@@ -1,0 +1,200 @@
+// ============================================================================
+// FAST SIM — Parametric detector response for HEP
+// ============================================================================
+//
+// Simplified fast simulation (Delphes-style) applying parametric smearing
+// and efficiency to reconstructed objects. Uses a flat random number from
+// the shower RNG for reproducibility.
+
+module particle_physics::fast_sim
+
+
+use particle_physics::lorentz::{LorentzVector, lorentz_new, lorentz_add, lorentz_scale, pt}
+use particle_physics::event_pipeline::{EventRecord, event_record_new, event_add_particle, EventParticle}
+use particle_physics::parton_shower::{rand_shower_uniform}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// Smearing Parameters
+// ============================================================================
+
+/// Jet energy scale and resolution parameters.
+pub struct JetSmearing {
+    pub jes_mean: f64,    // multiplicative scale (1.0 = no bias)
+    pub jer_frac: f64,    // fractional resolution (e.g. 0.1 = 10%)
+}
+
+/// Electron efficiency and resolution.
+pub struct ElectronResponse {
+    pub efficiency: f64,     // 0..1
+    pub energy_scale: f64,   // multiplicative
+    pub energy_res: f64,     // fractional
+}
+
+/// MET resolution parameters.
+pub struct METSmearing {
+    pub res_x: f64,
+    pub res_y: f64,
+}
+
+/// Default jet smearing (10% resolution, no scale bias).
+pub fn jet_smearing_default() -> JetSmearing {
+    return JetSmearing { jes_mean: 1.0, jer_frac: 0.1 }
+}
+
+/// Default electron response (95% efficiency, 1% scale, 2% resolution).
+pub fn electron_response_default() -> ElectronResponse {
+    return ElectronResponse { efficiency: 0.95, energy_scale: 1.0, energy_res: 0.02 }
+}
+
+/// Default MET smearing (5 GeV in each component).
+pub fn met_smearing_default() -> METSmearing {
+    return METSmearing { res_x: 5.0, res_y: 5.0 }
+}
+
+// ============================================================================
+// Object-level Smearing
+// ============================================================================
+
+/// Box-Muller-like approximate normal variate using uniform RNG.
+/// Returns ~N(0,1) using the sum of 12 uniform[-0.5,0.5] (Central Limit Theorem).
+fn rand_gaussian() -> f64 with Mut {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < 12 {
+        sum = sum + rand_shower_uniform() - 0.5
+        i = i + 1
+    }
+    return sum
+}
+
+/// Smear jet pT by JER and apply JES scale.
+pub fn fast_sim_jet(p: LorentzVector, smear: JetSmearing) -> LorentzVector with Mut, Div, Panic {
+    let pT = pt(p)
+    if pT <= 0.0 { return p }
+    let scale = smear.jes_mean * (1.0 + smear.jer_frac * rand_gaussian())
+    if scale < 0.1 { scale = 0.1 }
+    // Scale 3-momentum and energy proportionally (massless approximation)
+    let e_new = p.t * scale
+    let px_new = p.x * scale
+    let py_new = p.y * scale
+    let pz_new = p.z * scale
+    return lorentz_new(e_new, px_new, py_new, pz_new)
+}
+
+/// Apply electron efficiency and energy smearing.
+/// Returns the smeared momentum, or a zero momentum if electron fails efficiency.
+pub fn fast_sim_electron(p: LorentzVector, resp: ElectronResponse) -> LorentzVector with Mut {
+    if rand_shower_uniform() > resp.efficiency {
+        return lorentz_new(0.0, 0.0, 0.0, 0.0)
+    }
+    let scale = resp.energy_scale * (1.0 + resp.energy_res * rand_gaussian())
+    if scale < 0.1 { scale = 0.1 }
+    return lorentz_new(p.t * scale, p.x * scale, p.y * scale, p.z * scale)
+}
+
+/// Smear MET vector.
+pub fn fast_sim_met(met_x: f64, met_y: f64, smear: METSmearing) -> LorentzVector with Mut {
+    let mx = met_x + smear.res_x * rand_gaussian()
+    let my = met_y + smear.res_y * rand_gaussian()
+    let met = sqrt(mx * mx + my * my)
+    return lorentz_new(met, mx, my, 0.0)
+}
+
+// ============================================================================
+// Event-level Fast Simulation
+// ============================================================================
+
+/// Apply fast simulation to an entire event record.
+/// Jets (pdg 1-6, 21), electrons (pdg 11), and MET (pdg 12,14,16) are smeared.
+pub fn fast_sim_event(ev: &!EventRecord) -> EventRecord with Mut, Div, Panic {
+    var out = event_record_new()
+    let jet_smear = jet_smearing_default()
+    let ele_resp = electron_response_default()
+    let met_smear = met_smearing_default()
+
+    var sum_met_x: f64 = 0.0
+    var sum_met_y: f64 = 0.0
+
+    var i: i64 = 0
+    while i < ev.n_particles {
+        let part = ev.particles[i as usize]
+        if part.status != 1 { i = i + 1; continue }
+
+        let pdg = part.pdg
+        var new_p = part.p
+
+        if pdg == 11 || pdg == -11 {
+            // Electron
+            new_p = fast_sim_electron(part.p, ele_resp)
+            if new_p.t == 0.0 {
+                // Failed efficiency: skip adding to output
+                i = i + 1
+                continue
+            }
+        } else if pdg >= 1 && pdg <= 6 || pdg >= -6 && pdg <= -1 || pdg == 21 {
+            // Jet (quark or gluon)
+            new_p = fast_sim_jet(part.p, jet_smear)
+        } else if pdg == 12 || pdg == 14 || pdg == 16 || pdg == 1000022 {
+            // Invisible: accumulate true MET
+            sum_met_x = sum_met_x + part.p.x
+            sum_met_y = sum_met_y + part.p.y
+        }
+
+        event_add_particle(&!out, pdg, 1, new_p, part.charge, part.mass)
+        i = i + 1
+    }
+
+    // Add smeared MET as a single invisible particle
+    let met_p = fast_sim_met(sum_met_x, sum_met_y, met_smear)
+    if met_p.t > 0.0 {
+        event_add_particle(&!out, 1000022, 1, met_p, 0.0, 0.0)
+    }
+
+    return out
+}
+
+// ============================================================================
+// Inline tests
+// ============================================================================
+
+pub fn test_fast_sim_jet() -> bool with Mut, Div, Panic {
+    let p = lorentz_new(100.0, 50.0, 0.0, 0.0)
+    let smear = jet_smearing_default()
+    let p_smeared = fast_sim_jet(p, smear)
+    if p_smeared.t <= 0.0 { return false }
+    if p_smeared.t == p.t { return false }  // should be different due to smearing
+    return true
+}
+
+pub fn test_fast_sim_electron() -> bool with Mut {
+    let p = lorentz_new(50.0, 30.0, 0.0, 0.0)
+    let resp = electron_response_default()
+    // Run many times to check efficiency roughly holds
+    var pass: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        let p_smeared = fast_sim_electron(p, resp)
+        if p_smeared.t > 0.0 { pass = pass + 1 }
+        i = i + 1
+    }
+    // Should pass roughly 95% of the time
+    if pass < 10 { return false }
+    return true
+}
+
+pub fn test_fast_sim_event() -> bool with Mut, Div, Panic {
+    var ev = event_record_new()
+    let p1 = lorentz_new(100.0, 50.0, 0.0, 0.0)
+    let p2 = lorentz_new(100.0, -50.0, 0.0, 0.0)
+    event_add_particle(&!ev, 1, 1, p1, 0.666, 0.0)
+    event_add_particle(&!ev, -1, 1, p2, -0.666, 0.0)
+    var ev_smeared = fast_sim_event(&ev)
+    // 2 jets + smeared MET particle = 3
+    if ev_smeared.n_particles != 3 { return false }
+    return true
+}

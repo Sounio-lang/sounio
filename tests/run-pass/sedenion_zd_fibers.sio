@@ -1,0 +1,164 @@
+//@ run-pass
+//@ expect-stdout: FIBERS OK
+// FRENTE B, second brick — the SHAPE of the sedenion zero-divisor geometry, executed exactly.
+//
+// Brick 1 (sedenion_e8_boundary.sio) proved WHICH 84 of the 112 mixed-half primitives participate.
+// This proves HOW they annihilate: the 84 participating primitives split into exactly 7 FIBERS
+// indexed by the algebraic label L = lo XOR hi in {9..15}, and annihilation NEVER crosses fibers.
+//
+//   * 7 fibers, one per L in {9,10,11,12,13,14,15}, each of exactly 12 vertices;
+//   * every vertex has annihilator degree exactly 4 (it annihilates exactly 4 partners);
+//   * every annihilation edge is INTRA-fiber: a * b = 0  =>  L(a) == L(b);
+//   * each fiber carries exactly 24 unordered annihilation edges  (7 * 24 = 168).
+//
+// The fiber index is the SAME xor-grade the e8-boundary forbids at 8: participation requires
+// lo^hi != 8, and among participants lo^hi in {9..15} is precisely the fiber label. (The companion
+// facts "each fiber is connected + bipartite 6+6" are verified in the Python oracle; this test
+// executes the fiber/degree/edge structure, which needs no graph traversal.)
+//
+// Decidable integer equality over Z, no float. SELF-CONTAINED (Lean-bridge prim_prod, no #637).
+// Cross-verified element-wise vs scripts/research/sedenion_zd_fibers_oracle.py by
+// scripts/ci/sedenion_zd_fibers_gate.sh.
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+
+fn sed_sigma(a: i64, b: i64) -> i64 with Mut, Panic, Div { cd_sigma_c(a, b, 4) }
+
+fn prim_prod(ulo: i64, uhi: i64, uneg: i64, vlo: i64, vhi: i64, vneg: i64, k: i64) -> i64 with Mut, Panic, Div {
+    let su = if uneg == 1 { 0 - 1 } else { 1 }
+    let sv = if vneg == 1 { 0 - 1 } else { 1 }
+    var acc = 0
+    if (ulo ^ vlo) == k { acc = acc + sed_sigma(ulo, vlo) }
+    if (ulo ^ vhi) == k { acc = acc + sv * sed_sigma(ulo, vhi) }
+    if (uhi ^ vlo) == k { acc = acc + su * sed_sigma(uhi, vlo) }
+    if (uhi ^ vhi) == k { acc = acc + su * sv * sed_sigma(uhi, vhi) }
+    acc
+}
+
+fn is_zero_pair(ulo: i64, uhi: i64, uneg: i64, vlo: i64, vhi: i64, vneg: i64) -> bool with Mut, Panic, Div {
+    var k = 0
+    while k < 16 {
+        if prim_prod(ulo, uhi, uneg, vlo, vhi, vneg, k) != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // Enumerate the 112 mixed-half signed primitives and mark which participate.
+    var clo = [0; 112]
+    var chi = [0; 112]
+    var cneg = [0; 112]
+    var part = [0; 112]   // 1 if this candidate participates in some zero-divisor pair
+    var n = 0
+    var lo = 1
+    while lo <= 7 {
+        var hi = 8
+        while hi <= 15 {
+            var neg = 0
+            while neg <= 1 {
+                clo[n as usize] = lo
+                chi[n as usize] = hi
+                cneg[n as usize] = neg
+                n = n + 1
+                neg = neg + 1
+            }
+            hi = hi + 1
+        }
+        lo = lo + 1
+    }
+    var i = 0
+    while i < n {
+        var parti = 0
+        var j = 0
+        while j < n {
+            if is_zero_pair(clo[i as usize], chi[i as usize], cneg[i as usize],
+                            clo[j as usize], chi[j as usize], cneg[j as usize]) {
+                parti = 1
+            }
+            j = j + 1
+        }
+        part[i as usize] = parti
+        i = i + 1
+    }
+
+    // Fiber size (by L = lo^hi), degree per vertex, and intra-fiber edge counts.
+    var fiber_size = [0; 16]   // index by L in {9..15}
+    var fiber_edges = [0; 16]
+    var degree_bad = 0
+    var intra_bad = 0
+    var npart = 0
+    i = 0
+    while i < n {
+        if part[i as usize] == 1 {
+            npart = npart + 1
+            let li = clo[i as usize] ^ chi[i as usize]
+            fiber_size[li as usize] = fiber_size[li as usize] + 1
+            // degree = number of participating partners j != i with a zero product
+            var deg = 0
+            var j = 0
+            while j < n {
+                if j != i && part[j as usize] == 1 {
+                    if is_zero_pair(clo[i as usize], chi[i as usize], cneg[i as usize],
+                                    clo[j as usize], chi[j as usize], cneg[j as usize]) {
+                        deg = deg + 1
+                        // count each unordered edge once (i < j), and check it stays in-fiber
+                        if i < j {
+                            let lj = clo[j as usize] ^ chi[j as usize]
+                            if li == lj { fiber_edges[li as usize] = fiber_edges[li as usize] + 1 }
+                            else { intra_bad = intra_bad + 1 }
+                        }
+                    }
+                }
+                j = j + 1
+            }
+            if deg != 4 { degree_bad = degree_bad + 1 }
+        }
+        i = i + 1
+    }
+
+    // Emit per-fiber structure (L size edges) for the element-wise cross-check.
+    var L = 9
+    var fibers_ok = 1
+    while L <= 15 {
+        // ONE encoded int per fiber (L*10000 + size*100 + edges) + explicit newline, portable across
+        // souc builds (print_int's newline behavior differs; see sedenion_e8_boundary.sio).
+        print("FIBER ")
+        print_int(L * 10000 + fiber_size[L as usize] * 100 + fiber_edges[L as usize])
+        print("\n")
+        if fiber_size[L as usize] != 12 { fibers_ok = 0 }
+        if fiber_edges[L as usize] != 24 { fibers_ok = 0 }
+        L = L + 1
+    }
+    print("PARTICIPATE ")
+    print_int(npart as i64)
+    print("\n")
+    print("DEGREE_BAD ")
+    print_int(degree_bad as i64)
+    print("\n")
+    print("INTRA_BAD ")
+    print_int(intra_bad as i64)
+    print("\n")
+    // The single load-bearing verdict (checked by the run-pass output gate).
+    if fibers_ok == 1 && npart == 84 && degree_bad == 0 && intra_bad == 0 {
+        println("FIBERS OK")
+    } else {
+        println("FIBERS FAIL")
+    }
+}

@@ -1,0 +1,412 @@
+// stdlib/darwin_pbpk/validation/pbpk28_rapamycin_clinical.sio
+//
+// PBPK28 CLINICAL VALIDATION — RAPAMYCIN (predicted-vs-observed concentration profile)
+//
+// Closes the "PBPK28 has no external validation" gap: simulates the 28-state
+// permeability-limited kernel with a first-order ORAL absorption depot, samples
+// whole-blood concentration at the observed study timepoints, and compares
+// point-by-point against a published clinical profile via GMFE / % within 2-fold
+// (the FDA/EMA PBPK credibility metric).
+//
+// ============================================================================
+// OBSERVED DATA IS PENDING — DO NOT FABRICATE.
+// The observed concentration-time series must be supplied by a literature-MCP
+// session reading the source paper. Until obs_n() > 0 this file runs the model
+// and prints an ILLUSTRATIVE predicted profile, then emits
+//   PBPK28_RAPAMYCIN_CLINICAL_PENDING_OBSERVED
+// (NOT a PASS). When the observed arrays + study design are filled in, it computes
+// GMFE and emits PBPK28_RAPAMYCIN_CLINICAL_PASS / _FAIL_HONEST.
+//
+// Provenance to fill (lit session) — DO NOT FABRICATE C(t) points:
+//   source     : Ferron GM et al. Clin Pharmacol Ther. 1997;61:416-428
+//                PMID 9129559; DOI 10.1016/s0009-9236(97)90192-2
+//                (NOTE: 61:696-708 is a DIFFERENT paper, not Ferron sirolimus)
+//   n          : 36 (abstract); multi-center kidney transplant + cyclosporine
+//   matrix     : WHOLE BLOOD (B/P ratio ~30.9 in abstract)
+//   OBS_T/OBS_C: digitize from paper figures/tables only when PDF available
+//   status 2026-07-19: open web/MCP found parameters only (CL/F, t½, ka), no free
+//     C(t) series → primary clinical MODEL validation drug switched to vancomycin
+//     (docs/audit/CLINICAL_DRUG_SWITCH_VANCO_VALIDATION_2026-07-19.md)
+//
+// Method: per-step CN (pbpk28_full_cn_step), oral depot driven through the
+// release term rel = F * ka * A_depot; A_depot depletes at ka * A_depot.
+// Acceptance: GMFE <= 2.0 OR >= 80% of points within 2-fold.
+//
+// NOTE (coupling): PBPK28 Kp/TMDD params are known to diverge from literature
+// (gap_report: rapamycin_kp_values, *_tmdd_params; adipose capping). A poor GMFE
+// here is a TRUE result (FAIL_HONEST), not a reason to loosen the threshold.
+//
+// Author: Demetrios Chiuratto Agourakis
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+// FULL explicit ontology test wiring for PBPK28 (ChEBI compounds + GO enzymatic)
+use chemistry::ontology
+
+// Plot integration for ontology-labeled graphs (Task 4)
+use plot::line
+use plot::bar
+use plot::epistemic::{ErrorBarEntry, error_bar_entry, error_bar_chart}
+
+// Hoisted: a fn nested in a function body is not parsed.
+fn scale_for_plot(v: f64) -> f64 { v * 1000000.0 }  // to ug/L scale demo (no underscore separators in literals — E200)
+
+// ============================================================================
+// MATH HELPERS (native compiler has no stdlib transcendentals here)
+// ============================================================================
+
+fn pv_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn pv_finite(x: f64) -> bool {
+    if x != x { return false }
+    return pv_abs(x) < 1.0e12
+}
+
+// exp via repeated squaring (matches rapamycin_clinical.sio cv_exp)
+fn pv_exp(x: f64) -> f64 with Mut {
+    var r = 1.0 + x / 1024.0
+    var i: i32 = 0
+    while i < 10 {
+        r = r * r
+        i = i + (1 as i32)
+    }
+    return r
+}
+
+fn pv_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    var sx = x
+    var scale: i32 = 0
+    while sx > 2.0 {
+        sx = sx / 2.718281828459045
+        scale = scale + (1 as i32)
+    }
+    while sx < 0.5 {
+        sx = sx * 2.718281828459045
+        scale = scale - (1 as i32)
+    }
+    let u = (sx - 1.0) / (sx + 1.0)
+    let u2 = u * u
+    let result = 2.0 * (u + u * u2 / 3.0 + u * u2 * u2 / 5.0
+                       + u * u2 * u2 * u2 / 7.0 + u * u2 * u2 * u2 * u2 / 9.0)
+    var sf = 0.0
+    var si: i32 = 0
+    if scale > 0 {
+        while si < scale { sf = sf + 1.0; si = si + (1 as i32) }
+    } else {
+        while si < (0 - scale) { sf = sf - 1.0; si = si + (1 as i32) }
+    }
+    return result + sf
+}
+
+// FE = max(pred/obs, obs/pred), always >= 1.0
+fn pv_fold_error(pred: f64, obs: f64) -> f64 {
+    if obs <= 0.0 || pred <= 0.0 { return 999.0 }
+    let r = pred / obs
+    let ri = obs / pred
+    if r > ri { return r }
+    return ri
+}
+
+// ============================================================================
+// EXPLICIT ONTOLOGY TEST (ChEBI + GO enzymatic for PBPK28 rapamycin)
+// Added per dissertation requirement: test that the chemical identity and
+// enzymatic process are concretely wired via the pbpk28_*_chebi_id calls.
+// ============================================================================
+
+fn test_pbpk28_rapamycin_ontology_integration() -> bool with IO {
+    println("  [ONTOLOGY] PBPK28 rapamycin chemical + enzymatic test")
+    let rapa_id: i32 = 9168;  // pbpk28_rapamycin_chebi_id equiv (CHEBI:9168)
+    let cyp_id: i32 = 6805;   // pbpk28_cyp3a4_enzymatic_process_id equiv (GO:6805)
+    let rapa_iri = chemistry::ontology::rapamycin_chebi()
+    let cyp_iri = chemistry::ontology::cyp3a4_metabolism_iri()
+    // Also exercise the tsit5_pbpk28 site for the requested concrete calls
+    // (unqualified RHS: tuple destructuring of a qualified-path call is not
+    // accepted; the glob import at the top already brings this name in)
+    let (tsit_rapa, tsit_cyp) = pbpk28_ontology_identities()
+    // expected: rapamycin CHEBI 9168, cyp3a4 GO 6805
+    let ok_rapa = rapa_id == 9168 && tsit_rapa == 9168
+    let ok_cyp = cyp_id == 6805 && tsit_cyp == 6805
+    print("    rapamycin_chebi_id: "); println(rapa_id)
+    print("    cyp3a4_process_id:  "); println(cyp_id)
+    print("    tsit5_ontology_pair: ("); print(tsit_rapa); print(","); print(tsit_cyp); println(")")
+    if ok_rapa && ok_cyp {
+        println("    [PASS] explicit PBPK28 ontology (ChEBI+GO) integrated")
+        return true
+    }
+    println("    [FAIL] ontology id mismatch")
+    return false
+}
+
+// ============================================================================
+// OBSERVED DATA — PENDING (supplied by literature-MCP session)
+// ============================================================================
+// obs_n() = 0 is the PENDING sentinel. Set it to the number of digitized points
+// and fill obs_t_at / obs_c_at + the study-design constants below.
+
+fn obs_n() -> i32 { return 0 }
+
+fn obs_t_at(i: i32) -> f64 {
+    // hours post-dose; fill from the source figure/table
+    return 0.0
+}
+
+fn obs_c_at(i: i32) -> f64 {
+    // observed WHOLE-BLOOD sirolimus concentration, mg/L
+    return 0.0
+}
+
+// Study design (fill with the observed study's regimen)
+fn study_dose_mg() -> f64 { return 2.0 }   // PLACEHOLDER (illustrative)
+fn oral_ka()      -> f64 { return 0.5 }    // PLACEHOLDER 1/h (illustrative)
+fn oral_f()       -> f64 { return 0.15 }   // PLACEHOLDER sirolimus oral F ~0.14
+
+// ============================================================================
+// SIMULATE-AND-SAMPLE — 28-state CN with first-order oral depot
+// ============================================================================
+// Returns predicted whole-blood concentration (cv[0], mg/L) at time `t_target`
+// hours, for an oral dose `dose` with absorption (ka, F).
+
+fn pbpk28_oral_blood_at(prm: PBPKParams28, dose: f64, ka: f64, f_bio: f64,
+                        t_target: f64) -> f64 with Mut, Div, Panic {
+    let dt = 0.05
+    var st = pbpk28_state_zero()
+    var a_depot = dose          // mg in gut depot at t=0 (oral)
+    var t = 0.0
+    var out = 0.0
+    var captured = false
+    while t < t_target {
+        let dt_use = if t + dt > t_target { t_target - t } else { dt }
+        let rel = f_bio * ka * a_depot         // mg/h reaching systemic blood
+        let st_new = pbpk28_full_cn_step(st, prm, rel, dt_use)
+        a_depot = a_depot - ka * a_depot * dt_use
+        if a_depot < 0.0 { a_depot = 0.0 }
+        t = t + dt_use
+        st = st_new
+        if !pv_finite(st.cv[0]) { return 0.0 }
+        out = st.cv[0]
+        captured = true
+    }
+    if captured == false { return st.cv[0] }
+    return out
+}
+
+// Small dt-param helper for DT-CONVERGENCE diagnostic (tiny addition; nominal
+// pbpk28_oral_blood_at keeps its fixed dt for grid/profile).
+fn pbpk28_oral_blood_at_dt(prm: PBPKParams28, dose: f64, ka: f64, f_bio: f64,
+                           t_target: f64, dt: f64) -> f64 with Mut, Div, Panic {
+    var st = pbpk28_state_zero()
+    var a_depot = dose
+    var t = 0.0
+    var out = 0.0
+    var captured = false
+    while t < t_target {
+        let dt_use = if t + dt > t_target { t_target - t } else { dt }
+        let rel = f_bio * ka * a_depot
+        let st_new = pbpk28_full_cn_step(st, prm, rel, dt_use)
+        a_depot = a_depot - ka * a_depot * dt_use
+        if a_depot < 0.0 { a_depot = 0.0 }
+        t = t + dt_use
+        st = st_new
+        if !pv_finite(st.cv[0]) { return 0.0 }
+        out = st.cv[0]
+        captured = true
+    }
+    if captured == false { return st.cv[0] }
+    return out
+}
+
+// ============================================================================
+// MAIN — predicted-vs-observed, or PENDING
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("========================================================")
+    println("  PBPK28 CLINICAL VALIDATION — Rapamycin (whole blood)")
+    println("  Predicted-vs-observed concentration-time profile")
+    println("  Ontology: CHEBI:9168 (rapamycin) + GO:6805 (CYP3A4 metabolism)")
+    println("========================================================")
+
+    // Explicit ontology integration test (ChEBI for rapamycin + GO for CYP3A4)
+    // also calls into tsit5_pbpk28::pbpk28_ontology_identities()
+    let _ont = test_pbpk28_rapamycin_ontology_integration()
+
+    let prm = pbpk28_params_rapamycin()
+    let dose = study_dose_mg()
+    let ka = oral_ka()
+    let f_bio = oral_f()
+    let n = obs_n()
+
+    if n <= 0 {
+        // PENDING: show an illustrative predicted profile (real model output for
+        // the placeholder oral regimen), but compute NO GMFE and emit no PASS.
+        println("  OBSERVED DATA PENDING — illustrative predicted profile only")
+        println("  (placeholder oral dose mg / ka / F shown; not a validation)")
+        println(dose)
+        println(ka)
+        println(f_bio)
+        var k: i32 = 0
+        let grid: [f64; 8] = [0.5, 1.0, 2.0, 4.0, 8.0, 24.0, 72.0, 168.0]
+        var cn: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        while k < 8 {
+            let tt = grid[k]
+            let cpred = pbpk28_oral_blood_at(prm, dose, ka, f_bio, tt)
+            cn[k] = cpred
+            println(tt)
+            println(cpred)
+            k = k + (1 as i32)
+        }
+
+        // ----------------------------------------------------------------
+        // TERMINAL HALF-LIFE FIT (computed, not eyeballed)
+        // ----------------------------------------------------------------
+        // Log-linear regression of ln(C) vs t over the post-peak declining
+        // tail gives lambda_z; t_half = ln(2)/lambda_z. This converts the
+        // "model over-clears" observation into a NUMBER that can be compared
+        // against sirolimus's real terminal t_half (~62 h). A small fitted
+        // t_half here is the quantitative signature of gap #2 (capped Kp ->
+        // tiny Vd). Still illustrative (placeholder oral regimen) and emits
+        // NO pass/fail — diagnostic only.
+        var pk: i32 = 0
+        var pkv = cn[0]
+        var jj: i32 = 1
+        while jj < 8 {
+            if cn[jj] > pkv { pkv = cn[jj]; pk = jj }
+            jj = jj + (1 as i32)
+        }
+        var sx = 0.0
+        var sy = 0.0
+        var sxx = 0.0
+        var sxy = 0.0
+        var npt = 0.0
+        // start one point AFTER Cmax: excluding the peak (where dC/dt ~ 0) is
+        // standard NCA practice and avoids biasing lambda_z shallow.
+        var m: i32 = pk + 1
+        while m < 8 {
+            let cm = cn[m]
+            if cm > 1.0e-9 && pv_finite(cm) {
+                let xx = grid[m]
+                let yy = pv_ln(cm)
+                sx = sx + xx
+                sy = sy + yy
+                sxx = sxx + xx * xx
+                sxy = sxy + xx * yy
+                npt = npt + 1.0
+            }
+            m = m + (1 as i32)
+        }
+        println("  terminal half-life fit (illustrative diagnostic):")
+        if npt >= 2.0 {
+            let denom = npt * sxx - sx * sx
+            if pv_abs(denom) > 1.0e-12 {
+                let slope = (npt * sxy - sx * sy) / denom
+                let lambda_z = 0.0 - slope
+                if lambda_z > 0.0 {
+                    println("  lambda_z (1/h) =")
+                    println(lambda_z)
+                    println("  t_half (h) =")
+                    println(0.6931471805599453 / lambda_z)
+                } else {
+                    println("  t_half: non-eliminating tail (lambda_z <= 0)")
+                }
+            } else {
+                println("  t_half: degenerate fit (no time spread)")
+            }
+        } else {
+            println("  t_half: insufficient finite tail points")
+        }
+
+        // Plot renders with ontology labels (CHEBI:9168 / GO:6805)
+        // local scaling for visibility on illustrative (tiny) concs from capped model
+        var pvals: [f64; 8] = [0.0; 8]
+        var kk: i32 = 0
+        while kk < 8 {
+            pvals[kk] = scale_for_plot(cn[kk])
+            kk = kk + (1 as i32)
+        }
+        println("")
+        println("  --- Plot renders (via stdlib/plot, labeled with ontology) ---")
+        line::line_plot(&pvals, 8, "Rapamycin profile (CHEBI:9168 / CYP GO:6805) illustrative")
+        // bar for concs
+        let bar_lbls: [str; 8] = ["0.5h", "1h", "2h", "4h", "8h", "24h", "72h", "168h"]
+        bar::bar_chart(&bar_lbls, &pvals, 8, "Rapamycin concs (scaled) CHEBI:9168 + GO:6805")
+        // error bars (demo ~10% u on subset)
+        let e0 = error_bar_entry("2h", scale_for_plot(cn[2]), 0.10 * scale_for_plot(cn[2]), 0.88)
+        let e1 = error_bar_entry("8h", scale_for_plot(cn[4]), 0.10 * scale_for_plot(cn[4]), 0.82)
+        let e2 = error_bar_entry("24h", scale_for_plot(cn[5]), 0.10 * scale_for_plot(cn[5]), 0.78)
+        let e3 = error_bar_entry("72h", scale_for_plot(cn[6]), 0.10 * scale_for_plot(cn[6]), 0.70)
+        let ebs: [ErrorBarEntry; 4] = [e0, e1, e2, e3]
+        error_bar_chart(&ebs, 4, "Error bars (demo u~10%) Rapamycin CHEBI:9168 GO:6805")
+        println("")
+
+        // DT-CONVERGENCE diagnostic (after grid/cn prints + t_half + plot)
+        // tiny 3-dt check on one plotted point (t=24.0), mirrors MC cross DT block style.
+        // Uses the just-added dt helper.
+        println("DT-CONVERGENCE (CN oral_blood_at t=24.0h: dt=0.05 vs dt=0.025 vs dt=0.0125)")
+        let t_check = 24.0
+        let c0 = pbpk28_oral_blood_at_dt(prm, dose, ka, f_bio, t_check, 0.05)
+        let c1 = pbpk28_oral_blood_at_dt(prm, dose, ka, f_bio, t_check, 0.025)
+        let c2 = pbpk28_oral_blood_at_dt(prm, dose, ka, f_bio, t_check, 0.0125)
+        let d01 = pv_abs(c0 - c1)
+        let d12 = pv_abs(c1 - c2)
+        let rel_dt = if pv_abs(c0) > 1.0e-12 { d01 / pv_abs(c0) } else { 0.0 }
+        let ratio = if d12 > 1.0e-12 { d01 / d12 } else { 0.0 }
+        print("  C dt=0.05:   "); println(c0)
+        print("  C dt=0.025:  "); println(c1)
+        print("  C dt=0.0125: "); println(c2)
+        print("  rel diff (dt/2): "); println(rel_dt)
+        print("  diff ratio (~4 for order 2): "); println(ratio)
+        if rel_dt < 0.01 {
+            println("  [NOTE] discretization effect small on this point (illustrative)")
+        } else {
+            println("  [NOTE] dt effect visible (illustrative profile)")
+        }
+        println("")
+
+        println("PBPK28_RAPAMYCIN_CHEBI_9168_GO_6805_CLINICAL_PENDING_OBSERVED")
+        return 0
+    }
+
+    // Observed data present: predicted-vs-observed GMFE + % within 2-fold.
+    var sum_ln_fe = 0.0
+    var within2: i32 = 0
+    var nf = 0.0
+    var i: i32 = 0
+    while i < n {
+        let tt = obs_t_at(i)
+        let cobs = obs_c_at(i)
+        let cpred = pbpk28_oral_blood_at(prm, dose, ka, f_bio, tt)
+        let fe = pv_fold_error(cpred, cobs)
+        println(tt)
+        println(cobs)
+        println(cpred)
+        println(fe)
+        sum_ln_fe = sum_ln_fe + pv_ln(fe)
+        if fe <= 2.0 { within2 = within2 + (1 as i32) }
+        nf = nf + 1.0
+        i = i + (1 as i32)
+    }
+
+    let gmfe = pv_exp(sum_ln_fe / nf)
+    var pct2 = 0.0
+    var w: i32 = 0
+    var wf = 0.0
+    while w < within2 { wf = wf + 1.0; w = w + (1 as i32) }
+    pct2 = 100.0 * wf / nf
+
+    println("  GMFE =")
+    println(gmfe)
+    println("  % within 2-fold =")
+    println(pct2)
+
+    // FDA/EMA acceptance: GMFE <= 2.0 OR >= 80% within 2-fold
+    if gmfe <= 2.0 || pct2 >= 80.0 {
+        println("PBPK28_RAPAMYCIN_CHEBI_9168_GO_6805_CLINICAL_PASS")
+        return 0
+    }
+    println("PBPK28_RAPAMYCIN_CHEBI_9168_GO_6805_CLINICAL_FAIL_HONEST")
+    return 1
+}

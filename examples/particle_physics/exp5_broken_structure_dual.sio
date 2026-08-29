@@ -1,0 +1,274 @@
+// examples/particle_physics/exp5_broken_structure_dual.sio
+//
+// EXP5 — Dual broken-structure receipt (N3)
+//
+// Emits two receipts under schema sounio.broken_structure.v1:
+//   (A) qft_unstable  — Z NonUnitary deficit vs √s
+//   (B) sedenion_zd   — proximity to canonical ZD pair along a path t∈[0,1]
+//
+// NON-ISOMORPHISM (printed and gated):
+//   NonUnitary deficit ≠ sedenion zero-divisor. Shared receipt shape only.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/exp5_broken_structure_dual.sio
+// Gate:
+//   bash scripts/ci/particle_broken_structure_dual_gate.sh
+
+use particle_physics::sm_params::{mass_z}
+use particle_physics::nonunitary::{
+    nu_z_propagator, nu_deficit, nu_unitarity_threshold, NU_Z,
+}
+use algebra::sedenion::{
+    sed_zero, sed_basis, sed_zd_z, sed_zd_w,
+    sed_scale, sed_add, sed_mul, sed_norm_sq,
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn within(a: f64, b: f64, tol: f64) -> bool {
+    abs_f(a - b) < tol
+}
+
+fn print_pass(tag: i64) with IO {
+    print("PASS ")
+    print_int(tag)
+    print("\n")
+}
+
+fn print_fail(tag: i64) with IO {
+    print("FAIL ")
+    print_int(tag)
+    print("\n")
+}
+
+fn pass_if(cond: bool, tag: i64) -> i64 with IO {
+    if cond {
+        print_pass(tag)
+        1
+    } else {
+        print_fail(tag)
+        0
+    }
+}
+
+// Newton sqrt for sedenion norm
+fn f_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g > 1.0 { g = x / 2.0 }
+    var i: i64 = 0
+    while i < 40 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+// Proximity of unit-ish sedenion s to *annihilation* with canonical right ZD w:
+//   dist = ‖s*w‖² / (‖s‖² · ‖w‖² + eps)
+//   proximity = 1 / (1 + dist)
+// At s ∝ z (canonical left ZD): z*w = 0 → dist = 0 → proximity = 1.
+// (Do not average ‖s*z‖ — z*z is not zero; that metric never reaches 1 on the ZD pair.)
+fn sed_zd_proximity(s: &[f64; 16]) -> f64 with Mut, Div, Panic {
+    var w: [f64; 16] = [0.0; 16]
+    var pw: [f64; 16] = [0.0; 16]
+    sed_zd_w(&!w)
+    sed_mul(s, &w, &!pw)
+    let eps = 1.0e-12
+    let ns = sed_norm_sq(s)
+    let nw = sed_norm_sq(&w)
+    let dist = sed_norm_sq(&pw) / (ns * nw + eps)
+    1.0 / (1.0 + dist)
+}
+
+// Build s(t) = normalize( (1-t)*e0 + t*z )
+fn sed_path_point(t: f64, out: &![f64; 16]) with Mut, Div, Panic {
+    var e0: [f64; 16] = [0.0; 16]
+    var z: [f64; 16] = [0.0; 16]
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    sed_basis(0, &!e0)
+    sed_zd_z(&!z)
+    sed_scale(&e0, 1.0 - t, &!a)
+    sed_scale(&z, t, &!b)
+    sed_add(&a, &b, out)
+    let n2 = sed_norm_sq(out)
+    let n = f_sqrt(n2)
+    if n > 1.0e-30 {
+        var i: i64 = 0
+        while i < 16 {
+            (*out)[i as usize] = (*out)[i as usize] / n
+            i = i + 1
+        }
+    }
+}
+
+// ============================================================================
+// Domain A — QFT NonUnitary (Z)
+// ============================================================================
+
+fn run_qft_receipt() -> i64 with IO, Mut, Div, Panic {
+    var n: i64 = 0
+    print("=== EXP5 domain qft_unstable ===\n")
+
+    let mz = mass_z().val()
+    let gamma_z = 2.4952
+    let s_pole = mz * mz
+    let thr = nu_unitarity_threshold(mz, gamma_z, 0.01)
+
+    let d_pole = nu_deficit(nu_z_propagator(s_pole, gamma_z))
+    let d_mid = nu_deficit(nu_z_propagator(s_pole * 1.01, gamma_z))
+    let d_hi = nu_deficit(nu_z_propagator((mz + 5.0) * (mz + 5.0), gamma_z))
+    let d_thr = nu_deficit(nu_z_propagator(thr * thr, gamma_z))
+
+    print("EXP5_QFT_JSON {")
+    print("\"schema\":\"sounio.broken_structure.v1\",")
+    print("\"domain\":\"qft_unstable\",")
+    print("\"species_or_fiber\":\"Z\",")
+    print("\"coordinate\":\"sqrt_s\",")
+    print("\"effect_or_type\":\"NonUnitary\",")
+    print("\"points\":[")
+    print("{\"label\":\"pole\",\"coord\":")
+    print_f64(mz)
+    print(",\"proximity\":")
+    print_f64(d_pole)
+    print("},")
+    print("{\"label\":\"mid\",\"coord\":")
+    print_f64(mz * 1.005)
+    print(",\"proximity\":")
+    print_f64(d_mid)
+    print("},")
+    print("{\"label\":\"hi5\",\"coord\":")
+    print_f64(mz + 5.0)
+    print(",\"proximity\":")
+    print_f64(d_hi)
+    print("},")
+    print("{\"label\":\"thr1pct\",\"coord\":")
+    print_f64(thr)
+    print(",\"proximity\":")
+    print_f64(d_thr)
+    print("}],")
+    print("\"non_isomorphism\":\"NonUnitary_deficit_is_not_sedenion_zero_divisor\"")
+    print("}\n")
+
+    n = n + pass_if(within(d_pole, 1.0, 0.01), 701)
+    n = n + pass_if(d_pole > d_mid && d_mid > d_hi && d_hi > d_thr, 702)
+    n = n + pass_if(d_thr < 0.02 && d_thr > 0.0, 703)
+    n
+}
+
+// ============================================================================
+// Domain B — Sedenion zero-divisor proximity
+// ============================================================================
+
+fn run_sedenion_receipt() -> i64 with IO, Mut, Div, Panic {
+    var n: i64 = 0
+    print("=== EXP5 domain sedenion_zd ===\n")
+
+    // Exact annihilation witness: ‖z*w‖² = 0
+    var z: [f64; 16] = [0.0; 16]
+    var w: [f64; 16] = [0.0; 16]
+    var zw: [f64; 16] = [0.0; 16]
+    sed_zd_z(&!z)
+    sed_zd_w(&!w)
+    sed_mul(&z, &w, &!zw)
+    let ann_norm = sed_norm_sq(&zw)
+    print("EXP5_ZD_ANNIHILATION_NORM_SQ ")
+    print_f64(ann_norm)
+    print("\n")
+    n = n + pass_if(ann_norm < 1.0e-20, 801)
+
+    // Path t = 0, 0.25, 0.5, 0.75, 1.0
+    var s: [f64; 16] = [0.0; 16]
+    sed_path_point(0.0, &!s)
+    let p0 = sed_zd_proximity(&s)
+    sed_path_point(0.25, &!s)
+    let p25 = sed_zd_proximity(&s)
+    sed_path_point(0.5, &!s)
+    let p50 = sed_zd_proximity(&s)
+    sed_path_point(0.75, &!s)
+    let p75 = sed_zd_proximity(&s)
+    sed_path_point(1.0, &!s)
+    let p100 = sed_zd_proximity(&s)
+
+    print("EXP5_ZD_PROX_T0 ")
+    print_f64(p0)
+    print("\n")
+    print("EXP5_ZD_PROX_T1 ")
+    print_f64(p100)
+    print("\n")
+
+    print("EXP5_SED_JSON {")
+    print("\"schema\":\"sounio.broken_structure.v1\",")
+    print("\"domain\":\"sedenion_zd\",")
+    print("\"species_or_fiber\":\"canonical_z_w\",")
+    print("\"coordinate\":\"path_t\",")
+    print("\"effect_or_type\":\"ZeroDivisorProximity\",")
+    print("\"points\":[")
+    print("{\"label\":\"t0\",\"coord\":0.0,\"proximity\":")
+    print_f64(p0)
+    print("},")
+    print("{\"label\":\"t025\",\"coord\":0.25,\"proximity\":")
+    print_f64(p25)
+    print("},")
+    print("{\"label\":\"t05\",\"coord\":0.5,\"proximity\":")
+    print_f64(p50)
+    print("},")
+    print("{\"label\":\"t075\",\"coord\":0.75,\"proximity\":")
+    print_f64(p75)
+    print("},")
+    print("{\"label\":\"t1\",\"coord\":1.0,\"proximity\":")
+    print_f64(p100)
+    print("}],")
+    print("\"non_isomorphism\":\"NonUnitary_deficit_is_not_sedenion_zero_divisor\"")
+    print("}\n")
+
+    // At t=1, s = normalize(z) ≈ z/√2 — product with w still ~0 → proximity high
+    n = n + pass_if(p100 > 0.9, 802)
+    // At t=0, e0 is far from annihilation in this metric relative to t=1
+    n = n + pass_if(p0 < p100, 803)
+    // Proximities in [0,1]
+    n = n + pass_if(p0 >= 0.0 && p0 <= 1.0 && p100 >= 0.0 && p100 <= 1.0, 804)
+    // Path is not flat: at least one intermediate between endpoints
+    n = n + pass_if(p50 > p0 || p75 > p0, 805)
+    n
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("PARTICLE_EXP5_BEGIN\n")
+    print("EXP5_NON_ISOMORPHISM NonUnitary_deficit_is_not_sedenion_zero_divisor\n")
+    print("EXP5_ANALOGY_LEVEL receipt_geometry_and_typed_honesty_only\n")
+
+    let n_q = run_qft_receipt()
+    let n_s = run_sedenion_receipt()
+    let npass = n_q + n_s
+    // Expected: QFT=3, SED=5 → 8
+    let expected: i64 = 8
+    let nfail = expected - npass
+
+    print("PARTICLE_EXP5_PASS ")
+    print_int(npass)
+    print("\n")
+    print("PARTICLE_EXP5_FAIL ")
+    print_int(nfail)
+    print("\n")
+    print("PARTICLE_EXP5_NQ ")
+    print_int(n_q)
+    print("\n")
+    print("PARTICLE_EXP5_NS ")
+    print_int(n_s)
+    print("\n")
+
+    if npass == expected {
+        print("PARTICLE_EXP5_OK\n")
+        print("PARTICLE_EXP5_DUAL_RECEIPT_OK\n")
+        0
+    } else {
+        print("PARTICLE_EXP5_FAILED\n")
+        1
+    }
+}

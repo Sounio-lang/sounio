@@ -1,0 +1,297 @@
+// Shadow-only SOIR v6 writer for the first sectioned BSS/layout profile.
+//
+// Semantic-Lane-ID: SOIR-V6-BSS-LAYOUT-R1
+// Concept-IDs: none
+// Intent-Preserved: scientific payloads keep distinct future sections; this
+// lane never narrows or reconstructs numeric, epistemic, algebra, or receipt
+// meaning from the BSS/layout scalars.
+// Claims-Introduced: one canonical v6 frame with one critical singleton
+// BSS/layout section has validation-rejection-no-write before emission.
+// Claims-Forbidden: module graph, opcode, Arena install, numeric payload,
+// wide-numeric decode, multi-section ordering, and default-pipeline use.
+
+module ir::soir_v6_writer
+
+pub let SOIR_V6_WRITER_MAX_SIZE: i64 = 131072
+pub let SOIR_V6_WRITER_VERSION: i8 = 6
+pub let SOIR_V6_WRITER_HEADER_SIZE: i64 = 64
+pub let SOIR_V6_WRITER_DIRECTORY_OFFSET: i64 = 64
+pub let SOIR_V6_WRITER_DIRECTORY_ENTRY_SIZE: i64 = 48
+pub let SOIR_V6_WRITER_DIRECTORY_SIZE: i64 = 48
+pub let SOIR_V6_WRITER_SECTION_COUNT: i64 = 1
+pub let SOIR_V6_WRITER_BSS_PAYLOAD_OFFSET: i64 = 112
+pub let SOIR_V6_WRITER_BSS_PAYLOAD_SIZE: i64 = 32
+pub let SOIR_V6_WRITER_BSS_FRAME_SIZE: i64 = 144
+// Adler-32 of the exact ASCII descriptor (without a terminal NUL):
+// SOIRv6:bss-range-v1:le64:header64:dir48:kind5:critical+singleton:payload(module_total,range_count,range_offset,range_size):adler32
+pub let SOIR_V6_WRITER_SCHEMA_FINGERPRINT: i64 = 3946524625
+
+pub let SOIR_V6_WRITER_SECTION_KIND_BSS_LAYOUT: i64 = 5
+pub let SOIR_V6_WRITER_SECTION_SCHEMA_BSS_LAYOUT: i64 = 1
+pub let SOIR_V6_WRITER_SECTION_FLAG_CRITICAL: i64 = 1
+pub let SOIR_V6_WRITER_SECTION_FLAG_SINGLETON: i64 = 2
+pub let SOIR_V6_WRITER_SECTION_FLAGS_BSS_LAYOUT: i64 = 3
+
+pub let SOIR_V6_WRITER_BSS_RANGE_COUNT: i64 = 1
+
+pub let SOIR_V6_WRITER_OK: i64 = 0
+pub let SOIR_V6_WRITER_ERR_VIEW_BOUNDS: i64 = -1
+pub let SOIR_V6_WRITER_ERR_LAYOUT: i64 = -2
+pub let SOIR_V6_WRITER_ERR_STALE_PLAN: i64 = -3
+pub let SOIR_V6_WRITER_ERR_INTERNAL_BOUNDS: i64 = -4
+
+pub struct SoirV6BssWritePlan {
+    start: i64,
+    capacity: i64,
+    required: i64,
+    end: i64,
+    module_bss_total_size: i64,
+    range_offset: i64,
+    range_size: i64,
+    version: i8,
+    status: i64,
+}
+
+struct SoirV6WriterCursor {
+    pos: i64,
+    limit: i64,
+    status: i64,
+}
+
+fn soir_v6_writer_failed_plan(
+    start: i64,
+    capacity: i64,
+    module_bss_total_size: i64,
+    range_offset: i64,
+    range_size: i64,
+    status: i64,
+) -> SoirV6BssWritePlan {
+    SoirV6BssWritePlan {
+        start: start,
+        capacity: capacity,
+        required: 0,
+        end: start,
+        module_bss_total_size: module_bss_total_size,
+        range_offset: range_offset,
+        range_size: range_size,
+        version: SOIR_V6_WRITER_VERSION,
+        status: status,
+    }
+}
+
+pub fn soir_v6_bss_write_plan_status(plan: &SoirV6BssWritePlan) -> i64 {
+    (*plan).status
+}
+
+pub fn soir_v6_bss_write_plan_start(plan: &SoirV6BssWritePlan) -> i64 {
+    (*plan).start
+}
+
+pub fn soir_v6_bss_write_plan_required(plan: &SoirV6BssWritePlan) -> i64 {
+    (*plan).required
+}
+
+pub fn soir_v6_bss_write_plan_end(plan: &SoirV6BssWritePlan) -> i64 {
+    (*plan).end
+}
+
+pub fn soir_v6_bss_write_plan_version(plan: &SoirV6BssWritePlan) -> i8 {
+    (*plan).version
+}
+
+pub fn soir_v6_bss_write_plan_module_total(plan: &SoirV6BssWritePlan) -> i64 {
+    (*plan).module_bss_total_size
+}
+
+pub fn soir_v6_bss_write_plan_range_offset(plan: &SoirV6BssWritePlan) -> i64 {
+    (*plan).range_offset
+}
+
+pub fn soir_v6_bss_write_plan_range_size(plan: &SoirV6BssWritePlan) -> i64 {
+    (*plan).range_size
+}
+
+fn soir_v6_writer_put_i8(
+    cursor: &! SoirV6WriterCursor,
+    out_buf: &![i8; 131072],
+    value: i8,
+) with Mut, Panic, Div {
+    if (*cursor).status != SOIR_V6_WRITER_OK { return }
+    if (*cursor).pos < 0 ||
+       (*cursor).pos >= (*cursor).limit ||
+       (*cursor).pos >= SOIR_V6_WRITER_MAX_SIZE {
+        (*cursor).status = SOIR_V6_WRITER_ERR_INTERNAL_BOUNDS
+        return
+    }
+    out_buf[(*cursor).pos as usize] = value
+    (*cursor).pos = (*cursor).pos + 1
+}
+
+fn soir_v6_writer_put_i64(
+    cursor: &! SoirV6WriterCursor,
+    out_buf: &![i8; 131072],
+    value: i64,
+) with Mut, Panic, Div {
+    var shift: i64 = 0
+    while shift < 64 {
+        soir_v6_writer_put_i8(cursor, out_buf, ((value >> shift) & 255) as i8)
+        shift = shift + 8
+    }
+}
+
+// Adler-32 is a non-cryptographic integrity checksum, not authentication.
+fn soir_v6_writer_bss_payload_checksum(
+    module_bss_total_size: i64,
+    range_offset: i64,
+    range_size: i64,
+) -> i64 with Div {
+    var a: i64 = 1
+    var b: i64 = 0
+    var word_index: i64 = 0
+    while word_index < 4 {
+        var value = module_bss_total_size
+        if word_index == 1 { value = SOIR_V6_WRITER_BSS_RANGE_COUNT }
+        else if word_index == 2 { value = range_offset }
+        else if word_index == 3 { value = range_size }
+        var byte_index: i64 = 0
+        while byte_index < 8 {
+            let octet = (value >> (byte_index * 8)) & 255
+            a = (a + octet) % 65521
+            b = (b + a) % 65521
+            byte_index = byte_index + 1
+        }
+        word_index = word_index + 1
+    }
+    (b << 16) | a
+}
+
+fn soir_v6_writer_plan_matches(
+    left: &SoirV6BssWritePlan,
+    right: &SoirV6BssWritePlan,
+) -> bool {
+    (*left).status == (*right).status &&
+        (*left).start == (*right).start &&
+        (*left).capacity == (*right).capacity &&
+        (*left).required == (*right).required &&
+        (*left).end == (*right).end &&
+        (*left).module_bss_total_size == (*right).module_bss_total_size &&
+        (*left).range_offset == (*right).range_offset &&
+        (*left).range_size == (*right).range_size &&
+        (*left).version == (*right).version
+}
+
+pub fn soir_v6_writer_preflight_bss_layout(
+    start: i64,
+    capacity: i64,
+    module_bss_total_size: i64,
+    range_offset: i64,
+    range_size: i64,
+) -> SoirV6BssWritePlan with Panic, Div {
+    if start < 0 ||
+       capacity < 0 ||
+       start > SOIR_V6_WRITER_MAX_SIZE ||
+       capacity > SOIR_V6_WRITER_MAX_SIZE - start ||
+       SOIR_V6_WRITER_BSS_FRAME_SIZE > capacity {
+        return soir_v6_writer_failed_plan(
+            start,
+            capacity,
+            module_bss_total_size,
+            range_offset,
+            range_size,
+            SOIR_V6_WRITER_ERR_VIEW_BOUNDS,
+        )
+    }
+    if module_bss_total_size < 0 ||
+       range_offset < 0 ||
+       range_size < 0 ||
+       range_offset > module_bss_total_size ||
+       range_size > module_bss_total_size - range_offset {
+        return soir_v6_writer_failed_plan(
+            start,
+            capacity,
+            module_bss_total_size,
+            range_offset,
+            range_size,
+            SOIR_V6_WRITER_ERR_LAYOUT,
+        )
+    }
+    SoirV6BssWritePlan {
+        start: start,
+        capacity: capacity,
+        required: SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        end: start + SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        module_bss_total_size: module_bss_total_size,
+        range_offset: range_offset,
+        range_size: range_size,
+        version: SOIR_V6_WRITER_VERSION,
+        status: SOIR_V6_WRITER_OK,
+    }
+}
+
+pub fn soir_v6_writer_emit_bss_layout(
+    plan: &SoirV6BssWritePlan,
+    out_buf: &![i8; 131072],
+) -> i64 with Mut, Panic, Div {
+    if (*plan).status != SOIR_V6_WRITER_OK { return (*plan).status }
+    let verified = soir_v6_writer_preflight_bss_layout(
+        (*plan).start,
+        (*plan).capacity,
+        (*plan).module_bss_total_size,
+        (*plan).range_offset,
+        (*plan).range_size,
+    )
+    if !soir_v6_writer_plan_matches(plan, &verified) {
+        return SOIR_V6_WRITER_ERR_STALE_PLAN
+    }
+
+    var cursor = SoirV6WriterCursor {
+        pos: (*plan).start,
+        limit: (*plan).end,
+        status: SOIR_V6_WRITER_OK,
+    }
+
+    // Fixed header: magic, version/feature policy, lengths, and schema identity.
+    soir_v6_writer_put_i8(&! cursor, out_buf, 83 as i8)
+    soir_v6_writer_put_i8(&! cursor, out_buf, 79 as i8)
+    soir_v6_writer_put_i8(&! cursor, out_buf, 73 as i8)
+    soir_v6_writer_put_i8(&! cursor, out_buf, 82 as i8)
+    soir_v6_writer_put_i8(&! cursor, out_buf, SOIR_V6_WRITER_VERSION)
+    soir_v6_writer_put_i8(&! cursor, out_buf, 0 as i8)
+    soir_v6_writer_put_i8(&! cursor, out_buf, 0 as i8)
+    soir_v6_writer_put_i8(&! cursor, out_buf, 0 as i8)
+    soir_v6_writer_put_i64(&! cursor, out_buf, SOIR_V6_WRITER_BSS_FRAME_SIZE)
+    soir_v6_writer_put_i64(&! cursor, out_buf, SOIR_V6_WRITER_DIRECTORY_OFFSET)
+    soir_v6_writer_put_i64(&! cursor, out_buf, SOIR_V6_WRITER_DIRECTORY_SIZE)
+    soir_v6_writer_put_i64(&! cursor, out_buf, SOIR_V6_WRITER_SECTION_COUNT)
+    soir_v6_writer_put_i64(&! cursor, out_buf, SOIR_V6_WRITER_SCHEMA_FINGERPRINT)
+    soir_v6_writer_put_i64(&! cursor, out_buf, SOIR_V6_WRITER_HEADER_SIZE)
+    soir_v6_writer_put_i64(&! cursor, out_buf, 0)
+
+    // One canonical critical singleton directory entry.
+    soir_v6_writer_put_i64(&! cursor, out_buf, SOIR_V6_WRITER_SECTION_KIND_BSS_LAYOUT)
+    soir_v6_writer_put_i64(&! cursor, out_buf, SOIR_V6_WRITER_SECTION_SCHEMA_BSS_LAYOUT)
+    soir_v6_writer_put_i64(&! cursor, out_buf, SOIR_V6_WRITER_SECTION_FLAGS_BSS_LAYOUT)
+    soir_v6_writer_put_i64(&! cursor, out_buf, SOIR_V6_WRITER_BSS_PAYLOAD_OFFSET)
+    soir_v6_writer_put_i64(&! cursor, out_buf, SOIR_V6_WRITER_BSS_PAYLOAD_SIZE)
+    soir_v6_writer_put_i64(
+        &! cursor,
+        out_buf,
+        soir_v6_writer_bss_payload_checksum(
+            (*plan).module_bss_total_size,
+            (*plan).range_offset,
+            (*plan).range_size,
+        ),
+    )
+
+    // BSS/layout schema v1: one anonymous range. Function binding awaits the
+    // canonical ModuleGraph and is deliberately not inferred from range order.
+    soir_v6_writer_put_i64(&! cursor, out_buf, (*plan).module_bss_total_size)
+    soir_v6_writer_put_i64(&! cursor, out_buf, SOIR_V6_WRITER_BSS_RANGE_COUNT)
+    soir_v6_writer_put_i64(&! cursor, out_buf, (*plan).range_offset)
+    soir_v6_writer_put_i64(&! cursor, out_buf, (*plan).range_size)
+
+    if cursor.status != SOIR_V6_WRITER_OK || cursor.pos != (*plan).end {
+        return SOIR_V6_WRITER_ERR_INTERNAL_BOUNDS
+    }
+    cursor.pos
+}

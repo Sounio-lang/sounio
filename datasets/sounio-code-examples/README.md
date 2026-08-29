@@ -28,13 +28,11 @@ configs:
 
 Instruction/completion dataset for **Sounio**, a self-hosted systems + scientific programming language for epistemic computing.
 
-Live dataset URL: <https://huggingface.co/datasets/chiuratto-AIgourakis/sounio-code-examples>
-
 ## Contents
 
-- `train.jsonl`: 333 examples
-- `validation.jsonl`: 37 examples
-- Total: 370 examples extracted from `tests/run-pass` and `tests/compile-fail`
+- `train.jsonl`: 724 examples
+- `validation.jsonl`: 81 examples
+- Total: 805 examples extracted from `tests/run-pass` and `tests/compile-fail`
 
 Each record contains:
 
@@ -56,13 +54,13 @@ This dataset is designed to make Sounio legible to code models quickly:
 ## Rebuild locally
 
 ```bash
-python3 scripts/export_hf_dataset.py
+python3 scripts/dev/export_hf_dataset.py
 ```
 
 ## Upload
 
 ```bash
-python3 scripts/export_hf_dataset.py --upload
+python3 scripts/dev/export_hf_dataset.py --upload
 ```
 
 Set `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN` before uploading.

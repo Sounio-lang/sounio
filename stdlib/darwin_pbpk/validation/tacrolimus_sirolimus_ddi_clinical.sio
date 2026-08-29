@@ -1,0 +1,205 @@
+// darwin_pbpk/validation/tacrolimus_sirolimus_ddi_clinical.sio
+//
+// Clinical validation of the tacrolimus + sirolimus drug-drug interaction
+// under Knightian uncertainty.
+//
+// Scenario: post-cardiac-transplant patient with a Cypher drug-eluting
+// stent (sirolimus payload) starts oral tacrolimus for rejection
+// prophylaxis. Sirolimus inhibits intestinal P-gp → tacrolimus F_oral
+// rises by ~30% at therapeutic sirolimus concentrations (Undre 1999,
+// Transplant Proc 31:1305; Hodge 2004; Cattaneo 2008).
+//
+// Dissertation argument: DDI uncertainty is a QUALITATIVELY DISTINCT
+// GUM source. Unlike CL or fu_plasma (which can be tightened by better
+// analytical chemistry), the DDI magnitude is bounded below by the
+// statistical floor of the single Undre 1999 drug-drug PK study
+// (n=12). No amount of TDM on either drug alone can collapse this
+// uncertainty — it is an irreducible epistemic floor.
+//
+// Gate suite:
+//   D1: Co-administration F_oral PBox width ≥ baseline F_oral PBox width
+//       (DDI widens uncertainty)
+//   D2: Mean F_oral boost at [S]=12 ng/mL is in [0.15, 0.35]
+//       (Undre 1999 30% central, range across follow-up studies)
+//   D3: Baseline safe @ 5 mg q12h → SAFE; co-admin → ADJUST/REFUSE
+//       (DDI widens the C24h Knightian band beyond therapeutic window)
+//   D4: u(delta_F) > 0 — DDI variance contribution is non-zero
+//   D5: Combined-F PBox confidence ≤ baseline F PBox confidence
+//       (Fréchet enclosure decays confidence under composition)
+//   D6: Combined-F PBox is properly clamped to [0, 1].
+
+use clinical::tacrolimus_oral_safety::*
+use darwin_pbpk::ddi::tacrolimus_sirolimus_ddi::*
+use epistemic::knightian::*
+
+// ============================================================================
+// MATH
+// ============================================================================
+
+fn ddv_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// ============================================================================
+// MAIN — DDI CLINICAL VALIDATION
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  DDI CLINICAL VALIDATION — Tacrolimus + Sirolimus (post-Cypher DES)")
+    println("  Mechanistic intestinal P-gp inhibition (Undre 1999, Lampen 1998)")
+    println("======================================================================")
+    println("")
+
+    // Patient: 70 kg, CrCl 80 mL/min, oral 5 mg q12h immediate-release Prograf.
+    let weight = 70.0
+    let crcl = 80.0
+    let dose_mg = 5.0
+    let tau_h = 12.0
+
+    // Therapeutic sirolimus concentration from Cypher DES at steady-state
+    // (Sousa 2003 Circulation 107:2274; local arterial release with systemic
+    // spillover gives ~5–15 ng/mL whole-blood). Use the population midpoint.
+    let c_siro_ng_ml = 12.0
+
+    println("  Patient: 70 kg kidney-transplant maintenance + Cypher DES")
+    println("  Sirolimus whole-blood [S]: 12 ng/mL (Sousa 2003)")
+    println("  Tacrolimus regimen: 5 mg PO q12h")
+    println("")
+
+    // --- Build baseline F_oral PBox (post-TDM, n=3) ----------------------
+    let prm = tp_default(weight, crcl)
+    let f_baseline = tp_f_to_pbox(&prm, 3)
+    let f_baseline_gap = pb_gap(&f_baseline)
+    let f_baseline_conf = pb_confidence(&f_baseline)
+
+    print("  Baseline F_oral PBox  [")
+    print(pb_lo_mean(&f_baseline)); print(", "); print(pb_hi_mean(&f_baseline))
+    println("]")
+
+    // --- DDI delta_F PBox -----------------------------------------------
+    let d_pb = ddi_delta_f_pbox(c_siro_ng_ml)
+    print("  delta_F PBox          [")
+    print(pb_lo_mean(&d_pb)); print(", "); print(pb_hi_mean(&d_pb))
+    println("]")
+    print("  delta_F mean (R_max·[S]/(K_i+[S])) = ")
+    let delta_mean = ddi_f_boost(0.30, 5.0, c_siro_ng_ml)
+    println(delta_mean)
+
+    // --- Combined F_oral PBox via Fréchet inc-inc enclosure -------------
+    let f_combo = ddi_combined_f_knightian(&f_baseline, c_siro_ng_ml)
+    print("  Combined F_oral PBox  [")
+    print(pb_lo_mean(&f_combo)); print(", "); print(pb_hi_mean(&f_combo))
+    println("]")
+    let combo_gap = pb_gap(&f_combo)
+    let combo_conf = pb_confidence(&f_combo)
+    print("  Baseline gap = "); println(f_baseline_gap)
+    print("  Combined gap = "); println(combo_gap)
+    println("")
+
+    // --- C24h Knightian band: baseline vs co-administration -------------
+    // For the comparison we use the existing Knightian gate; baseline runs
+    // the standard pipeline. The DDI-perturbed C24h band is computed by
+    // re-running the trough gate with a manually inflated effective dose:
+    // F_combo / F_baseline_mean · dose_mg (equivalent in the linearised
+    // 1-comp oral SS model where C_trough ∝ F·D / V).
+    let pre_baseline = predict_c_trough_knightian(weight, crcl, dose_mg, tau_h, 3)
+    let safe_baseline = is_safe_tac_dose(&pre_baseline, 5.0, 15.0, 700)
+    print("  Baseline post-TDM C24h band [")
+    print(pb_lo_mean(&pre_baseline)); print(", "); print(pb_hi_mean(&pre_baseline))
+    println("]")
+    if safe_baseline { println("  Baseline gate: PRESCRIBE") }
+    else { println("  Baseline gate: REFUSE/ADJUST") }
+
+    // Knightian conservative propagation: substitute the F upper bound
+    // (F_combo_hi) for the trough computation's upper edge. This gives the
+    // conservative *worst-case* upper trough estimate consistent with
+    // pb_apply2_monotone_inc_inc on (F, Cmin) — the dissertation Knightian
+    // approach. Using the F midpoint would understate the risk and is the
+    // mistake the dissertation argues against.
+    let f_combo_hi = pb_hi_mean(&f_combo)
+    let f_baseline_mid = (pb_lo_mean(&f_baseline) + pb_hi_mean(&f_baseline)) * 0.5
+    let effective_dose = if f_baseline_mid > 1.0e-9 {
+        dose_mg * f_combo_hi / f_baseline_mid
+    } else {
+        dose_mg
+    }
+    let coadmin = predict_c_trough_knightian(weight, crcl, effective_dose, tau_h, 3)
+    let safe_coadmin = is_safe_tac_dose(&coadmin, 5.0, 15.0, 700)
+    print("  Co-admin    C24h band [")
+    print(pb_lo_mean(&coadmin)); print(", "); print(pb_hi_mean(&coadmin))
+    println("]  (Knightian-conservative: F_combo_hi propagated)")
+    if safe_coadmin { println("  Co-admin gate: PRESCRIBE") }
+    else { println("  Co-admin gate: REFUSE/ADJUST — mandatory TDM before second dose") }
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    println("GATE D1: Co-admin F_oral band ≥ baseline F_oral band width")
+    if combo_gap >= f_baseline_gap {
+        println("  [PASS]"); passed = passed + 1
+    } else {
+        println("  FAIL"); failed = failed + 1
+    }
+
+    println("GATE D2: Mean F-boost at [S]=12 ng/mL in [0.15, 0.35]")
+    if delta_mean > 0.15 && delta_mean < 0.35 {
+        println("  [PASS]"); passed = passed + 1
+    } else {
+        println("  FAIL"); failed = failed + 1
+    }
+
+    println("GATE D3: Baseline → SAFE; Co-admin → ADJUST/REFUSE")
+    if safe_baseline && !safe_coadmin {
+        println("  [PASS]"); passed = passed + 1
+    } else {
+        println("  FAIL (or DDI did not perturb gate decision)")
+        failed = failed + 1
+    }
+
+    println("GATE D4: u(delta_F) > 0 (DDI variance contribution non-zero)")
+    if pb_variance(&d_pb) > 0.0 {
+        println("  [PASS]"); passed = passed + 1
+    } else {
+        println("  FAIL"); failed = failed + 1
+    }
+
+    println("GATE D5: Combined-F PBox confidence ≤ baseline F PBox confidence")
+    if combo_conf <= f_baseline_conf {
+        println("  [PASS]"); passed = passed + 1
+    } else {
+        println("  FAIL"); failed = failed + 1
+    }
+
+    println("GATE D6: Combined-F PBox within [0, 1]")
+    let combo_lo = pb_lo_mean(&f_combo)
+    let combo_hi = pb_hi_mean(&f_combo)
+    if combo_lo >= 0.0 && combo_hi <= 1.0 && combo_lo <= combo_hi {
+        println("  [PASS]"); passed = passed + 1
+    } else {
+        println("  FAIL"); failed = failed + 1
+    }
+
+    println("")
+    println("======================================================================")
+    println("  DDI CLINICAL VALIDATION — TEST SUMMARY")
+    println("======================================================================")
+    print("  Passed: "); println(passed)
+    print("  Failed: "); println(failed)
+    println("")
+    if failed == 0 {
+        println("  DDI CLINICAL VALIDATION COMPLETE")
+        println("")
+        println("  Key dissertation finding:")
+        println("    DDI magnitude is a qualitatively distinct GUM source.")
+        println("    Unlike CL, fu, or Kp — which collapse under better")
+        println("    analytical chemistry — the Undre 1999 single-study floor")
+        println("    persists as an irreducible epistemic uncertainty. The")
+        println("    Knightian gate correctly flags co-administration as")
+        println("    REFUSE/ADJUST, mandating drug-drug TDM before the second")
+        println("    dose. This is the operational expression of the")
+        println("    'irreducible-epistemic-floor' thesis in §6.5.")
+    } else {
+        println("  FAILURES DETECTED — investigate before commit")
+    }
+    0
+}

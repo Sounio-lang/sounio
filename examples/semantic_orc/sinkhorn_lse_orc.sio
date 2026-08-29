@@ -1,0 +1,566 @@
+//@ run-pass
+//! Semantic ORC Sinkhorn-LSE runtime gate.
+//!
+//! This is an early small Sounio-native curvature runtime gate for the
+//! hyperbolic-semantic-networks migration lane. It deliberately avoids the
+//! old primal Sinkhorn path: all balancing updates are performed in log space.
+//! The entropic regularization epsilon used by the transport solver is admitted
+//! through Sounio's Knowledge<T> confidence gate before any curvature gate
+//! token is printed. This is not a W1 uncertainty interval.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return -1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    var result = 0.0
+    var power = y
+    var i: i64 = 1
+    while i <= 15 {
+        if i % 2 == 1 { result = result + power / (i as f64) }
+        else { result = result - power / (i as f64) }
+        power = power * y
+        i = i + 1
+    }
+    result + (k as f64) * ln2
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Div, Panic {
+    let ln2 = 0.6931471805599453
+    var v = x
+    if v > 700.0 { v = 700.0 }
+    if v < -700.0 { return 0.0 }
+    let k = (v / ln2) as i64
+    let r = v - (k as f64) * ln2
+    var result = 1.0
+    var term = 1.0
+    var i: i64 = 1
+    while i <= 15 {
+        term = term * r / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    if k >= 0 {
+        var j: i64 = 0
+        while j < k { result = result * 2.0; j = j + 1 }
+    } else {
+        var j: i64 = 0
+        while j < (0 - k) { result = result / 2.0; j = j + 1 }
+    }
+    result
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn logsumexp2(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    let m = max_f64(a, b)
+    m + ln_f64(exp_f64(a - m) + exp_f64(b - m))
+}
+
+struct Sinkhorn2Result {
+    w1: f64,
+    mass: f64,
+    row0: f64,
+    row1: f64,
+    col0: f64,
+    col1: f64,
+    kappa: f64,
+}
+
+struct Sinkhorn4Result {
+    w1: f64,
+    mass: f64,
+    max_row_err: f64,
+    max_col_err: f64,
+    max_fixed_err: f64,
+}
+
+struct Sinkhorn16Result {
+    w1: f64,
+    mass: f64,
+    max_row_err: f64,
+    max_col_err: f64,
+    max_fixed_err: f64,
+    iterations_used: i64,
+}
+
+fn sinkhorn_lse2(
+    c00: f64, c01: f64,
+    c10: f64, c11: f64,
+    epsilon: f64,
+    edge_distance: f64,
+    iterations: i64,
+) -> Sinkhorn2Result with Mut, Div, Panic {
+    let log_half = ln_f64(0.5)
+    let k00 = (0.0 - c00) / epsilon
+    let k01 = (0.0 - c01) / epsilon
+    let k10 = (0.0 - c10) / epsilon
+    let k11 = (0.0 - c11) / epsilon
+
+    var u0 = 0.0
+    var u1 = 0.0
+    var v0 = 0.0
+    var v1 = 0.0
+    var it: i64 = 0
+    while it < iterations {
+        u0 = log_half - logsumexp2(k00 + v0, k01 + v1)
+        u1 = log_half - logsumexp2(k10 + v0, k11 + v1)
+        v0 = log_half - logsumexp2(k00 + u0, k10 + u1)
+        v1 = log_half - logsumexp2(k01 + u0, k11 + u1)
+        it = it + 1
+    }
+
+    let p00 = exp_f64(u0 + k00 + v0)
+    let p01 = exp_f64(u0 + k01 + v1)
+    let p10 = exp_f64(u1 + k10 + v0)
+    let p11 = exp_f64(u1 + k11 + v1)
+    let mass = p00 + p01 + p10 + p11
+    let row0 = p00 + p01
+    let row1 = p10 + p11
+    let col0 = p00 + p10
+    let col1 = p01 + p11
+    let w1 = p00 * c00 + p01 * c01 + p10 * c10 + p11 * c11
+    let kappa = 1.0 - w1 / edge_distance
+    Sinkhorn2Result { w1: w1, mass: mass, row0: row0, row1: row1, col0: col0, col1: col1, kappa: kappa }
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    abs_f64(a - b) <= tol
+}
+
+fn epsilon_in_prototype_range(epsilon: f64) -> bool {
+    epsilon >= 0.001 && epsilon <= 0.1
+}
+
+fn logsumexp4(a: f64, b: f64, c: f64, d: f64) -> f64 with Mut, Div, Panic {
+    let m0 = max_f64(a, b)
+    let m1 = max_f64(c, d)
+    let m = max_f64(m0, m1)
+    m + ln_f64(exp_f64(a - m) + exp_f64(b - m) + exp_f64(c - m) + exp_f64(d - m))
+}
+
+fn max4(a: f64, b: f64, c: f64, d: f64) -> f64 {
+    max_f64(max_f64(a, b), max_f64(c, d))
+}
+
+fn max16_value(values: [f64; 16]) -> f64 {
+    var m = values[0]
+    var i: i64 = 1
+    while i < 16 {
+        if values[i as usize] > m { m = values[i as usize] }
+        i = i + 1
+    }
+    m
+}
+
+fn logsumexp16(values: [f64; 16]) -> f64 with Mut, Div, Panic {
+    let m = max16_value(values)
+    var sum = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        sum = sum + exp_f64(values[i as usize] - m)
+        i = i + 1
+    }
+    m + ln_f64(sum)
+}
+
+fn row_lse16(k: [f64; 256], v: [f64; 16], row: i64) -> f64 with Mut, Div, Panic {
+    var vals: [f64; 16] = [0.0; 16]
+    var j: i64 = 0
+    while j < 16 {
+        vals[j as usize] = k[(row * 16 + j) as usize] + v[j as usize]
+        j = j + 1
+    }
+    logsumexp16(vals)
+}
+
+fn col_lse16(k: [f64; 256], u: [f64; 16], col: i64) -> f64 with Mut, Div, Panic {
+    var vals: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        vals[i as usize] = k[(i * 16 + col) as usize] + u[i as usize]
+        i = i + 1
+    }
+    logsumexp16(vals)
+}
+
+fn sinkhorn_lse4_nonuniform(epsilon: f64, iterations: i64) -> Sinkhorn4Result with Mut, Div, Panic {
+    let mu0 = 0.4
+    let mu1 = 0.3
+    let mu2 = 0.2
+    let mu3 = 0.1
+    let nu0 = 0.1
+    let nu1 = 0.2
+    let nu2 = 0.3
+    let nu3 = 0.4
+    let la0 = ln_f64(mu0)
+    let la1 = ln_f64(mu1)
+    let la2 = ln_f64(mu2)
+    let la3 = ln_f64(mu3)
+    let lb0 = ln_f64(nu0)
+    let lb1 = ln_f64(nu1)
+    let lb2 = ln_f64(nu2)
+    let lb3 = ln_f64(nu3)
+
+    var k: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < 4 {
+        var j: i64 = 0
+        while j < 4 {
+            let gap = abs_f64((i as f64) - (j as f64))
+            let cost = 0.1 + 0.25 * gap
+            k[(i * 4 + j) as usize] = (0.0 - cost) / epsilon
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var u0 = 0.0
+    var u1 = 0.0
+    var u2 = 0.0
+    var u3 = 0.0
+    var v0 = 0.0
+    var v1 = 0.0
+    var v2 = 0.0
+    var v3 = 0.0
+    var it: i64 = 0
+    while it < iterations {
+        u0 = la0 - logsumexp4(k[0] + v0, k[1] + v1, k[2] + v2, k[3] + v3)
+        u1 = la1 - logsumexp4(k[4] + v0, k[5] + v1, k[6] + v2, k[7] + v3)
+        u2 = la2 - logsumexp4(k[8] + v0, k[9] + v1, k[10] + v2, k[11] + v3)
+        u3 = la3 - logsumexp4(k[12] + v0, k[13] + v1, k[14] + v2, k[15] + v3)
+        v0 = lb0 - logsumexp4(k[0] + u0, k[4] + u1, k[8] + u2, k[12] + u3)
+        v1 = lb1 - logsumexp4(k[1] + u0, k[5] + u1, k[9] + u2, k[13] + u3)
+        v2 = lb2 - logsumexp4(k[2] + u0, k[6] + u1, k[10] + u2, k[14] + u3)
+        v3 = lb3 - logsumexp4(k[3] + u0, k[7] + u1, k[11] + u2, k[15] + u3)
+        it = it + 1
+    }
+
+    var p: [f64; 16] = [0.0; 16]
+    let u: [f64; 4] = [u0, u1, u2, u3]
+    let v: [f64; 4] = [v0, v1, v2, v3]
+    var mass = 0.0
+    var w1 = 0.0
+    i = 0
+    while i < 4 {
+        var j: i64 = 0
+        while j < 4 {
+            let idx = i * 4 + j
+            let gap = abs_f64((i as f64) - (j as f64))
+            let cost = 0.1 + 0.25 * gap
+            let pij = exp_f64(u[i as usize] + k[idx as usize] + v[j as usize])
+            p[idx as usize] = pij
+            mass = mass + pij
+            w1 = w1 + pij * cost
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    let row0 = p[0] + p[1] + p[2] + p[3]
+    let row1 = p[4] + p[5] + p[6] + p[7]
+    let row2 = p[8] + p[9] + p[10] + p[11]
+    let row3 = p[12] + p[13] + p[14] + p[15]
+    let col0 = p[0] + p[4] + p[8] + p[12]
+    let col1 = p[1] + p[5] + p[9] + p[13]
+    let col2 = p[2] + p[6] + p[10] + p[14]
+    let col3 = p[3] + p[7] + p[11] + p[15]
+    let row_err = max4(abs_f64(row0 - mu0), abs_f64(row1 - mu1), abs_f64(row2 - mu2), abs_f64(row3 - mu3))
+    let col_err = max4(abs_f64(col0 - nu0), abs_f64(col1 - nu1), abs_f64(col2 - nu2), abs_f64(col3 - nu3))
+
+    let fu0 = abs_f64(u0 + logsumexp4(k[0] + v0, k[1] + v1, k[2] + v2, k[3] + v3) - la0)
+    let fu1 = abs_f64(u1 + logsumexp4(k[4] + v0, k[5] + v1, k[6] + v2, k[7] + v3) - la1)
+    let fu2 = abs_f64(u2 + logsumexp4(k[8] + v0, k[9] + v1, k[10] + v2, k[11] + v3) - la2)
+    let fu3 = abs_f64(u3 + logsumexp4(k[12] + v0, k[13] + v1, k[14] + v2, k[15] + v3) - la3)
+    let fv0 = abs_f64(v0 + logsumexp4(k[0] + u0, k[4] + u1, k[8] + u2, k[12] + u3) - lb0)
+    let fv1 = abs_f64(v1 + logsumexp4(k[1] + u0, k[5] + u1, k[9] + u2, k[13] + u3) - lb1)
+    let fv2 = abs_f64(v2 + logsumexp4(k[2] + u0, k[6] + u1, k[10] + u2, k[14] + u3) - lb2)
+    let fv3 = abs_f64(v3 + logsumexp4(k[3] + u0, k[7] + u1, k[11] + u2, k[15] + u3) - lb3)
+    let fixed_err = max_f64(max4(fu0, fu1, fu2, fu3), max4(fv0, fv1, fv2, fv3))
+
+    Sinkhorn4Result {
+        w1: w1,
+        mass: mass,
+        max_row_err: row_err,
+        max_col_err: col_err,
+        max_fixed_err: fixed_err,
+    }
+}
+
+fn sinkhorn_lse16_symmetric(epsilon: f64, iterations: i64) -> Sinkhorn16Result with Mut, Div, Panic {
+    let log_m = ln_f64(0.0625)
+    let target = 0.0625
+
+    var k: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let cost = if i == j { 0.0 } else { 1.0 }
+            k[(i * 16 + j) as usize] = (0.0 - cost) / epsilon
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var u: [f64; 16] = [0.0; 16]
+    var v: [f64; 16] = [0.0; 16]
+    var it: i64 = 0
+    while it < iterations {
+        i = 0
+        while i < 16 {
+            u[i as usize] = log_m - row_lse16(k, v, i)
+            i = i + 1
+        }
+        var j: i64 = 0
+        while j < 16 {
+            v[j as usize] = log_m - col_lse16(k, u, j)
+            j = j + 1
+        }
+        it = it + 1
+    }
+
+    var mass = 0.0
+    var w1 = 0.0
+    var row_sum: [f64; 16] = [0.0; 16]
+    var col_sum: [f64; 16] = [0.0; 16]
+    i = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let idx = i * 16 + j
+            let pij = exp_f64(u[i as usize] + k[idx as usize] + v[j as usize])
+            let cost = if i == j { 0.0 } else { 1.0 }
+            mass = mass + pij
+            w1 = w1 + pij * cost
+            row_sum[i as usize] = row_sum[i as usize] + pij
+            col_sum[j as usize] = col_sum[j as usize] + pij
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var max_row_err = 0.0
+    var max_col_err = 0.0
+    var max_fixed_err = 0.0
+    i = 0
+    while i < 16 {
+        let re = abs_f64(row_sum[i as usize] - target)
+        let ce = abs_f64(col_sum[i as usize] - target)
+        let fue = abs_f64(u[i as usize] + row_lse16(k, v, i) - log_m)
+        let fve = abs_f64(v[i as usize] + col_lse16(k, u, i) - log_m)
+        if re > max_row_err { max_row_err = re }
+        if ce > max_col_err { max_col_err = ce }
+        if fue > max_fixed_err { max_fixed_err = fue }
+        if fve > max_fixed_err { max_fixed_err = fve }
+        i = i + 1
+    }
+
+    Sinkhorn16Result {
+        w1: w1,
+        mass: mass,
+        max_row_err: max_row_err,
+        max_col_err: max_col_err,
+        max_fixed_err: max_fixed_err,
+        iterations_used: iterations,
+    }
+}
+
+fn sinkhorn_lse16_nonuniform(epsilon: f64, iterations: i64) -> Sinkhorn16Result with Mut, Div, Panic {
+    var mu: [f64; 16] = [0.0; 16]
+    var nu: [f64; 16] = [0.0; 16]
+    var la: [f64; 16] = [0.0; 16]
+    var lb: [f64; 16] = [0.0; 16]
+    var k: [f64; 256] = [0.0; 256]
+
+    var i: i64 = 0
+    while i < 16 {
+        mu[i as usize] = ((16 - i) as f64) / 136.0
+        nu[i as usize] = ((i + 1) as f64) / 136.0
+        la[i as usize] = ln_f64(mu[i as usize])
+        lb[i as usize] = ln_f64(nu[i as usize])
+        i = i + 1
+    }
+
+    i = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let gap = abs_f64((i as f64) - (j as f64))
+            let cost = 0.05 + 0.03 * gap
+            k[(i * 16 + j) as usize] = (0.0 - cost) / epsilon
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var u: [f64; 16] = [0.0; 16]
+    var v: [f64; 16] = [0.0; 16]
+    var it: i64 = 0
+    var converged = false
+    while it < iterations && !converged {
+        i = 0
+        while i < 16 {
+            u[i as usize] = la[i as usize] - row_lse16(k, v, i)
+            i = i + 1
+        }
+        var j: i64 = 0
+        while j < 16 {
+            v[j as usize] = lb[j as usize] - col_lse16(k, u, j)
+            j = j + 1
+        }
+        var iter_fixed_err = 0.0
+        i = 0
+        while i < 16 {
+            let fue = abs_f64(u[i as usize] + row_lse16(k, v, i) - la[i as usize])
+            let fve = abs_f64(v[i as usize] + col_lse16(k, u, i) - lb[i as usize])
+            if fue > iter_fixed_err { iter_fixed_err = fue }
+            if fve > iter_fixed_err { iter_fixed_err = fve }
+            i = i + 1
+        }
+        it = it + 1
+        if iter_fixed_err < 0.003 {
+            converged = true
+        }
+    }
+
+    var mass = 0.0
+    var w1 = 0.0
+    var row_sum: [f64; 16] = [0.0; 16]
+    var col_sum: [f64; 16] = [0.0; 16]
+    i = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let idx = i * 16 + j
+            let gap = abs_f64((i as f64) - (j as f64))
+            let cost = 0.05 + 0.03 * gap
+            let pij = exp_f64(u[i as usize] + k[idx as usize] + v[j as usize])
+            mass = mass + pij
+            w1 = w1 + pij * cost
+            row_sum[i as usize] = row_sum[i as usize] + pij
+            col_sum[j as usize] = col_sum[j as usize] + pij
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var max_row_err = 0.0
+    var max_col_err = 0.0
+    var max_fixed_err = 0.0
+    i = 0
+    while i < 16 {
+        let re = abs_f64(row_sum[i as usize] - mu[i as usize])
+        let ce = abs_f64(col_sum[i as usize] - nu[i as usize])
+        let fue = abs_f64(u[i as usize] + row_lse16(k, v, i) - la[i as usize])
+        let fve = abs_f64(v[i as usize] + col_lse16(k, u, i) - lb[i as usize])
+        if re > max_row_err { max_row_err = re }
+        if ce > max_col_err { max_col_err = ce }
+        if fue > max_fixed_err { max_fixed_err = fue }
+        if fve > max_fixed_err { max_fixed_err = fve }
+        i = i + 1
+    }
+
+    Sinkhorn16Result {
+        w1: w1,
+        mass: mass,
+        max_row_err: max_row_err,
+        max_col_err: max_col_err,
+        max_fixed_err: max_fixed_err,
+        iterations_used: it,
+    }
+}
+
+fn main() -> i64 with IO, Epistemic, Mut, Div, Panic {
+    let eps_k: Knowledge<f64> = measure(0.05, uncertainty: 0.0005)
+    let epsilon = require_confidence(eps_k, 0.98)
+    let epsilon_ok = epsilon_in_prototype_range(epsilon)
+
+    let same = sinkhorn_lse2(
+        0.0, 1.0,
+        1.0, 0.0,
+        epsilon,
+        1.0,
+        24,
+    )
+    // Metric 1D semantic-distance case:
+    // left support = [0.0, 1.0], right support = [0.3, 1.3]
+    // cost_ij = abs(left_i - right_j). The transport cost exceeds the
+    // observed semantic edge scale, yielding negative curvature.
+    let bottleneck = sinkhorn_lse2(
+        0.3, 1.3,
+        0.7, 0.3,
+        epsilon,
+        0.2,
+        24,
+    )
+
+    let same_marginals_ok =
+        approx_eq(same.mass, 1.0, 0.001) &&
+        approx_eq(same.row0, 0.5, 0.001) &&
+        approx_eq(same.row1, 0.5, 0.001) &&
+        approx_eq(same.col0, 0.5, 0.001) &&
+        approx_eq(same.col1, 0.5, 0.001)
+    let bottleneck_marginals_ok =
+        approx_eq(bottleneck.mass, 1.0, 0.001) &&
+        approx_eq(bottleneck.row0, 0.5, 0.001) &&
+        approx_eq(bottleneck.row1, 0.5, 0.001) &&
+        approx_eq(bottleneck.col0, 0.5, 0.001) &&
+        approx_eq(bottleneck.col1, 0.5, 0.001)
+    let mass_ok = same_marginals_ok && bottleneck_marginals_ok
+    let positive_ok = same.kappa > 0.999
+    let negative_ok = bottleneck.kappa < -0.49 && bottleneck.kappa > -0.51
+    let nonuniform = sinkhorn_lse4_nonuniform(epsilon, 64)
+    let nonuniform_ok =
+        approx_eq(nonuniform.mass, 1.0, 0.015) &&
+        nonuniform.max_row_err < 0.01 &&
+        nonuniform.max_col_err < 0.01 &&
+        nonuniform.max_fixed_err < 0.002 &&
+        nonuniform.w1 > 0.0
+    let n16 = sinkhorn_lse16_symmetric(epsilon, 32)
+    let n16_ok =
+        approx_eq(n16.mass, 1.0, 0.002) &&
+        n16.max_row_err < 0.002 &&
+        n16.max_col_err < 0.002 &&
+        n16.max_fixed_err < 0.002 &&
+        n16.w1 >= 0.0
+    let n16_nonuniform = sinkhorn_lse16_nonuniform(epsilon, 128)
+    let n16_nonuniform_ok =
+        approx_eq(n16_nonuniform.mass, 1.0, 0.01) &&
+        n16_nonuniform.max_row_err < 0.01 &&
+        n16_nonuniform.max_col_err < 0.01 &&
+        n16_nonuniform.max_fixed_err < 0.003 &&
+        n16_nonuniform.iterations_used <= 128 &&
+        n16_nonuniform.w1 > 0.0
+
+    if epsilon_ok && mass_ok && positive_ok && negative_ok && nonuniform_ok && n16_ok && n16_nonuniform_ok {
+        println("SOUNIO_SEMANTIC_ORC_LSE_PASS")
+        println("claim_level=semantic_orc_lse_runtime_gate")
+        println("epistemic_epsilon_gate=true")
+        println("epsilon_range_gate=true")
+        println("same_support_kappa_positive=true")
+        println("bottleneck_kappa_negative=true")
+        println("marginal_constraints=true")
+        println("nonuniform4_fixed_point=true")
+        println("sinkhorn16_symmetric_fixed_point=true")
+        println("sinkhorn16_nonuniform_fixed_point=true")
+        println("sinkhorn16_nonuniform_adaptive_stop=true")
+        println("instance_checks_passed=true")
+        println("entropic_regularized_transport_only=true")
+        println("clinical_claims_not_enforced=true")
+        println("no_convergence_theorem=true")
+        0
+    } else {
+        println("SOUNIO_SEMANTIC_ORC_LSE_FAIL")
+        1
+    }
+}

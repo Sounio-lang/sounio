@@ -4,29 +4,23 @@
 
 `sounio-pkg` is a package manager and build system for the Sounio programming language, designed specifically for scientific and epistemic computing. It provides:
 
-- **Dependency management** with epistemic versioning
-- **Build system** integrated with Sounio compiler
-- **Package registry** for sharing scientific modules
-- **Workspace support** for large projects
-- **CI/CD integration** with existing Sounio validation
+Supported contract: local package creation, local build/check/test, and local package-import workflows.
+
+Not supported in the current release contract: hosted public-registry publishing,
+login, hosted search, broad dependency resolution, or workspace publishing.
 
 ## 🚀 Quick Start
 
 ### Installation
 ```bash
-# From source (once available)
-git clone https://github.com/sounio-lang/sounio-pkg
-cd sounio-pkg
-./install.sh
-
 # Verify installation
-sounio-pkg --version
+tools/sounio-pkg/sounio-pkg version
 ```
 
 ### Creating a New Package
 ```bash
 # Create a new Sounio package
-sounio-pkg new my-scientific-package
+tools/sounio-pkg/sounio-pkg new my-scientific-package
 cd my-scientific-package
 
 # Structure created:
@@ -42,28 +36,10 @@ cd my-scientific-package
 ### Building and Testing
 ```bash
 # Build the package
-sounio-pkg build
+../tools/sounio-pkg/sounio-pkg build
 
 # Run tests
-sounio-pkg test
-
-# Run examples
-sounio-pkg run --example basic_usage
-```
-
-### Managing Dependencies
-```bash
-# Add a dependency
-sounio-pkg add epistemic-stats --version "^1.0"
-
-# Add development dependency
-sounio-pkg add --dev sounio-test
-
-# Update dependencies
-sounio-pkg update
-
-# List dependencies
-sounio-pkg list
+../tools/sounio-pkg/sounio-pkg test
 ```
 
 ## 📦 Package Manifest (sounio.toml)
@@ -164,41 +140,7 @@ sounio-pkg doc [--open]
 sounio-pkg clean
 ```
 
-### Dependency Management
-```bash
-# Add dependency
-sounio-pkg add <package> [--version <constraint>] [--features <features>]
-
-# Remove dependency
-sounio-pkg remove <package>
-
-# Update dependencies
-sounio-pkg update [<package>]
-
-# List dependencies
-sounio-pkg list [--tree]
-
-# Check for outdated dependencies
-sounio-pkg outdated
-```
-
-### Publishing
-```bash
-# Login to registry
-sounio-pkg login
-
-# Publish package
-sounio-pkg publish [--dry-run]
-
-# Yank package version
-sounio-pkg yank <package>@<version>
-
-# Search packages
-sounio-pkg search <query>
-
-# Show package info
-sounio-pkg show <package>
-```
+Dependency management, publishing, hosted search, and registry authentication are design surfaces until a dedicated gate covers them.
 
 ### Workspace Management
 ```bash

@@ -1,0 +1,140 @@
+// stdlib/darwin_pbpk/scenarios/semaglutide_sc_depot.sio — runnable scenario
+//
+// End-to-end Stage G dissertation scenario for semaglutide:
+//
+//   - PBPK28 transport     (core/pbpk28_params + tsit5_pbpk28)
+//   - GLP-1R TMDD          (tmdd/glp1r — and shared kernel from
+//                           tmdd/fkbp12_mtorc1)
+//   - Bergman glucose-     (pd/bergman_glucose_insulin)
+//     insulin PD
+//   - SC depot first-order release (1 mg weekly, F=0.89, k_a=ln 2 / 60 h
+//     per Overgaard 2019 / Carlsson 2020)
+//
+// Composes the four library modules ported in Stage G-ε-11 through G-ε-15
+// into a single runnable end-to-end model. The TMDD step is applied to the
+// three GLP-1R organs (brain=3, gut=8, pancreas=12); the PD step reads
+// pancreas occupancy and drives plasma (ΔG, ΔI).
+//
+// Stage G-ε-16. gap-report claim `tmdd_semaglutide_path` + the multi-drug
+// scenario surface. Transitive parity with the JS engine is enforced
+// (transitively) by cases 7-9 of `dissertation_pbpk28_parity_gate.sh` once
+// the parity ref imports this scenario (G-ζ-1).
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::tmdd::fkbp12_mtorc1::*
+use darwin_pbpk::tmdd::glp1r::*
+use darwin_pbpk::pd::bergman_glucose_insulin::*
+
+// ─── SC depot release ───────────────────────────────────────────────────────
+// Overgaard 2019 / Carlsson 2020 — F = 0.89 bioavailability, k_a = ln 2 / 60 h
+// (≈ 0.01155 /h) terminal absorption rate, 1 mg typical weekly dose. Total
+// systemic exposure over t ∈ [0, ∞] equals F · Dose by construction
+// (∫ F·D·k_a·e^-k_a·t dt = F·D).
+fn sema_dose_mg() -> f64 { return 1.0 }
+fn sema_f() -> f64       { return 0.89 }
+fn sema_ka() -> f64      { return 0.011552453009332421 }   // ln(2)/60 h
+
+// rate(t) = F · Dose · k_a · exp(-k_a · t), mg/h.
+fn sema_release_rate_at(t: f64) -> f64 with Mut, Div {
+    if t < 0.0 { return 0.0 }
+    let ka = sema_ka()
+    let arg = 0.0 - ka * t
+    // Taylor series for exp with range reduction (the same `exp_neg` pattern
+    // used by the parity ref's qss analytical case — t up to 168 h means
+    // |arg| ≤ 1.94, well within the Taylor radius of convergence).
+    var y = 1.0
+    var term = 1.0
+    var k: i64 = 1
+    while k < 20 {
+        term = term * arg / (k as f64)
+        y = y + term
+        k = k + 1
+    }
+    return sema_f() * sema_dose_mg() * ka * y
+}
+
+// ─── Composite scenario state ───────────────────────────────────────────────
+// Carries PBPK28 transport + 3 GLP-1R organs' TMDD + Bergman PD. The three
+// TMDD organs are inlined as separate fields rather than a `[TmddState; 3]`
+// array — Sounio's current typechecker rejects struct-field initialization
+// from an array-of-struct-value literal (verified 2026-05-11 on
+// `./bin/souc` at HEAD), so the verbose form is the portable choice.
+struct SemaglutideScenario {
+    pbpk:       PBPKState28,
+    tmdd_brain: TmddState,    // organ index 3
+    tmdd_gut:   TmddState,    // organ index 8
+    tmdd_panc:  TmddState,    // organ index 12
+    pd:         BergmanState,
+}
+
+// Initial state: zero PBPK (drug enters via release_rate), R_free at
+// baseline R_total_0, no DR, PD at G_b/I_b basal.
+fn sema_scenario_init() -> SemaglutideScenario {
+    SemaglutideScenario {
+        pbpk:       pbpk28_state_zero(),
+        tmdd_brain: TmddState { ct_mass: 0.0, rfree: glp1r_rtotal0_at(3),  dr: 0.0 },
+        tmdd_gut:   TmddState { ct_mass: 0.0, rfree: glp1r_rtotal0_at(8),  dr: 0.0 },
+        tmdd_panc:  TmddState { ct_mass: 0.0, rfree: glp1r_rtotal0_at(12), dr: 0.0 },
+        pd:         bergman_state_init(),
+    }
+}
+
+// ─── Strang-style composite step ────────────────────────────────────────────
+// 1. PBPK28 transport with midpoint release rate.
+// 2. TMDD at each of brain/gut/pancreas — pulls drug from C_t, advances
+//    (R_free, DR). Uses tmdd_step from fkbp12_mtorc1 (shared kernel).
+// 3. PD at pancreas — reads its TMDD occupancy, advances (ΔG, ΔI).
+fn sema_strang_step(scen: SemaglutideScenario, p: PBPKParams28,
+                    bergman_p: BergmanParams,
+                    t_start: f64, dt: f64)
+    -> SemaglutideScenario with Mut, Div
+{
+    let rel_mid = sema_release_rate_at(t_start + 0.5 * dt)
+    var out_pbpk = pbpk28_full_cn_step(scen.pbpk, p, rel_mid, dt)
+
+    // Per-organ TMDD step. Each call couples the per-organ C_t (mg/L)
+    // from the PBPK transport into the TMDD state, advances binding/
+    // internalisation, then writes the new C_t back into PBPK.
+    var s_brain = scen.tmdd_brain
+    s_brain.ct_mass = out_pbpk.ct[3]
+    let new_brain = tmdd_step(s_brain, glp1r_params_at(3), dt)
+    out_pbpk.ct[3] = new_brain.ct_mass
+
+    var s_gut = scen.tmdd_gut
+    s_gut.ct_mass = out_pbpk.ct[8]
+    let new_gut = tmdd_step(s_gut, glp1r_params_at(8), dt)
+    out_pbpk.ct[8] = new_gut.ct_mass
+
+    var s_panc = scen.tmdd_panc
+    s_panc.ct_mass = out_pbpk.ct[12]
+    let new_panc = tmdd_step(s_panc, glp1r_params_at(12), dt)
+    out_pbpk.ct[12] = new_panc.ct_mass
+
+    // PD reads pancreas occupancy.
+    let occ = tmdd_occupancy(new_panc)
+    let out_pd = pd_step_glucose_insulin(scen.pd, occ, bergman_p, dt)
+
+    SemaglutideScenario {
+        pbpk:       out_pbpk,
+        tmdd_brain: new_brain,
+        tmdd_gut:   new_gut,
+        tmdd_panc:  new_panc,
+        pd:         out_pd,
+    }
+}
+
+// ─── Top-level integration driver ───────────────────────────────────────────
+fn sema_integrate_to(scen: SemaglutideScenario, p: PBPKParams28,
+                     bergman_p: BergmanParams,
+                     t_start: f64, t_end: f64, dt: f64)
+    -> SemaglutideScenario with Mut, Div
+{
+    var s = scen
+    var t = t_start
+    while t < t_end - 0.5 * dt {
+        s = sema_strang_step(s, p, bergman_p, t, dt)
+        t = t + dt
+    }
+    return s
+}

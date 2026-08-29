@@ -1,0 +1,431 @@
+//! stdlib/theorem/lrat.sio
+//!
+//! Minimal native LRAT/RUP replay kernel.
+//!
+//! Scope:
+//! - clause IDs are explicit and stable;
+//! - deleted clauses cannot be used as antecedents;
+//! - `lrat_add_rup4` checks a candidate lemma by assigning the negation of the
+//!   lemma and replaying up to four LRAT antecedent IDs as unit-propagation hints.
+//!
+//! This is a small proof-checker kernel, not a SAT solver. It is intentionally
+//! bounded so larger SAT engines can grow around a separately checkable core.
+
+let LRAT_MAX_CLAUSES: i64 = 128
+let LRAT_MAX_LITS: i64 = 1024
+let LRAT_MAX_VARS: i64 = 256
+
+var LRAT_COUNT: i64 = 0
+var LRAT_ID: [i64; 128] = [0; 128]
+var LRAT_ACTIVE: [i64; 128] = [0; 128]
+var LRAT_START: [i64; 128] = [0; 128]
+var LRAT_LEN: [i64; 128] = [0; 128]
+var LRAT_LITS: [i64; 1024] = [0; 1024]
+var LRAT_LIT_COUNT: i64 = 0
+var LRAT_ASSIGN: [i64; 256] = [0; 256]
+
+fn lrat_abs(x: i64) -> i64 {
+    if x < 0 { return 0 - x }
+    return x
+}
+
+fn lrat_lit_var(lit: i64) -> i64 {
+    return lrat_abs(lit)
+}
+
+fn lrat_find(id: i64) -> i64 {
+    var i: i64 = 0
+    while i < LRAT_COUNT {
+        if LRAT_ID[i] == id { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+fn lrat_lit_value(lit: i64) -> i64 {
+    let v = lrat_lit_var(lit)
+    if v <= 0 { return 0 }
+    if v >= LRAT_MAX_VARS { return 0 }
+    var a = LRAT_ASSIGN[v]
+    if lit < 0 { a = 0 - a }
+    return a
+}
+
+fn lrat_assign_lit(lit: i64) -> i64 with Mut {
+    let v = lrat_lit_var(lit)
+    if v <= 0 { return 0 }
+    if v >= LRAT_MAX_VARS { return 0 }
+    var want: i64 = 1
+    if lit < 0 { want = 0 - 1 }
+    if LRAT_ASSIGN[v] == 0 {
+        LRAT_ASSIGN[v] = want
+        return 1
+    }
+    if LRAT_ASSIGN[v] == want { return 1 }
+    return 0
+}
+
+fn lrat_clear_assign() with Mut {
+    var i: i64 = 0
+    while i < LRAT_MAX_VARS {
+        LRAT_ASSIGN[i] = 0
+        i = i + 1
+    }
+}
+
+pub fn lrat_reset() with Mut {
+    LRAT_COUNT = 0
+    LRAT_LIT_COUNT = 0
+    lrat_clear_assign()
+}
+
+pub fn lrat_clause_count() -> i64 {
+    return LRAT_COUNT
+}
+
+pub fn lrat_has_active(id: i64) -> i64 {
+    let idx = lrat_find(id)
+    if idx < 0 { return 0 }
+    return LRAT_ACTIVE[idx]
+}
+
+pub fn lrat_id_seen(id: i64) -> i64 {
+    if lrat_find(id) >= 0 { return 1 }
+    return 0
+}
+
+pub fn lrat_is_deleted(id: i64) -> i64 {
+    let idx = lrat_find(id)
+    if idx < 0 { return 0 }
+    if LRAT_ACTIVE[idx] == 0 { return 1 }
+    return 0
+}
+
+pub fn lrat_can_add_clause_id(id: i64) -> i64 {
+    if id <= 0 { return 0 }
+    if lrat_find(id) >= 0 { return 0 }
+    return 1
+}
+
+pub fn lrat_can_add_clause4(id: i64, len: i64) -> i64 {
+    if lrat_can_add_clause_id(id) == 0 { return 0 }
+    if len < 0 { return 0 }
+    if len > 4 { return 0 }
+    if LRAT_COUNT >= LRAT_MAX_CLAUSES { return 0 }
+    if LRAT_LIT_COUNT + len >= LRAT_MAX_LITS { return 0 }
+    return 1
+}
+
+pub fn lrat_next_fresh_id() -> i64 {
+    if LRAT_COUNT >= LRAT_MAX_CLAUSES { return 0 }
+    var max_id: i64 = 0
+    var i: i64 = 0
+    while i < LRAT_COUNT {
+        if LRAT_ID[i] > max_id { max_id = LRAT_ID[i] }
+        i = i + 1
+    }
+    return max_id + 1
+}
+
+pub fn lrat_add_clause4(id: i64, a: i64, b: i64, c: i64, d: i64, len: i64) -> i64 with Mut {
+    if lrat_can_add_clause4(id, len) == 0 { return 0 }
+
+    let idx = LRAT_COUNT
+    LRAT_ID[idx] = id
+    LRAT_ACTIVE[idx] = 1
+    LRAT_START[idx] = LRAT_LIT_COUNT
+    LRAT_LEN[idx] = len
+    if len >= 1 { LRAT_LITS[LRAT_LIT_COUNT] = a; LRAT_LIT_COUNT = LRAT_LIT_COUNT + 1 }
+    if len >= 2 { LRAT_LITS[LRAT_LIT_COUNT] = b; LRAT_LIT_COUNT = LRAT_LIT_COUNT + 1 }
+    if len >= 3 { LRAT_LITS[LRAT_LIT_COUNT] = c; LRAT_LIT_COUNT = LRAT_LIT_COUNT + 1 }
+    if len >= 4 { LRAT_LITS[LRAT_LIT_COUNT] = d; LRAT_LIT_COUNT = LRAT_LIT_COUNT + 1 }
+    LRAT_COUNT = idx + 1
+    return 1
+}
+
+pub fn lrat_delete(id: i64) -> i64 with Mut {
+    let idx = lrat_find(id)
+    if idx < 0 { return 0 }
+    LRAT_ACTIVE[idx] = 0
+    return 1
+}
+
+fn lrat_clause_other_lit2_idx(idx: i64, pivot: i64) -> i64 {
+    if idx < 0 { return 0 }
+    if LRAT_ACTIVE[idx] != 1 { return 0 }
+    if LRAT_LEN[idx] != 2 { return 0 }
+    let start = LRAT_START[idx]
+    let a = LRAT_LITS[start]
+    let b = LRAT_LITS[start + 1]
+    if a == pivot { return b }
+    if b == pivot { return a }
+    return 0
+}
+
+pub fn lrat_check_binary_resolution_unit(left_id: i64, right_id: i64,
+                                         pivot_lit: i64,
+                                         resolvent_lit: i64) -> i64 {
+    if pivot_lit == 0 { return 0 }
+    if resolvent_lit == 0 { return 0 }
+
+    let left_idx = lrat_find(left_id)
+    let right_idx = lrat_find(right_id)
+    if left_idx < 0 { return 0 }
+    if right_idx < 0 { return 0 }
+
+    let left_other = lrat_clause_other_lit2_idx(left_idx, pivot_lit)
+    let right_other = lrat_clause_other_lit2_idx(right_idx, 0 - pivot_lit)
+    if left_other != resolvent_lit { return 0 }
+    if right_other != resolvent_lit { return 0 }
+    return 1
+}
+
+pub fn lrat_add_binary_resolution_unit(id: i64, left_id: i64, right_id: i64,
+                                       pivot_lit: i64,
+                                       resolvent_lit: i64) -> i64 with Mut {
+    if lrat_check_binary_resolution_unit(left_id, right_id, pivot_lit, resolvent_lit) == 0 {
+        return 0
+    }
+    return lrat_add_clause4(id, resolvent_lit, 0, 0, 0, 1)
+}
+
+fn lrat_assign_negated_lemma4(a: i64, b: i64, c: i64, d: i64, len: i64) -> i64 with Mut {
+    if len < 0 { return 0 }
+    if len > 4 { return 0 }
+    if len >= 1 { if lrat_assign_lit(0 - a) == 0 { return 2 } }
+    if len >= 2 { if lrat_assign_lit(0 - b) == 0 { return 2 } }
+    if len >= 3 { if lrat_assign_lit(0 - c) == 0 { return 2 } }
+    if len >= 4 { if lrat_assign_lit(0 - d) == 0 { return 2 } }
+    return 1
+}
+
+fn lrat_replay_hint(id: i64) -> i64 with Mut {
+    let idx = lrat_find(id)
+    if idx < 0 { return 0 - 1 }
+    if LRAT_ACTIVE[idx] != 1 { return 0 - 1 }
+
+    let start = LRAT_START[idx]
+    let len = LRAT_LEN[idx]
+    var sat: i64 = 0
+    var unassigned: i64 = 0
+    var last: i64 = 0
+    var i: i64 = 0
+    while i < len {
+        let lit = LRAT_LITS[start + i]
+        let value = lrat_lit_value(lit)
+        if value == 1 { sat = 1 }
+        if value == 0 {
+            unassigned = unassigned + 1
+            last = lit
+        }
+        i = i + 1
+    }
+
+    if sat == 1 { return 1 }
+    if unassigned == 0 { return 2 }
+    if unassigned == 1 {
+        if lrat_assign_lit(last) == 0 { return 2 }
+    }
+    return 1
+}
+
+pub fn lrat_check_rup4(a: i64, b: i64, c: i64, d: i64, len: i64,
+                       h0: i64, h1: i64, h2: i64, h3: i64, hlen: i64) -> i64 with Mut {
+    if hlen < 0 { return 0 }
+    if hlen > 4 { return 0 }
+    lrat_clear_assign()
+    let neg = lrat_assign_negated_lemma4(a, b, c, d, len)
+    if neg == 0 { return 0 }
+    if neg == 2 { return 1 }
+
+    if hlen >= 1 {
+        let r0 = lrat_replay_hint(h0)
+        if r0 < 0 { return 0 }
+        if r0 == 2 { return 1 }
+    }
+    if hlen >= 2 {
+        let r1 = lrat_replay_hint(h1)
+        if r1 < 0 { return 0 }
+        if r1 == 2 { return 1 }
+    }
+    if hlen >= 3 {
+        let r2 = lrat_replay_hint(h2)
+        if r2 < 0 { return 0 }
+        if r2 == 2 { return 1 }
+    }
+    if hlen >= 4 {
+        let r3 = lrat_replay_hint(h3)
+        if r3 < 0 { return 0 }
+        if r3 == 2 { return 1 }
+    }
+    return 0
+}
+
+pub fn lrat_add_rup4(id: i64, a: i64, b: i64, c: i64, d: i64, len: i64,
+                     h0: i64, h1: i64, h2: i64, h3: i64, hlen: i64) -> i64 with Mut {
+    if lrat_check_rup4(a, b, c, d, len, h0, h1, h2, h3, hlen) != 1 { return 0 }
+    return lrat_add_clause4(id, a, b, c, d, len)
+}
+
+pub fn lrat_check_unit_rup4(lit: i64, h0: i64, h1: i64, h2: i64, h3: i64, hlen: i64) -> i64 with Mut {
+    return lrat_check_rup4(lit, 0, 0, 0, 1, h0, h1, h2, h3, hlen)
+}
+
+pub fn lrat_add_unit_rup4(id: i64, lit: i64, h0: i64, h1: i64, h2: i64, h3: i64, hlen: i64) -> i64 with Mut {
+    return lrat_add_rup4(id, lit, 0, 0, 0, 1, h0, h1, h2, h3, hlen)
+}
+
+pub fn lrat_check_empty_rup4(h0: i64, h1: i64, h2: i64, h3: i64, hlen: i64) -> i64 with Mut {
+    return lrat_check_rup4(0, 0, 0, 0, 0, h0, h1, h2, h3, hlen)
+}
+
+pub fn lrat_add_empty_rup4(id: i64, h0: i64, h1: i64, h2: i64, h3: i64, hlen: i64) -> i64 with Mut {
+    return lrat_add_rup4(id, 0, 0, 0, 0, 0, h0, h1, h2, h3, hlen)
+}
+
+pub fn lrat_frat_elaboration_manifest_fingerprint(
+    original_clause_count: i64,
+    add_count: i64,
+    delete_count: i64,
+    first_derived_id: i64,
+    final_clause_id: i64,
+    final_clause_len: i64) -> i64 with Mod {
+    if original_clause_count != 3 { return 0 - 1 }
+    if add_count != 2 { return 0 - 1 }
+    if delete_count != 1 { return 0 - 1 }
+    if first_derived_id != 4 { return 0 - 1 }
+    if final_clause_id != 5 { return 0 - 1 }
+    if final_clause_len != 0 { return 0 - 1 }
+
+    var fp: i64 = 173
+    fp = ((fp * 16777619) + original_clause_count + 2309) % 1000000007
+    fp = ((fp * 16777619) + add_count + 2309) % 1000000007
+    fp = ((fp * 16777619) + delete_count + 2309) % 1000000007
+    fp = ((fp * 16777619) + first_derived_id + 2309) % 1000000007
+    fp = ((fp * 16777619) + final_clause_id + 2309) % 1000000007
+    fp = ((fp * 16777619) + final_clause_len + 2309) % 1000000007
+    return fp
+}
+
+pub fn lrat_frat_hint_trace_fingerprint(
+    manifest_fp: i64,
+    derived_unit_id: i64,
+    derived_empty_id: i64,
+    deleted_clause_id: i64,
+    unit_hint_count: i64,
+    empty_hint_count: i64,
+    rup_step_count: i64) -> i64 with Mod {
+    if manifest_fp != 975208343 { return 0 - 1 }
+    if derived_unit_id != 4 { return 0 - 1 }
+    if derived_empty_id != 5 { return 0 - 1 }
+    if deleted_clause_id != 2 { return 0 - 1 }
+    if unit_hint_count != 2 { return 0 - 1 }
+    if empty_hint_count != 2 { return 0 - 1 }
+    if rup_step_count != 2 { return 0 - 1 }
+
+    var fp: i64 = 181
+    fp = ((fp * 16777619) + manifest_fp + 2333) % 1000000007
+    fp = ((fp * 16777619) + derived_unit_id + 2333) % 1000000007
+    fp = ((fp * 16777619) + derived_empty_id + 2333) % 1000000007
+    fp = ((fp * 16777619) + deleted_clause_id + 2333) % 1000000007
+    fp = ((fp * 16777619) + unit_hint_count + 2333) % 1000000007
+    fp = ((fp * 16777619) + empty_hint_count + 2333) % 1000000007
+    fp = ((fp * 16777619) + rup_step_count + 2333) % 1000000007
+    return fp
+}
+
+pub fn lrat_frat_unsat_envelope_fingerprint(
+    manifest_fp: i64,
+    hint_trace_fp: i64,
+    final_clause_id: i64,
+    final_clause_len: i64,
+    lrat_empty_seen: i64) -> i64 with Mod {
+    if manifest_fp != 975208343 { return 0 - 1 }
+    if hint_trace_fp != 459486070 { return 0 - 1 }
+    if final_clause_id != 5 { return 0 - 1 }
+    if final_clause_len != 0 { return 0 - 1 }
+    if lrat_empty_seen != 1 { return 0 - 1 }
+
+    var fp: i64 = 191
+    fp = ((fp * 16777619) + manifest_fp + 2351) % 1000000007
+    fp = ((fp * 16777619) + hint_trace_fp + 2351) % 1000000007
+    fp = ((fp * 16777619) + final_clause_id + 2351) % 1000000007
+    fp = ((fp * 16777619) + final_clause_len + 2351) % 1000000007
+    fp = ((fp * 16777619) + lrat_empty_seen + 2351) % 1000000007
+    return fp
+}
+
+pub fn lrat_deletion_lifecycle_manifest_fingerprint(
+    original_clause_count: i64,
+    derived_clause_count: i64,
+    delete_count: i64,
+    first_derived_id: i64,
+    final_clause_id: i64,
+    final_clause_len: i64) -> i64 with Mod {
+    if original_clause_count != 3 { return 0 - 1 }
+    if derived_clause_count != 2 { return 0 - 1 }
+    if delete_count != 2 { return 0 - 1 }
+    if first_derived_id != 4 { return 0 - 1 }
+    if final_clause_id != 5 { return 0 - 1 }
+    if final_clause_len != 0 { return 0 - 1 }
+
+    var fp: i64 = 197
+    fp = ((fp * 16777619) + original_clause_count + 2371) % 1000000007
+    fp = ((fp * 16777619) + derived_clause_count + 2371) % 1000000007
+    fp = ((fp * 16777619) + delete_count + 2371) % 1000000007
+    fp = ((fp * 16777619) + first_derived_id + 2371) % 1000000007
+    fp = ((fp * 16777619) + final_clause_id + 2371) % 1000000007
+    fp = ((fp * 16777619) + final_clause_len + 2371) % 1000000007
+    return fp
+}
+
+pub fn lrat_deletion_lifecycle_audit_fingerprint(
+    manifest_fp: i64,
+    next_id_before_derivation: i64,
+    next_id_after_unit: i64,
+    next_id_after_empty: i64,
+    reused_id_blocked: i64,
+    deleted_hint_blocked_count: i64,
+    final_empty_seen: i64) -> i64 with Mod {
+    if manifest_fp != 6950141 { return 0 - 1 }
+    if next_id_before_derivation != 4 { return 0 - 1 }
+    if next_id_after_unit != 5 { return 0 - 1 }
+    if next_id_after_empty != 0 { return 0 - 1 }
+    if reused_id_blocked != 1 { return 0 - 1 }
+    if deleted_hint_blocked_count != 2 { return 0 - 1 }
+    if final_empty_seen != 1 { return 0 - 1 }
+
+    var fp: i64 = 199
+    fp = ((fp * 16777619) + manifest_fp + 2383) % 1000000007
+    fp = ((fp * 16777619) + next_id_before_derivation + 2383) % 1000000007
+    fp = ((fp * 16777619) + next_id_after_unit + 2383) % 1000000007
+    fp = ((fp * 16777619) + next_id_after_empty + 2383) % 1000000007
+    fp = ((fp * 16777619) + reused_id_blocked + 2383) % 1000000007
+    fp = ((fp * 16777619) + deleted_hint_blocked_count + 2383) % 1000000007
+    fp = ((fp * 16777619) + final_empty_seen + 2383) % 1000000007
+    return fp
+}
+
+pub fn lrat_deletion_lifecycle_unsat_envelope_fingerprint(
+    manifest_fp: i64,
+    audit_fp: i64,
+    final_clause_id: i64,
+    final_clause_len: i64,
+    delete_count: i64,
+    lrat_empty_seen: i64) -> i64 with Mod {
+    if manifest_fp != 6950141 { return 0 - 1 }
+    if audit_fp != 109354544 { return 0 - 1 }
+    if final_clause_id != 5 { return 0 - 1 }
+    if final_clause_len != 0 { return 0 - 1 }
+    if delete_count != 2 { return 0 - 1 }
+    if lrat_empty_seen != 1 { return 0 - 1 }
+
+    var fp: i64 = 211
+    fp = ((fp * 16777619) + manifest_fp + 2399) % 1000000007
+    fp = ((fp * 16777619) + audit_fp + 2399) % 1000000007
+    fp = ((fp * 16777619) + final_clause_id + 2399) % 1000000007
+    fp = ((fp * 16777619) + final_clause_len + 2399) % 1000000007
+    fp = ((fp * 16777619) + delete_count + 2399) % 1000000007
+    fp = ((fp * 16777619) + lrat_empty_seen + 2399) % 1000000007
+    return fp
+}

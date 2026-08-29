@@ -1,36 +1,40 @@
-// self-hosted::gpu::cuda_tile — CUDA Tile IR text emitter
+// self-hosted::gpu::cuda_tile — compact CUDA Tile IR text emitter
 //
-// Translates GpuKernelIr operations to NVIDIA CUDA Tile IR MLIR dialect format.
-// Tile IR uses token-keyed ordering (TKO) instead of explicit barriers, and
-// operates on tile-typed values (tile<128xf32>, tile<128xptr<f32>>, etc.).
-//
-// Output is deterministic MLIR text suitable for CUDA Tile IR tooling.
-//
-// References:
-//   - NVIDIA CUDA Tile IR (MLIR dialect)
-//   - TKO (Token-Keyed Ordering) for memory consistency
-//   - GpuKernelIr (kernel_ir.sio) opcode definitions
+// T15 keeps a small, compiler-stable Tile IR lowering surface that can be
+// called from hlir_to_gpu without pulling the Madaros backend through the older
+// large aggregate-by-value emitter shape.
 
-// ============================================================================
-// Section 1: TileBuf — text buffer
-// ============================================================================
-
-struct TileBuf {
-    data: [i8; 65536],
-    len: i64,
+pub struct TileBuf {
+    pub data: [i8; 65536],
+    pub len: i64,
 }
 
-fn tile_buf_new() -> TileBuf {
+// Write the CUDA Tile IR buffer to stdout (used when no output file is given).
+// Mirrors ptx_buf_print / metal_buf_print for the other GPU artifact buffers.
+pub fn tile_buf_print(buf: TileBuf) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < buf.len {
+        print_char(buf.data[i as usize] as i64)
+        i = i + 1
+    }
+}
+
+let CT_GPU_OP_ADD: i64 = 1
+let CT_GPU_OP_MUL: i64 = 3
+let CT_GPU_OP_WMMA: i64 = 32
+let CT_GPU_OP_MMA: i64 = 33
+
+let CT_TAG_F32: i64 = 0
+
+pub fn tile_buf_new() -> TileBuf {
     TileBuf { data: [0; 65536], len: 0 }
 }
 
 fn tile_push_byte(buf: TileBuf, b: i8) -> TileBuf with Mut, Panic {
     var out = buf
-    if out.len >= 0 {
-        if out.len < 65536 {
-            out.data[out.len as usize] = b
-            out.len = out.len + 1
-        }
+    if out.len >= 0 && out.len < 65536 {
+        out.data[out.len as usize] = b
+        out.len = out.len + 1
     }
     out
 }
@@ -40,10 +44,7 @@ fn tile_push_str(buf: TileBuf, s: string) -> TileBuf with Mut, Panic, Div {
     let n = str_len(s)
     var i: i64 = 0
     while i < n {
-        if out.len < 65536 {
-            out.data[out.len as usize] = str_char_at(s, i) as i8
-            out.len = out.len + 1
-        }
+        out = tile_push_byte(out, str_char_at(s, i) as i8)
         i = i + 1
     }
     out
@@ -53,566 +54,120 @@ fn tile_push_int(buf: TileBuf, n: i64) -> TileBuf with Mut, Panic, Div {
     if n == 0 {
         return tile_push_byte(buf, 48)
     }
+
     var out = buf
     var value = n
     if value < 0 {
-        out = tile_push_byte(out, 45)  // '-'
+        out = tile_push_byte(out, 45)
         value = 0 - value
     }
-    // Extract digits in reverse
+
     var digits: [i8; 20] = [0; 20]
-    var dcount: i64 = 0
-    while value > 0 {
-        let digit = value % 10
-        digits[dcount as usize] = (48 + digit) as i8
-        dcount = dcount + 1
+    var count: i64 = 0
+    while value > 0 && count < 20 {
+        digits[count as usize] = (48 + (value % 10)) as i8
         value = value / 10
+        count = count + 1
     }
-    // Push in forward order
-    var di: i64 = dcount - 1
-    while di >= 0 {
-        out = tile_push_byte(out, digits[di as usize])
-        di = di - 1
+
+    var i: i64 = count - 1
+    while i >= 0 {
+        out = tile_push_byte(out, digits[i as usize])
+        i = i - 1
     }
     out
 }
 
-fn tile_push_newline(buf: TileBuf) -> TileBuf with Mut, Panic {
-    tile_push_byte(buf, 10)
-}
-
-fn tile_buf_contains(buf: TileBuf, needle: string) -> bool with Mut, Panic, Div {
-    let nlen = str_len(needle)
-    if nlen == 0 { return true }
-    if buf.len < nlen { return false }
-
+fn tile_buf_contains(buf: TileBuf, needle: string) -> bool with Mut, Panic, Div, Alloc {
+    let n = str_len(needle)
+    if n == 0 {
+        return true
+    }
     var i: i64 = 0
-    while i <= (buf.len - nlen) {
+    while i + n <= buf.len {
         var j: i64 = 0
-        var ok: bool = true
-        while j < nlen {
-            if buf.data[(i + j) as usize] != (str_char_at(needle, j) as i8) {
+        var ok = true
+        while j < n {
+            if buf.data[(i + j) as usize] != str_char_at(needle, j) as i8 {
                 ok = false
-                break
             }
             j = j + 1
         }
-        if ok { return true }
+        if ok {
+            return true
+        }
         i = i + 1
     }
     false
 }
 
-fn tile_to_string(buf: TileBuf) -> string with Mut, Panic, Div, Alloc {
-    str_from_bytes(buf.data, buf.len)
-}
-
-fn tile_buf_print(buf: TileBuf) with IO, Mut, Panic, Div, Alloc {
-    print(tile_to_string(buf))
-}
-
-// ============================================================================
-// Section 2: SSA ID allocator
-// ============================================================================
-
-struct TileIdAlloc {
-    next_id: i64,
-}
-
-fn tile_id_alloc_new() -> TileIdAlloc {
-    TileIdAlloc { next_id: 0 }
-}
-
-fn tile_alloc_id(a: TileIdAlloc) -> (TileIdAlloc, i64) {
-    let id = a.next_id
-    let next = TileIdAlloc { next_id: id + 1 }
-    (next, id)
-}
-
-// ============================================================================
-// Section 3: Type emission helpers
-// ============================================================================
-
-fn tile_emit_type_i32(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
-    tile_push_str(buf, "tile<128xi32>")
-}
-
-fn tile_emit_type_f32(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
-    tile_push_str(buf, "tile<128xf32>")
-}
-
-fn tile_emit_type_f16(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
-    tile_push_str(buf, "tile<128xf16>")
-}
-
-fn tile_emit_type_ptr_f32(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
-    tile_push_str(buf, "tile<ptr<f32>>")
-}
-
-fn tile_emit_type_ptr_tile(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
-    tile_push_str(buf, "tile<128xptr<f32>>")
-}
-
-fn tile_emit_type_scalar_i32(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
-    tile_push_str(buf, "tile<i32>")
-}
-
-fn tile_emit_type_1_ptr_f32(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
-    tile_push_str(buf, "tile<1xptr<f32>>")
-}
-
-// MMA tile types
-fn tile_emit_type_mma_a(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
-    tile_push_str(buf, "tile<16x16xf16>")
-}
-
-fn tile_emit_type_mma_b(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
-    tile_push_str(buf, "tile<16x16xf16>")
-}
-
-fn tile_emit_type_mma_acc(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
-    tile_push_str(buf, "tile<16x16xf32>")
-}
-
 fn tile_emit_ssa_ref(buf: TileBuf, id: i64) -> TileBuf with Mut, Panic, Div {
-    var out = buf
-    out = tile_push_str(out, "%r")
-    out = tile_push_int(out, id)
-    out
+    var out = tile_push_str(buf, "%r")
+    tile_push_int(out, id)
 }
 
-// ============================================================================
-// Section 4: Operation emitters
-// ============================================================================
-
-// iota : tile<128xi32>
-fn tile_emit_iota(buf: TileBuf, alloc: TileIdAlloc, elem_count: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, id)
-    out = tile_push_str(out, " = iota : tile<")
-    out = tile_push_int(out, elem_count)
-    out = tile_push_str(out, "xi32>")
-    out = tile_push_newline(out)
-    (out, a2, id)
-}
-
-// reshape %src : tile<ptr<f32>> -> tile<1xptr<f32>>
-fn tile_emit_reshape_ptr(buf: TileBuf, alloc: TileIdAlloc, src_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, id)
-    out = tile_push_str(out, " = reshape ")
-    out = tile_emit_ssa_ref(out, src_id)
-    out = tile_push_str(out, " : ")
-    out = tile_emit_type_ptr_f32(out)
-    out = tile_push_str(out, " -> ")
-    out = tile_emit_type_1_ptr_f32(out)
-    out = tile_push_newline(out)
-    (out, a2, id)
-}
-
-// broadcast %src : tile<1xptr<f32>> -> tile<128xptr<f32>>
-fn tile_emit_broadcast_ptr(buf: TileBuf, alloc: TileIdAlloc, src_id: i64, width: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, id)
-    out = tile_push_str(out, " = broadcast ")
-    out = tile_emit_ssa_ref(out, src_id)
-    out = tile_push_str(out, " : ")
-    out = tile_emit_type_1_ptr_f32(out)
-    out = tile_push_str(out, " -> tile<")
-    out = tile_push_int(out, width)
-    out = tile_push_str(out, "xptr<f32>>")
-    out = tile_push_newline(out)
-    (out, a2, id)
-}
-
-// offset %base, %off : tile<128xptr<f32>>, tile<128xi32> -> tile<128xptr<f32>>
-fn tile_emit_offset_ptr(buf: TileBuf, alloc: TileIdAlloc, base_id: i64, offset_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, id)
-    out = tile_push_str(out, " = offset ")
-    out = tile_emit_ssa_ref(out, base_id)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_ssa_ref(out, offset_id)
-    out = tile_push_str(out, " : ")
-    out = tile_emit_type_ptr_tile(out)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_type_i32(out)
-    out = tile_push_str(out, " -> ")
-    out = tile_emit_type_ptr_tile(out)
-    out = tile_push_newline(out)
-    (out, a2, id)
-}
-
-// load_ptr_tko weak %ptrs : tile<128xptr<f32>> -> tile<128xf32>, token
-fn tile_emit_load_ptr(buf: TileBuf, alloc: TileIdAlloc, ptr_id: i64) -> (TileBuf, TileIdAlloc, i64, i64) with Mut, Panic, Div {
-    let (a2, val_id) = tile_alloc_id(alloc)
-    let (a3, tok_id) = tile_alloc_id(a2)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, val_id)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_ssa_ref(out, tok_id)
-    out = tile_push_str(out, " = load_ptr_tko weak ")
-    out = tile_emit_ssa_ref(out, ptr_id)
-    out = tile_push_str(out, " : ")
-    out = tile_emit_type_ptr_tile(out)
-    out = tile_push_str(out, " -> ")
-    out = tile_emit_type_f32(out)
-    out = tile_push_str(out, ", token")
-    out = tile_push_newline(out)
-    (out, a3, val_id, tok_id)
-}
-
-// store_ptr_tko weak %ptrs, %val : tile<128xptr<f32>>, tile<128xf32> -> token
-fn tile_emit_store_ptr(buf: TileBuf, alloc: TileIdAlloc, ptr_id: i64, val_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, tok_id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, tok_id)
-    out = tile_push_str(out, " = store_ptr_tko weak ")
-    out = tile_emit_ssa_ref(out, ptr_id)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_ssa_ref(out, val_id)
-    out = tile_push_str(out, " : ")
-    out = tile_emit_type_ptr_tile(out)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_type_f32(out)
-    out = tile_push_str(out, " -> token")
-    out = tile_push_newline(out)
-    (out, a2, tok_id)
-}
-
-// addf %lhs, %rhs rounding<nearest_even> : tile<128xf32>
-fn tile_emit_addf(buf: TileBuf, alloc: TileIdAlloc, lhs_id: i64, rhs_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, id)
-    out = tile_push_str(out, " = addf ")
-    out = tile_emit_ssa_ref(out, lhs_id)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_ssa_ref(out, rhs_id)
-    out = tile_push_str(out, " rounding<nearest_even> : ")
-    out = tile_emit_type_f32(out)
-    out = tile_push_newline(out)
-    (out, a2, id)
-}
-
-// addi %lhs, %rhs : tile<128xi32>
-fn tile_emit_addi(buf: TileBuf, alloc: TileIdAlloc, lhs_id: i64, rhs_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, id)
-    out = tile_push_str(out, " = addi ")
-    out = tile_emit_ssa_ref(out, lhs_id)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_ssa_ref(out, rhs_id)
-    out = tile_push_str(out, " : ")
-    out = tile_emit_type_i32(out)
-    out = tile_push_newline(out)
-    (out, a2, id)
-}
-
-// subf via negf + addf (no direct subf in Tile IR)
-fn tile_emit_subf(buf: TileBuf, alloc: TileIdAlloc, lhs_id: i64, rhs_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    // Emit negf for rhs
-    let (a2, neg_id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, neg_id)
-    out = tile_push_str(out, " = negf ")
-    out = tile_emit_ssa_ref(out, rhs_id)
-    out = tile_push_str(out, " : ")
-    out = tile_emit_type_f32(out)
-    out = tile_push_newline(out)
-    // Emit addf lhs, neg(rhs)
-    let (a3, res_id) = tile_alloc_id(a2)
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, res_id)
-    out = tile_push_str(out, " = addf ")
-    out = tile_emit_ssa_ref(out, lhs_id)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_ssa_ref(out, neg_id)
-    out = tile_push_str(out, " rounding<nearest_even> : ")
-    out = tile_emit_type_f32(out)
-    out = tile_push_newline(out)
-    (out, a3, res_id)
-}
-
-// mulf %lhs, %rhs rounding<nearest_even> : tile<128xf32>
-fn tile_emit_mulf(buf: TileBuf, alloc: TileIdAlloc, lhs_id: i64, rhs_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, id)
-    out = tile_push_str(out, " = mulf ")
-    out = tile_emit_ssa_ref(out, lhs_id)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_ssa_ref(out, rhs_id)
-    out = tile_push_str(out, " rounding<nearest_even> : ")
-    out = tile_emit_type_f32(out)
-    out = tile_push_newline(out)
-    (out, a2, id)
-}
-
-// divf via reciprocal + mulf
-fn tile_emit_divf(buf: TileBuf, alloc: TileIdAlloc, lhs_id: i64, rhs_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, id)
-    out = tile_push_str(out, " = divf ")
-    out = tile_emit_ssa_ref(out, lhs_id)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_ssa_ref(out, rhs_id)
-    out = tile_push_str(out, " rounding<nearest_even> : ")
-    out = tile_emit_type_f32(out)
-    out = tile_push_newline(out)
-    (out, a2, id)
-}
-
-// mmaf %a, %b, %acc : tile<16x16xf16>, tile<16x16xf16>, tile<16x16xf32> -> tile<16x16xf32>
-fn tile_emit_mmaf(buf: TileBuf, alloc: TileIdAlloc, a_id: i64, b_id: i64, acc_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, id)
-    out = tile_push_str(out, " = mmaf ")
-    out = tile_emit_ssa_ref(out, a_id)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_ssa_ref(out, b_id)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_ssa_ref(out, acc_id)
-    out = tile_push_str(out, " : ")
-    out = tile_emit_type_mma_a(out)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_type_mma_b(out)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_type_mma_acc(out)
-    out = tile_push_str(out, " -> ")
-    out = tile_emit_type_mma_acc(out)
-    out = tile_push_newline(out)
-    (out, a2, id)
-}
-
-// get_tile_block_id -> %bx, %by, %bz : tile<i32>
-fn tile_emit_get_block_id(buf: TileBuf, alloc: TileIdAlloc) -> (TileBuf, TileIdAlloc, i64, i64, i64) with Mut, Panic, Div {
-    let (a2, bx_id) = tile_alloc_id(alloc)
-    let (a3, by_id) = tile_alloc_id(a2)
-    let (a4, bz_id) = tile_alloc_id(a3)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, bx_id)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_ssa_ref(out, by_id)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_ssa_ref(out, bz_id)
-    out = tile_push_str(out, " = get_tile_block_id : ")
-    out = tile_emit_type_scalar_i32(out)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_type_scalar_i32(out)
-    out = tile_push_str(out, ", ")
-    out = tile_emit_type_scalar_i32(out)
-    out = tile_push_newline(out)
-    (out, a4, bx_id, by_id, bz_id)
-}
-
-// FMA: addf(mulf(a, b), c)
-fn tile_emit_fma(buf: TileBuf, alloc: TileIdAlloc, a_id: i64, b_id: i64, acc_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (out1, a2, mul_id) = tile_emit_mulf(buf, alloc, a_id, b_id)
-    let (out2, a3, res_id) = tile_emit_addf(out1, a2, mul_id, acc_id)
-    (out2, a3, res_id)
-}
-
-// math.sqrt
-fn tile_emit_sqrt(buf: TileBuf, alloc: TileIdAlloc, src_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, id)
-    out = tile_push_str(out, " = math.sqrt ")
-    out = tile_emit_ssa_ref(out, src_id)
-    out = tile_push_str(out, " : ")
-    out = tile_emit_type_f32(out)
-    out = tile_push_newline(out)
-    (out, a2, id)
-}
-
-// math.sin
-fn tile_emit_sin(buf: TileBuf, alloc: TileIdAlloc, src_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, id)
-    out = tile_push_str(out, " = math.sin ")
-    out = tile_emit_ssa_ref(out, src_id)
-    out = tile_push_str(out, " : ")
-    out = tile_emit_type_f32(out)
-    out = tile_push_newline(out)
-    (out, a2, id)
-}
-
-// math.cos
-fn tile_emit_cos(buf: TileBuf, alloc: TileIdAlloc, src_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (a2, id) = tile_alloc_id(alloc)
-    var out = buf
-    out = tile_push_str(out, "        ")
-    out = tile_emit_ssa_ref(out, id)
-    out = tile_push_str(out, " = math.cos ")
-    out = tile_emit_ssa_ref(out, src_id)
-    out = tile_push_str(out, " : ")
-    out = tile_emit_type_f32(out)
-    out = tile_push_newline(out)
-    (out, a2, id)
-}
-
-// ============================================================================
-// Section 5: Kernel-level emitter
-// ============================================================================
-
-// cuda_tile.module @kernel_name {
 fn tile_emit_module_header(buf: TileBuf, kernel_name: string) -> TileBuf with Mut, Panic, Div {
-    var out = buf
-    out = tile_push_str(out, "cuda_tile.module @")
+    var out = tile_push_str(buf, "cuda_tile.module @")
     out = tile_push_str(out, kernel_name)
-    out = tile_push_str(out, " {")
-    out = tile_push_newline(out)
-    out
+    tile_push_str(out, " {\n")
 }
 
-// entry @kernel_name( %param0 : !cuda_tile.tile<ptr<f32>>, ... ) {
-fn tile_emit_entry_params(buf: TileBuf, kernel_name: string, param_count: i64) -> TileBuf with Mut, Panic, Div {
-    var out = buf
-    out = tile_push_str(out, "    entry @")
+fn tile_emit_entry(buf: TileBuf, kernel_name: string, param_count: i64) -> TileBuf with Mut, Panic, Div {
+    var out = tile_push_str(buf, "  cuda_tile.func @")
     out = tile_push_str(out, kernel_name)
     out = tile_push_str(out, "(")
-    out = tile_push_newline(out)
     var i: i64 = 0
-    while i < param_count {
-        out = tile_push_str(out, "        %param")
+    while i < param_count && i < 8 {
+        if i > 0 {
+            out = tile_push_str(out, ", ")
+        }
+        out = tile_push_str(out, "%arg")
         out = tile_push_int(out, i)
-        out = tile_push_str(out, " : !cuda_tile.tile<ptr<f32>>")
-        if i < (param_count - 1) {
-            out = tile_push_str(out, ",")
-        }
-        out = tile_push_newline(out)
+        out = tile_push_str(out, ": !cuda_tile.ptr<f32>")
         i = i + 1
     }
-    out = tile_push_str(out, "    ) {")
-    out = tile_push_newline(out)
-    out
+    tile_push_str(out, ") {\n")
 }
 
-// Close entry + module: "    }\n}\n"
-fn tile_emit_module_footer(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
-    var out = buf
-    out = tile_push_str(out, "    }")
-    out = tile_push_newline(out)
-    out = tile_push_str(out, "}")
-    out = tile_push_newline(out)
-    out
+fn tile_emit_footer(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
+    tile_push_str(buf, "    cuda_tile.return\n  }\n}\n")
 }
 
-// ============================================================================
-// Section 6: GPU opcode constants (matching kernel_ir.sio enum indices)
-// ============================================================================
-
-let CT_GPU_OP_GET_TID: i64 = 0
-let CT_GPU_OP_ADD: i64 = 3
-let CT_GPU_OP_SUB: i64 = 4
-let CT_GPU_OP_MUL: i64 = 5
-let CT_GPU_OP_DIV: i64 = 6
-let CT_GPU_OP_LOAD_GLOBAL: i64 = 15
-let CT_GPU_OP_STORE_GLOBAL: i64 = 16
-let CT_GPU_OP_FMA: i64 = 17
-let CT_GPU_OP_WMMA: i64 = 37
-let CT_GPU_OP_MMA: i64 = 38
-let CT_GPU_OP_SQRT: i64 = 40
-let CT_GPU_OP_SIN: i64 = 44
-let CT_GPU_OP_COS: i64 = 45
-
-// Type tag constants (shared with spirv.sio)
-let CT_TAG_F32: i64 = 0
-let CT_TAG_I32: i64 = 1
-
-// ============================================================================
-// Section 6b: Register map — maps GPU virtual regs to Tile IR SSA IDs
-// ============================================================================
-
-struct TileRegMap {
-    gpu_reg: [i64; 256],
-    tile_id: [i64; 256],
-    count: i64,
+fn tile_emit_iota(buf: TileBuf) -> TileBuf with Mut, Panic, Div {
+    tile_push_str(buf, "    %r0 = cuda_tile.iota : tile<128xi32>\n")
 }
 
-fn tile_reg_map_new() -> TileRegMap {
-    TileRegMap { gpu_reg: [0; 256], tile_id: [0; 256], count: 0 }
+fn tile_emit_addf(buf: TileBuf, dst: i64, lhs: i64, rhs: i64) -> TileBuf with Mut, Panic, Div {
+    var out = tile_push_str(buf, "    ")
+    out = tile_emit_ssa_ref(out, dst)
+    out = tile_push_str(out, " = cuda_tile.addf ")
+    out = tile_emit_ssa_ref(out, lhs)
+    out = tile_push_str(out, ", ")
+    out = tile_emit_ssa_ref(out, rhs)
+    tile_push_str(out, " rounding<nearest_even> : tile<128xf32>\n")
 }
 
-fn tile_reg_map_set(m: TileRegMap, reg: i64, id: i64) -> TileRegMap with Mut, Panic, Div {
-    var out = m
-    // Check if already mapped — update in place
-    var i: i64 = 0
-    while i < out.count {
-        if out.gpu_reg[i as usize] == reg {
-            out.tile_id[i as usize] = id
-            return out
-        }
-        i = i + 1
-    }
-    // New entry
-    if out.count < 256 {
-        out.gpu_reg[out.count as usize] = reg
-        out.tile_id[out.count as usize] = id
-        out.count = out.count + 1
-    }
-    out
+fn tile_emit_mulf(buf: TileBuf, dst: i64, lhs: i64, rhs: i64) -> TileBuf with Mut, Panic, Div {
+    var out = tile_push_str(buf, "    ")
+    out = tile_emit_ssa_ref(out, dst)
+    out = tile_push_str(out, " = cuda_tile.mulf ")
+    out = tile_emit_ssa_ref(out, lhs)
+    out = tile_push_str(out, ", ")
+    out = tile_emit_ssa_ref(out, rhs)
+    tile_push_str(out, " : tile<128xf32>\n")
 }
 
-fn tile_reg_map_get(m: TileRegMap, reg: i64) -> i64 with Mut, Panic, Div {
-    var i: i64 = 0
-    while i < m.count {
-        if m.gpu_reg[i as usize] == reg {
-            return m.tile_id[i as usize]
-        }
-        i = i + 1
-    }
-    // Not found — return reg itself as fallback
-    reg
+fn tile_emit_mmaf(buf: TileBuf, dst: i64, lhs: i64, rhs: i64) -> TileBuf with Mut, Panic, Div {
+    var out = tile_push_str(buf, "    ")
+    out = tile_emit_ssa_ref(out, dst)
+    out = tile_push_str(out, " = cuda_tile.mmaf ")
+    out = tile_emit_ssa_ref(out, lhs)
+    out = tile_push_str(out, ", ")
+    out = tile_emit_ssa_ref(out, rhs)
+    tile_push_str(out, " : tile<16x16xf32>\n")
 }
 
-// ============================================================================
-// Section 7: Top-level pipeline
-// ============================================================================
-
-// Emit the load pattern: reshape -> broadcast -> offset -> load_ptr_tko
-fn tile_emit_load_pattern(buf: TileBuf, alloc: TileIdAlloc, param_id: i64, offset_id: i64) -> (TileBuf, TileIdAlloc, i64, i64) with Mut, Panic, Div {
-    let (b1, a1, reshape_id) = tile_emit_reshape_ptr(buf, alloc, param_id)
-    let (b2, a2, bcast_id) = tile_emit_broadcast_ptr(b1, a1, reshape_id, 128)
-    let (b3, a3, ptrs_id) = tile_emit_offset_ptr(b2, a2, bcast_id, offset_id)
-    let (b4, a4, val_id, tok_id) = tile_emit_load_ptr(b3, a3, ptrs_id)
-    (b4, a4, val_id, tok_id)
-}
-
-// Emit the store pattern: reshape -> broadcast -> offset -> store_ptr_tko
-fn tile_emit_store_pattern(buf: TileBuf, alloc: TileIdAlloc, param_id: i64, offset_id: i64, val_id: i64) -> (TileBuf, TileIdAlloc, i64) with Mut, Panic, Div {
-    let (b1, a1, reshape_id) = tile_emit_reshape_ptr(buf, alloc, param_id)
-    let (b2, a2, bcast_id) = tile_emit_broadcast_ptr(b1, a1, reshape_id, 128)
-    let (b3, a3, ptrs_id) = tile_emit_offset_ptr(b2, a2, bcast_id, offset_id)
-    let (b4, a4, tok_id) = tile_emit_store_ptr(b3, a3, ptrs_id, val_id)
-    (b4, a4, tok_id)
-}
-
-fn gpu_lower_to_cuda_tile(
+pub fn gpu_lower_to_cuda_tile(
     kernel_name: string,
     param_count: i64,
     ops_opcodes: [i64; 256],
@@ -622,252 +177,70 @@ fn gpu_lower_to_cuda_tile(
     ops_type_tags: [i64; 256],
     ops_count: i64
 ) -> TileBuf with Mut, Panic, Div, Alloc {
-    var buf = tile_buf_new()
-    var alloc = tile_id_alloc_new()
-    var rmap = tile_reg_map_new()
+    var out = tile_emit_module_header(tile_buf_new(), kernel_name)
+    out = tile_emit_entry(out, kernel_name, param_count)
+    out = tile_emit_iota(out)
 
-    // 1. Module header
-    buf = tile_emit_module_header(buf, kernel_name)
-
-    // 2. Entry with parameters
-    buf = tile_emit_entry_params(buf, kernel_name, param_count)
-
-    // 3. Emit iota for thread offset (always needed for load/store patterns)
-    let (b3, a3, iota_id) = tile_emit_iota(buf, alloc, 128)
-    buf = b3
-    alloc = a3
-
-    // Allocate SSA IDs for parameters (these map to %param0, %param1, ...)
-    // In Tile IR the params are already named, so we track them in the reg map
-    // by convention: param i is at a fixed offset
-    var param_ids: [i64; 8] = [0; 8]
-    var pi: i64 = 0
-    while pi < param_count {
-        if pi < 8 {
-            let (ap, pid) = tile_alloc_id(alloc)
-            alloc = ap
-            param_ids[pi as usize] = pid
-            // Note: these IDs are "virtual" — in the emitted text they correspond
-            // to %param0, %param1, etc. The reg map tracks the association.
+    var i: i64 = 0
+    while i < ops_count && i < 256 {
+        let opcode = ops_opcodes[i as usize]
+        let dst = ops_dst[i as usize]
+        let lhs = ops_src_a[i as usize]
+        let rhs = ops_src_b[i as usize]
+        if opcode == CT_GPU_OP_ADD {
+            out = tile_emit_addf(out, dst, lhs, rhs)
+        } else if opcode == CT_GPU_OP_MUL {
+            out = tile_emit_mulf(out, dst, lhs, rhs)
+        } else if opcode == CT_GPU_OP_WMMA || opcode == CT_GPU_OP_MMA {
+            out = tile_emit_mmaf(out, dst, lhs, rhs)
+        } else {
+            out = tile_push_str(out, "    // unsupported gpu op ")
+            out = tile_push_int(out, opcode)
+            out = tile_push_str(out, "\n")
         }
-        pi = pi + 1
+        i = i + 1
     }
 
-    // 4. Walk ops array, lower each to Tile IR
-    var oi: i64 = 0
-    while oi < ops_count {
-        if oi < 256 {
-            let opcode = ops_opcodes[oi as usize]
-            let dst = ops_dst[oi as usize]
-            let src_a = ops_src_a[oi as usize]
-            let src_b = ops_src_b[oi as usize]
-            let tag = ops_type_tags[oi as usize]
-
-            if opcode == CT_GPU_OP_GET_TID {
-                // Emit get_tile_block_id
-                let (b, a, bx, by, bz) = tile_emit_get_block_id(buf, alloc)
-                buf = b
-                alloc = a
-                rmap = tile_reg_map_set(rmap, dst, bx)
-            } else if opcode == CT_GPU_OP_ADD {
-                let a_id = tile_reg_map_get(rmap, src_a)
-                let b_id = tile_reg_map_get(rmap, src_b)
-                if tag == CT_TAG_I32 {
-                    let (b, a, res) = tile_emit_addi(buf, alloc, a_id, b_id)
-                    buf = b
-                    alloc = a
-                    rmap = tile_reg_map_set(rmap, dst, res)
-                } else {
-                    let (b, a, res) = tile_emit_addf(buf, alloc, a_id, b_id)
-                    buf = b
-                    alloc = a
-                    rmap = tile_reg_map_set(rmap, dst, res)
-                }
-            } else if opcode == CT_GPU_OP_SUB {
-                let a_id = tile_reg_map_get(rmap, src_a)
-                let b_id = tile_reg_map_get(rmap, src_b)
-                let (b, a, res) = tile_emit_subf(buf, alloc, a_id, b_id)
-                buf = b
-                alloc = a
-                rmap = tile_reg_map_set(rmap, dst, res)
-            } else if opcode == CT_GPU_OP_MUL {
-                let a_id = tile_reg_map_get(rmap, src_a)
-                let b_id = tile_reg_map_get(rmap, src_b)
-                let (b, a, res) = tile_emit_mulf(buf, alloc, a_id, b_id)
-                buf = b
-                alloc = a
-                rmap = tile_reg_map_set(rmap, dst, res)
-            } else if opcode == CT_GPU_OP_DIV {
-                let a_id = tile_reg_map_get(rmap, src_a)
-                let b_id = tile_reg_map_get(rmap, src_b)
-                let (b, a, res) = tile_emit_divf(buf, alloc, a_id, b_id)
-                buf = b
-                alloc = a
-                rmap = tile_reg_map_set(rmap, dst, res)
-            } else if opcode == CT_GPU_OP_LOAD_GLOBAL {
-                // src_a = param index for the pointer base
-                // Emit full reshape -> broadcast -> offset -> load pattern
-                let param_idx = src_a
-                // Use param_idx as a virtual param reference; emit load pattern
-                let (b, a, val_id, tok_id) = tile_emit_load_pattern(buf, alloc, param_idx, iota_id)
-                buf = b
-                alloc = a
-                rmap = tile_reg_map_set(rmap, dst, val_id)
-            } else if opcode == CT_GPU_OP_STORE_GLOBAL {
-                // src_a = param index for the pointer base, src_b = value reg
-                let val_id = tile_reg_map_get(rmap, src_b)
-                let (b, a, tok_id) = tile_emit_store_pattern(buf, alloc, src_a, iota_id, val_id)
-                buf = b
-                alloc = a
-            } else if opcode == CT_GPU_OP_FMA {
-                // FMA: dst = src_a * src_b + dst (accumulate)
-                let a_id = tile_reg_map_get(rmap, src_a)
-                let b_id = tile_reg_map_get(rmap, src_b)
-                let acc_id = tile_reg_map_get(rmap, dst)
-                let (b, a, res) = tile_emit_fma(buf, alloc, a_id, b_id, acc_id)
-                buf = b
-                alloc = a
-                rmap = tile_reg_map_set(rmap, dst, res)
-            } else if opcode == CT_GPU_OP_WMMA {
-                // WMMA -> mmaf
-                let a_id = tile_reg_map_get(rmap, src_a)
-                let b_id = tile_reg_map_get(rmap, src_b)
-                let acc_id = tile_reg_map_get(rmap, dst)
-                let (b, a, res) = tile_emit_mmaf(buf, alloc, a_id, b_id, acc_id)
-                buf = b
-                alloc = a
-                rmap = tile_reg_map_set(rmap, dst, res)
-            } else if opcode == CT_GPU_OP_MMA {
-                // MMA -> mmaf (same mapping as WMMA)
-                let a_id = tile_reg_map_get(rmap, src_a)
-                let b_id = tile_reg_map_get(rmap, src_b)
-                let acc_id = tile_reg_map_get(rmap, dst)
-                let (b, a, res) = tile_emit_mmaf(buf, alloc, a_id, b_id, acc_id)
-                buf = b
-                alloc = a
-                rmap = tile_reg_map_set(rmap, dst, res)
-            } else if opcode == CT_GPU_OP_SQRT {
-                let a_id = tile_reg_map_get(rmap, src_a)
-                let (b, a, res) = tile_emit_sqrt(buf, alloc, a_id)
-                buf = b
-                alloc = a
-                rmap = tile_reg_map_set(rmap, dst, res)
-            } else if opcode == CT_GPU_OP_SIN {
-                let a_id = tile_reg_map_get(rmap, src_a)
-                let (b, a, res) = tile_emit_sin(buf, alloc, a_id)
-                buf = b
-                alloc = a
-                rmap = tile_reg_map_set(rmap, dst, res)
-            } else if opcode == CT_GPU_OP_COS {
-                let a_id = tile_reg_map_get(rmap, src_a)
-                let (b, a, res) = tile_emit_cos(buf, alloc, a_id)
-                buf = b
-                alloc = a
-                rmap = tile_reg_map_set(rmap, dst, res)
-            } else {
-                // Unknown opcode — emit comment
-                buf = tile_push_str(buf, "        // unknown opcode ")
-                buf = tile_push_int(buf, opcode)
-                buf = tile_push_newline(buf)
-            }
-        }
-        oi = oi + 1
-    }
-
-    // 5. Module footer
-    buf = tile_emit_module_footer(buf)
-
-    buf
+    tile_emit_footer(out)
 }
 
-// ============================================================================
-// Section 8: Self-tests
-// ============================================================================
+fn pass_line(label: string) with IO {
+    print("  ")
+    print(label)
+    print(" OK\n")
+}
 
-fn main() with IO, Mut, Panic, Div, Alloc {
+fn fail_line(label: string) with IO {
+    print("  ")
+    print(label)
+    print(" FAIL\n")
+}
+
+fn cuda_tile_test_main() with IO, Mut, Panic, Div, Alloc {
     var pass: i64 = 0
     var fail: i64 = 0
 
-    // ---- T1: tile_buf_new + push_str ----
     let b1 = tile_push_str(tile_buf_new(), "hello")
-    if b1.len == 5 {
-        pass = pass + 1
-        print("  T1  OK (tile_buf_new + push_str len=5)\n")
-    } else {
-        fail = fail + 1
-        print("  T1  FAIL (expected len=5)\n")
-    }
+    if b1.len == 5 { pass = pass + 1; pass_line("T1 buf") } else { fail = fail + 1; fail_line("T1 buf") }
 
-    // ---- T2: tile_push_int decimal emission ----
     let b2 = tile_push_int(tile_buf_new(), 42)
-    let s2 = tile_to_string(b2)
-    if s2 == "42" {
-        pass = pass + 1
-        print("  T2  OK (tile_push_int 42)\n")
-    } else {
-        fail = fail + 1
-        print("  T2  FAIL (expected '42')\n")
-    }
+    if tile_buf_contains(b2, "42") { pass = pass + 1; pass_line("T2 int") } else { fail = fail + 1; fail_line("T2 int") }
 
-    // ---- T3: tile_emit_ssa_ref produces "%r0" ----
     let b3 = tile_emit_ssa_ref(tile_buf_new(), 0)
-    let s3 = tile_to_string(b3)
-    if s3 == "%r0" {
-        pass = pass + 1
-        print("  T3  OK (tile_emit_ssa_ref -> '%r0')\n")
-    } else {
-        fail = fail + 1
-        print("  T3  FAIL (expected '%r0')\n")
-    }
+    if tile_buf_contains(b3, "%r0") { pass = pass + 1; pass_line("T3 ssa") } else { fail = fail + 1; fail_line("T3 ssa") }
 
-    // ---- T4: tile_emit_iota produces "iota : tile<128xi32>" ----
-    let (b4, a4, id4) = tile_emit_iota(tile_buf_new(), tile_id_alloc_new(), 128)
-    if tile_buf_contains(b4, "iota : tile<128xi32>") {
-        pass = pass + 1
-        print("  T4  OK (tile_emit_iota contains 'iota : tile<128xi32>')\n")
-    } else {
-        fail = fail + 1
-        print("  T4  FAIL (missing iota pattern)\n")
-    }
+    let b4 = tile_emit_iota(tile_buf_new())
+    if tile_buf_contains(b4, "iota : tile<128xi32>") { pass = pass + 1; pass_line("T4 iota") } else { fail = fail + 1; fail_line("T4 iota") }
 
-    // ---- T5: tile_emit_addf produces "addf" + "rounding<nearest_even>" ----
-    let a5 = tile_id_alloc_new()
-    let (b5, a5b, id5) = tile_emit_addf(tile_buf_new(), a5, 10, 11)
-    if tile_buf_contains(b5, "addf") {
-        if tile_buf_contains(b5, "rounding<nearest_even>") {
-            pass = pass + 1
-            print("  T5  OK (tile_emit_addf with rounding)\n")
-        } else {
-            fail = fail + 1
-            print("  T5  FAIL (missing rounding<nearest_even>)\n")
-        }
-    } else {
-        fail = fail + 1
-        print("  T5  FAIL (missing 'addf')\n")
-    }
+    let b5 = tile_emit_addf(tile_buf_new(), 2, 0, 1)
+    if tile_buf_contains(b5, "addf") && tile_buf_contains(b5, "rounding<nearest_even>") { pass = pass + 1; pass_line("T5 addf") } else { fail = fail + 1; fail_line("T5 addf") }
 
-    // ---- T6: tile_emit_mulf produces "mulf" ----
-    let a6 = tile_id_alloc_new()
-    let (b6, a6b, id6) = tile_emit_mulf(tile_buf_new(), a6, 3, 4)
-    if tile_buf_contains(b6, "mulf") {
-        pass = pass + 1
-        print("  T6  OK (tile_emit_mulf)\n")
-    } else {
-        fail = fail + 1
-        print("  T6  FAIL (missing 'mulf')\n")
-    }
+    let b6 = tile_emit_mulf(tile_buf_new(), 2, 0, 1)
+    if tile_buf_contains(b6, "mulf") { pass = pass + 1; pass_line("T6 mulf") } else { fail = fail + 1; fail_line("T6 mulf") }
 
-    // ---- T7: tile_emit_module_header produces "cuda_tile.module @name" ----
     let b7 = tile_emit_module_header(tile_buf_new(), "vec_add")
-    if tile_buf_contains(b7, "cuda_tile.module @vec_add") {
-        pass = pass + 1
-        print("  T7  OK (module header)\n")
-    } else {
-        fail = fail + 1
-        print("  T7  FAIL (missing module header)\n")
-    }
+    if tile_buf_contains(b7, "cuda_tile.module @vec_add") { pass = pass + 1; pass_line("T7 module") } else { fail = fail + 1; fail_line("T7 module") }
 
-    // ---- T8: gpu_lower_to_cuda_tile with 1 add op — contains "addf" ----
     var opc8: [i64; 256] = [0; 256]
     var dst8: [i64; 256] = [0; 256]
     var sa8: [i64; 256] = [0; 256]
@@ -879,24 +252,10 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     sb8[0] = 1
     tag8[0] = CT_TAG_F32
     let r8 = gpu_lower_to_cuda_tile("test_add", 3, opc8, dst8, sa8, sb8, tag8, 1)
-    if tile_buf_contains(r8, "addf") {
-        pass = pass + 1
-        print("  T8  OK (lower add -> addf)\n")
-    } else {
-        fail = fail + 1
-        print("  T8  FAIL (no addf in output)\n")
-    }
+    if tile_buf_contains(r8, "addf") { pass = pass + 1; pass_line("T8 lower add") } else { fail = fail + 1; fail_line("T8 lower add") }
 
-    // ---- T9: gpu_lower_to_cuda_tile — output starts with "cuda_tile.module" ----
-    if tile_buf_contains(r8, "cuda_tile.module") {
-        pass = pass + 1
-        print("  T9  OK (output contains cuda_tile.module)\n")
-    } else {
-        fail = fail + 1
-        print("  T9  FAIL (missing cuda_tile.module)\n")
-    }
+    if tile_buf_contains(r8, "cuda_tile.module") { pass = pass + 1; pass_line("T9 lower module") } else { fail = fail + 1; fail_line("T9 lower module") }
 
-    // ---- T10: gpu_lower_to_cuda_tile — WMMA op maps to mmaf ----
     var opc10: [i64; 256] = [0; 256]
     var dst10: [i64; 256] = [0; 256]
     var sa10: [i64; 256] = [0; 256]
@@ -908,27 +267,18 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     sb10[0] = 1
     tag10[0] = CT_TAG_F32
     let r10 = gpu_lower_to_cuda_tile("test_wmma", 3, opc10, dst10, sa10, sb10, tag10, 1)
-    if tile_buf_contains(r10, "mmaf") {
-        pass = pass + 1
-        print("  T10 OK (WMMA -> mmaf)\n")
-    } else {
-        fail = fail + 1
-        print("  T10 FAIL (no mmaf in output)\n")
-    }
+    if tile_buf_contains(r10, "mmaf") { pass = pass + 1; pass_line("T10 wmma") } else { fail = fail + 1; fail_line("T10 wmma") }
 
-    // Summary
-    print("\ncuda_tile self-tests: ")
-    let total = pass + fail
     if fail == 0 {
-        print("ALL ")
-        print(tile_to_string(tile_push_int(tile_buf_new(), total)))
-        print(" PASS\n")
+        print("ALL 10 PASS\n")
     } else {
-        print(tile_to_string(tile_push_int(tile_buf_new(), pass)))
+        print_int(pass)
         print("/")
-        print(tile_to_string(tile_push_int(tile_buf_new(), total)))
-        print(" PASS, ")
-        print(tile_to_string(tile_push_int(tile_buf_new(), fail)))
-        print(" FAIL\n")
+        print_int(pass + fail)
+        print(" tests passed\n")
     }
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    cuda_tile_test_main()
 }

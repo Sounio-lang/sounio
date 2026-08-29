@@ -1,0 +1,87 @@
+// stdlib/learn/surgical_sgd.sio
+//
+// SurgicalSGD — a gradient-descent optimizer that preserves ZD
+// surgical invariants at every step.
+//
+// Problem: a standard SGD step  w <- w - lr * grad  will drift the
+// weight vector off the ZD kernel subspace that a previous
+// unlearn/gate/edit operation carved out.  The surgical invariant
+// (e.g. "w has zero projection onto alice_kernel") is therefore NOT
+// preserved by standard training.  This is the central technical
+// issue Paper H addresses.
+//
+// SurgicalSGD decomposes the gradient at each step into:
+//   grad = grad_productive ⊕ grad_annihilator
+// where grad_annihilator is the component in the preserved-kernel
+// subspace.  The surgical step is:
+//   w <- w - lr * grad_productive
+// which never perturbs the kernel component of w.
+//
+// Required effects: with ZD, Learn
+// Proof of invariance: SounioLearningDynamics.lean::surgical_sgd_preserves_kernel.
+
+// ─────────────────────────────────────────────────────────────────────
+// Kernel basis (replicated for self-containment).
+// ─────────────────────────────────────────────────────────────────────
+fn sk_u1() -> [f64; 16] with Mut, ZD, Learn {
+    var v: [f64; 16] = [0.0; 16]
+    v[6]  =  0.707107
+    v[15] = 0.0 - 0.707107
+    v
+}
+fn sk_u2() -> [f64; 16] with Mut, ZD, Learn {
+    var v: [f64; 16] = [0.0; 16]
+    v[7]  =  0.707107
+    v[14] =  0.707107
+    v
+}
+
+fn sk_inner(a: &[f64;16], b: &[f64;16]) -> f64 with Mut, Panic, ZD, Learn {
+    var s = 0.0
+    var i = 0
+    while i < 16 { s = s + (*a)[i] * (*b)[i]; i = i + 1 }
+    s
+}
+
+// project_annihilator: component of gradient that would move w off
+// the preserved kernel subspace.  We RETURN this so the caller can
+// discard it OR record it for analysis.
+fn project_annihilator(grad: &[f64; 16]) -> [f64; 16] with Mut, Panic, ZD, Learn {
+    let u1 = sk_u1()
+    let u2 = sk_u2()
+    let c1 = sk_inner(grad, &u1)
+    let c2 = sk_inner(grad, &u2)
+    var out: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 16 { out[i] = c1 * u1[i] + c2 * u2[i]; i = i + 1 }
+    out
+}
+
+// project_productive: the orthogonal complement — the safe direction
+// to follow for gradient descent.
+fn project_productive(grad: &[f64; 16]) -> [f64; 16] with Mut, Panic, ZD, Learn {
+    let ann = project_annihilator(grad)
+    var out: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 16 { out[i] = (*grad)[i] - ann[i]; i = i + 1 }
+    out
+}
+
+// surgical_sgd_step: standard SGD update restricted to productive
+// gradient.  w is mutated in place; the kernel component of w is
+// preserved bit-exact.
+fn surgical_sgd_step(w: &![f64; 16], grad: &[f64; 16], lr: f64) with Mut, Panic, ZD, Learn {
+    let prod = project_productive(grad)
+    var i = 0
+    while i < 16 { (*w)[i] = (*w)[i] - lr * prod[i]; i = i + 1 }
+}
+
+// kernel_mass: compliance metric — squared mass in the kernel basis.
+// Should remain constant across SurgicalSGD steps (the theorem).
+fn kernel_mass(w: &[f64; 16]) -> f64 with Mut, Panic, ZD, Learn {
+    let u1 = sk_u1()
+    let u2 = sk_u2()
+    let c1 = sk_inner(w, &u1)
+    let c2 = sk_inner(w, &u2)
+    c1 * c1 + c2 * c2
+}

@@ -1,0 +1,213 @@
+//@ run-pass
+// E2E: stdlib/log, stdlib/path, stdlib/cmp
+//
+// Log:  append 5 entries at different levels, filter by WARN, count
+// Path: join "src" + "main.sio" → "src/main.sio", extension → "sio", parent → "src"
+// Cmp:  ordering, clamp, approx_eq
+
+use log::lib::*;
+use path::lib::*;
+use cmp::lib::*;
+
+// ---------------------------------------------------------------------------
+// Helpers for building paths from byte slices
+// ---------------------------------------------------------------------------
+
+fn make_path_3(a: u8, b: u8, c: u8) -> Path  with Mut{
+    var p = path_new()
+    p.data[0] = a
+    p.data[1] = b
+    p.data[2] = c
+    p.len = 3
+    p
+}
+
+fn make_path_8(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: u8) -> Path  with Mut{
+    var p = path_new()
+    p.data[0] = a
+    p.data[1] = b
+    p.data[2] = c
+    p.data[3] = d
+    p.data[4] = e
+    p.data[5] = f
+    p.data[6] = g
+    p.data[7] = h
+    p.len = 8
+    p
+}
+
+// ---------------------------------------------------------------------------
+// Log tests
+// ---------------------------------------------------------------------------
+
+fn test_log() -> i32 with Mut {
+    // Level constants
+    if LOG_TRACE() != 0 { return 101 }
+    if LOG_DEBUG() != 1 { return 102 }
+    if LOG_INFO()  != 2 { return 103 }
+    if LOG_WARN()  != 3 { return 104 }
+    if LOG_ERROR() != 4 { return 105 }
+    if LOG_FATAL() != 5 { return 106 }
+
+    // Create buffer with min_level = INFO (2)
+    var buf = log_buffer_new(LOG_INFO())
+
+    // Append 5 entries at levels: TRACE(filtered), DEBUG(filtered), INFO, WARN, ERROR
+    log_append(&! buf, LOG_TRACE(), 10, 1.0, 1000)  // filtered
+    log_append(&! buf, LOG_DEBUG(), 20, 2.0, 1001)  // filtered
+    log_append(&! buf, LOG_INFO(),  30, 3.0, 1002)
+    log_append(&! buf, LOG_WARN(),  40, 4.0, 1003)
+    log_append(&! buf, LOG_ERROR(), 50, 5.0, 1004)
+
+    // 3 entries should be stored (INFO, WARN, ERROR)
+    if log_count(&buf) != 3 { return 107 }
+
+    // Count by level
+    if log_count_level(&buf, LOG_INFO())  != 1 { return 108 }
+    if log_count_level(&buf, LOG_WARN())  != 1 { return 109 }
+    if log_count_level(&buf, LOG_ERROR()) != 1 { return 110 }
+    if log_count_level(&buf, LOG_TRACE()) != 0 { return 111 }
+
+    // Last value should be 5.0 (the ERROR entry)
+    let lv = log_last_value(&buf)
+    if lv != 5.0 { return 112 }
+
+    // Filter by WARN
+    var warn_buf = log_buffer_new(LOG_WARN())
+    log_filter_level(&buf, LOG_WARN(), &! warn_buf)
+    if log_count(&warn_buf) != 1 { return 113 }
+    if log_count_level(&warn_buf, LOG_WARN()) != 1 { return 114 }
+
+    // Clear
+    log_clear(&! buf)
+    if log_count(&buf) != 0 { return 115 }
+
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Path tests
+// ---------------------------------------------------------------------------
+
+fn test_path() -> i32  with Mut, Div{
+    // Build "src" (115, 114, 99) and "main.sio" (109,97,105,110,46,115,105,111)
+    // ASCII: s=115 r=114 c=99 m=109 a=97 i=105 n=110 .=46 s=115 i=105 o=111
+    let src_path  = make_path_3(115, 114, 99)                           // "src"
+    let main_path = make_path_8(109, 97, 105, 110, 46, 115, 105, 111)  // "main.sio"
+
+    // path_join: "src" + "main.sio" → "src/main.sio"
+    let joined = path_join(&src_path, &main_path)
+    // Expected length: 3 + 1 + 8 = 12
+    if joined.len != 12 { return 201 }
+    // Check separator at index 3
+    if joined.data[3] != 47 { return 202 }  // '/'
+
+    // path_extension: "main.sio" → "sio"
+    let ext = path_extension(&joined)
+    // "sio" = 3 bytes
+    if ext.len != 3 { return 203 }
+    if ext.data[0] != 115 { return 204 }  // 's'
+    if ext.data[1] != 105 { return 205 }  // 'i'
+    if ext.data[2] != 111 { return 206 }  // 'o'
+
+    // path_parent: "src/main.sio" → "src"
+    let parent = path_parent(&joined)
+    if parent.len != 3 { return 207 }
+    if !path_eq(&parent, &src_path) { return 208 }
+
+    // path_filename: "src/main.sio" → "main.sio"
+    let fname = path_filename(&joined)
+    if fname.len != 8 { return 209 }
+    if !path_eq(&fname, &main_path) { return 210 }
+
+    // path_stem: "src/main.sio" → "main"
+    let stem = path_stem(&joined)
+    // "main" = 4 bytes (109,97,105,110)
+    if stem.len != 4 { return 211 }
+    if stem.data[0] != 109 { return 212 }  // 'm'
+    if stem.data[3] != 110 { return 213 }  // 'n'
+
+    // path_is_absolute: "src" is not absolute, "/src" would be
+    if path_is_absolute(&src_path) { return 214 }
+
+    // Build "/src" = (47, 115, 114, 99)
+    var abs_path = path_new()
+    abs_path.data[0] = 47   // '/'
+    abs_path.data[1] = 115  // 's'
+    abs_path.data[2] = 114  // 'r'
+    abs_path.data[3] = 99   // 'c'
+    abs_path.len = 4
+    if !path_is_absolute(&abs_path) { return 215 }
+
+    // path_eq
+    let src2 = make_path_3(115, 114, 99)
+    if !path_eq(&src_path, &src2) { return 216 }
+    if path_eq(&src_path, &main_path) { return 217 }
+
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Cmp tests
+// ---------------------------------------------------------------------------
+
+fn test_cmp() -> i32 {
+    // cmp_i64
+    if cmp_i64(1, 2) != -1 { return 301 }
+    if cmp_i64(2, 2) !=  0 { return 302 }
+    if cmp_i64(3, 2) !=  1 { return 303 }
+
+    // cmp_f64
+    if cmp_f64(1.0, 2.0) != -1 { return 304 }
+    if cmp_f64(2.0, 2.0) !=  0 { return 305 }
+    if cmp_f64(3.0, 2.0) !=  1 { return 306 }
+
+    // min/max i64
+    if min_i64(3, 7) != 3 { return 307 }
+    if max_i64(3, 7) != 7 { return 308 }
+    if min_i64(-5, 0) != -5 { return 309 }
+    if max_i64(-5, 0) != 0 { return 310 }
+
+    // min/max f64
+    if min_f64(1.5, 2.5) != 1.5 { return 311 }
+    if max_f64(1.5, 2.5) != 2.5 { return 312 }
+
+    // clamp_f64
+    if clamp_f64(5.0, 0.0, 3.0) != 3.0 { return 313 }
+    if clamp_f64(-1.0, 0.0, 3.0) != 0.0 { return 314 }
+    if clamp_f64(1.5, 0.0, 3.0) != 1.5 { return 315 }
+
+    // clamp_i64
+    if clamp_i64(10, 0, 5) != 5 { return 316 }
+    if clamp_i64(-3, 0, 5) != 0 { return 317 }
+    if clamp_i64(3, 0, 5)  != 3 { return 318 }
+
+    // approx_eq
+    if !approx_eq(1.0, 1.0, 1e-10) { return 319 }
+    if !approx_eq(1.0, 1.0 + 1e-11, 1e-10) { return 320 }
+    if approx_eq(1.0, 2.0, 1e-10) { return 321 }
+
+    // sign_f64
+    if sign_f64(-3.0) != -1.0 { return 322 }
+    if sign_f64(0.0)  !=  0.0 { return 323 }
+    if sign_f64(7.0)  !=  1.0 { return 324 }
+
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 with Mut, Div {
+    let r1 = test_log()
+    if r1 != 0 { return r1 }
+
+    let r2 = test_path()
+    if r2 != 0 { return r2 }
+
+    let r3 = test_cmp()
+    if r3 != 0 { return r3 }
+
+    0
+}

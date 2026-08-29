@@ -1,0 +1,185 @@
+//@ run-pass
+//@ requires: madaros
+//
+// Fork()-based loopback test for stdlib/net/http_client.sio's http_get.
+// The child process runs a minimal fixed-response HTTP/1.1 server; the
+// parent drives http_get against it and checks the parsed HttpResponse.
+//
+// LINEAR-TYPING NOTE (see docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_
+// 2026-08-23.md, Finding 4): this compiler's linear checker rejects a
+// linear value (like `TcpSocket`) being touched in EITHER arm of an `if`
+// -- even consuming it identically in both arms trips `error[E039]`. A
+// naive `if pid == 0 { tcp_accept(listener); ... } else { tcp_close(listener) }`
+// therefore does not compile, since `listener` would be a single binding
+// alive before the `if` and used in both of its arms.
+//
+// Workaround (verified via a throwaway spike during this task, see the
+// task-4 report): destructure `listener` into its plain `fd: i64` field
+// ONCE, unconditionally, before the fork/`if`. A plain i64 is not linear,
+// so branching on `pid` while carrying `listener_fd` is unrestricted.
+// Each arm then builds its OWN fresh `TcpSocket { fd: listener_fd }`
+// value from scratch -- since that value is created and fully consumed
+// entirely within one arm (never a binding alive before the `if`), it
+// does not trip the "must match across arms" restriction at all.
+
+use net::socket::*
+use net::http_client::*
+
+fn reap_child(pid: i64) with IO {
+    if pid > 0 {
+        syscall6(62, pid, 9, 0, 0, 0, 0)   // kill(pid, SIGKILL)
+        syscall6(61, pid, 0, 0, 0, 0, 0)   // wait4(pid, ...) -- blocks until reaped
+    }
+}
+
+fn write_str(buf: &RawBuf, offset: i64, s: string) -> i64 with IO {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(buf, offset + i, str_char_at(s, i))
+        i = i + 1
+    }
+    offset + n
+}
+
+fn main() -> i64 with IO {
+    let server_ip = rawbuf_new(16)
+    rawbuf_set(&server_ip, 0, 127)
+    rawbuf_set(&server_ip, 1, 0)
+    rawbuf_set(&server_ip, 2, 0)
+    rawbuf_set(&server_ip, 3, 1)
+
+    let (listener, listen_err) = tcp_listen(&server_ip, 18092, 1)
+    let TcpSocket { fd: listener_fd } = listener
+
+    let pid = syscall6(57, 0, 0, 0, 0, 0, 0)   // fork()
+    if pid == 0 {
+        // Child: accept one connection, drain the request, send a fixed
+        // response, then exit. Never falls through to parent-only code.
+        let child_listener = TcpSocket { fd: listener_fd }
+        let (child_listener2, conn, accept_err) = tcp_accept(child_listener)
+        tcp_close(child_listener2)
+
+        let drain_buf = rawbuf_new(4096)
+        let (conn2, _drained) = tcp_recv(conn, &drain_buf, 4096)
+
+        let response = rawbuf_new(64)
+        var off: i64 = 0
+        off = write_str(&response, off, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+        let (conn3, _sent) = tcp_send(conn2, &response, off)
+        tcp_close(conn3)
+
+        syscall6(231, 0, 0, 0, 0, 0, 0)   // exit_group(0)
+        return 0
+    }
+
+    // Parent: close its own copy of the listening socket (the child owns
+    // the one that matters), then drive http_get against the server the
+    // child is running.
+    let parent_listener = TcpSocket { fd: listener_fd }
+    tcp_close(parent_listener)
+
+    let host = rawbuf_new(16)
+    rawbuf_set(&host, 0, 49)   // '1'
+    rawbuf_set(&host, 1, 50)   // '2'
+    rawbuf_set(&host, 2, 55)   // '7'
+    rawbuf_set(&host, 3, 46)   // '.'
+    rawbuf_set(&host, 4, 48)   // '0'
+    rawbuf_set(&host, 5, 46)   // '.'
+    rawbuf_set(&host, 6, 48)   // '0'
+    rawbuf_set(&host, 7, 46)   // '.'
+    rawbuf_set(&host, 8, 49)   // '1'
+
+    let path = rawbuf_new(4)
+    rawbuf_set(&path, 0, 47)   // '/'
+
+    let response = http_get(&host, 9, 18092, &path, 1)
+
+    reap_child(pid)
+
+    if listen_err != 0 {
+        print_int(1)
+        return 1
+    }
+    if response.ok != true {
+        print_int(2)
+        return 1
+    }
+    if response.status != 200 {
+        print_int(3)
+        return 1
+    }
+    if response.body_len != 5 {
+        print_int(4)
+        return 1
+    }
+    if rawbuf_get(&response.body, 0) != 104 {   // 'h'
+        print_int(5)
+        return 1
+    }
+
+    // Second round: prove find_content_length is anchored to a real line
+    // start, not a substring match anywhere in the header block. The
+    // fixture below puts a decoy header "X-Orig-Content-Length: 99"
+    // BEFORE the real "Content-Length: 5" -- a byte-scan that doesn't
+    // check for a line boundary would match the decoy's "Content-Length:"
+    // substring first and report body_len 99, not 5.
+    let server_ip2 = rawbuf_new(16)
+    rawbuf_set(&server_ip2, 0, 127)
+    rawbuf_set(&server_ip2, 1, 0)
+    rawbuf_set(&server_ip2, 2, 0)
+    rawbuf_set(&server_ip2, 3, 1)
+
+    let (listener2, listen_err2) = tcp_listen(&server_ip2, 18093, 1)
+    let TcpSocket { fd: listener2_fd } = listener2
+
+    let pid2 = syscall6(57, 0, 0, 0, 0, 0, 0)   // fork()
+    if pid2 == 0 {
+        let child_listener2 = TcpSocket { fd: listener2_fd }
+        let (child_listener2b, conn, accept_err) = tcp_accept(child_listener2)
+        tcp_close(child_listener2b)
+
+        let drain_buf = rawbuf_new(4096)
+        let (conn2, _drained) = tcp_recv(conn, &drain_buf, 4096)
+
+        let response2 = rawbuf_new(128)
+        var off2: i64 = 0
+        off2 = write_str(&response2, off2, "HTTP/1.1 200 OK\r\nX-Orig-Content-Length: 99\r\nContent-Length: 5\r\n\r\nhello")
+        let (conn3, _sent) = tcp_send(conn2, &response2, off2)
+        tcp_close(conn3)
+
+        syscall6(231, 0, 0, 0, 0, 0, 0)   // exit_group(0)
+        return 0
+    }
+
+    let parent_listener2 = TcpSocket { fd: listener2_fd }
+    tcp_close(parent_listener2)
+
+    let response_decoy = http_get(&host, 9, 18093, &path, 1)
+
+    reap_child(pid2)
+
+    if listen_err2 != 0 {
+        print_int(6)
+        return 1
+    }
+    if response_decoy.ok != true {
+        print_int(7)
+        return 1
+    }
+    if response_decoy.body_len != 5 {
+        print_int(8)
+        return 1
+    }
+    if rawbuf_get(&response_decoy.body, 0) != 104 {   // 'h'
+        print_int(9)
+        return 1
+    }
+    if rawbuf_get(&response_decoy.body, 4) != 111 {   // 'o'
+        print_int(10)
+        return 1
+    }
+
+    print_int(0)
+    return 0
+}

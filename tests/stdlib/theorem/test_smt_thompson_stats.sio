@@ -1,0 +1,251 @@
+//@ run-pass
+//
+// Thompson Sampling statistical ablation — Epistemic VSIDS empirical evidence.
+//
+// Three experiments:
+//
+//   1. Hash function sanity: smt_hash_f64 returns distinct values per (var, step),
+//      confirming TS makes different decisions than mean-only.
+//
+//   2. Mixed-length formula (len-2 + len-5 clauses): GUM variance is informative
+//      because short clauses pin blame precisely (low var/mean) while long clauses
+//      diffuse it (high var/mean). TS exploration is guided by this uncertainty.
+//      Expected: TS wins >= losses on non-tied instances.
+//
+//   3. Uniform 3-SAT (all len-3): GUM variance ∝ mean (constant factor 2/3),
+//      so epistemic exploration has no signal advantage. Mean-only VSIDS wins.
+//      Expected: mean wins > TS wins (confirming domain specificity).
+//
+// Note: LCG uses inline computation to avoid &!i64 scalar mutation bug.
+// Polarity extracted from bit 16 of raw LCG value (independent of variable bits 0-4).
+
+use theorem::smt::*
+
+fn main() -> i32 with IO, Mut, Div {
+    let lcg_a: i64 = 1103515245
+    let lcg_c: i64 = 12345
+    let lcg_m: i64 = 2147483648
+
+    // ============================================================
+    // Experiment 1: polarity distribution from inline LCG
+    // Verify genuine mixed-polarity clauses (not broken fixed-point LCG)
+    // ============================================================
+    var pos_cnt: i32 = 0; var neg_cnt: i32 = 0
+    var st: i64 = 1000
+    var ci: i32 = 0
+    while ci < 60 {
+        var li: i32 = 0
+        while li < 3 {
+            var raw = st * lcg_a + lcg_c
+            raw = raw % lcg_m
+            if raw < 0 { raw = raw + lcg_m }
+            st = raw
+            let rp = ((raw / 65536) % 2) as i32
+            if rp == 0 { pos_cnt = pos_cnt + 1 } else { neg_cnt = neg_cnt + 1 }
+            li = li + 1
+        }
+        ci = ci + 1
+    }
+    println("T1 inline-LCG: pos/neg polarities (180 lits, seed=1000, expected ~90/90):")
+    print_int(pos_cnt); print_int(neg_cnt)
+    // Pass: both counts >= 70 (roughly balanced, not stuck at single polarity)
+    var t1_pass: i32 = 1
+    if pos_cnt < 70 { t1_pass = 0 }
+    if neg_cnt < 70 { t1_pass = 0 }
+
+    // ============================================================
+    // Experiment 2: Mixed-length formula — TS vs mean-only
+    // n=20, 40 len-2 clauses + 20 len-5 clauses, no_ple=1, 200 seeds
+    // ============================================================
+    let n_vars: i32 = 20
+    let n_short: i32 = 40
+    let n_long: i32 = 20
+
+    var wt2: i32 = 0; var wm2: i32 = 0; var ties2: i32 = 0
+    var tdt2: i32 = 0; var tdm2: i32 = 0
+    var si: i32 = 0
+    while si < 200 {
+        let seed: i64 = 5000 + (si as i64)
+        st = seed
+
+        var ct = smt_new()
+        ci = 0
+        while ci < n_short {
+            var lits: [i32; 8] = [0; 8]
+            var li: i32 = 0
+            while li < 2 {
+                var raw = st * lcg_a + lcg_c
+                raw = raw % lcg_m
+                if raw < 0 { raw = raw + lcg_m }
+                st = raw
+                lits[li] = ((raw % n_vars) as i32) * 2 + (((raw / 65536) % 2) as i32)
+                li = li + 1
+            }
+            smt_add_clause(&! ct, &lits, 2)
+            ci = ci + 1
+        }
+        ci = 0
+        while ci < n_long {
+            var lits: [i32; 8] = [0; 8]
+            var li: i32 = 0
+            while li < 5 {
+                var raw = st * lcg_a + lcg_c
+                raw = raw % lcg_m
+                if raw < 0 { raw = raw + lcg_m }
+                st = raw
+                lits[li] = ((raw % n_vars) as i32) * 2 + (((raw / 65536) % 2) as i32)
+                li = li + 1
+            }
+            smt_add_clause(&! ct, &lits, 5)
+            ci = ci + 1
+        }
+        smt_set_score_mode(&! ct, 3)
+        smt_set_no_ple(&! ct, 1)
+        let rt = smt_solve(&! ct)
+        let dt = smt_get_decisions(&ct)
+
+        st = seed
+        var cm = smt_new()
+        ci = 0
+        while ci < n_short {
+            var lits: [i32; 8] = [0; 8]
+            var li: i32 = 0
+            while li < 2 {
+                var raw = st * lcg_a + lcg_c
+                raw = raw % lcg_m
+                if raw < 0 { raw = raw + lcg_m }
+                st = raw
+                lits[li] = ((raw % n_vars) as i32) * 2 + (((raw / 65536) % 2) as i32)
+                li = li + 1
+            }
+            smt_add_clause(&! cm, &lits, 2)
+            ci = ci + 1
+        }
+        ci = 0
+        while ci < n_long {
+            var lits: [i32; 8] = [0; 8]
+            var li: i32 = 0
+            while li < 5 {
+                var raw = st * lcg_a + lcg_c
+                raw = raw % lcg_m
+                if raw < 0 { raw = raw + lcg_m }
+                st = raw
+                lits[li] = ((raw % n_vars) as i32) * 2 + (((raw / 65536) % 2) as i32)
+                li = li + 1
+            }
+            smt_add_clause(&! cm, &lits, 5)
+            ci = ci + 1
+        }
+        smt_set_score_mode(&! cm, 1)
+        smt_set_no_ple(&! cm, 1)
+        let rm = smt_solve(&! cm)
+        let dm = smt_get_decisions(&cm)
+
+        tdt2 = tdt2 + dt
+        tdm2 = tdm2 + dm
+        if dt < dm { wt2 = wt2 + 1 }
+        else if dm < dt { wm2 = wm2 + 1 }
+        else { ties2 = ties2 + 1 }
+        si = si + 1
+    }
+    println("T2 mixed-length TS vs mean (200 seeds, no_ple=1):")
+    println("TS wins / mean wins / ties / total-TS / total-mean:")
+    print_int(wt2); print_int(wm2); print_int(ties2); print_int(tdt2); print_int(tdm2)
+    // Pass: TS wins >= mean wins (GUM variance guides exploration on mixed-length formulas)
+    var t2_pass: i32 = 0
+    if wt2 >= wm2 { t2_pass = 1 }
+
+    // ============================================================
+    // Experiment 3: Pure 3-SAT — mean-only should dominate TS
+    // n=25, 107 clauses (ratio=4.27), 100 seeds, no_ple=1
+    // ============================================================
+    var wt3: i32 = 0; var wm3: i32 = 0; var ties3: i32 = 0
+    var tdt3: i32 = 0; var tdm3: i32 = 0
+    si = 0
+    while si < 100 {
+        let seed: i64 = 6000 + (si as i64)
+        st = seed
+
+        var ct3 = smt_new()
+        ci = 0
+        while ci < 107 {
+            var lits: [i32; 8] = [0; 8]
+            var li: i32 = 0
+            while li < 3 {
+                var raw = st * lcg_a + lcg_c
+                raw = raw % lcg_m
+                if raw < 0 { raw = raw + lcg_m }
+                st = raw
+                lits[li] = ((raw % 25) as i32) * 2 + (((raw / 65536) % 2) as i32)
+                li = li + 1
+            }
+            smt_add_clause(&! ct3, &lits, 3)
+            ci = ci + 1
+        }
+        smt_set_score_mode(&! ct3, 3)
+        smt_set_no_ple(&! ct3, 1)
+        let rt3 = smt_solve(&! ct3)
+        let dt3 = smt_get_decisions(&ct3)
+
+        st = seed
+        var cm3 = smt_new()
+        ci = 0
+        while ci < 107 {
+            var lits: [i32; 8] = [0; 8]
+            var li: i32 = 0
+            while li < 3 {
+                var raw = st * lcg_a + lcg_c
+                raw = raw % lcg_m
+                if raw < 0 { raw = raw + lcg_m }
+                st = raw
+                lits[li] = ((raw % 25) as i32) * 2 + (((raw / 65536) % 2) as i32)
+                li = li + 1
+            }
+            smt_add_clause(&! cm3, &lits, 3)
+            ci = ci + 1
+        }
+        smt_set_score_mode(&! cm3, 1)
+        smt_set_no_ple(&! cm3, 1)
+        let rm3 = smt_solve(&! cm3)
+        let dm3 = smt_get_decisions(&cm3)
+
+        tdt3 = tdt3 + dt3
+        tdm3 = tdm3 + dm3
+        if dt3 < dm3 { wt3 = wt3 + 1 }
+        else if dm3 < dt3 { wm3 = wm3 + 1 }
+        else { ties3 = ties3 + 1 }
+        si = si + 1
+    }
+    println("T3 pure 3-SAT TS vs mean (100 seeds, no_ple=1):")
+    println("TS wins / mean wins / ties / total-TS / total-mean:")
+    print_int(wt3); print_int(wm3); print_int(ties3); print_int(tdt3); print_int(tdm3)
+    // Pass: mean wins > TS wins (confirms VSIDS exploitation optimal for uniform formulas)
+    var t3_pass: i32 = 0
+    if wm3 > wt3 { t3_pass = 1 }
+
+    // ============================================================
+    // Results
+    // ============================================================
+    println("---")
+    if t1_pass == 1 {
+        println("T1 PASS: inline-LCG produces mixed polarities")
+    } else {
+        println("T1 FAIL: LCG stuck at fixed polarity")
+    }
+    if t2_pass == 1 {
+        println("T2 PASS: TS >= mean-only wins on mixed-length (GUM-informative domain)")
+    } else {
+        println("T2 FAIL: TS did not demonstrate advantage on mixed-length formulas")
+    }
+    if t3_pass == 1 {
+        println("T3 PASS: mean-only wins on pure 3-SAT (GUM-uninformative domain)")
+    } else {
+        println("T3 FAIL: pure 3-SAT domain boundary not confirmed")
+    }
+
+    if t1_pass == 1 && t2_pass == 1 && t3_pass == 1 {
+        println("ALL PASS: Epistemic TS characterised — benefit on mixed-length, cost on uniform")
+        return 0
+    }
+    return 1
+}

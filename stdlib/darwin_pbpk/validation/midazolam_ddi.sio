@@ -1,0 +1,114 @@
+// midazolam_ddi.sio — validation of the midazolam CYP3A drug–drug interaction.
+//
+// Anchors the mechanistic well-stirred first-pass + competitive-inhibition model
+// (ddi/cyp3a_competitive.sio, drugs/midazolam.sio) against the clinical literature
+// and checks internal consistency. These are MODEL-property assertions: the parity
+// gate proves Sounio==Node to f64; this file checks the model lands on the
+// documented pharmacology.
+//
+//   Olkkola 1994 (Clin Pharmacol Ther 55:481): oral midazolam + ketoconazole
+//     raises AUC ~15× (range ~10-16× across studies).
+//   Heizmann 1984 (Br J Anaesth 56:1215): oral midazolam F ~0.3-0.44.
+//   Thummel 1996 (Clin Pharmacol Ther 59:491): both gut-wall and hepatic CYP3A
+//     contribute to first-pass — gut is essential to the magnitude.
+//   Shih 2013 / Kuehl 2001: CYP3A5 expressers clear midazolam faster.
+
+use darwin_pbpk::drugs::midazolam::{midazolam_cyp3a_substrate, ketoconazole_inhibitor, midazolam_pbpk_params_pgx}
+use darwin_pbpk::ddi::cyp3a_competitive::{cyp3a_factor_of, cyp3a_aucr, cyp3a_f_oral, cyp3a_clh, cyp3a_fg, cyp3a_fh, cyp3a_inhibition_factor}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  Midazolam CYP3A Drug-Drug Interaction — Validation")
+    println("======================================================================")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    let sub = midazolam_cyp3a_substrate()
+    let keto = ketoconazole_inhibitor()
+    let factor = cyp3a_factor_of(keto)
+
+    // TEST 1: solo oral bioavailability in the documented range (Heizmann 1984).
+    println("TEST 1: oral F in [0.30, 0.45] (Heizmann 1984)")
+    let f_solo = cyp3a_f_oral(sub, 1.0)
+    print("  F=");  println(f_solo); println("")
+    if f_solo > 0.30 && f_solo < 0.45 {
+        println("  [PASS] oral F within documented range")
+        passed = passed + 1
+    } else { println("  FAIL: oral F out of range"); failed = failed + 1 }
+    println("")
+
+    // TEST 2: ketoconazole AUCR ~15× (Olkkola 1994; band 12-18).
+    println("TEST 2: ketoconazole oral AUCR in [12, 18] (~15x, Olkkola 1994)")
+    let aucr = cyp3a_aucr(sub, factor)
+    print("  AUCR="); println(aucr); println("")
+    if aucr > 12.0 && aucr < 18.0 {
+        println("  [PASS] AUCR reproduces the iconic ~15x")
+        passed = passed + 1
+    } else { println("  FAIL: AUCR out of band"); failed = failed + 1 }
+    println("")
+
+    // TEST 3: monotonicity — stronger inhibition (smaller factor) -> larger AUCR.
+    println("TEST 3: AUCR monotonic increasing with inhibition strength")
+    let aucr_weak = cyp3a_aucr(sub, cyp3a_inhibition_factor(0.008, 0.008))   // I/Ki=1
+    let aucr_mid  = cyp3a_aucr(sub, cyp3a_inhibition_factor(0.032, 0.008))   // I/Ki=4
+    let aucr_strong = aucr                                                   // I/Ki=8
+    if aucr_strong > aucr_mid && aucr_mid > aucr_weak && aucr_weak > 1.0 {
+        println("  [PASS] AUCR(I/Ki=1) < AUCR(4) < AUCR(8)")
+        passed = passed + 1
+    } else { println("  FAIL: AUCR not monotonic"); failed = failed + 1 }
+    println("")
+
+    // TEST 4: gut contributes — full (gut+hepatic) AUCR exceeds hepatic-only.
+    println("TEST 4: gut-wall CYP3A is essential to the magnitude (Thummel 1996)")
+    let f0 = cyp3a_f_oral(sub, 1.0)
+    let clh0 = cyp3a_clh(sub, 1.0)
+    let f_hep_only = sub.fa * cyp3a_fg(sub, 1.0) * cyp3a_fh(sub, factor)
+    let aucr_hep_only = (f_hep_only / f0) * (clh0 / cyp3a_clh(sub, factor))
+    print("  AUCR_full="); println(aucr); println("")
+    print("  AUCR_hepatic_only="); println(aucr_hep_only); println("")
+    if aucr > aucr_hep_only && aucr_hep_only > 1.0 {
+        println("  [PASS] hepatic-only cannot reach the full AUCR without gut")
+        passed = passed + 1
+    } else { println("  FAIL: gut contribution not demonstrated"); failed = failed + 1 }
+    println("")
+
+    // TEST 5: CYP3A5 expresser clears faster than non-expresser (higher CL_h).
+    println("TEST 5: CYP3A5 expresser CL_h > non-expresser (Shih 2013)")
+    let p_exp = midazolam_pbpk_params_pgx(1, 0)
+    let p_non = midazolam_pbpk_params_pgx(0, 0)
+    let clh_exp = p_exp.cl_hepatic * p_exp.fu_plasma   // effective plasma CL_h
+    let clh_non = p_non.cl_hepatic * p_non.fu_plasma
+    print("  CL_h expresser="); println(clh_exp); println("")
+    print("  CL_h non-expresser="); println(clh_non); println("")
+    if clh_exp > clh_non {
+        println("  [PASS] expresser clears midazolam faster")
+        passed = passed + 1
+    } else { println("  FAIL: CYP3A5 ordering wrong"); failed = failed + 1 }
+    println("")
+
+    // TEST 6: CYP3A4*22 carrier clears slower than non-carrier (lower CL_h).
+    println("TEST 6: CYP3A4*22 carrier CL_h < non-carrier (Wang 2011)")
+    let p_22 = midazolam_pbpk_params_pgx(0, 1)
+    let clh_22 = p_22.cl_hepatic * p_22.fu_plasma
+    if clh_22 < clh_non {
+        println("  [PASS] *22 carrier clears midazolam slower")
+        passed = passed + 1
+    } else { println("  FAIL: CYP3A4*22 ordering wrong"); failed = failed + 1 }
+    println("")
+
+    println("======================================================================")
+    println("  MIDAZOLAM DDI VALIDATION — SUMMARY")
+    println("======================================================================")
+    print("  Passed: "); println(passed)
+    print("  Failed: "); println(failed)
+    println("")
+    if failed == 0 {
+        println("  ALL 6 TESTS PASSED")
+    } else {
+        println("  SOME TESTS FAILED — see diagnostics above")
+    }
+    println("======================================================================")
+    return 0
+}

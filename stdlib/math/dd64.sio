@@ -1,0 +1,205 @@
+// stdlib/math/dd64.sio — Double-word (double-double) arithmetic
+//
+// A Dd64 represents a real number as the unevaluated sum hi + lo of two f64
+// values with the Dekker non-overlap invariant: hi = fl(hi + lo) and
+// |lo| <= ulp(hi)/2.  This yields ~106 significand bits (~32 decimal digits)
+// using only IEEE-754 binary64 hardware operations — no new ABI, no softfloat.
+//
+// The building blocks are error-free transformations (EFTs): TwoSum and
+// TwoProd return the exact rounding error of an f64 add/mul as a second f64.
+// The double-word operations follow the "accurate" variants analysed in
+// Joldes, Muller & Popescu (2017), "Tight and rigorous error bounds for
+// basic building blocks of double-word arithmetic" (ACM TOMS 44(2)), whose
+// relative error bounds (u = 2^-53) are quoted per function below.
+//
+// References:
+//   Dekker (1971): "A floating-point technique for extending the available
+//     precision", Numer. Math. 18
+//   Knuth, TAOCP vol. 2, §4.2.2 (TwoSum)
+//   Hida, Li & Bailey (2001): "Algorithms for quad-double precision
+//     floating point arithmetic" (the qd library used by pySecDec/FIESTA)
+//   Joldes, Muller & Popescu (2017), ACM TOMS 44(2) [JMP2017]
+//
+// IMPORTANT (compiler contract): every EFT below is exact ONLY if the
+// compiler evaluates the f64 expressions literally, in order, in round-to-
+// nearest, without reassociation or contraction into FMA.  Witnesses in
+// tests/stdlib/math/test_dd64_*.sio check this bit-exactly on the native
+// binary; if an optimiser pass ever breaks them, the pass — not this file —
+// is wrong (EISA precision track, Phase 1).
+
+// =============================================================================
+// Type
+// =============================================================================
+
+pub struct Dd64 {
+    pub hi: f64,
+    pub lo: f64,
+}
+
+// =============================================================================
+// Constructors / accessors
+// =============================================================================
+
+pub fn dd_from_f64(a: f64) -> Dd64 {
+    Dd64 { hi: a, lo: 0.0 }
+}
+
+pub fn dd_zero() -> Dd64 {
+    Dd64 { hi: 0.0, lo: 0.0 }
+}
+
+pub fn dd_to_f64(x: Dd64) -> f64 {
+    x.hi + x.lo
+}
+
+// =============================================================================
+// Error-free transformations (EFTs)
+// =============================================================================
+
+// Knuth TwoSum — 6 flops, no precondition on |a| vs |b|.
+// Exact: hi + lo == a + b, with hi = fl(a + b).
+pub fn two_sum(a: f64, b: f64) -> Dd64 {
+    let s = a + b
+    let bb = s - a
+    let e = (a - (s - bb)) + (b - bb)
+    Dd64 { hi: s, lo: e }
+}
+
+// Dekker FastTwoSum — 3 flops, REQUIRES |a| >= |b| (or a == 0).
+// Exact under the precondition.
+pub fn quick_two_sum(a: f64, b: f64) -> Dd64 {
+    let s = a + b
+    let e = b - (s - a)
+    Dd64 { hi: s, lo: e }
+}
+
+// Veltkamp split: a == hi + lo with hi, lo representable in 26 bits each.
+// Splitter is 2^27 + 1 for binary64.  Baseline path with no FMA dependency.
+pub fn dd_split(a: f64) -> Dd64 {
+    let c = 134217729.0 * a
+    let h = c - (c - a)
+    Dd64 { hi: h, lo: a - h }
+}
+
+// Dekker TwoProd via Veltkamp split — 17 flops, no FMA.
+// Exact: hi + lo == a * b (barring overflow in the split), hi = fl(a * b).
+pub fn two_prod(a: f64, b: f64) -> Dd64 {
+    let p = a * b
+    let aa = dd_split(a)
+    let bb = dd_split(b)
+    let e = ((aa.hi * bb.hi - p) + aa.hi * bb.lo + aa.lo * bb.hi) + aa.lo * bb.lo
+    Dd64 { hi: p, lo: e }
+}
+
+// =============================================================================
+// Double-word arithmetic
+// =============================================================================
+
+// dd + dd, accurate variant (JMP2017 Algorithm 6 / AccurateDWPlusDW).
+// Relative error bound: 3u^2 / (1 - 4u)  ~= 3 * 2^-106.
+pub fn dd_add(x: Dd64, y: Dd64) -> Dd64 {
+    let s = two_sum(x.hi, y.hi)
+    let t = two_sum(x.lo, y.lo)
+    let c = s.lo + t.hi
+    let v = quick_two_sum(s.hi, c)
+    let w = t.lo + v.lo
+    quick_two_sum(v.hi, w)
+}
+
+// dd + f64 (cheaper accumulator; JMP2017 DWPlusFP, bound 2u^2).
+pub fn dd_add_f64(x: Dd64, y: f64) -> Dd64 {
+    let s = two_sum(x.hi, y)
+    let v = s.lo + x.lo
+    quick_two_sum(s.hi, v)
+}
+
+pub fn dd_neg(x: Dd64) -> Dd64 {
+    Dd64 { hi: 0.0 - x.hi, lo: 0.0 - x.lo }
+}
+
+pub fn dd_sub(x: Dd64, y: Dd64) -> Dd64 {
+    dd_add(x, dd_neg(y))
+}
+
+// dd * dd (JMP2017 DWTimesDW, no-FMA path).  Bound: ~5u^2.
+pub fn dd_mul(x: Dd64, y: Dd64) -> Dd64 {
+    let p = two_prod(x.hi, y.hi)
+    let c = x.hi * y.lo + x.lo * y.hi
+    let l = p.lo + c
+    quick_two_sum(p.hi, l)
+}
+
+// dd * f64 (JMP2017 DWTimesFP).  Bound: 2u^2.
+pub fn dd_mul_f64(x: Dd64, y: f64) -> Dd64 {
+    let p = two_prod(x.hi, y)
+    let l = p.lo + x.lo * y
+    quick_two_sum(p.hi, l)
+}
+
+// dd / dd — long division with two correction terms (qd-style).
+// Bound: ~10u^2 (JMP2017 DWDivDW family).
+pub fn dd_div(x: Dd64, y: Dd64) -> Dd64 with Div {
+    let q1 = x.hi / y.hi
+    let r1 = dd_sub(x, dd_mul_f64(y, q1))
+    let q2 = r1.hi / y.hi
+    let r2 = dd_sub(r1, dd_mul_f64(y, q2))
+    let q3 = r2.hi / y.hi
+    let q12 = quick_two_sum(q1, q2)
+    dd_add_f64(q12, q3)
+}
+
+// =============================================================================
+// f64 square root helper (self-contained Newton; avoids stdlib import so this
+// module stays usable on both compiler lanes)
+// =============================================================================
+
+fn dd64_sqrt_f64(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g > 1.0 { g = x * 0.5 } else { g = 1.0 }
+    var i = 0
+    while i < 40 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+// sqrt(dd) — one dd-accurate Newton correction on top of the f64 seed:
+//   q0 = sqrt(x.hi);  q = q0 + (x - q0^2) / (2 q0)
+// Doubles the correct digits of q0, giving full dd accuracy.
+pub fn dd_sqrt(x: Dd64) -> Dd64 with Mut, Div {
+    if x.hi <= 0.0 { return dd_zero() }
+    let q0 = dd64_sqrt_f64(x.hi)
+    let p = two_prod(q0, q0)
+    let r = dd_sub(x, p)
+    let corr = r.hi / (2.0 * q0)
+    quick_two_sum(q0, corr)
+}
+
+// =============================================================================
+// Comparison / utility
+// =============================================================================
+
+pub fn dd_abs(x: Dd64) -> Dd64 {
+    if x.hi < 0.0 { dd_neg(x) } else {
+        if x.hi == 0.0 && x.lo < 0.0 { dd_neg(x) } else { x }
+    }
+}
+
+// -1 if x < y, 0 if x == y, 1 if x > y
+pub fn dd_cmp(x: Dd64, y: Dd64) -> i64 {
+    if x.hi < y.hi { return 0 - 1 }
+    if x.hi > y.hi { return 1 }
+    if x.lo < y.lo { return 0 - 1 }
+    if x.lo > y.lo { return 1 }
+    0
+}
+
+pub fn dd_eq(x: Dd64, y: Dd64) -> bool {
+    x.hi == y.hi && x.lo == y.lo
+}
+
+pub fn dd_lt(x: Dd64, y: Dd64) -> bool {
+    dd_cmp(x, y) < 0
+}

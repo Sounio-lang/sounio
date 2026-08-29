@@ -1,107 +1,86 @@
-// self-hosted::gpu::kernels::hmma_signs — Fano plane sign pattern utilities for HMMA
+// self-hosted::gpu::kernels::hmma_signs — tensor-core (WMMA) octonion multiply, Convention X
 //
-// Provides sign-mask encoding and PTX emission for post-HMMA Fano plane
-// sign correction. When octonion vectors are packed into 16-wide HMMA
-// m16n16k16 tiles, the unsigned HMMA result must be corrected by applying
-// the sign pattern (+1/-1) from the octonion multiplication table.
+// Octonion multiplication a·b is LINEAR in b, so it is a matrix–vector product:
 //
-// Two octonion vectors (each 8 components) pack side-by-side into one
-// 16-wide tile. After HMMA multiply-accumulate, the result needs Fano
-// plane sign correction to produce the correct octonion product.
+//     a·b = L(a) · b,   where   L(a)[k][j] = σ(k⊕j, j) · a[k⊕j]     (X: e1·e2 = +e3)
+//
+// σ is the recursive Cayley–Dickson twist sign (canonical Convention X, matching
+// stdlib and the hypercomplex.sio / ossm_forward.sio GPU emitters — see
+// stdlib/algebra/README.md). Because the ±1 signs are BAKED INTO the left-multiply
+// matrix, a plain signed tensor-core matmul (`wmma.mma.sync.m16n16k16.f16.f32`) of the
+// 8×8 L(a) (padded to 16×16) against b yields the correct octonion product DIRECTLY —
+// there is NO post-multiply "sign correction" step.
+//
+// HISTORY: this file previously implemented a broken post-HMMA sign-mask correction
+// (`hmma_sign_mask_for_output_component` + `hmma_emit_full_sign_correction`) that
+// double-negated shared output components (e.g. dst[1] negated 3×, dst[2]/dst[5]/dst[6]
+// negated an even number of times → net no-op) and never implemented a coherent
+// convention. It was standalone/unused. Replaced 2026-07-16 by the L(a) construction
+// below, which is **hardware-validated on the DGX Spark (NVIDIA GB10, sm_121, CUDA 13.0)**:
+// a wmma m16n16k16 kernel computing L(a)·B matches the exact X reference for a full
+// 16-column batch (0/128 component mismatches) and the discriminator e1·e2 lands in
+// component 3 (+1), not 4 — Convention X. Reference: docs/gpu/oct_wmma_validate.cu.
 //
 // Architecture: all helpers precede callers (no forward references).
 // Uses HypercomplexPtxState from hypercomplex.sio for PTX emission.
 
 // ============================================================================
-// Fano plane sign table for octonion multiplication
-// ============================================================================
-//
-// The octonion basis e0..e7 multiply according to the Fano plane:
-//   Lines: (1,2,4), (2,3,5), (3,4,6), (4,5,7), (5,6,1), (6,7,2), (7,1,3)
-//   For line (a,b,c): e_a*e_b = +e_c, e_b*e_a = -e_c (cyclic)
-//   Identity: e_0 is real (all products with e_0 are positive)
-//   Self-product: e_i*e_i = -e_0 for i > 0
-//
-// Full sign table for basis(i)*basis(j) -> component(k):
-//   (i,j)->k: sign
-//   (0,0)->0: +  (1,1)->0: -  (2,2)->0: -  (3,3)->0: -  (4,4)->0: -  (5,5)->0: -  (6,6)->0: -  (7,7)->0: -
-//   (0,1)->1: +  (1,0)->1: +  (2,3)->1: +  (3,2)->1: -  (5,6)->1: +  (6,5)->1: -  (3,7)->1: +  (7,3)->1: -
-//   (0,2)->2: +  (2,0)->2: +  (1,3)->2: -  (3,1)->2: +  (4,6)->2: +  (6,4)->2: -  (5,7)->2: -  (7,5)->2: +
-//   (0,3)->3: +  (3,0)->3: +  (1,2)->3: +  (2,1)->3: -  (4,7)->3: -  (7,4)->3: +  (5,6)->3: +  (6,5)->3: -
-//     Wait, let me re-derive these systematically.
-
-// ============================================================================
-// Sign mask computation for Fano plane output component
+// Canonical Cayley–Dickson sign (Convention X) — the value baked into L(a)
 // ============================================================================
 
-// Returns a 16-bit sign mask for Fano plane output component k (0-7).
-// Bit i in the low byte is set if the HMMA tile product at position i
-// should be negated (Fano plane sign is -1).
-// The mask encodes which of the 8 contributing product terms to a given
-// output component have negative sign.
-//
-// For each output component k, we look at all (i,j) pairs where
-// oct_mul_basis(i,j) == k. If oct_mul_sign(i,j) == -1, set bit at
-// position j in the mask (the column index in the GEMM).
-//
-// Returns: 16-bit integer where bit j is 1 if the sign at column j is -1.
-// Only bits 0..7 are meaningful for single-octonion tiles.
-fn hmma_sign_mask_for_output_component(k: i64) -> i64 {
-    var mask: i64 = 0
-
-    if k == 0 {
-        mask = 0
+// Recursive Cayley–Dickson twist sign σ(a,b,bits) ∈ {+1,−1}; pure i64.
+fn hmma_oct_cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return hmma_oct_cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return hmma_oct_cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return hmma_oct_cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - hmma_oct_cd_sigma(a_lo, b_lo, bits - 1)
     }
-
-    if k == 1 {
-        mask = 0
-    }
-
-    if k == 2 {
-        mask = 2 + 32
-    }
-
-    if k == 3 {
-        mask = 2 + 128
-    }
-
-    if k == 4 {
-        mask = 4 + 16 + 64
-    }
-
-    if k == 5 {
-        mask = 8 + 32 + 128
-    }
-
-    if k == 6 {
-        mask = 2 + 16 + 64
-    }
-
-    if k == 7 {
-        mask = 4 + 16 + 128
-    }
-
-    mask
+    if b_lo == 0 { return 0 - hmma_oct_cd_sigma(0, a_lo, bits - 1) }
+    hmma_oct_cd_sigma(b_lo, a_lo, bits - 1)
 }
 
+// Which a-component feeds L(a)[k][j]:  a[k⊕j].
+fn hmma_left_mul_index(k: i64, j: i64) -> i64 { k ^ j }
+
+// Sign of L(a)[k][j] = σ(k⊕j, j) ∈ {+1,−1}. This is the entire "sign structure" —
+// it is a matrix entry, applied ONCE (baked into L(a)), never as a post-correction.
+fn hmma_left_mul_sign(k: i64, j: i64) -> i64 { hmma_oct_cd_sigma(k ^ j, j, 3) }
+
 // ============================================================================
-// PTX sign correction emitter
+// PTX: build the signed left-multiply matrix L(a) into 64 f32 registers
 // ============================================================================
 
-// Emits PTX to apply sign correction to 8 f32 registers starting at dst_base.
-// Uses the sign_mask to selectively neg.f32 components where the Fano plane
-// sign is -1. Bit i of sign_mask: 1 = negate, 0 = keep positive.
-fn hmma_emit_sign_correction(buf: HypercomplexPtxState, dst_base: i64, sign_mask: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+// Emits L(a)[k][j] into %f[lmat_base + k*8 + j] from the a-components at
+// %f[a_base + (k⊕j)], folding the compile-time σ(k⊕j,j) sign into a mov or neg.
+// The resulting register block is the matrix-A operand of the wmma matmul (padded
+// to 16×16 by the caller); after `wmma.mma.sync ... L, b`, no sign fixup is needed.
+fn hmma_emit_build_left_mul_matrix(buf: HypercomplexPtxState, a_base: i64, lmat_base: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
     var out = buf
+    out = hc_push_str(out, "    // build L(a)[k][j] = sigma(k^j,j) * a[k^j]  (Convention X)\n")
     var k: i64 = 0
     while k < 8 {
-        let bit_val = (sign_mask >> k) & 1
-        if bit_val == 1 {
-            out = hc_push_str(out, "    neg.f32 %f")
-            out = hc_push_str(out, i64_to_string(dst_base + k))
+        var j: i64 = 0
+        while j < 8 {
+            let src = a_base + (k ^ j)
+            let dst = lmat_base + k * 8 + j
+            if hmma_left_mul_sign(k, j) < 0 {
+                out = hc_push_str(out, "    neg.f32 %f")
+            } else {
+                out = hc_push_str(out, "    mov.f32 %f")
+            }
+            out = hc_push_str(out, i64_to_string(dst))
             out = hc_push_str(out, ", %f")
-            out = hc_push_str(out, i64_to_string(dst_base + k))
+            out = hc_push_str(out, i64_to_string(src))
             out = hc_push_str(out, ";\n")
+            j = j + 1
         }
         k = k + 1
     }
@@ -112,47 +91,8 @@ fn hmma_emit_sign_correction(buf: HypercomplexPtxState, dst_base: i64, sign_mask
 // Fragment packing/unpacking PTX emitters
 // ============================================================================
 
-// Emits PTX to pack two 8-component octonion vectors into the packed
-// fragment ABI used by the split PTX lowering path:
-//   - oct_a pairs [0:1]..[6:7] -> fragment regs [0..3]
-//   - oct_b pairs [0:1]..[6:7] -> fragment regs [4..7]
-// Each fragment register is a packed .b32 lane formed via cvt.rn.f16x2.f32.
-fn hmma_emit_pack_oct_pair(buf: HypercomplexPtxState, oct_a_base: i64, oct_b_base: i64, frag_reg: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
-    var out = buf
-    out = hc_push_str(out, "    // pack oct_a[")
-    out = hc_push_str(out, i64_to_string(oct_a_base))
-    out = hc_push_str(out, "..] + oct_b[")
-    out = hc_push_str(out, i64_to_string(oct_b_base))
-    out = hc_push_str(out, "..] -> frag[")
-    out = hc_push_str(out, i64_to_string(frag_reg))
-    out = hc_push_str(out, "..] as 8 packed .b32 regs via f16x2 pairs\n")
-
-    var pair_idx: i64 = 0
-    while pair_idx < 4 {
-        let lane_lo = pair_idx * 2
-        let lane_hi = lane_lo + 1
-        out = hc_push_str(out, "    cvt.rn.f16x2.f32 %r")
-        out = hc_push_str(out, i64_to_string(frag_reg + pair_idx))
-        out = hc_push_str(out, ", %f")
-        out = hc_push_str(out, i64_to_string(oct_a_base + lane_lo))
-        out = hc_push_str(out, ", %f")
-        out = hc_push_str(out, i64_to_string(oct_a_base + lane_hi))
-        out = hc_push_str(out, ";\n")
-        out = hc_push_str(out, "    cvt.rn.f16x2.f32 %r")
-        out = hc_push_str(out, i64_to_string(frag_reg + 4 + pair_idx))
-        out = hc_push_str(out, ", %f")
-        out = hc_push_str(out, i64_to_string(oct_b_base + lane_lo))
-        out = hc_push_str(out, ", %f")
-        out = hc_push_str(out, i64_to_string(oct_b_base + lane_hi))
-        out = hc_push_str(out, ";\n")
-        pair_idx = pair_idx + 1
-    }
-    out
-}
-
-// Emits PTX to unpack 16-wide HMMA f32 accumulator result into an
-// 8-component octonion output. Takes the first 8 f32 accumulator
-// registers and moves them to the destination octonion registers.
+// Emits PTX to unpack the first 8 f32 accumulator registers of the wmma result
+// into an 8-component octonion output (the product a·b in Convention X).
 fn hmma_emit_unpack_result(buf: HypercomplexPtxState, frag_reg: i64, oct_dst_base: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
     var out = buf
     out = hc_push_str(out, "    // unpack HMMA result frag[")
@@ -160,7 +100,6 @@ fn hmma_emit_unpack_result(buf: HypercomplexPtxState, frag_reg: i64, oct_dst_bas
     out = hc_push_str(out, "..] -> dst[")
     out = hc_push_str(out, i64_to_string(oct_dst_base))
     out = hc_push_str(out, "..]\n")
-
     var i: i64 = 0
     while i < 8 {
         out = hc_push_str(out, "    mov.f32 %f")
@@ -174,21 +113,721 @@ fn hmma_emit_unpack_result(buf: HypercomplexPtxState, frag_reg: i64, oct_dst_bas
 }
 
 // ============================================================================
-// Convenience: full sign correction for all 8 output components
+// Complete WMMA octonion-multiply kernel emitter (Convention X)
 // ============================================================================
 
-// Applies Fano plane sign correction for all 8 output components of an
-// octonion HMMA multiply. Emits neg.f32 instructions for each component
-// whose sign mask indicates negative sign.
-fn hmma_emit_full_sign_correction(buf: HypercomplexPtxState, dst_base: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
-    var out = buf
+// Emits "{%<prefix><start>, ..., %<prefix><start+count-1>}".
+fn hmma_emit_frag_list(buf: HypercomplexPtxState, prefix: string, start: i64, count: i64) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(buf, "{")
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { out = hc_push_str(out, ", ") }
+        out = hc_push_str(out, prefix)
+        out = hc_push_str(out, i64_to_string(start + i))
+        i = i + 1
+    }
+    hc_push_str(out, "}")
+}
+
+// Emits a complete, runnable PTX kernel `sounio_oct_mul_wmma(L_ptr, B_ptr, out_ptr)` that
+// computes the octonion product on tensor cores: given L(a) (16×16 f16, the caller/host builds
+// L(a)[k][j]=σ(k⊕j,j)·a[k⊕j] via hmma_left_mul_sign) and B (16×16 f16), it runs one
+// wmma.m16n16k16.f16→f32 tile and stores D = L(a)·B (the octonion products, Convention X).
+// HARDWARE-VALIDATED on the DGX Spark (NVIDIA GB10, sm_121, CUDA 13.0): this exact emitted PTX
+// ptxas-assembles and launches; e1·e2 → component 3 (+1), batch 0/128 mismatch vs the exact X
+// reference. Reference harness: docs/gpu/run_sounio_ptx.cu (loads the Sounio-emitted PTX).
+pub fn hmma_emit_oct_mul_wmma_kernel(s: HypercomplexPtxState) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, ".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    out = hc_push_str(out, ".visible .entry sounio_oct_mul_wmma(\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 1 p_lmat,\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 1 p_b,\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 1 p_out\n)\n{\n")
+    out = hc_push_str(out, "    .reg .b32 %r<18>;\n    .reg .b32 %f<10>;\n    .reg .b64 %rd<7>;\n\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [p_lmat];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd2, [p_b];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd3, [p_out];\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd4, %rd1;\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd5, %rd2;\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd6, %rd3;\n")
+    out = hc_push_str(out, "    mov.b32 %r1, 16;\n")
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.global.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%rd4], %r1;\n")
+    out = hc_push_str(out, "    wmma.load.b.sync.aligned.col.m16n16k16.global.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%rd5], %r1;\n")
+    out = hc_push_str(out, "    mov.f32 %f1, 0f00000000;\n")
+    out = hc_push_str(out, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f1, %f1, %f1, %f1, %f1, %f1, %f1, %f1};\n")
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", %r1;\n")
+    out = hc_push_str(out, "    ret;\n}\n")
+    out
+}
+
+// Emits a SELF-CONTAINED WMMA octonion-multiply kernel: sounio_oct_mul_full(a_ptr, b_ptr, out_ptr).
+// Thread 0 builds L(a) IN-KERNEL into shared memory (f16, with the compile-time σ from
+// hmma_left_mul_sign folded into an optional neg), stages B, bar.sync; the warp then runs one
+// wmma m16n16k16 tile computing D = L(a)·B = the octonion products a·b_c (Convention X). Unlike
+// hmma_emit_oct_mul_wmma_kernel (which takes a pre-built L matrix), this takes RAW octonions.
+// HARDWARE-VALIDATED on the DGX Spark (NVIDIA GB10, sm_121, CUDA 13.0): the emitted PTX
+// ptxas-assembles (21096-byte cubin) + launches; e1·e2 → component 3 (+1), batch 0/128 mismatch
+// vs the exact X reference. Reference: docs/gpu/run_full_ptx.cu.
+pub fn hmma_emit_oct_mul_full_kernel(s: HypercomplexPtxState) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, ".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    out = hc_push_str(out, ".visible .entry sounio_oct_mul_full(\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_a,\n    .param .u64 .ptr .align 4 p_b,\n    .param .u64 .ptr .align 4 p_out\n)\n{\n")
+    out = hc_push_str(out, "    .reg .pred %p<2>;\n    .reg .b16 %rs<2>;\n    .reg .b32 %r<24>;\n    .reg .b32 %f<12>;\n    .reg .b64 %rd<7>;\n")
+    out = hc_push_str(out, "    .shared .align 2 .b8 sL[512];\n    .shared .align 2 .b8 sB[512];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [p_a];\n    ld.param.u64 %rd2, [p_b];\n    ld.param.u64 %rd3, [p_out];\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd4, %rd1;\n    cvta.to.global.u64 %rd5, %rd2;\n    cvta.to.global.u64 %rd6, %rd3;\n")
+    out = hc_push_str(out, "    mov.u32 %r18, sL;\n    mov.u32 %r19, sB;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BUILD_DONE;\n")
+    out = hc_push_str(out, "    mov.u16 %rs1, 0;\n    mov.u32 %r21, 0;\n$ZERO:\n")
+    out = hc_push_str(out, "    add.s32 %r20, %r18, %r21;\n    st.shared.u16 [%r20], %rs1;\n")
+    out = hc_push_str(out, "    add.s32 %r20, %r19, %r21;\n    st.shared.u16 [%r20], %rs1;\n")
+    out = hc_push_str(out, "    add.s32 %r21, %r21, 2;\n    setp.lt.u32 %p1, %r21, 512;\n    @%p1 bra $ZERO;\n")
     var k: i64 = 0
     while k < 8 {
-        let mask = hmma_sign_mask_for_output_component(k)
-        if mask != 0 {
-            out = hmma_emit_sign_correction(out, dst_base, mask)
+        var j: i64 = 0
+        while j < 8 {
+            let i = k ^ j
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd4+")
+            out = hc_push_str(out, i64_to_string(i * 4))
+            out = hc_push_str(out, "];\n")
+            if hmma_left_mul_sign(k, j) < 0 { out = hc_push_str(out, "    neg.f32 %f1, %f1;\n") }
+            out = hc_push_str(out, "    cvt.rn.f16.f32 %rs1, %f1;\n")
+            out = hc_push_str(out, "    st.shared.u16 [%r18+")
+            out = hc_push_str(out, i64_to_string((k * 16 + j) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            j = j + 1
         }
         k = k + 1
     }
+    var c: i64 = 0
+    while c < 16 {
+        var r: i64 = 0
+        while r < 8 {
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd5+")
+            out = hc_push_str(out, i64_to_string((c * 8 + r) * 4))
+            out = hc_push_str(out, "];\n    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r19+")
+            out = hc_push_str(out, i64_to_string((c * 16 + r) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            r = r + 1
+        }
+        c = c + 1
+    }
+    out = hc_push_str(out, "$BUILD_DONE:\n    bar.sync 0;\n    mov.b32 %r1, 16;\n")
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%r18], %r1;\n    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%r19], %r1;\n    mov.f32 %f0, 0f00000000;\n")
+    out = hc_push_str(out, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", %r1;\n    ret;\n}\n")
+    out
+}
+
+// ============================================================================
+// Sedenion (16-dim) tensor-core multiply — same L(a) construction, bits=4
+// ============================================================================
+
+// Sign of the sedenion left-mul matrix L(a)[k][j] = σ(k⊕j, j, 4). L(a) is 16×16 = exactly one
+// wmma m16n16k16 tile (no padding).
+fn hmma_sed_left_mul_sign(k: i64, j: i64) -> i64 { hmma_oct_cd_sigma(k ^ j, j, 4) }
+
+// Emits a SELF-CONTAINED tensor-core SEDENION multiply kernel sounio_sed_mul_full(a,b,out): thread 0
+// builds L(a)[k][j]=σ(k⊕j,j,4)·a[k⊕j] into shared (f16, 16×16 full tile, compile-time σ folded into
+// optional neg), stages B, bar.sync, and the warp runs one wmma tile → D = L(a)·B = the sedenion
+// products (Convention X). HARDWARE-VALIDATED on the DGX Spark (GB10, sm_121, CUDA 13.0): the emitted
+// PTX ptxas-assembles (20576-byte cubin) + launches; e2·e5 → component 7, and the canonical zero
+// divisor (e3+e10)·(e6−e15) ANNIHILATES exactly (0/16 nonzero) on the tensor core.
+// Reference: docs/gpu/sed_mul_full.cu.
+pub fn hmma_emit_sed_mul_full_kernel(s: HypercomplexPtxState) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, ".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    out = hc_push_str(out, ".visible .entry sounio_sed_mul_full(\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_a,\n    .param .u64 .ptr .align 4 p_b,\n    .param .u64 .ptr .align 4 p_out\n)\n{\n")
+    out = hc_push_str(out, "    .reg .pred %p<2>;\n    .reg .b16 %rs<2>;\n    .reg .b32 %r<24>;\n    .reg .b32 %f<12>;\n    .reg .b64 %rd<7>;\n")
+    out = hc_push_str(out, "    .shared .align 2 .b8 sL[512];\n    .shared .align 2 .b8 sB[512];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [p_a];\n    ld.param.u64 %rd2, [p_b];\n    ld.param.u64 %rd3, [p_out];\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd4, %rd1;\n    cvta.to.global.u64 %rd5, %rd2;\n    cvta.to.global.u64 %rd6, %rd3;\n")
+    out = hc_push_str(out, "    mov.u32 %r18, sL;\n    mov.u32 %r19, sB;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BUILD_DONE;\n")
+    var k: i64 = 0
+    while k < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let i = k ^ j
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd4+")
+            out = hc_push_str(out, i64_to_string(i * 4))
+            out = hc_push_str(out, "];\n")
+            if hmma_sed_left_mul_sign(k, j) < 0 { out = hc_push_str(out, "    neg.f32 %f1, %f1;\n") }
+            out = hc_push_str(out, "    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r18+")
+            out = hc_push_str(out, i64_to_string((k * 16 + j) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            j = j + 1
+        }
+        k = k + 1
+    }
+    var c: i64 = 0
+    while c < 16 {
+        var r: i64 = 0
+        while r < 16 {
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd5+")
+            out = hc_push_str(out, i64_to_string((c * 16 + r) * 4))
+            out = hc_push_str(out, "];\n    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r19+")
+            out = hc_push_str(out, i64_to_string((c * 16 + r) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            r = r + 1
+        }
+        c = c + 1
+    }
+    out = hc_push_str(out, "$BUILD_DONE:\n    bar.sync 0;\n    mov.b32 %r1, 16;\n")
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%r18], %r1;\n    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%r19], %r1;\n    mov.f32 %f0, 0f00000000;\n")
+    out = hc_push_str(out, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", %r1;\n    ret;\n}\n")
+    out
+}
+
+// ============================================================================
+// Octonion ASSOCIATOR [a,b,c]=(ab)c−a(bc) on tensor cores (Convention X)
+// ============================================================================
+
+// Right-multiply matrix sign: R(c)[k][i] = σ(i, k⊕i) · c[k⊕i] realizes x ↦ x·c.
+fn hmma_right_mul_sign(k: i64, i: i64) -> i64 { hmma_oct_cd_sigma(i, k ^ i, 3) }
+
+// Emits sounio_oct_associator(a_ptr, c_ptr, out_ptr): since [a,b,c] is linear in b,
+//   [a,b,c] = M·b,  M = R(c)·L(a) − L(a)·R(c)   (matrix commutator).
+// Thread 0 builds L(a) and R(c) (row-major, 8×8 in a 16×16 tile, compile-time σ folded into optional
+// neg), bar.sync; then TWO wmma m16n16k16 matmuls (R·L and L·R, both row.row) + 8 sub.f32 → the
+// associator matrix M (16×16), stored to global. HARDWARE-VALIDATED on the DGX Spark (GB10, sm_121,
+// CUDA 13.0): the emitted PTX ptxas-assembles (17552-byte cubin), launches, and reproduces the
+// 168 non-associative octonion basis triples + the associator-norm dichotomy ‖[e_i,e_j,e_k]‖∈{0,2}
+// on the Blackwell tensor cores. Reference: docs/gpu/assoc_tc.cu.
+pub fn hmma_emit_oct_associator_kernel(s: HypercomplexPtxState) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, ".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    out = hc_push_str(out, ".visible .entry sounio_oct_associator(\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_a,\n    .param .u64 .ptr .align 4 p_c,\n    .param .u64 .ptr .align 4 p_out\n)\n{\n")
+    out = hc_push_str(out, "    .reg .pred %p<2>;\n    .reg .b16 %rs<2>;\n    .reg .b32 %r<24>;\n    .reg .b32 %f<28>;\n    .reg .b64 %rd<7>;\n")
+    out = hc_push_str(out, "    .shared .align 2 .b8 sL[512];\n    .shared .align 2 .b8 sR[512];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [p_a];\n    ld.param.u64 %rd2, [p_c];\n    ld.param.u64 %rd3, [p_out];\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd4, %rd1;\n    cvta.to.global.u64 %rd5, %rd2;\n    cvta.to.global.u64 %rd6, %rd3;\n")
+    out = hc_push_str(out, "    mov.u32 %r18, sL;\n    mov.u32 %r19, sR;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BUILD_DONE;\n")
+    out = hc_push_str(out, "    mov.u16 %rs1, 0;\n    mov.u32 %r21, 0;\n$ZERO:\n")
+    out = hc_push_str(out, "    add.s32 %r20, %r18, %r21;\n    st.shared.u16 [%r20], %rs1;\n")
+    out = hc_push_str(out, "    add.s32 %r20, %r19, %r21;\n    st.shared.u16 [%r20], %rs1;\n")
+    out = hc_push_str(out, "    add.s32 %r21, %r21, 2;\n    setp.lt.u32 %p1, %r21, 512;\n    @%p1 bra $ZERO;\n")
+    var k: i64 = 0
+    while k < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let i = k ^ j
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd4+")
+            out = hc_push_str(out, i64_to_string(i * 4))
+            out = hc_push_str(out, "];\n")
+            if hmma_left_mul_sign(k, j) < 0 { out = hc_push_str(out, "    neg.f32 %f1, %f1;\n") }
+            out = hc_push_str(out, "    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r18+")
+            out = hc_push_str(out, i64_to_string((k * 16 + j) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            j = j + 1
+        }
+        k = k + 1
+    }
+    var kk: i64 = 0
+    while kk < 8 {
+        var ii: i64 = 0
+        while ii < 8 {
+            let jj = kk ^ ii
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd5+")
+            out = hc_push_str(out, i64_to_string(jj * 4))
+            out = hc_push_str(out, "];\n")
+            if hmma_right_mul_sign(kk, ii) < 0 { out = hc_push_str(out, "    neg.f32 %f1, %f1;\n") }
+            out = hc_push_str(out, "    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r19+")
+            out = hc_push_str(out, i64_to_string((kk * 16 + ii) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            ii = ii + 1
+        }
+        kk = kk + 1
+    }
+    out = hc_push_str(out, "$BUILD_DONE:\n    bar.sync 0;\n    mov.b32 %r1, 16;\n    mov.f32 %f0, 0f00000000;\n")
+    // T1 = R·L
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%r19], %r1;\n    wmma.load.b.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%r18], %r1;\n    wmma.mma.sync.aligned.row.row.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    // T2 = L·R
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%r18], %r1;\n    wmma.load.b.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%r19], %r1;\n    wmma.mma.sync.aligned.row.row.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 10, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    // M = T1 - T2
+    var e: i64 = 0
+    while e < 8 {
+        out = hc_push_str(out, "    sub.f32 %f")
+        out = hc_push_str(out, i64_to_string(18 + e))
+        out = hc_push_str(out, ", %f")
+        out = hc_push_str(out, i64_to_string(2 + e))
+        out = hc_push_str(out, ", %f")
+        out = hc_push_str(out, i64_to_string(10 + e))
+        out = hc_push_str(out, ";\n")
+        e = e + 1
+    }
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ")
+    out = hmma_emit_frag_list(out, "%f", 18, 8)
+    out = hc_push_str(out, ", %r1;\n    ret;\n}\n")
+    out
+}
+
+// ============================================================================
+// Sedenion ASSOCIATOR on tensor cores — richest algebra (non-assoc + zero divisors)
+// ============================================================================
+
+// Sedenion right-multiply matrix sign: R(c)[k][i] = σ(i, k⊕i, 4) · c[k⊕i].
+fn hmma_sed_right_mul_sign(k: i64, i: i64) -> i64 { hmma_oct_cd_sigma(i, k ^ i, 4) }
+
+// Emits sounio_sed_associator(a,c,out): [a,b,c]=M·b, M=R(c)·L(a)−L(a)·R(c). For sedenions L(a),R(c)
+// are 16×16 = EXACTLY one wmma tile (no padding). Thread 0 builds L(a),R(c) (compile-time σ, bits=4),
+// bar.sync; two wmma m16n16k16 matmuls (R·L, L·R, row.row) + 8 sub.f32 → M. HARDWARE-VALIDATED on the
+// DGX Spark (GB10, sm_121, CUDA 13.0): the emitted PTX ptxas-assembles (14584-byte cubin), launches,
+// and reproduces the 1848 non-associative sedenion basis triples (1527 zero + 1848 nonzero = 15³) +
+// the associator-norm dichotomy ‖·‖∈{0,2} on the Blackwell tensor cores. Reference: docs/gpu/sed_assoc_tc.cu.
+pub fn hmma_emit_sed_associator_kernel(s: HypercomplexPtxState) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, ".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    out = hc_push_str(out, ".visible .entry sounio_sed_associator(\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_a,\n    .param .u64 .ptr .align 4 p_c,\n    .param .u64 .ptr .align 4 p_out\n)\n{\n")
+    out = hc_push_str(out, "    .reg .pred %p<2>;\n    .reg .b16 %rs<2>;\n    .reg .b32 %r<24>;\n    .reg .b32 %f<28>;\n    .reg .b64 %rd<7>;\n")
+    out = hc_push_str(out, "    .shared .align 2 .b8 sL[512];\n    .shared .align 2 .b8 sR[512];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [p_a];\n    ld.param.u64 %rd2, [p_c];\n    ld.param.u64 %rd3, [p_out];\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd4, %rd1;\n    cvta.to.global.u64 %rd5, %rd2;\n    cvta.to.global.u64 %rd6, %rd3;\n")
+    out = hc_push_str(out, "    mov.u32 %r18, sL;\n    mov.u32 %r19, sR;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BUILD_DONE;\n")
+    var k: i64 = 0
+    while k < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let i = k ^ j
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd4+")
+            out = hc_push_str(out, i64_to_string(i * 4))
+            out = hc_push_str(out, "];\n")
+            if hmma_sed_left_mul_sign(k, j) < 0 { out = hc_push_str(out, "    neg.f32 %f1, %f1;\n") }
+            out = hc_push_str(out, "    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r18+")
+            out = hc_push_str(out, i64_to_string((k * 16 + j) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            j = j + 1
+        }
+        k = k + 1
+    }
+    var kk: i64 = 0
+    while kk < 16 {
+        var ii: i64 = 0
+        while ii < 16 {
+            let jj = kk ^ ii
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd5+")
+            out = hc_push_str(out, i64_to_string(jj * 4))
+            out = hc_push_str(out, "];\n")
+            if hmma_sed_right_mul_sign(kk, ii) < 0 { out = hc_push_str(out, "    neg.f32 %f1, %f1;\n") }
+            out = hc_push_str(out, "    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r19+")
+            out = hc_push_str(out, i64_to_string((kk * 16 + ii) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            ii = ii + 1
+        }
+        kk = kk + 1
+    }
+    out = hc_push_str(out, "$BUILD_DONE:\n    bar.sync 0;\n    mov.b32 %r1, 16;\n    mov.f32 %f0, 0f00000000;\n")
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%r19], %r1;\n    wmma.load.b.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%r18], %r1;\n    wmma.mma.sync.aligned.row.row.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%r18], %r1;\n    wmma.load.b.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%r19], %r1;\n    wmma.mma.sync.aligned.row.row.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 10, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    var e: i64 = 0
+    while e < 8 {
+        out = hc_push_str(out, "    sub.f32 %f")
+        out = hc_push_str(out, i64_to_string(18 + e))
+        out = hc_push_str(out, ", %f")
+        out = hc_push_str(out, i64_to_string(2 + e))
+        out = hc_push_str(out, ", %f")
+        out = hc_push_str(out, i64_to_string(10 + e))
+        out = hc_push_str(out, ";\n")
+        e = e + 1
+    }
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ")
+    out = hmma_emit_frag_list(out, "%f", 18, 8)
+    out = hc_push_str(out, ", %r1;\n    ret;\n}\n")
+    out
+}
+
+// ============================================================================
+// O-SSM octonion linear recurrence step on tensor cores (wires L(a) into ossm_forward)
+// ============================================================================
+
+// Emits sounio_ossm_oct_step(A,B,x,H,out): the tensor-core batched form of the O-SSM forward step's
+// linear part (self-hosted/gpu/kernels/ossm_forward.sio: `ah = A⊗h_prev; sum = ah + B·x`). For a
+// 16-wide batch of octonion states H, the octonion multiply A⊗H is L(A)·H — one wmma m16n16k16 tile —
+// then thread 0 adds the B·x term: S[k][b] = (A⊗H[b])[k] + B[k]·x[b]. HARDWARE-VALIDATED on the DGX
+// Spark (GB10, sm_121): the emitted PTX ptxas-assembles + matches the scalar per-thread O-SSM
+// reference (ossm_emit_oct_mul_f64 semantics) for the full batch. Reference: docs/gpu/ossm_step_tc.cu.
+pub fn hmma_emit_ossm_oct_step_kernel(s: HypercomplexPtxState) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, ".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    out = hc_push_str(out, ".visible .entry sounio_ossm_oct_step(\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_A,\n    .param .u64 .ptr .align 4 p_B,\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_x,\n    .param .u64 .ptr .align 4 p_H,\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_out\n)\n{\n")
+    out = hc_push_str(out, "    .reg .pred %p<2>;\n    .reg .b16 %rs<2>;\n    .reg .b32 %r<24>;\n")
+    out = hc_push_str(out, "    .reg .b32 %f<12>;\n    .reg .b64 %rd<14>;\n")
+    out = hc_push_str(out, "    .shared .align 2 .b8 sL[512];\n    .shared .align 2 .b8 sH[512];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [p_A];\n    ld.param.u64 %rd2, [p_B];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd7, [p_x];\n    ld.param.u64 %rd8, [p_H];\n    ld.param.u64 %rd3, [p_out];\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd4, %rd1;\n    cvta.to.global.u64 %rd9, %rd2;\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd10, %rd7;\n    cvta.to.global.u64 %rd5, %rd8;\n    cvta.to.global.u64 %rd6, %rd3;\n")
+    out = hc_push_str(out, "    mov.u32 %r18, sL;\n    mov.u32 %r19, sH;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BUILD_DONE;\n")
+    out = hc_push_str(out, "    mov.u16 %rs1, 0;\n    mov.u32 %r21, 0;\n$ZERO:\n")
+    out = hc_push_str(out, "    add.s32 %r20, %r18, %r21;\n    st.shared.u16 [%r20], %rs1;\n")
+    out = hc_push_str(out, "    add.s32 %r20, %r19, %r21;\n    st.shared.u16 [%r20], %rs1;\n")
+    out = hc_push_str(out, "    add.s32 %r21, %r21, 2;\n    setp.lt.u32 %p1, %r21, 512;\n    @%p1 bra $ZERO;\n")
+    var k: i64 = 0
+    while k < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let i = k ^ j
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd4+")
+            out = hc_push_str(out, i64_to_string(i * 4))
+            out = hc_push_str(out, "];\n")
+            if hmma_left_mul_sign(k, j) < 0 { out = hc_push_str(out, "    neg.f32 %f1, %f1;\n") }
+            out = hc_push_str(out, "    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r18+")
+            out = hc_push_str(out, i64_to_string((k * 16 + j) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            j = j + 1
+        }
+        k = k + 1
+    }
+    var b: i64 = 0
+    while b < 16 {
+        var r: i64 = 0
+        while r < 8 {
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd5+")
+            out = hc_push_str(out, i64_to_string((b * 8 + r) * 4))
+            out = hc_push_str(out, "];\n    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r19+")
+            out = hc_push_str(out, i64_to_string((b * 16 + r) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            r = r + 1
+        }
+        b = b + 1
+    }
+    out = hc_push_str(out, "$BUILD_DONE:\n    bar.sync 0;\n    mov.b32 %r1, 16;\n    mov.f32 %f0, 0f00000000;\n")
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%r18], %r1;\n    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%r19], %r1;\n    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", %r1;\n    bar.sync 0;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $DONE;\n")
+    var kk: i64 = 0
+    while kk < 8 {
+        var bb: i64 = 0
+        while bb < 16 {
+            let off = (kk * 16 + bb) * 4
+            out = hc_push_str(out, "    ld.global.f32 %f2, [%rd9+")
+            out = hc_push_str(out, i64_to_string(kk * 4))
+            out = hc_push_str(out, "];\n    ld.global.f32 %f3, [%rd10+")
+            out = hc_push_str(out, i64_to_string(bb * 4))
+            out = hc_push_str(out, "];\n    ld.global.f32 %f4, [%rd6+")
+            out = hc_push_str(out, i64_to_string(off))
+            out = hc_push_str(out, "];\n    fma.rn.f32 %f4, %f2, %f3, %f4;\n    st.global.f32 [%rd6+")
+            out = hc_push_str(out, i64_to_string(off))
+            out = hc_push_str(out, "], %f4;\n")
+            bb = bb + 1
+        }
+        kk = kk + 1
+    }
+    out = hc_push_str(out, "$DONE:\n    ret;\n}\n")
+    out
+}
+
+// ============================================================================
+// FULL O-SSM octonion forward CELL on tensor cores, with in-kernel T-step recurrence
+// ============================================================================
+
+// Build L(M) into shared buffer `sbuf` from the global-f32 param at `rd_ptr` (sign via cd_sigma(,,3)).
+fn hmma_emit_cell_build_left(s: HypercomplexPtxState, sbuf: string, rd_ptr: string) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = s
+    var k: i64 = 0
+    while k < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let i = k ^ j
+            out = hc_push_str(out, "    ld.global.f32 %f1, [")
+            out = hc_push_str(out, rd_ptr)
+            out = hc_push_str(out, "+")
+            out = hc_push_str(out, i64_to_string(i * 4))
+            out = hc_push_str(out, "];\n")
+            if hmma_left_mul_sign(k, j) < 0 { out = hc_push_str(out, "    neg.f32 %f1, %f1;\n") }
+            out = hc_push_str(out, "    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [")
+            out = hc_push_str(out, sbuf)
+            out = hc_push_str(out, "+")
+            out = hc_push_str(out, i64_to_string((k * 16 + j) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            j = j + 1
+        }
+        k = k + 1
+    }
+    out
+}
+
+// One wmma tile: acc(d=%f2..9) = L(sA row-major)·H(sH=%r20 col-major); store row-major to sS(%r21).
+fn hmma_emit_cell_tile(s: HypercomplexPtxState, sA: string) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [")
+    out = hc_push_str(out, sA)
+    out = hc_push_str(out, "], %r22;\n    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%r20], %r22;\n    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.shared.f32 [%r21], ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", %r22;\n")
+    out
+}
+
+// Emits sounio_ossm_oct_cell(A,B,C,x,H0,out,T): the FULL O-SSM octonion forward cell on tensor cores
+// with an in-kernel recurrence over T timesteps. Per step: S=L(A)·H (wmma) + B·x post-add; h=cubic
+// sigmoid (1/64 x³ + 1/4 x + 1/2, matching ossm_emit_sigmoid_f64 in ossm_forward.sio); CH=L(C)·h (wmma);
+// y=Re=CH[0]. H persists in shared across steps; two wmma m16n16k16 tiles/step. This is the batched
+// tensor-core form of the whole ossm_forward loop `h_t=sigmoid(A⊗h_{t-1}+B·x); y_t=Re(C⊗h_t)`.
+// HW-validated on the DGX Spark GB10 (sm_121): ptxas-clean + matches the scalar reference over the batch.
+pub fn hmma_emit_ossm_oct_cell_kernel(s: HypercomplexPtxState) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, ".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    out = hc_push_str(out, ".visible .entry sounio_ossm_oct_cell(\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_A,\n    .param .u64 .ptr .align 4 p_B,\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_C,\n    .param .u64 .ptr .align 4 p_x,\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_H,\n    .param .u64 .ptr .align 4 p_out,\n")
+    out = hc_push_str(out, "    .param .u32 p_T\n)\n{\n")
+    out = hc_push_str(out, "    .reg .pred %p<2>;\n    .reg .b16 %rs<2>;\n    .reg .b32 %r<32>;\n")
+    out = hc_push_str(out, "    .reg .f32 %f<16>;\n    .reg .b64 %rd<16>;\n")
+    out = hc_push_str(out, "    .shared .align 2 .b8 sLA[512];\n    .shared .align 2 .b8 sLC[512];\n")
+    out = hc_push_str(out, "    .shared .align 2 .b8 sH[512];\n    .shared .align 4 .b8 sS[1024];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [p_A];\n    ld.param.u64 %rd2, [p_B];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd3, [p_C];\n    ld.param.u64 %rd7, [p_x];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd8, [p_H];\n    ld.param.u64 %rd12, [p_out];\n    ld.param.u32 %r24, [p_T];\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd4, %rd1;\n    cvta.to.global.u64 %rd9, %rd2;\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd11, %rd3;\n    cvta.to.global.u64 %rd10, %rd7;\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd5, %rd8;\n    cvta.to.global.u64 %rd6, %rd12;\n")
+    out = hc_push_str(out, "    mov.u32 %r18, sLA;\n    mov.u32 %r19, sLC;\n    mov.u32 %r20, sH;\n    mov.u32 %r21, sS;\n")
+    out = hc_push_str(out, "    mov.b32 %r22, 16;\n    mov.f32 %f0, 0f00000000;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BUILD_DONE;\n")
+    out = hc_push_str(out, "    mov.u16 %rs1, 0;\n    mov.u32 %r28, 0;\n$ZERO:\n")
+    out = hc_push_str(out, "    add.s32 %r26, %r18, %r28;\n    st.shared.u16 [%r26], %rs1;\n")
+    out = hc_push_str(out, "    add.s32 %r26, %r19, %r28;\n    st.shared.u16 [%r26], %rs1;\n")
+    out = hc_push_str(out, "    add.s32 %r26, %r20, %r28;\n    st.shared.u16 [%r26], %rs1;\n")
+    out = hc_push_str(out, "    add.s32 %r28, %r28, 2;\n    setp.lt.u32 %p1, %r28, 512;\n    @%p1 bra $ZERO;\n")
+    out = hmma_emit_cell_build_left(out, "%r18", "%rd4")
+    out = hmma_emit_cell_build_left(out, "%r19", "%rd11")
+    var b0: i64 = 0
+    while b0 < 16 {
+        var r0: i64 = 0
+        while r0 < 8 {
+            out = hc_push_str(out, "    ld.global.f32 %f1, [%rd5+")
+            out = hc_push_str(out, i64_to_string((b0 * 8 + r0) * 4))
+            out = hc_push_str(out, "];\n    cvt.rn.f16.f32 %rs1, %f1;\n    st.shared.u16 [%r20+")
+            out = hc_push_str(out, i64_to_string((b0 * 16 + r0) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            r0 = r0 + 1
+        }
+        b0 = b0 + 1
+    }
+    out = hc_push_str(out, "$BUILD_DONE:\n    bar.sync 0;\n    mov.u32 %r23, 0;\n$STEP:\n")
+    out = hc_push_str(out, "    mul.lo.s32 %r25, %r23, 64;\n")
+    out = hmma_emit_cell_tile(out, "%r18")
+    out = hc_push_str(out, "    bar.sync 0;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $SKIP1;\n")
+    var b: i64 = 0
+    while b < 16 {
+        out = hc_push_str(out, "    add.s32 %r26, %r25, ")
+        out = hc_push_str(out, i64_to_string(b * 4))
+        out = hc_push_str(out, ";\n    cvt.s64.s32 %rd13, %r26;\n    add.s64 %rd13, %rd10, %rd13;\n    ld.global.f32 %f10, [%rd13];\n")
+        var k: i64 = 0
+        while k < 8 {
+            out = hc_push_str(out, "    ld.shared.f32 %f13, [%r21+")
+            out = hc_push_str(out, i64_to_string((k * 16 + b) * 4))
+            out = hc_push_str(out, "];\n    ld.global.f32 %f11, [%rd9+")
+            out = hc_push_str(out, i64_to_string(k * 4))
+            out = hc_push_str(out, "];\n    fma.rn.f32 %f12, %f11, %f10, %f13;\n")
+            out = hc_push_str(out, "    mul.f32 %f13, %f12, %f12;\n    mul.f32 %f14, %f13, %f12;\n")
+            out = hc_push_str(out, "    fma.rn.f32 %f15, %f12, 0f3E800000, 0f3F000000;\n")
+            out = hc_push_str(out, "    fma.rn.f32 %f12, %f14, 0f3C800000, %f15;\n")
+            out = hc_push_str(out, "    cvt.rn.f16.f32 %rs1, %f12;\n    st.shared.u16 [%r20+")
+            out = hc_push_str(out, i64_to_string((b * 16 + k) * 2))
+            out = hc_push_str(out, "], %rs1;\n")
+            k = k + 1
+        }
+        b = b + 1
+    }
+    out = hc_push_str(out, "$SKIP1:\n    bar.sync 0;\n")
+    out = hmma_emit_cell_tile(out, "%r19")
+    out = hc_push_str(out, "    bar.sync 0;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $SKIP2;\n")
+    var bo: i64 = 0
+    while bo < 16 {
+        out = hc_push_str(out, "    ld.shared.f32 %f1, [%r21+")
+        out = hc_push_str(out, i64_to_string(bo * 4))
+        out = hc_push_str(out, "];\n    add.s32 %r26, %r25, ")
+        out = hc_push_str(out, i64_to_string(bo * 4))
+        out = hc_push_str(out, ";\n    cvt.s64.s32 %rd13, %r26;\n    add.s64 %rd13, %rd6, %rd13;\n    st.global.f32 [%rd13], %f1;\n")
+        bo = bo + 1
+    }
+    out = hc_push_str(out, "$SKIP2:\n    bar.sync 0;\n")
+    out = hc_push_str(out, "    add.s32 %r23, %r23, 1;\n    setp.lt.s32 %p1, %r23, %r24;\n    @%p1 bra $STEP;\n")
+    out = hc_push_str(out, "    ret;\n}\n")
+    out
+}
+
+// ============================================================================
+// SEDENION S-SSM linear recurrence step on tensor cores (16×16 exact tile) + zero-divisor gating
+// ============================================================================
+
+// Emits sounio_sed_ssm_step(A,B,x,H,out): for a 16-wide batch of sedenion states H, the sedenion
+// multiply A⊗H is L16(A)·H — EXACTLY one wmma m16n16k16 tile (bits=4, no padding) — then thread 0 adds
+// B·x: S[k][b] = (A⊗H[:,b])[k] + B[k]·x[b]. The cd_sigma sign table σ(k⊕j,j,4) is emitted as a module
+// .global constant (hmma_sed_left_mul_sign) and the XOR index i=k⊕j is computed at runtime, so
+// build/stage/post-add are compact PTX loops. This is the sedenion counterpart of the octonion step
+// (sounio_ossm_oct_step) — the S-SSM linear recurrence. HW-validated on the DGX Spark GB10, including
+// the zero-divisor GATE: A=(e3+e10) annihilates the state direction (e6−e15) (||·||=0) while e1 passes.
+pub fn hmma_emit_sed_ssm_step_kernel(s: HypercomplexPtxState) -> HypercomplexPtxState with Mut, Panic, Div, Alloc {
+    var out = hc_push_str(s, ".version 9.0\n.target sm_121\n.address_size 64\n\n")
+    // sign table: sedsgn[k*16+j] = σ(k⊕j,j,4) as f32 ±1
+    out = hc_push_str(out, ".global .align 4 .b32 sounio_sedsgn[256] = {")
+    var idx: i64 = 0
+    while idx < 256 {
+        let k = idx >> 4
+        let j = idx & 15
+        if idx > 0 { out = hc_push_str(out, ", ") }
+        if hmma_sed_left_mul_sign(k, j) < 0 { out = hc_push_str(out, "0fBF800000") } else { out = hc_push_str(out, "0f3F800000") }
+        idx = idx + 1
+    }
+    out = hc_push_str(out, "};\n\n")
+    out = hc_push_str(out, ".visible .entry sounio_sed_ssm_step(\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_A,\n    .param .u64 .ptr .align 4 p_B,\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_x,\n    .param .u64 .ptr .align 4 p_H,\n")
+    out = hc_push_str(out, "    .param .u64 .ptr .align 4 p_out\n)\n{\n")
+    out = hc_push_str(out, "    .reg .pred %p<2>;\n    .reg .b16 %rs<2>;\n    .reg .b32 %r<28>;\n")
+    out = hc_push_str(out, "    .reg .f32 %f<12>;\n    .reg .b64 %rd<18>;\n")
+    out = hc_push_str(out, "    .shared .align 2 .b8 sL[512];\n    .shared .align 2 .b8 sH[512];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [p_A];\n    ld.param.u64 %rd2, [p_B];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd7, [p_x];\n    ld.param.u64 %rd8, [p_H];\n    ld.param.u64 %rd3, [p_out];\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd4, %rd1;\n    cvta.to.global.u64 %rd9, %rd2;\n")
+    out = hc_push_str(out, "    cvta.to.global.u64 %rd10, %rd7;\n    cvta.to.global.u64 %rd5, %rd8;\n    cvta.to.global.u64 %rd6, %rd3;\n")
+    out = hc_push_str(out, "    mov.u32 %r18, sL;\n    mov.u32 %r19, sH;\n    mov.u64 %rd14, sounio_sedsgn;\n")
+    out = hc_push_str(out, "    mov.u32 %r16, %tid.x;\n    setp.ne.u32 %p1, %r16, 0;\n    @%p1 bra $AFTERBUILD;\n")
+    // build L(A): sL[idx] = σ(k⊕j,j,4) * A[k⊕j]
+    out = hc_push_str(out, "    mov.u32 %r20, 0;\n$BUILD:\n")
+    out = hc_push_str(out, "    shr.u32 %r21, %r20, 4;\n    and.b32 %r22, %r20, 15;\n    xor.b32 %r23, %r21, %r22;\n")
+    out = hc_push_str(out, "    mul.wide.u32 %rd13, %r23, 4;\n    add.s64 %rd13, %rd4, %rd13;\n    ld.global.f32 %f1, [%rd13];\n")
+    out = hc_push_str(out, "    mul.wide.u32 %rd15, %r20, 4;\n    add.s64 %rd15, %rd14, %rd15;\n    ld.global.f32 %f2, [%rd15];\n")
+    out = hc_push_str(out, "    mul.f32 %f1, %f1, %f2;\n    cvt.rn.f16.f32 %rs1, %f1;\n")
+    out = hc_push_str(out, "    mad.lo.u32 %r24, %r20, 2, %r18;\n    st.shared.u16 [%r24], %rs1;\n")
+    out = hc_push_str(out, "    add.u32 %r20, %r20, 1;\n    setp.lt.u32 %p1, %r20, 256;\n    @%p1 bra $BUILD;\n")
+    // stage H col-major (H[b*16+r] contiguous): sH[idx]=half(H[idx])
+    out = hc_push_str(out, "    mov.u32 %r20, 0;\n$STAGE:\n")
+    out = hc_push_str(out, "    mul.wide.u32 %rd13, %r20, 4;\n    add.s64 %rd13, %rd5, %rd13;\n    ld.global.f32 %f1, [%rd13];\n")
+    out = hc_push_str(out, "    cvt.rn.f16.f32 %rs1, %f1;\n")
+    out = hc_push_str(out, "    mad.lo.u32 %r24, %r20, 2, %r19;\n    st.shared.u16 [%r24], %rs1;\n")
+    out = hc_push_str(out, "    add.u32 %r20, %r20, 1;\n    setp.lt.u32 %p1, %r20, 256;\n    @%p1 bra $STAGE;\n")
+    out = hc_push_str(out, "$AFTERBUILD:\n    bar.sync 0;\n    mov.b32 %r1, 16;\n    mov.f32 %f0, 0f00000000;\n")
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", [%r18], %r1;\n    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", [%r19], %r1;\n    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 2, 8)
+    out = hc_push_str(out, ", ")
+    out = hmma_emit_frag_list(out, "%r", 10, 8)
+    out = hc_push_str(out, ", {%f0, %f0, %f0, %f0, %f0, %f0, %f0, %f0};\n")
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd6], ")
+    out = hmma_emit_frag_list(out, "%f", 2, 8)
+    out = hc_push_str(out, ", %r1;\n    bar.sync 0;\n")
+    // thread 0: S[k*16+b] += B[k]*x[b]
+    out = hc_push_str(out, "    mov.u32 %r16, %tid.x;\n    setp.ne.u32 %p1, %r16, 0;\n    @%p1 bra $DONE;\n")
+    out = hc_push_str(out, "    mov.u32 %r20, 0;\n$PADD:\n")
+    out = hc_push_str(out, "    shr.u32 %r21, %r20, 4;\n    and.b32 %r22, %r20, 15;\n")
+    out = hc_push_str(out, "    mul.wide.u32 %rd13, %r21, 4;\n    add.s64 %rd13, %rd9, %rd13;\n    ld.global.f32 %f5, [%rd13];\n")
+    out = hc_push_str(out, "    mul.wide.u32 %rd13, %r22, 4;\n    add.s64 %rd13, %rd10, %rd13;\n    ld.global.f32 %f6, [%rd13];\n")
+    out = hc_push_str(out, "    mul.wide.u32 %rd13, %r20, 4;\n    add.s64 %rd13, %rd6, %rd13;\n    ld.global.f32 %f7, [%rd13];\n")
+    out = hc_push_str(out, "    fma.rn.f32 %f7, %f5, %f6, %f7;\n    st.global.f32 [%rd13], %f7;\n")
+    out = hc_push_str(out, "    add.u32 %r20, %r20, 1;\n    setp.lt.u32 %p1, %r20, 256;\n    @%p1 bra $PADD;\n")
+    out = hc_push_str(out, "$DONE:\n    ret;\n}\n")
     out
 }

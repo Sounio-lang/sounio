@@ -1,0 +1,264 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/partial_corr.sio — first-order partial correlation
+//
+// The correlation between x and y after removing the linear effect of a third
+// variable z — the tool for distinguishing genuine association from confounding:
+//
+//   partial_corr(x, y, z, n) -> PartialResult
+//
+//   r_xy·z = (r_xy − r_xz·r_yz) / √((1 − r_xz²)(1 − r_yz²)),
+// with a t-test  t = r_xy·z·√(n−3)/√(1 − r_xy·z²) ~ t(n−3).
+//
+// Pure Sounio: three Pearson correlations in one pass each; incomplete beta for
+// the t tail. No nested data-array calls.
+//
+// References:
+//   Yule (1907); Anderson, "An Introduction to Multivariate Statistical Analysis".
+
+module stats::partial_corr
+
+fn pc_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / pc_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn pc_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn pc_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn pc_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * pc_ln(tt) - tt + pc_ln(a)
+}
+
+fn pc_betacf(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let qab = a + b
+    let qap = a + 1.0
+    let qam = a - 1.0
+    var c = 1.0
+    var d = 1.0 - qab * x / qap
+    if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+    d = 1.0 / d
+    var h = d
+    var m = 1
+    while m <= 200 {
+        let mf = m as f64
+        let m2 = 2.0 * mf
+        var aa = mf * (b - mf) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        h = h * d * c
+        aa = 0.0 - (a + mf) * (qab + mf) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-14 { m = 201 } else { m = m + 1 }
+    }
+    return h
+}
+
+fn pc_ibeta(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x >= 1.0 { return 1.0 }
+    let lbeta = pc_lgamma(a) + pc_lgamma(b) - pc_lgamma(a + b)
+    let front = pc_exp(a * pc_ln(x) + b * pc_ln(1.0 - x) - lbeta)
+    if x < (a + 1.0) / (a + b + 2.0) { return front * pc_betacf(a, b, x) / a }
+    return 1.0 - front * pc_betacf(b, a, 1.0 - x) / b
+}
+
+fn pc_t_two_tail(t: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if df <= 0.0 { return 1.0 }
+    let at = if t < 0.0 { 0.0 - t } else { t }
+    let x = df / (df + at * at)
+    return pc_ibeta(df * 0.5, 0.5, x)
+}
+
+// Pearson correlation of two columns held in [256] buffers.
+fn pc_pearson(a: &[f64; 256], b: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    let nf = n as f64
+    var sa = 0.0
+    var sb = 0.0
+    var i = 0
+    while i < n { sa = sa + a[i as usize]; sb = sb + b[i as usize]; i = i + 1 }
+    let ma = sa / nf
+    let mb = sb / nf
+    var saa = 0.0
+    var sbb = 0.0
+    var sab = 0.0
+    var j = 0
+    while j < n {
+        let da = a[j as usize] - ma
+        let db = b[j as usize] - mb
+        saa = saa + da * da
+        sbb = sbb + db * db
+        sab = sab + da * db
+        j = j + 1
+    }
+    let den = pc_sqrt(saa * sbb)
+    if den <= 0.0 { return 0.0 }
+    return sab / den
+}
+
+pub struct PartialResult {
+    pub partial: f64,   // r_xy.z
+    pub r_xy: f64,
+    pub r_xz: f64,
+    pub r_yz: f64,
+    pub t: f64,
+    pub df: i64,        // n - 3
+    pub p: f64,
+}
+
+/// First-order partial correlation of x and y controlling for z.
+///
+/// Parâmetros: x, y, z — the three variables; n — size (>=4, <=256).
+/// Retorno: PartialResult (partial, r_xy, r_xz, r_yz, t, df, p).
+/// Referências: Yule (1907).
+pub fn partial_corr(x: &[f64; 256], y: &[f64; 256], z: &[f64; 256], n: i32) -> PartialResult with Mut, Div, Panic {
+    if n < 4 {
+        return PartialResult { partial: 0.0, r_xy: 0.0, r_xz: 0.0, r_yz: 0.0, t: 0.0, df: 0, p: 1.0 }
+    }
+    let rxy = pc_pearson(x, y, n)
+    let rxz = pc_pearson(x, z, n)
+    let ryz = pc_pearson(y, z, n)
+    let den = pc_sqrt((1.0 - rxz * rxz) * (1.0 - ryz * ryz))
+    var partial = 0.0
+    if den > 1.0e-300 { partial = (rxy - rxz * ryz) / den }
+    if partial > 1.0 { partial = 1.0 }
+    if partial < 0.0 - 1.0 { partial = 0.0 - 1.0 }
+    let dff = (n as f64) - 3.0
+    var t = 0.0
+    let om = 1.0 - partial * partial
+    if om > 1.0e-300 { t = partial * pc_sqrt(dff) / pc_sqrt(om) } else { t = 1.0e9 }
+    let p = pc_t_two_tail(t, dff)
+    return PartialResult { partial: partial, r_xy: rxy, r_xz: rxz, r_yz: ryz, t: t, df: (n - 3) as i64, p: p }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// z={1,2,3,4}, x={2,1,4,3}, y={1,3,2,4}. r_xy=0, r_xz=0.6, r_yz=0.8.
+// partial = (0 - 0.48)/sqrt(0.64·0.36) = -0.48/0.48 = -1.
+fn test_partial() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var z: [f64; 256] = [0.0; 256]
+    x[0]=2.0; x[1]=1.0; x[2]=4.0; x[3]=3.0
+    y[0]=1.0; y[1]=3.0; y[2]=2.0; y[3]=4.0
+    z[0]=1.0; z[1]=2.0; z[2]=3.0; z[3]=4.0
+    let r = partial_corr(&x, &y, &z, 4)
+    var ok = true
+    ok = check(1, approx(r.r_xy, 0.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.r_xz, 0.6, 1.0e-6)) && ok
+    ok = check(3, approx(r.r_yz, 0.8, 1.0e-6)) && ok
+    ok = check(4, approx(r.partial, 0.0 - 1.0, 1.0e-5)) && ok
+    return ok
+}
+
+// z uncorrelated with x and y -> partial = r_xy. x=y={1,2,3,4}, z={1,-1,-1,1}.
+// r_xz=0, r_yz=0 -> partial = r_xy = 1.
+fn test_uncorrelated_z() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var z: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=1.0; y[1]=2.0; y[2]=3.0; y[3]=4.0
+    z[0]=1.0; z[1]=0.0-1.0; z[2]=0.0-1.0; z[3]=1.0
+    let r = partial_corr(&x, &y, &z, 4)
+    var ok = true
+    ok = check(10, approx(r.r_xz, 0.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.r_yz, 0.0, 1.0e-9)) && ok
+    ok = check(12, approx(r.partial, 1.0, 1.0e-6)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_partial() && ok
+    ok = test_uncorrelated_z() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

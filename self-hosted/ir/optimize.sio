@@ -118,7 +118,7 @@ fn make_folded_load_imm(orig: IrInstr, value: i64) -> IrInstr {
         imm_flags: 0,
         bin_op: BinaryOp::OpAdd,
         un_op: UnaryOp::OpNeg,
-        name: ir_empty_name(),
+        name_id: 0,
         call_args: ir_empty_reg_list(),
         arg_count: 0,
     }
@@ -139,7 +139,7 @@ fn make_copy_instr(dst: i64, src: i64) -> IrInstr {
         imm_flags: 0,
         bin_op: BinaryOp::OpAdd,
         un_op: UnaryOp::OpNeg,
-        name: ir_empty_name(),
+        name_id: 0,
         call_args: ir_empty_reg_list(),
         arg_count: 0,
     }
@@ -151,11 +151,11 @@ fn make_copy_instr(dst: i64, src: i64) -> IrInstr {
 // constants, replaces the instruction with IrLoadImm of the computed result.
 fn const_fold_pass(func: IrFunction) -> IrFunction with Mut, Panic, Div {
     var info = const_info_new()
-    var result = func
+    var result = ir_function_clone(&func)
 
     var i: i64 = 0
     while i < result.instr_count {
-        let instr = result.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(result.region, (i)))
         let dst = instr.dst
 
         match instr.op {
@@ -176,6 +176,7 @@ fn const_fold_pass(func: IrFunction) -> IrFunction with Mut, Panic, Div {
                 if dst >= 0 && dst < 8192 {
                     info.is_float_const[dst as usize] = true
                     info.float_val[dst as usize] = instr.imm_f64
+                    info.is_const[dst as usize] = false
                 }
             }
             IrOpcode::IrBinOp => {
@@ -189,7 +190,7 @@ fn const_fold_pass(func: IrFunction) -> IrFunction with Mut, Panic, Div {
                         let folded = fold_result.0
                         let val = fold_result.1
                         if folded {
-                            result.instrs[i as usize] = make_folded_load_imm(instr, val)
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), make_folded_load_imm(instr, val))
                             if dst >= 0 && dst < 8192 {
                                 info.is_const[dst as usize] = true
                                 info.const_val[dst as usize] = val
@@ -222,7 +223,7 @@ fn const_fold_pass(func: IrFunction) -> IrFunction with Mut, Panic, Div {
                     let folded = fold_result.0
                     let val = fold_result.1
                     if folded {
-                        result.instrs[i as usize] = make_folded_load_imm(instr, val)
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), make_folded_load_imm(instr, val))
                         if dst >= 0 && dst < 8192 {
                             info.is_const[dst as usize] = true
                             info.const_val[dst as usize] = val
@@ -315,7 +316,7 @@ fn count_uses(func: IrFunction) -> UseCount with Mut, Panic, Div, Alloc {
 
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
 
         // Count src1
         uc = inc_use(uc, instr.src1)
@@ -328,10 +329,10 @@ fn count_uses(func: IrFunction) -> UseCount with Mut, Panic, Div, Alloc {
 
         // For IrIndexSet, imm_i64 holds the source register
         match instr.op {
-            IrOpcode::IrIndexSet => {
-                uc = inc_use(uc, instr.imm_i64)
-            }
-            _ => {}
+        IrOpcode::IrIndexSet => {
+            uc = inc_use(uc, instr.imm_i64)
+        }
+        _ => {}
         }
 
         i = i + 1
@@ -344,7 +345,9 @@ fn count_uses(func: IrFunction) -> UseCount with Mut, Panic, Div, Alloc {
 fn instr_has_side_effects(instr: IrInstr) -> bool {
     match instr.op {
         IrOpcode::IrCall       => true,
+        IrOpcode::IrCallSret   => true,
         IrOpcode::IrReturn     => true,
+        IrOpcode::IrReturnSret => true,
         IrOpcode::IrJump       => true,
         IrOpcode::IrBranchTrue => true,
         IrOpcode::IrBranchFalse => true,
@@ -363,18 +366,18 @@ fn instr_has_side_effects(instr: IrInstr) -> bool {
 // Dead instructions are replaced with IrNop.
 fn dce_pass(func: IrFunction) -> IrFunction with Mut, Panic, Div, Alloc {
     let uc = count_uses(func)
-    var result = func
+    var result = ir_function_clone(&func)
 
     var i: i64 = 0
     while i < result.instr_count {
-        let instr = result.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(result.region, (i)))
         let dst = instr.dst
 
         if dst >= 0 && dst < 8192 {
             if uc.counts[dst as usize] == 0 {
                 if !instr_has_side_effects(instr) {
                     // Dead instruction: replace with NOP
-                    result.instrs[i as usize] = ir_nop()
+                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_nop())
                 }
             }
         }
@@ -436,7 +439,7 @@ fn make_add_self(dst: i64, src: i64) -> IrInstr {
         imm_flags: 0,
         bin_op: BinaryOp::OpAdd,
         un_op: UnaryOp::OpNeg,
-        name: ir_empty_name(),
+        name_id: 0,
         call_args: ir_empty_reg_list(),
         arg_count: 0,
     }
@@ -455,13 +458,13 @@ fn make_add_self(dst: i64, src: i64) -> IrInstr {
 fn strength_reduce_pass(func: IrFunction) -> IrFunction with Mut, Panic, Div {
     // We need constant information to know which operands are known values.
     var info = const_info_new()
-    var result = func
+    var result = ir_function_clone(&func)
 
     // First pass: gather constant info (same as const_fold, but we only record,
     // we don't fold -- const_fold already ran).
     var j: i64 = 0
     while j < result.instr_count {
-        let instr = result.instrs[j as usize]
+        let instr = ir_arena_load(ir_region_slot_r(result.region, (j)))
         let dst = instr.dst
         match instr.op {
             IrOpcode::IrLoadImm => {
@@ -484,7 +487,7 @@ fn strength_reduce_pass(func: IrFunction) -> IrFunction with Mut, Panic, Div {
     // Second pass: apply strength reduction transforms.
     var i: i64 = 0
     while i < result.instr_count {
-        let instr = result.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(result.region, (i)))
 
         match instr.op {
             IrOpcode::IrBinOp => {
@@ -499,48 +502,48 @@ fn strength_reduce_pass(func: IrFunction) -> IrFunction with Mut, Panic, Div {
                 if is_op_mul(instr.bin_op) {
                     // x * 0 -> load 0
                     if s2_const && s2_val == 0 {
-                        result.instrs[i as usize] = make_folded_load_imm(instr, 0)
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), make_folded_load_imm(instr, 0))
                         if dst >= 0 && dst < 8192 {
                             info.is_const[dst as usize] = true
                             info.const_val[dst as usize] = 0
                         }
                     // 0 * x -> load 0
                     } else if s1_const && s1_val == 0 {
-                        result.instrs[i as usize] = make_folded_load_imm(instr, 0)
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), make_folded_load_imm(instr, 0))
                         if dst >= 0 && dst < 8192 {
                             info.is_const[dst as usize] = true
                             info.const_val[dst as usize] = 0
                         }
                     // x * 1 -> copy x
                     } else if s2_const && s2_val == 1 {
-                        result.instrs[i as usize] = make_copy_instr(dst, s1)
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), make_copy_instr(dst, s1))
                     // 1 * x -> copy x
                     } else if s1_const && s1_val == 1 {
-                        result.instrs[i as usize] = make_copy_instr(dst, s2)
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), make_copy_instr(dst, s2))
                     // x * 2 -> x + x
                     } else if s2_const && s2_val == 2 {
-                        result.instrs[i as usize] = make_add_self(dst, s1)
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), make_add_self(dst, s1))
                     // 2 * x -> x + x
                     } else if s1_const && s1_val == 2 {
-                        result.instrs[i as usize] = make_add_self(dst, s2)
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), make_add_self(dst, s2))
                     }
                 } else if is_op_add(instr.bin_op) {
                     // x + 0 -> copy x
                     if s2_const && s2_val == 0 {
-                        result.instrs[i as usize] = make_copy_instr(dst, s1)
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), make_copy_instr(dst, s1))
                     // 0 + x -> copy x
                     } else if s1_const && s1_val == 0 {
-                        result.instrs[i as usize] = make_copy_instr(dst, s2)
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), make_copy_instr(dst, s2))
                     }
                 } else if is_op_sub(instr.bin_op) {
                     // x - 0 -> copy x
                     if s2_const && s2_val == 0 {
-                        result.instrs[i as usize] = make_copy_instr(dst, s1)
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), make_copy_instr(dst, s1))
                     }
                 } else if is_op_div(instr.bin_op) {
                     // x / 1 -> copy x
                     if s2_const && s2_val == 1 {
-                        result.instrs[i as usize] = make_copy_instr(dst, s1)
+                        ir_arena_store(ir_region_slot_w(result.region, (i)), make_copy_instr(dst, s1))
                     }
                 }
             }
@@ -585,7 +588,7 @@ fn opt_check_opcode(func: IrFunction, pos: i64, expected: IrOpcode) -> bool {
     if pos < 0 || pos >= func.instr_count {
         return false
     }
-    let instr = func.instrs[pos as usize]
+    let instr = ir_arena_load(ir_region_slot_r(func.region, (pos)))
     opcodes_equal(instr.op, expected)
 }
 
@@ -594,7 +597,7 @@ fn opt_check_load_imm(func: IrFunction, pos: i64, expected_val: i64) -> bool {
     if pos < 0 || pos >= func.instr_count {
         return false
     }
-    let instr = func.instrs[pos as usize]
+    let instr = ir_arena_load(ir_region_slot_r(func.region, (pos)))
     if !opcodes_equal(instr.op, IrOpcode::IrLoadImm) {
         return false
     }
@@ -602,7 +605,7 @@ fn opt_check_load_imm(func: IrFunction, pos: i64, expected_val: i64) -> bool {
 }
 
 // Build a test function with given instruction count.
-fn opt_make_test_func(instrs: [IrInstr; 128], count: i64) -> IrFunction {
+fn opt_make_test_func(instrs: [IrInstr; 1024], count: i64) -> IrFunction {
     IrFunction {
         name: ir_empty_name(),
         instrs: instrs,
@@ -612,8 +615,15 @@ fn opt_make_test_func(instrs: [IrInstr; 128], count: i64) -> IrFunction {
         param_count: 0,
         param_regs: [IR_INVALID_REG; 64],
         compile_strategy: IR_STRATEGY_STANDARD,
+        returns_float: 0,
+        return_struct_name: ir_empty_name(),
+        return_fixed_array_len: 0 - 1,
         prof_counter_id: -1,
         hyper_algebra_kind: -1,
+        is_sret: 0,
+        sret_dest_reg: -1,
+        bss_size: 0,
+        first_param_is_ref: 0,
     }
 }
 
@@ -623,7 +633,7 @@ fn opt_make_test_func(instrs: [IrInstr; 128], count: i64) -> IrFunction {
 
 // T01: Constant folding of addition (3 + 5 = 8)
 fn test_const_fold_add() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_load_imm(0, 3)
     instrs[1] = ir_load_imm(1, 5)
     instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
@@ -638,7 +648,7 @@ fn test_const_fold_add() -> bool with Mut, Panic, Div {
 
 // T02: Constant folding of multiplication (7 * 6 = 42)
 fn test_const_fold_mul() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_load_imm(0, 7)
     instrs[1] = ir_load_imm(1, 6)
     instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)
@@ -652,7 +662,7 @@ fn test_const_fold_mul() -> bool with Mut, Panic, Div {
 
 // T03: Constant folding of subtraction (10 - 3 = 7)
 fn test_const_fold_sub() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_load_imm(0, 10)
     instrs[1] = ir_load_imm(1, 3)
     instrs[2] = ir_binop(2, 0, BinaryOp::OpSub, 1)
@@ -666,7 +676,7 @@ fn test_const_fold_sub() -> bool with Mut, Panic, Div {
 
 // T04: Constant folding of comparison (5 == 5 -> 1)
 fn test_const_fold_eq() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_load_imm(0, 5)
     instrs[1] = ir_load_imm(1, 5)
     instrs[2] = ir_binop(2, 0, BinaryOp::OpEq, 1)
@@ -680,7 +690,7 @@ fn test_const_fold_eq() -> bool with Mut, Panic, Div {
 
 // T05: Constant folding of unary negation (neg 42 = -42)
 fn test_const_fold_neg() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_load_imm(0, 42)
     instrs[1] = ir_unaryop(1, UnaryOp::OpNeg, 0)
     instrs[2] = ir_return(1)
@@ -694,7 +704,7 @@ fn test_const_fold_neg() -> bool with Mut, Panic, Div {
 
 // T06: Constant folding does not fold division by zero
 fn test_const_fold_div_by_zero() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_load_imm(0, 10)
     instrs[1] = ir_load_imm(1, 0)
     instrs[2] = ir_binop(2, 0, BinaryOp::OpDiv, 1)
@@ -709,7 +719,7 @@ fn test_const_fold_div_by_zero() -> bool with Mut, Panic, Div {
 
 // T07: DCE removes a dead instruction
 fn test_dce_removes_dead_instr() -> bool with Mut, Panic, Div, Alloc {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_load_imm(0, 100)   // used by return
     instrs[1] = ir_load_imm(1, 200)   // dead: r1 never used
     instrs[2] = ir_return(0)
@@ -726,7 +736,7 @@ fn test_dce_removes_dead_instr() -> bool with Mut, Panic, Div, Alloc {
 
 // T08: DCE does not remove instructions with side effects
 fn test_dce_keeps_side_effects() -> bool with Mut, Panic, Div, Alloc {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     // A call whose return value is unused should NOT be eliminated
     instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
     instrs[1] = ir_load_imm(1, 0)
@@ -741,7 +751,7 @@ fn test_dce_keeps_side_effects() -> bool with Mut, Panic, Div, Alloc {
 
 // T09: Strength reduction of x * 2 -> x + x
 fn test_strength_reduce_mul_by_2() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_load_imm(0, 2)     // const 2
     instrs[1] = ir_load_imm(1, 100)   // this will NOT be recognized as const by SR
                                         // because SR only tracks IrLoadImm
@@ -759,14 +769,14 @@ fn test_strength_reduce_mul_by_2() -> bool with Mut, Panic, Div {
     if !opt_check_opcode(reduced, 2, IrOpcode::IrBinOp) {
         return false
     }
-    let instr = reduced.instrs[2]
+    let instr = ir_arena_load(ir_region_slot_r(reduced.region, (2)))
     // src1 and src2 should both be 0 (the non-constant operand)
     instr.src1 == 0 && instr.src2 == 0
 }
 
 // T10: Strength reduction of x + 0 -> copy x
 fn test_strength_reduce_add_zero() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
     instrs[1] = ir_load_imm(1, 0)
     instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
@@ -779,13 +789,13 @@ fn test_strength_reduce_add_zero() -> bool with Mut, Panic, Div {
     if !opt_check_opcode(reduced, 2, IrOpcode::IrCopy) {
         return false
     }
-    let instr = reduced.instrs[2]
+    let instr = ir_arena_load(ir_region_slot_r(reduced.region, (2)))
     instr.src1 == 0
 }
 
 // T11: Strength reduction of x * 1 -> copy x
 fn test_strength_reduce_mul_by_1() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
     instrs[1] = ir_load_imm(1, 1)
     instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)
@@ -797,13 +807,13 @@ fn test_strength_reduce_mul_by_1() -> bool with Mut, Panic, Div {
     if !opt_check_opcode(reduced, 2, IrOpcode::IrCopy) {
         return false
     }
-    let instr = reduced.instrs[2]
+    let instr = ir_arena_load(ir_region_slot_r(reduced.region, (2)))
     instr.src1 == 0
 }
 
 // T12: Strength reduction of x * 0 -> load 0
 fn test_strength_reduce_mul_by_0() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
     instrs[1] = ir_load_imm(1, 0)
     instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)
@@ -817,7 +827,7 @@ fn test_strength_reduce_mul_by_0() -> bool with Mut, Panic, Div {
 
 // T13: Strength reduction of x / 1 -> copy x
 fn test_strength_reduce_div_by_1() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
     instrs[1] = ir_load_imm(1, 1)
     instrs[2] = ir_binop(2, 0, BinaryOp::OpDiv, 1)
@@ -829,13 +839,13 @@ fn test_strength_reduce_div_by_1() -> bool with Mut, Panic, Div {
     if !opt_check_opcode(reduced, 2, IrOpcode::IrCopy) {
         return false
     }
-    let instr = reduced.instrs[2]
+    let instr = ir_arena_load(ir_region_slot_r(reduced.region, (2)))
     instr.src1 == 0
 }
 
 // T14: Strength reduction of x - 0 -> copy x
 fn test_strength_reduce_sub_zero() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
     instrs[1] = ir_load_imm(1, 0)
     instrs[2] = ir_binop(2, 0, BinaryOp::OpSub, 1)
@@ -847,7 +857,7 @@ fn test_strength_reduce_sub_zero() -> bool with Mut, Panic, Div {
     if !opt_check_opcode(reduced, 2, IrOpcode::IrCopy) {
         return false
     }
-    let instr = reduced.instrs[2]
+    let instr = ir_arena_load(ir_region_slot_r(reduced.region, (2)))
     instr.src1 == 0
 }
 
@@ -855,7 +865,7 @@ fn test_strength_reduce_sub_zero() -> bool with Mut, Panic, Div {
 fn test_pipeline_combined() -> bool with Mut, Panic, Div, Alloc {
     // Build: r0 = 3, r1 = 5, r2 = r0 + r1 (folds to 8),
     //        r3 = 100 (dead), return r2
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_load_imm(0, 3)
     instrs[1] = ir_load_imm(1, 5)
     instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
@@ -880,7 +890,7 @@ fn test_pipeline_combined() -> bool with Mut, Panic, Div, Alloc {
 
 // T16: Constant folding through copy propagation
 fn test_const_fold_through_copy() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_load_imm(0, 10)
     instrs[1] = ir_copy(1, 0)           // r1 = r0 = 10
     instrs[2] = ir_load_imm(2, 20)
@@ -895,7 +905,7 @@ fn test_const_fold_through_copy() -> bool with Mut, Panic, Div {
 
 // T17: Constant folding of chained operations
 fn test_const_fold_chain() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_load_imm(0, 2)
     instrs[1] = ir_load_imm(1, 3)
     instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)  // r2 = 2 * 3 = 6
@@ -913,7 +923,7 @@ fn test_const_fold_chain() -> bool with Mut, Panic, Div {
 
 // T18: Constant folding with bitwise AND
 fn test_const_fold_bitwise_and() -> bool with Mut, Panic, Div {
-    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs[0] = ir_load_imm(0, 255)     // 0xFF
     instrs[1] = ir_load_imm(1, 15)      // 0x0F
     instrs[2] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
@@ -927,13 +937,13 @@ fn test_const_fold_bitwise_and() -> bool with Mut, Panic, Div {
 
 // T19: Module-level optimization applies to all functions
 fn test_optimize_module_all_funcs() -> bool with Mut, Panic, Div, Alloc {
-    var instrs_a: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs_a: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs_a[0] = ir_load_imm(0, 10)
     instrs_a[1] = ir_load_imm(1, 20)
     instrs_a[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
     instrs_a[3] = ir_return(2)
 
-    var instrs_b: [IrInstr; 128] = [ir_nop(); 128]
+    var instrs_b: [IrInstr; 1024] = [ir_nop(); 1024]
     instrs_b[0] = ir_load_imm(0, 3)
     instrs_b[1] = ir_load_imm(1, 7)
     instrs_b[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)

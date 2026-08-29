@@ -1,0 +1,192 @@
+// Shadow-only transactional SOIR v5 writer.
+//
+// This module is deliberately outside the default compiler pipeline. The
+// first vertical owns only the scalar empty-module wire form; it neither
+// accepts the legacy module aggregate nor touches the standalone wide-numeric
+// payload codec.
+
+module ir::soir_writer
+
+pub let SOIR_WRITER_MAX_SIZE: i64 = 131072
+pub let SOIR_WRITER_EMPTY_EXTENSION_COUNT_FIELDS: i64 = 36
+pub let SOIR_WRITER_SCALAR_EMPTY_V5_SIZE: i64 = 320
+pub let SOIR_WRITER_VERSION_V5: i8 = 5
+
+pub let SOIR_WRITER_OK: i64 = 0
+pub let SOIR_WRITER_VIEW_BOUNDS: i64 = -3
+pub let SOIR_WRITER_STALE_PLAN: i64 = -6
+pub let SOIR_WRITER_INTERNAL_BOUNDS: i64 = -7
+
+// Emit revalidates every scalar field produced by preflight before writing.
+// The current checker does not enforce field privacy, so this is an integrity
+// check rather than an unforgeable capability boundary.
+pub struct SoirWritePlan {
+    start: i64,
+    capacity: i64,
+    required: i64,
+    end: i64,
+    version: i8,
+    status: i64,
+}
+
+struct SoirWriterCursor {
+    pos: i64,
+    limit: i64,
+    status: i64,
+}
+
+fn soir_writer_failed_plan(start: i64, capacity: i64, status: i64) -> SoirWritePlan {
+    SoirWritePlan {
+        start: start,
+        capacity: capacity,
+        required: 0,
+        end: start,
+        version: SOIR_WRITER_VERSION_V5,
+        status: status,
+    }
+}
+
+pub fn soir_write_plan_status(plan: &SoirWritePlan) -> i64 {
+    (*plan).status
+}
+
+pub fn soir_write_plan_required(plan: &SoirWritePlan) -> i64 {
+    (*plan).required
+}
+
+pub fn soir_write_plan_start(plan: &SoirWritePlan) -> i64 {
+    (*plan).start
+}
+
+pub fn soir_write_plan_end(plan: &SoirWritePlan) -> i64 {
+    (*plan).end
+}
+
+pub fn soir_write_plan_version(plan: &SoirWritePlan) -> i8 {
+    (*plan).version
+}
+
+fn soir_writer_put_i8(
+    cursor: &! SoirWriterCursor,
+    out_buf: &![i8; 131072],
+    value: i8,
+) with Mut, Panic, Div {
+    if (*cursor).status != SOIR_WRITER_OK { return }
+    if (*cursor).pos < 0 ||
+       (*cursor).pos >= (*cursor).limit ||
+       (*cursor).pos >= SOIR_WRITER_MAX_SIZE {
+        (*cursor).status = SOIR_WRITER_INTERNAL_BOUNDS
+        return
+    }
+    out_buf[(*cursor).pos as usize] = value
+    (*cursor).pos = (*cursor).pos + 1
+}
+
+fn soir_writer_put_i64(
+    cursor: &! SoirWriterCursor,
+    out_buf: &![i8; 131072],
+    value: i64,
+) with Mut, Panic, Div {
+    var shift: i64 = 0
+    while shift < 64 {
+        soir_writer_put_i8(cursor, out_buf, ((value >> shift) & 255) as i8)
+        shift = shift + 8
+    }
+}
+
+fn soir_writer_put_zeroes(
+    cursor: &! SoirWriterCursor,
+    out_buf: &![i8; 131072],
+    count: i64,
+) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < count {
+        soir_writer_put_i8(cursor, out_buf, 0 as i8)
+        i = i + 1
+    }
+}
+
+fn soir_writer_put_module_header_v5(
+    cursor: &! SoirWriterCursor,
+    out_buf: &![i8; 131072],
+) with Mut, Panic, Div {
+    soir_writer_put_i8(cursor, out_buf, 83 as i8)
+    soir_writer_put_i8(cursor, out_buf, 79 as i8)
+    soir_writer_put_i8(cursor, out_buf, 73 as i8)
+    soir_writer_put_i8(cursor, out_buf, 82 as i8)
+    soir_writer_put_i8(cursor, out_buf, SOIR_WRITER_VERSION_V5)
+    soir_writer_put_zeroes(cursor, out_buf, 3)
+    soir_writer_put_i64(cursor, out_buf, 0)
+}
+
+fn soir_writer_put_empty_module_tail_v5(
+    cursor: &! SoirWriterCursor,
+    out_buf: &![i8; 131072],
+) with Mut, Panic, Div {
+    // String count, the 36 empty extension counts, and BSS total size.
+    soir_writer_put_i64(cursor, out_buf, 0)
+    var extension_index: i64 = 0
+    while extension_index < SOIR_WRITER_EMPTY_EXTENSION_COUNT_FIELDS {
+        soir_writer_put_i64(cursor, out_buf, 0)
+        extension_index = extension_index + 1
+    }
+    soir_writer_put_i64(cursor, out_buf, 0)
+}
+
+fn soir_writer_scalar_plan_matches(left: &SoirWritePlan, right: &SoirWritePlan) -> bool {
+    (*left).status == (*right).status &&
+        (*left).start == (*right).start &&
+        (*left).capacity == (*right).capacity &&
+        (*left).required == (*right).required &&
+        (*left).end == (*right).end &&
+        (*left).version == (*right).version
+}
+
+pub fn soir_writer_preflight_scalar_empty_module_v5(
+    start: i64,
+    capacity: i64,
+) -> SoirWritePlan with Panic, Div {
+    if start < 0 ||
+       capacity < 0 ||
+       start > SOIR_WRITER_MAX_SIZE ||
+       capacity > SOIR_WRITER_MAX_SIZE - start ||
+       SOIR_WRITER_SCALAR_EMPTY_V5_SIZE > capacity {
+        return soir_writer_failed_plan(start, capacity, SOIR_WRITER_VIEW_BOUNDS)
+    }
+    SoirWritePlan {
+        start: start,
+        capacity: capacity,
+        required: SOIR_WRITER_SCALAR_EMPTY_V5_SIZE,
+        end: start + SOIR_WRITER_SCALAR_EMPTY_V5_SIZE,
+        version: SOIR_WRITER_VERSION_V5,
+        status: SOIR_WRITER_OK,
+    }
+}
+
+// Returns the absolute end cursor. The bridge currently admits start=0 only;
+// accepting non-zero views is deliberately outside this vertical's claim.
+pub fn soir_writer_emit_scalar_empty_module_v5(
+    plan: &SoirWritePlan,
+    out_buf: &![i8; 131072],
+) -> i64 with Mut, Panic, Div {
+    if (*plan).status != SOIR_WRITER_OK { return (*plan).status }
+    let verified = soir_writer_preflight_scalar_empty_module_v5(
+        (*plan).start,
+        (*plan).capacity,
+    )
+    if !soir_writer_scalar_plan_matches(plan, &verified) {
+        return SOIR_WRITER_STALE_PLAN
+    }
+
+    var cursor = SoirWriterCursor {
+        pos: (*plan).start,
+        limit: (*plan).end,
+        status: SOIR_WRITER_OK,
+    }
+    soir_writer_put_module_header_v5(&! cursor, out_buf)
+    soir_writer_put_empty_module_tail_v5(&! cursor, out_buf)
+    if cursor.status != SOIR_WRITER_OK || cursor.pos != (*plan).end {
+        return SOIR_WRITER_INTERNAL_BOUNDS
+    }
+    cursor.pos
+}

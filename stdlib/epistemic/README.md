@@ -42,7 +42,7 @@ let x = Knowledge::measured(2.0, 0.1, "sensor")
 // Explicit propagation
 let exp_x = propagate::exp(x)      // Var(e^X) ≈ e^(2X)·Var(X)
 let log_x = propagate::ln(x)       // Var(ln X) ≈ Var(X)/X²
-let sqrt_x = propagate::sqrt(x)    // Var(√X) ≈ Var(X)/(4X)
+let sqrt_x = x.sqrt()              // Var(√X) ≈ Var(X)/(4X)
 
 // Monte Carlo for complex functions
 let complex = propagate::monte_carlo(x, |v| my_complex_fn(v), 10000)

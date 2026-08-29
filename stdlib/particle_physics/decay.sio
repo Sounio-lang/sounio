@@ -1,0 +1,182 @@
+// stdlib/particle_physics/decay.sio — General 2-body decay widths
+//
+// Framework for computing partial and total decay widths of any unstable
+// particle into two-body final states.  Includes spin/color averaging and
+// epistemic uncertainty combination.
+//
+// References:
+//   - PDG 2024, Kinematics
+//   - Peskin & Schroeder, Ch. 4
+
+module particle_physics::decay
+
+use particle_physics::lorentz::{LorentzVector, lorentz_new, lorentz_norm_sq}
+use particle_physics::kinematics::{kallen_lambda, cm_momentum_final}
+use epistemic::knowledge::{Epistemic}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// 2-BODY DECAY WIDTH
+// ============================================================================
+
+/// Generic 2-body decay width:
+///   Γ = |p_f| / (8π M²) · |M|².
+///
+/// # Parameters
+/// - `m_parent`: Decaying particle mass.
+/// - `m3`, `m4`: Final-state masses.
+/// - `amplitude_sq`: Spin-averaged |M|².
+///
+/// # Returns
+/// Partial width in GeV.
+pub fn decay_width_2_body(m_parent: f64, m3: f64, m4: f64, amplitude_sq: f64) -> f64 with Mut, Div, Panic {
+    if m_parent <= 0.0 { return 0.0 }
+    let m2 = m_parent * m_parent
+    let lam = kallen_lambda(m2, m3 * m3, m4 * m4)
+    if lam < 0.0 { return 0.0 }
+    let p_f = sqrt(lam) / (2.0 * m_parent)
+    p_f * amplitude_sq / (8.0 * PI * m2)
+}
+
+/// 2-body decay width with epistemic amplitude:
+///   Γ = |p_f| / (8π M²) · |M|²,
+///   δΓ = Γ · δ|M|² / |M|².
+///
+/// # Parameters
+/// - `m_parent`: Decaying particle mass.
+/// - `m3`, `m4`: Final-state masses.
+/// - `amplitude_sq`: `Epistemic` spin-averaged |M|².
+///
+/// # Returns
+/// `Epistemic` partial width in GeV.
+pub fn decay_width_2_body_epistemic(m_parent: f64, m3: f64, m4: f64, amplitude_sq: Epistemic) -> Epistemic with Mut, Div, Panic {
+    if m_parent <= 0.0 {
+        return Epistemic::measured(0.0, 0.0)
+    }
+    let m2 = m_parent * m_parent
+    let lam = kallen_lambda(m2, m3 * m3, m4 * m4)
+    if lam < 0.0 {
+        return Epistemic::measured(0.0, 0.0)
+    }
+    let p_f = sqrt(lam) / (2.0 * m_parent)
+    let prefactor = p_f / (8.0 * PI * m2)
+    let val = prefactor * amplitude_sq.val()
+    let std = prefactor * amplitude_sq.std()
+    Epistemic::measured(val, std)
+}
+
+// ============================================================================
+// SPIN / COLOR AVERAGING FACTORS
+// ============================================================================
+
+/// Spin-average factor for initial fermion: 1/(2s+1) = 1/2.
+pub fn spin_avg_fermion() -> f64 {
+    0.5
+}
+
+/// Spin-average factor for initial vector boson: 1/3.
+pub fn spin_avg_vector() -> f64 {
+    1.0 / 3.0
+}
+
+/// Spin-average factor for initial scalar: 1.
+pub fn spin_avg_scalar() -> f64 {
+    1.0
+}
+
+/// Color-sum factor for final-state quarks: N_c = 3.
+pub fn color_sum_quark() -> f64 {
+    3.0
+}
+
+/// Color-average factor for initial-state quarks: 1/N_c = 1/3.
+pub fn color_avg_quark() -> f64 {
+    1.0 / 3.0
+}
+
+/// Color-sum factor for final-state gluons: N_c² − 1 = 8.
+pub fn color_sum_gluon() -> f64 {
+    8.0
+}
+
+// ============================================================================
+// TOTAL WIDTH FROM PARTIALS
+// ============================================================================
+
+/// Sum partial widths with epistemic combination (GUM: variances add).
+///
+/// # Parameters
+/// - `partials`: Array of partial widths.
+/// - `n`: Number of partial widths.
+///
+/// # Returns
+/// Total width as `Epistemic`.
+pub fn total_width_from_partials(partials: &[Epistemic; 16], n: i64) -> Epistemic with Mut {
+    var sum_val: f64 = 0.0
+    var sum_var: f64 = 0.0
+    var min_conf: i64 = 1000
+    var i: i64 = 0
+    while i < n {
+        let p = partials[i]
+        sum_val = sum_val + p.val()
+        sum_var = sum_var + p.variance()
+        if p.confidence() < min_conf {
+            min_conf = p.confidence()
+        }
+        i = i + 1
+    }
+    Epistemic::new(sum_val, sum_var, min_conf)
+}
+
+/// Simple total width from raw partial widths (no epistemic metadata).
+pub fn total_width_raw(partials: &[f64; 16], n: i64) -> f64 with Mut {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        sum = sum + partials[i]
+        i = i + 1
+    }
+    sum
+}
+
+// ============================================================================
+// BRANCHING RATIO
+// ============================================================================
+
+/// Branching ratio: BR_i = Γ_i / Γ_total.
+pub fn branching_ratio(partial_width: f64, total_width: f64) -> f64 with Div, Panic {
+    if total_width == 0.0 { return 0.0 }
+    partial_width / total_width
+}
+
+/// Branching ratio with epistemic inputs.
+pub fn branching_ratio_epistemic(partial: Epistemic, total: Epistemic) -> Epistemic with Mut, Div, Panic {
+    if total.val() == 0.0 {
+        return Epistemic::measured(0.0, 0.0)
+    }
+    let val = partial.val() / total.val()
+    // δ(BR) ≈ BR · sqrt((δΓ_i/Γ_i)² + (δΓ_tot/Γ_tot)²)
+    let rel_unc = sqrt_f64(
+        (partial.std() / partial.val()) * (partial.std() / partial.val()) +
+        (total.std() / total.val()) * (total.std() / total.val())
+    )
+    Epistemic::measured(val, val * rel_unc)
+}
+
+// ============================================================================
+// LOCAL HELPERS
+// ============================================================================
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 24 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+let PI: f64 = 3.14159265358979323846

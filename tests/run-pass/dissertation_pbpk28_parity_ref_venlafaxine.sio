@@ -1,0 +1,468 @@
+//@ run-pass
+//@ timeout: 90
+// ============================================================================
+// DISSERTATION PBPK28 PARITY REFERENCE — VENLAFAXINE XR (SISTEMA 2)
+//
+// Controlled-release witness: Korsmeyer-Peppas erodible matrix (oral XR) feeding
+// TWO coupled PBPK28 compartments — parent (venlafaxine) and active metabolite
+// ODV — bridged by hepatic CYP2D6 formation (organ 1 = liver). Self-contained
+// reimplementation (same pattern as the semaglutide ref) so it carries no
+// cross-module private-field access; the matrix transcendentals and absorption
+// are bit-identical to stdlib/darwin_pbpk/{release/matrix_er,scenarios/
+// venlafaxine_xr}.sio and to website/src/lib/pbpk28_core.mjs (runVenlafaxineScenario).
+//
+// Companion: scripts/ci/dissertation_pbpk28_parity_gate.sh cases 10-13 diff this
+// against the Node engine within 1.0% RMSE per organ (parent + ODV cavg) plus
+// matrix release (case 12, biomaterial bridge) and ODV/parent ratio (case 13).
+// Parity runs at NM (R7); PM/IM/UM are scaling verified by the pgx smoke.
+//
+// Sources: Gohel 2008 (matrix n=0.65/k=0.199), Wang 2022 (F_XR=0.45, ka=0.63),
+// Klamerus 1999 (CL_parent 57, CL_odv 28, CL_form 43 L/h), Kirchheiner 2006.
+// ============================================================================
+
+struct CnOut {
+    cv: [f64; 14],
+    ct: [f64; 14]
+}
+
+struct VfxState {
+    p_cv: [f64; 14],
+    p_ct: [f64; 14],
+    o_cv: [f64; 14],
+    o_ct: [f64; 14],
+    gut:  f64
+}
+
+fn vfx_zero() -> VfxState {
+    VfxState {
+        p_cv: [0.0; 14], p_ct: [0.0; 14],
+        o_cv: [0.0; 14], o_ct: [0.0; 14],
+        gut:  0.0
+    }
+}
+
+// ─── Anatomy (drug-independent; same as rapamycin/semaglutide refs) ──────────
+fn vref_at(i: i64) -> f64 {
+    if i ==  0 { return 5.0 }
+    if i ==  1 { return 1.8 }
+    if i ==  2 { return 0.31 }
+    if i ==  3 { return 1.45 }
+    if i ==  4 { return 0.33 }
+    if i ==  5 { return 1.1 }
+    if i ==  6 { return 28.0 }
+    if i ==  7 { return 20.0 }
+    if i ==  8 { return 1.2 }
+    if i ==  9 { return 3.6 }
+    if i == 10 { return 6.6 }
+    if i == 11 { return 0.18 }
+    if i == 12 { return 0.09 }
+    return 3.7
+}
+
+fn vasc_frac_at(i: i64) -> f64 {
+    if i ==  0 { return 1.000 }
+    if i ==  1 { return 0.210 }
+    if i ==  2 { return 0.160 }
+    if i ==  3 { return 0.037 }
+    if i ==  4 { return 0.262 }
+    if i ==  5 { return 0.262 }
+    if i ==  6 { return 0.040 }
+    if i ==  7 { return 0.050 }
+    if i ==  8 { return 0.024 }
+    if i ==  9 { return 0.019 }
+    if i == 10 { return 0.041 }
+    if i == 11 { return 0.282 }
+    if i == 12 { return 0.180 }
+    return 0.050
+}
+
+fn q_at(i: i64) -> f64 {
+    if i ==  0 { return 350.0 }
+    if i ==  1 { return 90.0 }
+    if i ==  2 { return 74.0 }
+    if i ==  3 { return 44.0 }
+    if i ==  4 { return 16.0 }
+    if i ==  5 { return 350.0 }
+    if i ==  6 { return 42.0 }
+    if i ==  7 { return 10.0 }
+    if i ==  8 { return 55.0 }
+    if i ==  9 { return 21.0 }
+    if i == 10 { return 17.0 }
+    if i == 11 { return 10.0 }
+    if i == 12 { return 8.0 }
+    return 13.0
+}
+
+// ─── Venlafaxine Kp/PS tables (which: 0=parent, 1=ODV) ───────────────────────
+fn kp_at(which: i32, i: i64) -> f64 {
+    if which == 0 {
+        if i ==  0 { return 1.00 }
+        if i ==  1 { return 4.20 }
+        if i ==  2 { return 3.50 }
+        if i ==  3 { return 1.20 }
+        if i ==  4 { return 2.00 }
+        if i ==  5 { return 2.80 }
+        if i ==  6 { return 1.80 }
+        if i ==  7 { return 1.20 }
+        if i ==  8 { return 2.40 }
+        if i ==  9 { return 1.50 }
+        if i == 10 { return 0.80 }
+        if i == 11 { return 2.00 }
+        if i == 12 { return 1.60 }
+        return 0.90
+    }
+    if i ==  0 { return 1.00 }
+    if i ==  1 { return 3.50 }
+    if i ==  2 { return 3.00 }
+    if i ==  3 { return 1.00 }
+    if i ==  4 { return 1.60 }
+    if i ==  5 { return 2.20 }
+    if i ==  6 { return 1.40 }
+    if i ==  7 { return 0.90 }
+    if i ==  8 { return 2.00 }
+    if i ==  9 { return 1.20 }
+    if i == 10 { return 0.70 }
+    if i == 11 { return 1.60 }
+    if i == 12 { return 1.30 }
+    return 0.70
+}
+
+fn ps_at(which: i32, i: i64) -> f64 {
+    if which == 0 {
+        if i ==  0 { return 0.0 }
+        if i ==  1 { return 900.0 }
+        if i ==  2 { return 600.0 }
+        if i ==  3 { return 120.0 }
+        if i ==  4 { return 200.0 }
+        if i ==  5 { return 8000.0 }
+        if i ==  6 { return 250.0 }
+        if i ==  7 { return 80.0 }
+        if i ==  8 { return 500.0 }
+        if i ==  9 { return 100.0 }
+        if i == 10 { return 40.0 }
+        if i == 11 { return 120.0 }
+        if i == 12 { return 80.0 }
+        return 60.0
+    }
+    if i ==  0 { return 0.0 }
+    if i ==  1 { return 700.0 }
+    if i ==  2 { return 450.0 }
+    if i ==  3 { return 90.0 }
+    if i ==  4 { return 150.0 }
+    if i ==  5 { return 6000.0 }
+    if i ==  6 { return 200.0 }
+    if i ==  7 { return 60.0 }
+    if i ==  8 { return 400.0 }
+    if i ==  9 { return 80.0 }
+    if i == 10 { return 30.0 }
+    if i == 11 { return 100.0 }
+    if i == 12 { return 70.0 }
+    return 50.0
+}
+
+fn cl_central(which: i32) -> f64 { if which == 0 { return 57.0 } return 28.0 }
+
+fn vfx_f_oral() -> f64 { return 0.45 }
+fn vfx_ka() -> f64 { return 0.63 }
+fn vfx_cl_form_nm() -> f64 { return 43.0 }
+
+// Matrix model (Gohel 2008): total_dose=75, k=0.199, n=0.65.
+fn matrix_dose() -> f64 { return 75.0 }
+fn matrix_k() -> f64 { return 0.199 }
+fn matrix_n() -> f64 { return 0.65 }
+
+// ─── Matrix transcendentals — identical to matrix_er.sio / pbpk28_core.mjs ───
+fn mer_ln_unit(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 - 1.0e6 }
+    let y = (x - 1.0) / (x + 1.0)
+    let y2 = y * y
+    var term = y
+    var sum = term
+    var k: i64 = 1
+    while k < 20 {
+        term = term * y2
+        sum = sum + term / (2.0 * (k as f64) + 1.0)
+        k = k + 1
+    }
+    return 2.0 * sum
+}
+
+fn mer_exp(x: f64) -> f64 with Mut {
+    var r = 1.0 + x / 1024.0
+    var i = 0
+    while i < 10 {
+        r = r * r
+        i = i + 1
+    }
+    return r
+}
+
+fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div {
+    if t <= 0.0 { return 0.0 }
+    var ln_t = 0.0
+    if t > 2.0 {
+        ln_t = 0.6931471805599453 + mer_ln_unit(t / 2.0)
+    } else {
+        ln_t = mer_ln_unit(t)
+    }
+    return mer_exp(n * ln_t)
+}
+
+fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
+    if x >= 0.0 { return 1.0 }
+    var y = 1.0
+    var term = 1.0
+    var k: i64 = 1
+    while k < 20 {
+        term = term * x / (k as f64)
+        y = y + term
+        k = k + 1
+    }
+    return y
+}
+
+fn matrix_fraction(t: f64) -> f64 with Mut, Div {
+    if t <= 0.0 { return 0.0 }
+    let f = matrix_k() * mer_pow(t, matrix_n())
+    if f > 1.0 { return 1.0 }
+    return f
+}
+
+fn matrix_cumulative(t: f64) -> f64 with Mut, Div {
+    return matrix_dose() * matrix_fraction(t)
+}
+
+fn matrix_step_amount(t: f64, dt: f64) -> f64 with Mut, Div {
+    return matrix_cumulative(t + dt) - matrix_cumulative(t)
+}
+
+// ─── Fully-coupled CN transport step (port of pbpk28_full_cn_step) ───────────
+fn cn_step(cv: [f64; 14], ct: [f64; 14], which: i32, rel_mid: f64, dt: f64) -> CnOut with Mut, Div {
+    let h = 0.5 * dt
+    let vb = vref_at(0)
+
+    var sum_q = 0.0
+    var i = 1
+    while i < 14 {
+        sum_q = sum_q + q_at(i)
+        i = i + 1
+    }
+    let big_s = h * (sum_q + cl_central(which)) / vb
+
+    let cb_old = cv[0]
+    var rhs0 = (1.0 - big_s) * cb_old + dt * rel_mid / vb
+
+    var a_v: [f64; 14] = [0.0; 14]
+    var b_v: [f64; 14] = [0.0; 14]
+    var a_t: [f64; 14] = [0.0; 14]
+    var b_t: [f64; 14] = [0.0; 14]
+    var sum_beta_a = 0.0
+    var sum_beta_b = 0.0
+
+    i = 1
+    while i < 14 {
+        let vi = vref_at(i)
+        let vf = vasc_frac_at(i)
+        let vv_raw = vi * vf
+        let vt_raw = vi * (1.0 - vf)
+        let vv = if vv_raw < 1.0e-30 { 1.0e-30 } else { vv_raw }
+        let vt = if vt_raw < 1.0e-30 { 1.0e-30 } else { vt_raw }
+        let kp = kp_at(which, i)
+        let ps = ps_at(which, i)
+        let qi = q_at(i)
+
+        let beta = h * qi / vb
+        let gamma = h * qi / vv
+        let p = 1.0 + h * (qi + ps) / vv
+        let qq = h * ps / (vv * kp)
+        let rr = h * ps / vt
+        let sb = 1.0 + h * ps / (vt * kp)
+        let det = p * sb - qq * rr
+
+        rhs0 = rhs0 + beta * cv[i]
+
+        let rhs_v = gamma * cb_old + (1.0 - h * (qi + ps) / vv) * cv[i] + qq * ct[i]
+        let rhs_t = rr * cv[i] + (1.0 - h * ps / (vt * kp)) * ct[i]
+
+        let av = (sb * rhs_v + qq * rhs_t) / det
+        let bv = (sb * gamma) / det
+        let at = (rr * rhs_v + p * rhs_t) / det
+        let bt = (rr * gamma) / det
+
+        a_v[i] = av
+        b_v[i] = bv
+        a_t[i] = at
+        b_t[i] = bt
+
+        sum_beta_a = sum_beta_a + beta * av
+        sum_beta_b = sum_beta_b + beta * bv
+        i = i + 1
+    }
+
+    let cb_new = (rhs0 + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
+
+    var out = CnOut { cv: [0.0; 14], ct: [0.0; 14] }
+    out.cv[0] = if cb_new < 0.0 { 0.0 } else { cb_new }
+    i = 1
+    while i < 14 {
+        let cvi = a_v[i] + b_v[i] * cb_new
+        let cti = a_t[i] + b_t[i] * cb_new
+        out.cv[i] = if cvi < 0.0 { 0.0 } else { cvi }
+        out.ct[i] = if cti < 0.0 { 0.0 } else { cti }
+        i = i + 1
+    }
+    return out
+}
+
+fn organ_average(cv: [f64; 14], ct: [f64; 14], i: i64) -> f64 {
+    if i == 0 { return cv[0] }
+    let vf = vasc_frac_at(i)
+    return vf * cv[i] + (1.0 - vf) * ct[i]
+}
+
+fn total_mass(cv: [f64; 14], ct: [f64; 14]) -> f64 with Mut {
+    var total = vref_at(0) * cv[0]
+    var i = 1
+    while i < 14 {
+        let vi = vref_at(i)
+        let vf = vasc_frac_at(i)
+        total = total + vi * vf * cv[i] + vi * (1.0 - vf) * ct[i]
+        i = i + 1
+    }
+    return total
+}
+
+// One Lie-Trotter step: matrix → gut → absorption → parent CN → CYP2D6 → ODV CN.
+fn vfx_step(st: VfxState, t_start: f64, dt: f64) -> VfxState with Mut, Div {
+    let rel_amt = matrix_step_amount(t_start, dt)
+    var gut = st.gut + rel_amt
+    let frac_abs = 1.0 - mer_exp_neg(0.0 - vfx_ka() * dt)
+    let absorb = vfx_f_oral() * gut * frac_abs
+    gut = gut - absorb
+    if gut < 0.0 { gut = 0.0 }
+    let parent_input = absorb / dt
+
+    let outp = cn_step(st.p_cv, st.p_ct, 0, parent_input, dt)
+
+    let c_liver = organ_average(outp.cv, outp.ct, 1)
+    let form_mg = vfx_cl_form_nm() * c_liver * dt
+    var p_cv = outp.cv
+    p_cv[1] = p_cv[1] - form_mg / vref_at(1)
+    if p_cv[1] < 0.0 { p_cv[1] = 0.0 }
+    if p_cv[0] < 0.0 { p_cv[0] = 0.0 }
+    let odv_input = form_mg / dt
+
+    let outo = cn_step(st.o_cv, st.o_ct, 1, odv_input, dt)
+
+    return VfxState {
+        p_cv: p_cv, p_ct: outp.ct,
+        o_cv: outo.cv, o_ct: outo.ct,
+        gut:  gut
+    }
+}
+
+fn integrate_to(st: VfxState, t_start: f64, t_end: f64, dt: f64) -> VfxState with Mut, Div {
+    var s = st
+    var t = t_start
+    while t + 0.5 * dt < t_end {
+        s = vfx_step(s, t, dt)
+        t = t + dt
+    }
+    return s
+}
+
+fn emit_at(st: &VfxState, t: f64) with IO, Mut, Div {
+    var i = 0
+    while i < 14 {
+        print("VPARENT|t=")
+        println(t)
+        println("")
+        print("VPARENT|i=")
+        println(i)
+        print("VPARENT|cv=")
+        println(st.p_cv[i])
+        println("")
+        print("VPARENT|ct=")
+        println(st.p_ct[i])
+        println("")
+        print("VPARENT|cavg=")
+        println(organ_average(st.p_cv, st.p_ct, i))
+        println("")
+        i = i + 1
+    }
+    i = 0
+    while i < 14 {
+        print("VODV|t=")
+        println(t)
+        println("")
+        print("VODV|i=")
+        println(i)
+        print("VODV|cv=")
+        println(st.o_cv[i])
+        println("")
+        print("VODV|ct=")
+        println(st.o_ct[i])
+        println("")
+        print("VODV|cavg=")
+        println(organ_average(st.o_cv, st.o_ct, i))
+        println("")
+        i = i + 1
+    }
+    print("VMATRIX|t=")
+    println(t)
+    println("")
+    print("VMATRIX|rel=")
+    println(matrix_cumulative(t))
+    println("")
+    let mp = total_mass(st.p_cv, st.p_ct)
+    let mo = total_mass(st.o_cv, st.o_ct)
+    let ratio = if mp < 1.0e-12 { 0.0 } else { mo / mp }
+    print("VRATIO|t=")
+    println(t)
+    println("")
+    print("VRATIO|nm=")
+    println(ratio)
+    println("")
+    print("VMASS|p=")
+    println(mp)
+    println("")
+    print("VMASS|o=")
+    println(mo)
+    println("")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("DISSERTATION_PBPK28_VENLAFAXINE_PARITY_REF v1")
+    println("compartments=14")
+    println("dt=0.5")
+    println("dose_mg=75.0")
+    println("matrix_n=0.65")
+    println("matrix_k=0.199")
+    println("F_oral_xr=0.45")
+    println("ka_h_inv=0.63")
+    println("cl_form_nm_L_per_h=43.0")
+    println("integrator=fully_coupled_CN_27state_x2")
+    println("drug=venlafaxine")
+    println("release=korsmeyer_peppas_matrix")
+    println("samples=12")
+
+    let dt = 0.5
+    var s = vfx_zero()
+    var t = 0.0
+
+    s = integrate_to(s, t,  1.0, dt); t =  1.0; emit_at(&s, t)
+    s = integrate_to(s, t,  2.0, dt); t =  2.0; emit_at(&s, t)
+    s = integrate_to(s, t,  4.0, dt); t =  4.0; emit_at(&s, t)
+    s = integrate_to(s, t,  6.0, dt); t =  6.0; emit_at(&s, t)
+    s = integrate_to(s, t,  8.0, dt); t =  8.0; emit_at(&s, t)
+    s = integrate_to(s, t, 12.0, dt); t = 12.0; emit_at(&s, t)
+    s = integrate_to(s, t, 18.0, dt); t = 18.0; emit_at(&s, t)
+    s = integrate_to(s, t, 24.0, dt); t = 24.0; emit_at(&s, t)
+    s = integrate_to(s, t, 36.0, dt); t = 36.0; emit_at(&s, t)
+    s = integrate_to(s, t, 48.0, dt); t = 48.0; emit_at(&s, t)
+    s = integrate_to(s, t, 72.0, dt); t = 72.0; emit_at(&s, t)
+    s = integrate_to(s, t, 96.0, dt); t = 96.0; emit_at(&s, t)
+
+    println("DISSERTATION_PBPK28_VENLAFAXINE_PARITY_DONE")
+    return 0
+}

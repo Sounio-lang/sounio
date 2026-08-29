@@ -1,0 +1,621 @@
+// MLI S2a gate — interpreter tests on IR-derived MLI (ladder S2 gate,
+// straight-line subset).
+//
+// Run: ./bin/souc run self-hosted/mli/s2a_gate_runner.sio
+// Exit 0 iff every case passes.
+//
+// Pipeline under test per positive case:
+//   hand-built IrFunction (arena API) -> ir_to_mli_s2a -> mli_verify_function
+//   (must be OK) -> mli_interp_run on concrete inputs -> compare against the
+//   host-computed expected value. The host IS the claim oracle (ADR-008), so
+//   expected values are the clock's own arithmetic, not a second definition.
+//
+// Negative cases are positive CONTROLS: the translator or the interp MUST
+// refuse with the exact named code.
+//
+// S2b update: control flow (IrJump/branches) and compares now TRANSLATE —
+// their refusal controls moved to positives in s2b_gate_runner.sio. This
+// runner keeps the still-refused surface: wide ints, CD, epistemic, kind
+// conflicts, shifts, plus the interpreter refusal controls.
+//
+// Fixture note: BinaryOp enum arguments collapse to 0 under native-v2
+// (measured 2026-08-16, this lane), so every binop fixture pushes a skeleton
+// and pokes the true ordinal via s2a_poke_bin_op. The translator reads only
+// raw arena columns and calibrates opcode ordinals at runtime — see
+// ir_to_mli.sio's header.
+
+use ir::ir::*
+use mli::ir::*
+use mli::builder::*
+use mli::verify::*
+use mli::ir_to_mli::*
+use mli::interp::*
+
+// ---------------------------------------------------------------------------
+// Reporting helpers.
+// ---------------------------------------------------------------------------
+
+fn report_pass(name: string) -> i64 with IO {
+    print("PASS: ")
+    print(name)
+    print("\n")
+    0
+}
+
+fn report_fail(name: string, detail: string, got: i64, want: i64) -> i64 with IO {
+    print("FAIL: ")
+    print(name)
+    print(" [")
+    print(detail)
+    print("] got=")
+    print_int(got)
+    print(" want=")
+    print_int(want)
+    print("\n")
+    1
+}
+
+// ---------------------------------------------------------------------------
+// IR construction helpers (arena API).
+// ---------------------------------------------------------------------------
+
+fn gate_func_begin(cap: i64) -> IrFunction with Mut, Panic, Div {
+    var f = ir_empty_function()
+    var r = ir_region_invalid()
+    let rc = ir_instr_arena_alloc(cap, &!r)
+    if rc == IR_ARENA_OK {
+        f.region = r
+    }
+    f
+}
+
+fn gate_push(f: &!IrFunction, inst: IrInstr) -> bool with Mut, Panic, Div {
+    var r = f.region
+    if ir_region_push(&!r, inst) != IR_ARENA_OK { return false }
+    f.region = r
+    f.instr_count = f.instr_count + 1
+    true
+}
+
+// Push a binop skeleton and poke the true BinaryOp ordinal (see note above).
+fn gate_push_binop(f: &!IrFunction, dst: i64, lhs: i64, bin_ordinal: i64, rhs: i64) -> bool with Mut, Panic, Div {
+    if !gate_push(f, ir_binop(dst, lhs, BinaryOp::OpAdd, rhs)) { return false }
+    s2a_poke_bin_op(f.region, f.instr_count - 1, bin_ordinal)
+    true
+}
+
+fn gate_param(f: &!IrFunction, reg: i64, is_float: bool) with Mut, Panic, Div {
+    let pi = f.param_count
+    f.param_regs[pi] = reg
+    f.param_count = pi + 1
+    if is_float {
+        let rc = ir_float_bits_set(f, reg)
+        if rc < 0 {
+            // A silent marking failure would untype the param — poison
+            // loudly so the case fails at translation.
+            f.param_count = 0 - 100
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Case runners.
+// ---------------------------------------------------------------------------
+
+fn run_case_f64(name: string, src: &IrFunction, a0: f64, a1: f64, expect: f64) -> i64 with IO, Mut, Panic, Div {
+    var m = mli_func_empty()
+    let st = ir_to_mli_scalar(src, &!m)
+    if !st.ok { return report_fail(name, "lower", st.code, MLI_T_OK) }
+    let vr = mli_verify_function(&m)
+    if vr.code != MLI_VERR_OK { return report_fail(name, "verify", vr.code, MLI_VERR_OK) }
+    var args = mli_interp_args_empty()
+    args.af[0] = a0
+    args.af[1] = a1
+    let res = mli_interp_run(&m, &args)
+    if !res.ok { return report_fail(name, "interp", res.code, MLI_I_OK) }
+    if !res.has_value { return report_fail(name, "no-value", 0, 1) }
+    if !res.ret_is_float { return report_fail(name, "ret-kind", 0, 1) }
+    if res.ret_f != expect { return report_fail(name, "value", 0, 1) }
+    report_pass(name)
+}
+
+fn run_case_i64(name: string, src: &IrFunction, a0: i64, a1: i64, expect: i64) -> i64 with IO, Mut, Panic, Div {
+    var m = mli_func_empty()
+    let st = ir_to_mli_scalar(src, &!m)
+    if !st.ok { return report_fail(name, "lower", st.code, MLI_T_OK) }
+    let vr = mli_verify_function(&m)
+    if vr.code != MLI_VERR_OK { return report_fail(name, "verify", vr.code, MLI_VERR_OK) }
+    var args = mli_interp_args_empty()
+    args.ai[0] = a0
+    args.ai[1] = a1
+    let res = mli_interp_run(&m, &args)
+    if !res.ok { return report_fail(name, "interp", res.code, MLI_I_OK) }
+    if !res.has_value { return report_fail(name, "no-value", 0, 1) }
+    if res.ret_is_float { return report_fail(name, "ret-kind", 1, 0) }
+    if res.ret_i != expect { return report_fail(name, "value", res.ret_i, expect) }
+    report_pass(name)
+}
+
+fn expect_lower_code(name: string, src: &IrFunction, want: i64) -> i64 with IO, Mut, Panic, Div {
+    var m = mli_func_empty()
+    let st = ir_to_mli_scalar(src, &!m)
+    if st.ok { return report_fail(name, "lower-accepted", MLI_T_OK, want) }
+    if st.code != want { return report_fail(name, "lower-code", st.code, want) }
+    report_pass(name)
+}
+
+// ---------------------------------------------------------------------------
+// Positive corpus — add1 and neighbours.
+// ---------------------------------------------------------------------------
+
+// P1: fn add1(x: f64) -> f64 { x + 1.0 } — the Phase-2 golden shape.
+fn case_add1() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(4)
+    gate_param(&!f, 0, true)
+    f.reg_count = 3
+    f.returns_float = 1
+    var ok = gate_push(&!f, ir_load_float(1, 1.0))
+    ok = ok && gate_push_binop(&!f, 2, 0, S2A_B_ADD, 1)
+    ok = ok && gate_push(&!f, ir_return(2))
+    if !ok { return report_fail("P1 add1", "build", 0, 1) }
+    run_case_f64("P1 add1(41.5) == 42.5", &f, 41.5, 0.0, 42.5)
+}
+
+// P2: fn addmul(a: i64, b: i64) -> i64 { a*b + 7 }
+fn case_addmul() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(5)
+    gate_param(&!f, 0, false)
+    gate_param(&!f, 1, false)
+    f.reg_count = 5
+    var ok = gate_push_binop(&!f, 2, 0, S2A_B_MUL, 1)
+    ok = ok && gate_push(&!f, ir_load_imm(3, 7))
+    ok = ok && gate_push_binop(&!f, 4, 2, S2A_B_ADD, 3)
+    ok = ok && gate_push(&!f, ir_return(4))
+    if !ok { return report_fail("P2 addmul", "build", 0, 1) }
+    run_case_i64("P2 addmul(6,7) == 49", &f, 6, 7, 49)
+}
+
+// P3: copy chain.
+fn case_copychain() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(4)
+    gate_param(&!f, 0, false)
+    f.reg_count = 3
+    var ok = gate_push(&!f, ir_copy(1, 0))
+    ok = ok && gate_push(&!f, ir_copy(2, 1))
+    ok = ok && gate_push(&!f, ir_return(2))
+    if !ok { return report_fail("P3 copychain", "build", 0, 1) }
+    run_case_i64("P3 copychain(123) == 123", &f, 123, 0, 123)
+}
+
+// P4: fn conv(a: i64) -> i64 { trunc(a as f64 * 2.0) } — i2f and f2i.
+fn case_conv() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(6)
+    gate_param(&!f, 0, false)
+    f.reg_count = 5
+    var ok = gate_push(&!f, ir_int_to_float(1, 0))
+    ok = ok && gate_push(&!f, ir_load_float(2, 2.0))
+    ok = ok && gate_push_binop(&!f, 3, 1, S2A_B_MUL, 2)
+    ok = ok && gate_push(&!f, ir_float_to_int(4, 3))
+    ok = ok && gate_push(&!f, ir_return(4))
+    if !ok { return report_fail("P4 conv", "build", 0, 1) }
+    run_case_i64("P4 conv(21) == 42", &f, 21, 0, 42)
+}
+
+// P5: fn poly(x: f64, y: f64) -> f64 { (x+y)*(x-y) }
+fn case_poly() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(5)
+    gate_param(&!f, 0, true)
+    gate_param(&!f, 1, true)
+    f.reg_count = 5
+    f.returns_float = 1
+    var ok = gate_push_binop(&!f, 2, 0, S2A_B_ADD, 1)
+    ok = ok && gate_push_binop(&!f, 3, 0, S2A_B_SUB, 1)
+    ok = ok && gate_push_binop(&!f, 4, 2, S2A_B_MUL, 3)
+    ok = ok && gate_push(&!f, ir_return(4))
+    if !ok { return report_fail("P5 poly", "build", 0, 1) }
+    run_case_f64("P5 poly(3.0,1.5) == 6.75", &f, 3.0, 1.5, 6.75)
+}
+
+// P6: fn rem(a: i64, b: i64) -> i64 { a % b }
+fn case_rem() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(3)
+    gate_param(&!f, 0, false)
+    gate_param(&!f, 1, false)
+    f.reg_count = 3
+    var ok = gate_push_binop(&!f, 2, 0, S2A_B_REM, 1)
+    ok = ok && gate_push(&!f, ir_return(2))
+    if !ok { return report_fail("P6 rem", "build", 0, 1) }
+    run_case_i64("P6 rem(17,5) == 2", &f, 17, 5, 2)
+}
+
+// P7: fn bits(a: i64, b: i64) -> i64 { (a^b) + (a&b) }
+fn case_bits() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(5)
+    gate_param(&!f, 0, false)
+    gate_param(&!f, 1, false)
+    f.reg_count = 5
+    var ok = gate_push_binop(&!f, 2, 0, S2A_B_BITXOR, 1)
+    ok = ok && gate_push_binop(&!f, 3, 0, S2A_B_BITAND, 1)
+    ok = ok && gate_push_binop(&!f, 4, 2, S2A_B_ADD, 3)
+    ok = ok && gate_push(&!f, ir_return(4))
+    if !ok { return report_fail("P7 bits", "build", 0, 1) }
+    run_case_i64("P7 bits(12,10) == 14", &f, 12, 10, 14)
+}
+
+// ---------------------------------------------------------------------------
+// Translator refusal controls.
+// ---------------------------------------------------------------------------
+
+fn case_refuse_wide() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(3)
+    gate_param(&!f, 0, false)
+    f.reg_count = 8
+    var ok = gate_push(&!f, ir_wide_add(2, 0, 4, 2))
+    ok = ok && gate_push(&!f, ir_return(2))
+    if !ok { return report_fail("N1 wide", "build", 0, 1) }
+    expect_lower_code("N1 IrWideAdd refused (i128 excluded, D2)", &f, MLI_T_WIDE_EXCLUDED)
+}
+
+fn case_refuse_hyper() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(3)
+    gate_param(&!f, 0, false)
+    f.reg_count = 24
+    var ok = gate_push(&!f, ir_hyper_mul_o(16, 0, 8))
+    ok = ok && gate_push(&!f, ir_return(16))
+    if !ok { return report_fail("N2 hyper", "build", 0, 1) }
+    expect_lower_code("N2 IrHyperMulO refused (CD is R1)", &f, MLI_T_R1_CD)
+}
+
+fn case_refuse_epistemic() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(3)
+    gate_param(&!f, 0, true)
+    f.reg_count = 3
+    f.returns_float = 1
+    var ok = gate_push(&!f, ir_lift_knowledge(1, 0, 0))
+    ok = ok && gate_push(&!f, ir_return(1))
+    if !ok { return report_fail("N3 epistemic", "build", 0, 1) }
+    expect_lower_code("N3 IrLiftKnowledge refused (Knowledge is R1)", &f, MLI_T_R1_EPISTEMIC)
+}
+
+fn case_refuse_kind_conflict() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(4)
+    f.reg_count = 2
+    var ok = gate_push(&!f, ir_load_imm(1, 5))
+    ok = ok && gate_push(&!f, ir_load_float(1, 5.0))
+    ok = ok && gate_push(&!f, ir_return(1))
+    if !ok { return report_fail("N5 kindconflict", "build", 0, 1) }
+    expect_lower_code("N5 conflicting-kind reg reuse refused", &f, MLI_T_KIND_CONFLICT)
+}
+
+fn case_refuse_shift() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(3)
+    gate_param(&!f, 0, false)
+    gate_param(&!f, 1, false)
+    f.reg_count = 3
+    var ok = gate_push_binop(&!f, 2, 0, S2A_B_SHL, 1)
+    ok = ok && gate_push(&!f, ir_return(2))
+    if !ok { return report_fail("N6 shift", "build", 0, 1) }
+    expect_lower_code("N6 OpShl refused (shift unpinned)", &f, MLI_T_SHIFT_UNPINNED)
+}
+
+// ---------------------------------------------------------------------------
+// Interpreter refusal controls.
+// ---------------------------------------------------------------------------
+
+// I1: division by zero refuses loudly at interp time (translate + verify OK).
+fn case_interp_div_zero() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(3)
+    gate_param(&!f, 0, false)
+    gate_param(&!f, 1, false)
+    f.reg_count = 3
+    var ok = gate_push_binop(&!f, 2, 0, S2A_B_DIV, 1)
+    ok = ok && gate_push(&!f, ir_return(2))
+    if !ok { return report_fail("I1 divzero", "build", 0, 1) }
+
+    var m = mli_func_empty()
+    let st = ir_to_mli_scalar(&f, &!m)
+    if !st.ok { return report_fail("I1 divzero", "lower", st.code, MLI_T_OK) }
+    let vr = mli_verify_function(&m)
+    if vr.code != MLI_VERR_OK { return report_fail("I1 divzero", "verify", vr.code, MLI_VERR_OK) }
+    var args = mli_interp_args_empty()
+    args.ai[0] = 10
+    args.ai[1] = 0
+    let res = mli_interp_run(&m, &args)
+    if res.ok { return report_fail("I1 divzero", "interp-accepted", MLI_I_OK, MLI_I_DIV_ZERO) }
+    if res.code != MLI_I_DIV_ZERO { return report_fail("I1 divzero", "interp-code", res.code, MLI_I_DIV_ZERO) }
+    report_pass("I1 i64 div-by-zero REFUSED by interp")
+}
+
+// Tiny icmp so we can poke the SoA cc/op columns after a green verify.
+// Writing i_cc / i_op is the sanctioned SoA path — do not land a MliInst.
+fn build_icmp_lt() -> MliFunction with Mut, Panic {
+    var f = mli_func_new("icmp_lt", mli_kind_bool())
+    let a = mli_add_arg(&!f, mli_kind_int(64, 1))
+    let b = mli_add_arg(&!f, mli_kind_int(64, 1))
+    let b0 = mli_new_block(&!f)
+    let d = mli_new_vreg(&!f, mli_kind_bool())
+    if a < 0 || b < 0 || b0 < 0 || d < 0 { return f }
+    var ok = mli_emit(&!f, b0, mli_inst_icmp(MLI_CC_LT, mli_opd_vreg(d, mli_kind_bool()), mli_opd_vreg(a, mli_kind_int(64, 1)), mli_opd_vreg(b, mli_kind_int(64, 1))))
+    ok = ok && mli_set_term(&!f, b0, mli_term_ret(mli_opd_vreg(d, mli_kind_bool())))
+    f
+}
+
+fn build_add_i64() -> MliFunction with Mut, Panic {
+    var f = mli_func_new("add2", mli_kind_int(64, 1))
+    let a = mli_add_arg(&!f, mli_kind_int(64, 1))
+    let b = mli_add_arg(&!f, mli_kind_int(64, 1))
+    let b0 = mli_new_block(&!f)
+    let d = mli_new_vreg(&!f, mli_kind_int(64, 1))
+    if a < 0 || b < 0 || b0 < 0 || d < 0 { return f }
+    var ok = mli_emit(&!f, b0, mli_inst3(MLI_OP_ADD, mli_opd_vreg(d, mli_kind_int(64, 1)), mli_opd_vreg(a, mli_kind_int(64, 1)), mli_opd_vreg(b, mli_kind_int(64, 1))))
+    ok = ok && mli_set_term(&!f, b0, mli_term_ret(mli_opd_vreg(d, mli_kind_int(64, 1))))
+    f
+}
+
+// I2: a named R1 opcode must refuse AT THE OPCODE, not by writing a
+// zero product. After #1801, unimplemented arg kinds refuse at load
+// (I9), so this witness pokes CD_MUL onto a green i64 add — SoA
+// i_op only, never a whole MliInst (#1678/#1749).
+fn case_interp_refuses_cd() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    let vr = mli_verify_function(&f)
+    if vr.code != MLI_VERR_OK { return report_fail("I2 cd", "pre-verify", vr.code, MLI_VERR_OK) }
+    f.i_op[mli_slot(0, 0)] = MLI_OP_CD_MUL
+    var args = mli_interp_args_empty()
+    args.ai[0] = 3
+    args.ai[1] = 4
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I2 cd", "interp-accepted", MLI_I_OK, MLI_I_UNSUPPORTED_OP) }
+    if res.has_value { return report_fail("I2 cd", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_UNSUPPORTED_OP {
+        return report_fail("I2 cd", "interp-code", res.code, MLI_I_UNSUPPORTED_OP)
+    }
+    if res.block != 0 || res.index != 0 {
+        return report_fail("I2 cd", "refused-before-opcode", res.block, 0)
+    }
+    report_pass("I2 CD cd_mul REFUSED by interp at the opcode (no product)")
+}
+
+// I3: V-struct refuses an unclassified compare-code. cc=7 is not "false".
+fn case_verify_refuses_unknown_cc() -> i64 with IO, Mut, Panic, Div {
+    var f = build_icmp_lt()
+    f.i_cc[mli_slot(0, 0)] = 7
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OPERAND_RULE {
+        return report_fail("I3 unknown cc verify", "code", vs.code, MLI_VERR_OPERAND_RULE)
+    }
+    report_pass("I3 unclassified icmp cc is a VERIFY error (not a silent false)")
+}
+
+// I4: interp refuses the same poke even if verify ran first on the clean fn.
+// The defect class: hold stayed false and the interp returned OK.
+fn case_interp_refuses_unknown_cc() -> i64 with IO, Mut, Panic, Div {
+    var f = build_icmp_lt()
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I4 unknown cc interp", "pre-verify", vs.code, 0) }
+    f.i_cc[mli_slot(0, 0)] = 7
+    var args = mli_interp_args_empty()
+    args.ai[0] = 1
+    args.ai[1] = 2
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I4 unknown cc interp", "guessed-false", MLI_I_OK, MLI_I_BAD_CC) }
+    if res.code != MLI_I_BAD_CC { return report_fail("I4 unknown cc interp", "code", res.code, MLI_I_BAD_CC) }
+    report_pass("I4 unclassified icmp cc REFUSED by interp (not evaluated as false)")
+}
+
+// I5: an opcode with no case must refuse, not fall through to r=0 / OK.
+fn case_interp_refuses_unknown_opcode() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I5 unknown op interp", "pre-verify", vs.code, 0) }
+    f.i_op[mli_slot(0, 0)] = 77
+    var args = mli_interp_args_empty()
+    args.ai[0] = 3
+    args.ai[1] = 4
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I5 unknown op interp", "guessed-zero", MLI_I_OK, MLI_I_UNSUPPORTED_OP) }
+    if res.code != MLI_I_UNSUPPORTED_OP {
+        return report_fail("I5 unknown op interp", "code", res.code, MLI_I_UNSUPPORTED_OP)
+    }
+    report_pass("I5 unknown opcode REFUSED by interp (no default-zero)")
+}
+
+// I6: CALL is a named opcode with no ABI. Verify must refuse it — stamping
+// OK was the same default-guess as E219 / #1784 / the char* printer.
+fn case_verify_refuses_call() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    f.i_op[mli_slot(0, 0)] = MLI_OP_CALL
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_CALL_UNSPECIFIED {
+        return report_fail("I6 call verify", "code", vs.code, MLI_VERR_CALL_UNSPECIFIED)
+    }
+    report_pass("I6 CALL is a VERIFY error (ABI unpinned, not a silent OK)")
+}
+
+// I7: a never-written vreg must refuse, not return the register-file zero.
+// Same class as #1801 (empty stub / caller reads rax) and #1788 (no
+// fabricated zero). Poke is a scalar SoA column only — rewriting a whole
+// MliOperand in i_src1[] is the #1678/#1749 miscompile surface.
+// NOP the add after a green verify: dest is never defined, ret dest
+// must be UNDEF, not 0.
+fn case_interp_refuses_undef_vreg() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I7 undef", "pre-verify", vs.code, 0) }
+    f.i_op[mli_slot(0, 0)] = MLI_OP_NOP
+    var args = mli_interp_args_empty()
+    args.ai[0] = 3
+    args.ai[1] = 4
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I7 undef", "guessed-zero", MLI_I_OK, MLI_I_UNDEF_VREG) }
+    if res.has_value { return report_fail("I7 undef", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_UNDEF_VREG {
+        return report_fail("I7 undef", "code", res.code, MLI_I_UNDEF_VREG)
+    }
+    report_pass("I7 unread vreg REFUSED by interp (no fabricated zero)")
+}
+
+// I8: void success is not integer 0. #1801's empty stub was prologue+ret
+// with the caller reading rax; has_value is the bit that forbids that.
+fn case_void_ret_has_no_value() -> i64 with IO, Mut, Panic, Div {
+    var f = mli_func_new("empty", mli_kind_void())
+    let b0 = mli_new_block(&!f)
+    if b0 < 0 { return report_fail("I8 void", "block", 0, 1) }
+    if !mli_set_term(&!f, b0, mli_term_ret_void()) { return report_fail("I8 void", "term", 0, 1) }
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I8 void", "verify", vs.code, 0) }
+    var args = mli_interp_args_empty()
+    let res = mli_interp_run(&f, &args)
+    if !res.ok { return report_fail("I8 void", "interp", res.code, MLI_I_OK) }
+    if res.has_value { return report_fail("I8 void", "claimed-int-zero", 1, 0) }
+    report_pass("I8 void return has no value (not a fabricated integer 0)")
+}
+
+// I9: #1801 site 1 — declared type after refuse. Knowledge is a legal
+// S1 kind (verify OK) but the interp has no inhabitant. Skipping the
+// arg and returning void success would fabricate "I handled this".
+fn case_interp_refuses_uninhabited_arg() -> i64 with IO, Mut, Panic, Div {
+    var f = mli_func_new("kvoid", mli_kind_void())
+    let kk = mli_kind_knowledge(MLI_KIND_FLOAT, 64, MLI_KSHAPE_MIN3)
+    let ka = mli_add_arg(&!f, kk)
+    let b0 = mli_new_block(&!f)
+    if ka < 0 || b0 < 0 { return report_fail("I9 arg-kind", "build", 0, 1) }
+    if !mli_set_term(&!f, b0, mli_term_ret_void()) { return report_fail("I9 arg-kind", "term", 0, 1) }
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I9 arg-kind", "verify", vs.code, 0) }
+    var args = mli_interp_args_empty()
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I9 arg-kind", "accepted-declared-type", MLI_I_OK, MLI_I_ARG_KIND) }
+    if res.has_value { return report_fail("I9 arg-kind", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_ARG_KIND {
+        return report_fail("I9 arg-kind", "code", res.code, MLI_I_ARG_KIND)
+    }
+    if res.index != 0 { return report_fail("I9 arg-kind", "arg-index", res.index, 0) }
+    report_pass("I9 unimplemented arg kind REFUSED at load (no declared-type inhabitant)")
+}
+
+// I10: same hole with a narrow int. Int{32} is a legal kind; only i64
+// is runnable. `fn f(x: i32) -> i64 { 1 }` used to succeed with 1.
+fn case_interp_refuses_narrow_int_arg() -> i64 with IO, Mut, Panic, Div {
+    var f = mli_func_new("i32arg", mli_kind_int(64, 1))
+    let a = mli_add_arg(&!f, mli_kind_int(32, 1))
+    let b0 = mli_new_block(&!f)
+    if a < 0 || b0 < 0 { return report_fail("I10 i32-arg", "build", 0, 1) }
+    if !mli_set_term(&!f, b0, mli_term_ret(mli_opd_imm_int(1, mli_kind_int(64, 1)))) {
+        return report_fail("I10 i32-arg", "term", 0, 1)
+    }
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I10 i32-arg", "verify", vs.code, 0) }
+    var args = mli_interp_args_empty()
+    args.ai[0] = 99
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I10 i32-arg", "fabricated-one", MLI_I_OK, MLI_I_ARG_KIND) }
+    if res.has_value { return report_fail("I10 i32-arg", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_ARG_KIND {
+        return report_fail("I10 i32-arg", "code", res.code, MLI_I_ARG_KIND)
+    }
+    report_pass("I10 i32 arg REFUSED at load (not a silent i64 1)")
+}
+
+// I11: #1801 site 2 twin — CALL is a named hole. Poke after green
+// verify (SoA i_op only). Interp must refuse with the named code, not
+// the unknown-op catch-all; has_value must stay false so a caller
+// cannot read rax as the dest.
+fn case_interp_refuses_call() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I11 call interp", "pre-verify", vs.code, 0) }
+    f.i_op[mli_slot(0, 0)] = MLI_OP_CALL
+    var args = mli_interp_args_empty()
+    args.ai[0] = 3
+    args.ai[1] = 4
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I11 call interp", "guessed-rax", MLI_I_OK, MLI_I_CALL_UNSPECIFIED) }
+    if res.has_value { return report_fail("I11 call interp", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_CALL_UNSPECIFIED {
+        return report_fail("I11 call interp", "code", res.code, MLI_I_CALL_UNSPECIFIED)
+    }
+    report_pass("I11 CALL REFUSED by interp with named code (no rax after empty stub)")
+}
+
+// I12: #1830 class — opcode 0 is NOP. Bumping blk_instr_count after a
+// green verify walks a slot nobody wrote; that used to execute as a
+// successful no-op. Poke is the SoA count column only.
+fn case_interp_refuses_unwired_slot() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I12 unwired", "pre-verify", vs.code, 0) }
+    f.blk_instr_count[0] = f.blk_instr_count[0] + 1
+    var args = mli_interp_args_empty()
+    args.ai[0] = 3
+    args.ai[1] = 4
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I12 unwired", "silent-nop", MLI_I_OK, MLI_I_UNWIRED_SLOT) }
+    if res.has_value { return report_fail("I12 unwired", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_UNWIRED_SLOT {
+        return report_fail("I12 unwired", "code", res.code, MLI_I_UNWIRED_SLOT)
+    }
+    if res.index != 1 { return report_fail("I12 unwired", "slot", res.index, 1) }
+    report_pass("I12 unwritten slot REFUSED by interp (not a silent NOP)")
+}
+
+// I13: verify must not stamp OK on the same ghost slot. #1801: returning
+// the declared well-formedness after reading a zero nobody wrote.
+fn case_verify_refuses_unwired_slot() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    f.blk_instr_count[0] = f.blk_instr_count[0] + 1
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_UNWIRED_SLOT {
+        return report_fail("I13 unwired verify", "code", vs.code, MLI_VERR_UNWIRED_SLOT)
+    }
+    report_pass("I13 unwritten slot is a VERIFY error (not a silent NOP)")
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    println("=== MLI S2a gate: ir_to_mli (straight-line i64/f64) + minimal interp ===")
+    if ir_instr_arena_init() != IR_ARENA_OK {
+        println("FAIL: arena init")
+        return 1
+    }
+    if !s2a_calibrate() {
+        println("FAIL: opcode ordinal calibration")
+        return 1
+    }
+
+    var failures: i64 = 0
+    failures = failures + case_add1()
+    failures = failures + case_addmul()
+    failures = failures + case_copychain()
+    failures = failures + case_conv()
+    failures = failures + case_poly()
+    failures = failures + case_rem()
+    failures = failures + case_bits()
+    failures = failures + case_refuse_wide()
+    failures = failures + case_refuse_hyper()
+    failures = failures + case_refuse_epistemic()
+    failures = failures + case_refuse_kind_conflict()
+    failures = failures + case_refuse_shift()
+    failures = failures + case_interp_div_zero()
+    failures = failures + case_interp_refuses_cd()
+    failures = failures + case_verify_refuses_unknown_cc()
+    failures = failures + case_interp_refuses_unknown_cc()
+    failures = failures + case_interp_refuses_unknown_opcode()
+    failures = failures + case_verify_refuses_call()
+    failures = failures + case_interp_refuses_undef_vreg()
+    failures = failures + case_void_ret_has_no_value()
+    failures = failures + case_interp_refuses_uninhabited_arg()
+    failures = failures + case_interp_refuses_narrow_int_arg()
+    failures = failures + case_interp_refuses_call()
+    failures = failures + case_interp_refuses_unwired_slot()
+    failures = failures + case_verify_refuses_unwired_slot()
+
+    if failures == 0 {
+        println("=== MLI S2a: ALL CASES PASS ===")
+        return 0
+    }
+    print("=== MLI S2a: FAILURES = ")
+    print_int(failures)
+    print(" ===")
+    print("\n")
+    1
+}

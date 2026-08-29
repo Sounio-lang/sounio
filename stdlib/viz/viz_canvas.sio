@@ -1,0 +1,372 @@
+// stdlib/viz/viz_canvas.sio — Visual IR renderer to display::Canvas
+
+use display::canvas::{Canvas, canvas_fill_rect, canvas_draw_rect, canvas_draw_text, canvas_fill_circle}
+use display::canvas_ext::{canvas_draw_line_aa}
+use viz::coord::{coord_new, coord_draw_axes}
+use viz::chart::{chart_line, chart_scatter, chart_bar, chart_heatmap}
+use viz::epiviz::{epiviz_band}
+use render::renderer3d::{Camera3D, Light3D, Tri3D, r3d_depth_buf_alloc, r3d_depth_buf_clear, r3d_render_viewport}
+use viz::ir::{
+    VizScene, VizNode,
+    VIZ_NODE_PANEL, VIZ_NODE_CHART_LINE, VIZ_NODE_CHART_SCATTER, VIZ_NODE_CHART_BAR,
+    VIZ_NODE_HEATMAP, VIZ_NODE_UNCERTAINTY_BAND, VIZ_NODE_LABEL, VIZ_NODE_CONTROL,
+    VIZ_NODE_FOREST, VIZ_NODE_WATERFALL,
+    VIZ_NODE_MOLECULE, VIZ_NODE_FIELD, VIZ_NODE_VECTOR_FIELD, VIZ_NODE_TRAJECTORY, VIZ_NODE_SPECTRUM, VIZ_NODE_MESH,
+    VIZ_CONTROL_SLIDER, VIZ_CONTROL_TOGGLE, VIZ_CONTROL_TABS, VIZ_CONTROL_LEGEND,
+    VIZ_CONTROL_BUTTON, VIZ_CONTROL_TOOLTIP, VIZ_CONTROL_VIEWPORT
+}
+
+fn vc_pad_range_min(v: f64) -> f64 { v - 0.001 }
+fn vc_pad_range_max(v: f64) -> f64 { v + 0.001 }
+
+fn vc_draw_panel(c: &!Canvas, node: &VizNode) with Mut {
+    canvas_fill_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 18, 22, 28)
+    canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 80, 95, 110)
+}
+
+fn vc_draw_control(c: &!Canvas, node: &VizNode) with Mut, Div {
+    let x = node.layout.x
+    let y = node.layout.y
+    let w = node.layout.w
+    let h = node.layout.h
+    if node.data_slot == VIZ_CONTROL_SLIDER {
+        canvas_fill_rect(c, x, y + h / 2 - 2, w, 4, 55, 60, 70)
+        let span = node.max_value - node.min_value
+        let frac = if span == 0.0 { 0.0 } else { (node.value - node.min_value) / span }
+        let knob_x = x + (frac * (w as f64)) as i64
+        canvas_fill_rect(c, knob_x - 3, y, 7, h, node.style.r, node.style.g, node.style.b)
+    } else if node.data_slot == VIZ_CONTROL_TOGGLE {
+        canvas_draw_rect(c, x, y, w, h, 130, 150, 160)
+        if node.value > 0.0 {
+            canvas_fill_rect(c, x + 3, y + 3, w - 6, h - 6, node.style.r, node.style.g, node.style.b)
+        }
+    } else if node.data_slot == VIZ_CONTROL_TABS {
+        canvas_fill_rect(c, x, y, w, h, 40, 48, 58)
+        let min_i = node.min_value as i64
+        let max_i = node.max_value as i64
+        var count = max_i - min_i + 1
+        if count <= 0 { count = 1 }
+        let tab_w = if w / count <= 0 { 1 } else { w / count }
+        var active = node.value as i64
+        if active < min_i { active = min_i }
+        if active > max_i { active = max_i }
+        canvas_fill_rect(c, x + (active - min_i) * tab_w, y, tab_w, h, node.style.r, node.style.g, node.style.b)
+        canvas_draw_rect(c, x, y, w, h, 120, 135, 150)
+    } else if node.data_slot == VIZ_CONTROL_LEGEND {
+        canvas_draw_rect(c, x, y, w, h, 120, 135, 150)
+        canvas_fill_rect(c, x + 4, y + h / 2 - 3, 10, 6, node.style.r, node.style.g, node.style.b)
+        vc_draw_label(c, node)
+    } else if node.data_slot == VIZ_CONTROL_TOOLTIP {
+        canvas_fill_rect(c, x, y, w, h, 28, 34, 42)
+        canvas_draw_rect(c, x, y, w, h, 140, 155, 170)
+        vc_draw_label(c, node)
+    } else if node.data_slot == VIZ_CONTROL_VIEWPORT || node.data_slot == VIZ_CONTROL_BUTTON {
+        canvas_draw_rect(c, x, y, w, h, 120, 135, 150)
+        vc_draw_label(c, node)
+    }
+}
+
+fn vc_draw_label(c: &!Canvas, node: &VizNode) with Mut {
+    var buf: [i8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < node.label_len && i < 64 {
+        buf[i as usize] = node.label[i as usize]
+        i = i + 1
+    }
+    canvas_draw_text(c, &buf, node.label_len, node.layout.x, node.layout.y, node.style.r, node.style.g, node.style.b)
+}
+
+fn vc_clamp(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo { lo } else if v > hi { hi } else { v }
+}
+
+fn vc_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i: i64 = 0
+    while i < 12 {
+        g = (g + x / g) * 0.5
+        i = i + 1
+    }
+    g
+}
+
+fn vc_draw_waterfall(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div {
+    let d = scene.series[node.data_slot as usize]
+    if d.n <= 0 { return }
+    canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 80, 95, 110)
+    let row_h = vc_clamp(node.layout.h / d.n - 2, 3, 24)
+    let span = if d.y_max == d.y_min { 1.0 } else { d.y_max - d.y_min }
+    var i: i64 = 0
+    while i < d.n && i < 1024 {
+        let frac = (d.ys[i as usize] - d.y_min) / span
+        let bar_w = vc_clamp((frac * (node.layout.w as f64)) as i64, 1, node.layout.w)
+        let py = node.layout.y + i * (row_h + 2)
+        canvas_fill_rect(c, node.layout.x, py, bar_w, row_h, node.style.r, node.style.g, node.style.b)
+        canvas_fill_rect(c, node.layout.x + bar_w, py, node.layout.w - bar_w, row_h, 36, 40, 50)
+        i = i + 1
+    }
+}
+
+fn vc_draw_forest(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div {
+    let d = scene.series[node.data_slot as usize]
+    if d.n <= 0 { return }
+    var x_min = d.x_min
+    var x_max = d.x_max
+    var i: i64 = 0
+    while i < d.n && i < 1024 {
+        let sigma = vc_sqrt(d.vars[i as usize])
+        let lo = d.xs[i as usize] - sigma
+        let hi = d.xs[i as usize] + sigma
+        if lo < x_min { x_min = lo }
+        if hi > x_max { x_max = hi }
+        i = i + 1
+    }
+    if x_min == x_max {
+        x_min = x_min - 1.0
+        x_max = x_max + 1.0
+    }
+    let row_h = vc_clamp(node.layout.h / (d.n + 1), 5, 22)
+    canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 90, 95, 120)
+    i = 0
+    while i < d.n && i < 1024 {
+        let sigma = vc_sqrt(d.vars[i as usize])
+        let row_y = node.layout.y + row_h / 2 + i * row_h
+        let sx = node.layout.x + (((d.xs[i as usize] - x_min) / (x_max - x_min)) * (node.layout.w as f64)) as i64
+        let slo = node.layout.x + ((((d.xs[i as usize] - sigma) - x_min) / (x_max - x_min)) * (node.layout.w as f64)) as i64
+        let shi = node.layout.x + ((((d.xs[i as usize] + sigma) - x_min) / (x_max - x_min)) * (node.layout.w as f64)) as i64
+        canvas_fill_rect(c, slo, row_y, shi - slo + 1, 1, 180, 180, 220)
+        canvas_fill_rect(c, slo, row_y - 2, 1, 5, 180, 180, 220)
+        canvas_fill_rect(c, shi, row_y - 2, 1, 5, 180, 180, 220)
+        canvas_fill_rect(c, sx - 3, row_y - 3, 7, 7, node.style.r, node.style.g, node.style.b)
+        i = i + 1
+    }
+}
+
+fn vc_mol_x(node: &VizNode, x: f64) -> i64 {
+    node.layout.x + node.layout.w / 2 + (x * (node.layout.w as f64) * 0.30) as i64
+}
+
+fn vc_mol_y(node: &VizNode, y: f64) -> i64 {
+    node.layout.y + node.layout.h / 2 - (y * (node.layout.h as f64) * 0.30) as i64
+}
+
+fn vc_draw_molecule(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div {
+    canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 120, 130, 150)
+    if node.data_slot < 0 || node.data_slot >= scene.molecule_count { return }
+    let slot = node.data_slot as usize
+    var bond_count = scene.molecules[slot].bond_count
+    if bond_count < 0 { bond_count = 0 }
+    if bond_count > 96 { bond_count = 96 }
+    var atom_count = scene.molecules[slot].atom_count
+    if atom_count < 0 { atom_count = 0 }
+    if atom_count > 64 { atom_count = 64 }
+    var bi: i64 = 0
+    while bi < bond_count {
+        let b = scene.molecules[slot].bonds[bi as usize]
+        if b.atom_a >= 0 && b.atom_a < atom_count && b.atom_b >= 0 && b.atom_b < atom_count {
+            let a0 = scene.molecules[slot].atoms[b.atom_a as usize]
+            let a1 = scene.molecules[slot].atoms[b.atom_b as usize]
+            let x0 = vc_mol_x(node, a0.x)
+            let y0 = vc_mol_y(node, a0.y)
+            let x1 = vc_mol_x(node, a1.x)
+            let y1 = vc_mol_y(node, a1.y)
+            canvas_draw_line_aa(c, x0, y0, x1, y1, 180, 190, 205)
+            if b.order > 1 {
+                canvas_draw_line_aa(c, x0, y0 + 2, x1, y1 + 2, 150, 160, 175)
+            }
+        }
+        bi = bi + 1
+    }
+    let cx = node.layout.x + node.layout.w / 2
+    let cy = node.layout.y + node.layout.h / 2
+    canvas_fill_rect(c, cx - 2, cy - 2, 5, 5, node.style.r, node.style.g, node.style.b)
+    var ai: i64 = 0
+    while ai < atom_count {
+        let a = scene.molecules[slot].atoms[ai as usize]
+        let sx = vc_mol_x(node, a.x)
+        let sy = vc_mol_y(node, a.y)
+        let rad = vc_clamp((a.radius * 8.0) as i64, 3, 12)
+        canvas_fill_circle(c, sx, sy, rad, a.r, a.g, a.b)
+        canvas_fill_rect(c, sx - 1, sy - 1, 3, 3, a.r, a.g, a.b)
+        canvas_draw_rect(c, sx - rad, sy - rad, rad * 2 + 1, rad * 2 + 1, 40, 45, 55)
+        ai = ai + 1
+    }
+}
+
+fn vc_draw_field(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div {
+    let rows: i64 = 8
+    let cols: i64 = 8
+    let cell_w = if cols == 0 { 1 } else { node.layout.w / cols }
+    let cell_h = if rows == 0 { 1 } else { node.layout.h / rows }
+    var rr: i64 = 0
+    while rr < rows {
+        var cc: i64 = 0
+        while cc < cols {
+            let intensity = (rr * 24 + cc * 12) % 220
+            canvas_fill_rect(c, node.layout.x + cc * cell_w, node.layout.y + rr * cell_h, cell_w + 1, cell_h + 1, intensity / 3, 80 + intensity / 4, 130 + intensity / 3)
+            cc = cc + 1
+        }
+        rr = rr + 1
+    }
+    canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 90, 120, 130)
+    let cx = node.layout.x + node.layout.w / 2
+    let cy = node.layout.y + node.layout.h / 2
+    canvas_draw_line_aa(c, cx - cell_w, cy, cx + cell_w, cy, 240, 240, 180)
+    canvas_draw_line_aa(c, cx, cy - cell_h, cx, cy + cell_h, 240, 240, 180)
+}
+
+fn vc_draw_vector_field(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div {
+    let f = scene.vector_data[node.data_slot as usize]
+    let rows = scene.vector_field_rows[node.data_slot as usize]
+    let cols = scene.vector_field_cols[node.data_slot as usize]
+    let cell_w = if cols <= 0 { 1 } else { node.layout.w / cols }
+    let cell_h = if rows <= 0 { 1 } else { node.layout.h / rows }
+    canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 120, 110, 70)
+    var rr: i64 = 0
+    while rr < rows && rr < 32 {
+        var cc: i64 = 0
+        while cc < cols && cc < 32 {
+            let idx = rr * cols + cc
+            let cx = node.layout.x + cc * cell_w + cell_w / 2
+            let cy = node.layout.y + rr * cell_h + cell_h / 2
+            let dx = vc_clamp((f.vx[idx as usize] * 3.0) as i64, 0 - cell_w / 2, cell_w / 2)
+            let dy = vc_clamp((f.vy[idx as usize] * 3.0) as i64, 0 - cell_h / 2, cell_h / 2)
+            canvas_draw_line_aa(c, cx, cy, cx + dx, cy + dy, node.style.r, node.style.g, node.style.b)
+            canvas_fill_rect(c, cx + dx - 1, cy + dy - 1, 3, 3, node.style.r, node.style.g, node.style.b)
+            cc = cc + 1
+        }
+        rr = rr + 1
+    }
+}
+
+fn vc_traj_x(node: &VizNode, x: f64, z: f64) -> i64 {
+    node.layout.x + node.layout.w / 2 + (x * (node.layout.w as f64) * 0.35) as i64 + (z * 2.0) as i64
+}
+
+fn vc_traj_y(node: &VizNode, y: f64, z: f64) -> i64 {
+    node.layout.y + node.layout.h / 2 - (y * (node.layout.h as f64) * 0.35) as i64 - (z * 2.0) as i64
+}
+
+fn vc_draw_trajectory(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div {
+    let tr = scene.trajectory_data[node.data_slot as usize]
+    canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 120, 95, 150)
+    var i: i64 = 1
+    while i < tr.n && i < 1024 {
+        let x0 = vc_traj_x(node, tr.x[(i - 1) as usize], tr.z[(i - 1) as usize])
+        let y0 = vc_traj_y(node, tr.y[(i - 1) as usize], tr.z[(i - 1) as usize])
+        let x1 = vc_traj_x(node, tr.x[i as usize], tr.z[i as usize])
+        let y1 = vc_traj_y(node, tr.y[i as usize], tr.z[i as usize])
+        canvas_draw_line_aa(c, x0, y0, x1, y1, node.style.r, node.style.g, node.style.b)
+        i = i + 1
+    }
+    if tr.n > 0 {
+        let sx = vc_traj_x(node, tr.x[0], tr.z[0])
+        let sy = vc_traj_y(node, tr.y[0], tr.z[0])
+        canvas_fill_rect(c, sx - 2, sy - 2, 5, 5, 180, 230, 190)
+        let last = tr.n - 1
+        let ex = vc_traj_x(node, tr.x[last as usize], tr.z[last as usize])
+        let ey = vc_traj_y(node, tr.y[last as usize], tr.z[last as usize])
+        canvas_fill_rect(c, ex - 2, ey - 2, 5, 5, 255, 180, 130)
+        var cur = scene.time as i64
+        if cur < 0 { cur = 0 }
+        if cur >= tr.n { cur = tr.n - 1 }
+        let tx = vc_traj_x(node, tr.x[cur as usize], tr.z[cur as usize])
+        let ty = vc_traj_y(node, tr.y[cur as usize], tr.z[cur as usize])
+        canvas_draw_rect(c, tx - 4, ty - 4, 9, 9, 255, 245, 120)
+    }
+}
+
+fn vc_spec_x(node: &VizNode, x: f64, xmin: f64, xmax: f64) -> i64 {
+    let span = if xmax == xmin { 1.0 } else { xmax - xmin }
+    node.layout.x + (((x - xmin) / span) * (node.layout.w as f64)) as i64
+}
+
+fn vc_spec_y(node: &VizNode, y: f64, ymin: f64, ymax: f64) -> i64 {
+    let span = if ymax == ymin { 1.0 } else { ymax - ymin }
+    node.layout.y + node.layout.h - (((y - ymin) / span) * (node.layout.h as f64)) as i64
+}
+
+fn vc_draw_spectrum(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div {
+    let s = scene.spectrum_data[node.data_slot as usize]
+    canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 140, 110, 70)
+    var i: i64 = 1
+    while i < s.n && i < 1024 {
+        let x0 = vc_spec_x(node, s.x[(i - 1) as usize], s.x_min, s.x_max)
+        let y0 = vc_spec_y(node, s.intensity[(i - 1) as usize], s.y_min, s.y_max)
+        let x1 = vc_spec_x(node, s.x[i as usize], s.x_min, s.x_max)
+        let y1 = vc_spec_y(node, s.intensity[i as usize], s.y_min, s.y_max)
+        canvas_draw_line_aa(c, x0, y0, x1, y1, node.style.r, node.style.g, node.style.b)
+        i = i + 1
+    }
+}
+
+fn vc_draw_mesh(scene: &VizScene, c: &!Canvas, node: &VizNode) with Mut, Div, Alloc {
+    let m = scene.meshes[node.data_slot as usize]
+    var tris: [Tri3D; 4096] = [m.tris[0]; 4096]
+    var i: i64 = 0
+    while i < m.n && i < 128 {
+        tris[i as usize] = m.tris[i as usize]
+        i = i + 1
+    }
+    let cam = Camera3D { pos_x: 0.0, pos_y: 0.0, pos_z: 0.0, focal: (node.layout.w as f64) * 0.8 }
+    let light = Light3D { dx: 0.0, dy: 0.0, dz: 1.0, r: 255, g: 255, b: 255, ambient: 0.35 }
+    let depth = r3d_depth_buf_alloc(c.width, c.height)
+    r3d_depth_buf_clear(depth, c.width, c.height)
+    r3d_render_viewport(&tris, m.n, &cam, &light, depth, c, node.layout.x, node.layout.y, node.layout.w, node.layout.h)
+    heap_free(depth as *mut i8)
+    canvas_draw_rect(c, node.layout.x, node.layout.y, node.layout.w, node.layout.h, 120, 130, 150)
+}
+
+pub fn viz_canvas_render_scene(scene: &VizScene, c: &!Canvas) with Mut, Div, Alloc {
+    var i: i64 = 0
+    while i < scene.node_count {
+        let node = scene.nodes[i as usize]
+        if node.kind == VIZ_NODE_PANEL {
+            vc_draw_panel(c, &node)
+        } else if node.kind == VIZ_NODE_LABEL {
+            vc_draw_label(c, &node)
+        } else if node.kind == VIZ_NODE_CONTROL {
+            vc_draw_control(c, &node)
+        } else if node.kind == VIZ_NODE_CHART_LINE || node.kind == VIZ_NODE_CHART_SCATTER || node.kind == VIZ_NODE_CHART_BAR || node.kind == VIZ_NODE_UNCERTAINTY_BAND {
+            let d = scene.series[node.data_slot as usize]
+            let x0 = if d.x_min == d.x_max { vc_pad_range_min(d.x_min) } else { d.x_min }
+            let x1 = if d.x_min == d.x_max { vc_pad_range_max(d.x_max) } else { d.x_max }
+            let y0 = if d.y_min == d.y_max { vc_pad_range_min(d.y_min) } else { d.y_min }
+            let y1 = if d.y_min == d.y_max { vc_pad_range_max(d.y_max) } else { d.y_max }
+            let cs = coord_new(x0, x1, y0, y1, node.layout.x, node.layout.y, node.layout.w, node.layout.h)
+            coord_draw_axes(&cs, c)
+            if node.kind == VIZ_NODE_CHART_LINE {
+                chart_line(&cs, &d.xs, &d.ys, d.n, c, node.style.r, node.style.g, node.style.b)
+            } else if node.kind == VIZ_NODE_CHART_SCATTER {
+                chart_scatter(&cs, &d.xs, &d.ys, d.n, c, node.style.r, node.style.g, node.style.b)
+            } else if node.kind == VIZ_NODE_CHART_BAR {
+                chart_bar(&cs, &d.xs, &d.ys, d.n, c, node.style.r, node.style.g, node.style.b)
+            } else {
+                epiviz_band(&cs, &d.xs, &d.ys, &d.vars, d.n, c, node.style.r, node.style.g, node.style.b)
+            }
+        } else if node.kind == VIZ_NODE_HEATMAP {
+            let h = scene.heatmaps[node.data_slot as usize]
+            let cs = coord_new(0.0, h.cols as f64, 0.0, h.rows as f64, node.layout.x, node.layout.y, node.layout.w, node.layout.h)
+            chart_heatmap(&cs, &h.values, h.rows, h.cols, h.min_value, h.max_value, c)
+            coord_draw_axes(&cs, c)
+        } else if node.kind == VIZ_NODE_FOREST {
+            vc_draw_forest(scene, c, &node)
+        } else if node.kind == VIZ_NODE_WATERFALL {
+            vc_draw_waterfall(scene, c, &node)
+        } else if node.kind == VIZ_NODE_MOLECULE {
+            vc_draw_molecule(scene, c, &node)
+        } else if node.kind == VIZ_NODE_FIELD {
+            vc_draw_field(scene, c, &node)
+        } else if node.kind == VIZ_NODE_VECTOR_FIELD {
+            vc_draw_vector_field(scene, c, &node)
+        } else if node.kind == VIZ_NODE_TRAJECTORY {
+            vc_draw_trajectory(scene, c, &node)
+        } else if node.kind == VIZ_NODE_SPECTRUM {
+            vc_draw_spectrum(scene, c, &node)
+        } else if node.kind == VIZ_NODE_MESH {
+            vc_draw_mesh(scene, c, &node)
+        }
+        i = i + 1
+    }
+}

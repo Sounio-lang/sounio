@@ -1,0 +1,377 @@
+// self-hosted/gpu/kretikos_kaxi_asm_summary.sio
+//
+// Pure-Sounio K-AXI assembly parser. Reads a .kaxi file and emits a flat
+// JSON summary on stdout describing instruction-level shape and the
+// first-occurrence lines used by witness recognizers. Replaces the
+// `python3` regex/loop heredoc inside `kretikos kaxi-witness` (bin/kretikos
+// line ~1594).
+//
+// Argv:  driver.elf <asm_path>
+// Output (sorted keys, indent=2) on stdout:
+//   {
+//     "first_add_first": "<line>",
+//     "first_add_second": "<line>",
+//     "first_div": "<line>",
+//     "first_fma": "<line>",
+//     "first_mul": "<line>",
+//     "first_store_global": "<line>",
+//     "first_sub": "<line>",
+//     "instruction_count": N,
+//     "opcodes": ["..."],
+//     "seq_dense_zero_based": <bool>,
+//     "seqs": [N, ...],
+//     "store_global_count": N,
+//     "variance_annotation_count": N
+//   }
+//
+// "instruction" = a non-empty line whose first non-whitespace byte is not ';'.
+// Strip leading whitespace; trailing CR/whitespace is ignored when matching.
+// Variance count = number of instruction lines containing "var=+" or "var=0%".
+// seq_dense_zero_based = true iff each parsed seq=N matches its 0-based index.
+
+use gpu::kaxi_backend::*
+
+const FILE_CAP: i64 = 262144
+
+struct FileBuf {
+    data: [i8; 262144],
+    len: i64,
+}
+
+fn fb_new() -> FileBuf {
+    FileBuf { data: [0; 262144], len: 0 }
+}
+
+fn fb_load(path: string) -> FileBuf with IO, Mut, Panic, Div, Alloc {
+    var buf = fb_new()
+    let size = file_size(path)
+    if size <= 0 { return buf }
+    let bytes = read_file(path)
+    let cap: i64 = if size > FILE_CAP { FILE_CAP } else { size }
+    var i: i64 = 0
+    while i < cap {
+        buf.data[i as usize] = bytes[i as usize] as i8
+        i = i + 1
+    }
+    buf.len = cap
+    buf
+}
+
+fn is_ws(c: i8) -> bool {
+    c == 32 || c == 9 || c == 13
+}
+
+// Walk one physical line. Returns (line_start, line_end_excl, next_pos).
+// line_start is the first non-leading-whitespace position (or pos if line
+// is entirely whitespace); line_end_excl excludes the trailing newline and
+// any trailing CR/space/tab. next_pos points past the newline or to len.
+struct LineSpan { start: i64, end: i64, next: i64 }
+
+fn line_span(buf: &FileBuf, pos: i64) -> LineSpan with Mut, Panic, Div {
+    var p = pos
+    while p < buf.len && is_ws(buf.data[p as usize]) {
+        p = p + 1
+    }
+    let start = p
+    var q = pos
+    while q < buf.len && buf.data[q as usize] != 10 {
+        q = q + 1
+    }
+    var end = q
+    while end > start && is_ws(buf.data[(end - 1) as usize]) {
+        end = end - 1
+    }
+    let next: i64 = if q < buf.len { q + 1 } else { q }
+    LineSpan { start: start, end: end, next: next }
+}
+
+// True if buf[ls..le] starts with the bytes of `prefix` followed by space
+// (or is exactly `prefix` with no trailing arg). Matches the Python
+// `line.startswith(opcode + " ")` semantics, with a tolerance for opcodes
+// like "ret" that may appear as "ret seq=N" (always followed by space).
+fn line_has_prefix(buf: &FileBuf, ls: i64, le: i64, prefix: string) -> bool with Mut, Panic, Div {
+    let n = str_len(prefix)
+    if le - ls < n { return false }
+    var i: i64 = 0
+    while i < n {
+        if buf.data[(ls + i) as usize] != (str_char_at(prefix, i) as i8) { return false }
+        i = i + 1
+    }
+    if le - ls == n { return true }
+    let nxt = buf.data[(ls + n) as usize]
+    nxt == 32 || nxt == 9
+}
+
+// Find first occurrence of `needle` within buf[ls..le]. Returns
+// position (within buf), or -1 if absent.
+fn line_find(buf: &FileBuf, ls: i64, le: i64, needle: string) -> i64 with Mut, Panic, Div {
+    let nlen = str_len(needle)
+    if nlen == 0 { return ls }
+    if le - ls < nlen { return 0 - 1 }
+    var i = ls
+    while i + nlen <= le {
+        var j: i64 = 0
+        var ok = true
+        while j < nlen {
+            if buf.data[(i + j) as usize] != (str_char_at(needle, j) as i8) {
+                ok = false
+                break
+            }
+            j = j + 1
+        }
+        if ok { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Parse a non-negative integer starting at pos (within buf). Returns -1
+// if no digit at pos.
+fn parse_int_at(buf: &FileBuf, pos: i64) -> i64 with Mut, Panic, Div {
+    if pos >= buf.len { return 0 - 1 }
+    let c0 = buf.data[pos as usize]
+    if c0 < 48 || c0 > 57 { return 0 - 1 }
+    var v: i64 = 0
+    var p = pos
+    while p < buf.len {
+        let c = buf.data[p as usize]
+        if c < 48 || c > 57 { break }
+        v = v * 10 + (c - 48) as i64
+        p = p + 1
+    }
+    v
+}
+
+// Push the opcode token (first whitespace-delimited word in the line)
+// from buf[ls..le] onto out.
+fn push_opcode_token(out: KaxiAsmBuf, buf: &FileBuf, ls: i64, le: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var x = out
+    var i = ls
+    while i < le {
+        let c = buf.data[i as usize]
+        if is_ws(c) || c == 44 { break }
+        x = kaxi_asm_push_byte(x, c)
+        i = i + 1
+    }
+    x
+}
+
+// Push the verbatim line bytes from buf[ls..le] onto out, JSON-escaping
+// '"' and '\\' (which K-AXI assembly never contains in practice, but
+// guarded to keep the emitter total). Other bytes are emitted as-is.
+fn push_line_quoted(out: KaxiAsmBuf, buf: &FileBuf, ls: i64, le: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var x = kaxi_asm_push_byte(out, 34 as i8)
+    var i = ls
+    while i < le {
+        let c = buf.data[i as usize]
+        if c == 34 || c == 92 {
+            x = kaxi_asm_push_byte(x, 92 as i8)
+            x = kaxi_asm_push_byte(x, c)
+        } else {
+            x = kaxi_asm_push_byte(x, c)
+        }
+        i = i + 1
+    }
+    x = kaxi_asm_push_byte(x, 34 as i8)
+    x
+}
+
+// Push a JSON-quoted opcode token built from buf[ls..token_end].
+fn push_opcode_quoted(out: KaxiAsmBuf, buf: &FileBuf, ls: i64, le: i64) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var x = kaxi_asm_push_byte(out, 34 as i8)
+    x = push_opcode_token(x, buf, ls, le)
+    x = kaxi_asm_push_byte(x, 34 as i8)
+    x
+}
+
+struct Bounds { start: i64, end: i64, set: bool }
+
+fn bounds_empty() -> Bounds {
+    Bounds { start: 0, end: 0, set: false }
+}
+
+// Emit "  \"<key>\": <line-or-empty-string>,\n" with sorted-key formatting.
+// If b.set, pushes the quoted line; otherwise pushes "".
+fn emit_first_line_field(out: KaxiAsmBuf, key: string, buf: &FileBuf, b: Bounds, trailing_comma: bool) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var x = kaxi_asm_push_str(out, "  \"")
+    x = kaxi_asm_push_str(x, key)
+    x = kaxi_asm_push_str(x, "\": ")
+    if b.set {
+        x = push_line_quoted(x, buf, b.start, b.end)
+    } else {
+        x = kaxi_asm_push_str(x, "\"\"")
+    }
+    if trailing_comma {
+        x = kaxi_asm_push_byte(x, 44 as i8)
+    }
+    x = kaxi_asm_push_byte(x, 10 as i8)
+    x
+}
+
+fn emit_int_field(out: KaxiAsmBuf, key: string, value: i64, trailing_comma: bool) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var x = kaxi_asm_push_str(out, "  \"")
+    x = kaxi_asm_push_str(x, key)
+    x = kaxi_asm_push_str(x, "\": ")
+    x = kaxi_asm_push_str(x, kaxi_i64_to_string(value))
+    if trailing_comma {
+        x = kaxi_asm_push_byte(x, 44 as i8)
+    }
+    x = kaxi_asm_push_byte(x, 10 as i8)
+    x
+}
+
+fn emit_bool_field(out: KaxiAsmBuf, key: string, value: bool, trailing_comma: bool) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var x = kaxi_asm_push_str(out, "  \"")
+    x = kaxi_asm_push_str(x, key)
+    x = kaxi_asm_push_str(x, "\": ")
+    if value {
+        x = kaxi_asm_push_str(x, "true")
+    } else {
+        x = kaxi_asm_push_str(x, "false")
+    }
+    if trailing_comma {
+        x = kaxi_asm_push_byte(x, 44 as i8)
+    }
+    x = kaxi_asm_push_byte(x, 10 as i8)
+    x
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 1 {
+        println("usage: kretikos_kaxi_asm_summary <asm_path>")
+        return 2
+    }
+    let path = get_arg(0)
+    let buf = fb_load(path)
+    if buf.len <= 0 {
+        print("kaxi-asm-summary: cannot read ")
+        println(path)
+        return 1
+    }
+
+    var opcodes_arr = kaxi_asm_new()
+    opcodes_arr = kaxi_asm_push_byte(opcodes_arr, 91 as i8) // '['
+
+    var seqs_arr = kaxi_asm_new()
+    seqs_arr = kaxi_asm_push_byte(seqs_arr, 91 as i8)
+
+    var inst_count: i64 = 0
+    var sg_count: i64 = 0
+    var var_count: i64 = 0
+    var seq_dense: bool = true
+    var saw_any_seq: bool = false
+
+    var first_add = bounds_empty()
+    var second_add = bounds_empty()
+    var first_sub = bounds_empty()
+    var first_mul = bounds_empty()
+    var first_div = bounds_empty()
+    var first_fma = bounds_empty()
+    var first_store_global = bounds_empty()
+
+    var pos: i64 = 0
+    while pos < buf.len {
+        let ln = line_span(&buf, pos)
+        if ln.start == ln.end {
+            pos = ln.next
+            continue
+        }
+        let first = buf.data[ln.start as usize]
+        if first == 59 {
+            pos = ln.next
+            continue
+        }
+
+        if inst_count > 0 {
+            opcodes_arr = kaxi_asm_push_str(opcodes_arr, ", ")
+            seqs_arr = kaxi_asm_push_str(seqs_arr, ", ")
+        }
+        opcodes_arr = push_opcode_quoted(opcodes_arr, &buf, ln.start, ln.end)
+
+        let seq_pos = line_find(&buf, ln.start, ln.end, "seq=")
+        if seq_pos >= 0 {
+            let v = parse_int_at(&buf, seq_pos + 4)
+            saw_any_seq = true
+            if v != inst_count {
+                seq_dense = false
+            }
+            seqs_arr = kaxi_asm_push_str(seqs_arr, kaxi_i64_to_string(v))
+        } else {
+            seq_dense = false
+            // Emit a placeholder "-1" so the array stays length-aligned;
+            // shell/witness logic surfaces the failure via seq_dense flag.
+            seqs_arr = kaxi_asm_push_str(seqs_arr, "-1")
+        }
+
+        if line_find(&buf, ln.start, ln.end, "var=+") >= 0 || line_find(&buf, ln.start, ln.end, "var=0%") >= 0 {
+            var_count = var_count + 1
+        }
+
+        if line_has_prefix(&buf, ln.start, ln.end, "store_global") {
+            sg_count = sg_count + 1
+            if !first_store_global.set {
+                first_store_global = Bounds { start: ln.start, end: ln.end, set: true }
+            }
+        }
+        if line_has_prefix(&buf, ln.start, ln.end, "add") {
+            if !first_add.set {
+                first_add = Bounds { start: ln.start, end: ln.end, set: true }
+            } else if !second_add.set {
+                second_add = Bounds { start: ln.start, end: ln.end, set: true }
+            }
+        }
+        if line_has_prefix(&buf, ln.start, ln.end, "sub") && !first_sub.set {
+            first_sub = Bounds { start: ln.start, end: ln.end, set: true }
+        }
+        if line_has_prefix(&buf, ln.start, ln.end, "mul") && !first_mul.set {
+            first_mul = Bounds { start: ln.start, end: ln.end, set: true }
+        }
+        if line_has_prefix(&buf, ln.start, ln.end, "div") && !first_div.set {
+            first_div = Bounds { start: ln.start, end: ln.end, set: true }
+        }
+        if line_has_prefix(&buf, ln.start, ln.end, "fma") && !first_fma.set {
+            first_fma = Bounds { start: ln.start, end: ln.end, set: true }
+        }
+
+        inst_count = inst_count + 1
+        pos = ln.next
+    }
+
+    if !saw_any_seq && inst_count == 0 {
+        // Empty asm: keep seq_dense = true (matches Python's seqs == range(0)).
+        seq_dense = true
+    }
+
+    opcodes_arr = kaxi_asm_push_byte(opcodes_arr, 93 as i8) // ']'
+    seqs_arr = kaxi_asm_push_byte(seqs_arr, 93 as i8)
+
+    var out = kaxi_asm_new()
+    out = kaxi_asm_push_str(out, "{\n")
+    out = emit_first_line_field(out, "first_add_first", &buf, first_add, true)
+    out = emit_first_line_field(out, "first_add_second", &buf, second_add, true)
+    out = emit_first_line_field(out, "first_div", &buf, first_div, true)
+    out = emit_first_line_field(out, "first_fma", &buf, first_fma, true)
+    out = emit_first_line_field(out, "first_mul", &buf, first_mul, true)
+    out = emit_first_line_field(out, "first_store_global", &buf, first_store_global, true)
+    out = emit_first_line_field(out, "first_sub", &buf, first_sub, true)
+    out = emit_int_field(out, "instruction_count", inst_count, true)
+
+    out = kaxi_asm_push_str(out, "  \"opcodes\": ")
+    out = kaxi_asm_push_str(out, kaxi_asm_to_string(opcodes_arr))
+    out = kaxi_asm_push_str(out, ",\n")
+
+    out = emit_bool_field(out, "seq_dense_zero_based", seq_dense, true)
+
+    out = kaxi_asm_push_str(out, "  \"seqs\": ")
+    out = kaxi_asm_push_str(out, kaxi_asm_to_string(seqs_arr))
+    out = kaxi_asm_push_str(out, ",\n")
+
+    out = emit_int_field(out, "store_global_count", sg_count, true)
+    out = emit_int_field(out, "variance_annotation_count", var_count, false)
+    out = kaxi_asm_push_str(out, "}\n")
+
+    let s = kaxi_asm_to_string(out)
+    print(s)
+    0
+}

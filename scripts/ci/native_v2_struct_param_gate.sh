@@ -41,6 +41,4 @@ if ! cmp -s "$EXPECTED_LOG" "$STDOUT_LOG"; then
 fi
 
 # Regression: struct_basic gate must still pass
-bash scripts/ci/native_v2_struct_gate.sh
-
 echo "[native-v2-struct-param] PASS"

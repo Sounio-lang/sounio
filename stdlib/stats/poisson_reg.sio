@@ -1,0 +1,224 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/poisson_reg.sio — one-predictor Poisson regression (log link)
+//
+// Maximum-likelihood Poisson regression log(μᵢ) = b₀ + b₁·xᵢ, fit by
+// Newton-Raphson — the count/rate companion to logistic regression:
+//
+//   poisson_fit(x, y, n) -> PoissonFit             (y = counts ≥ 0)
+//   poisson_predict(fit, x) -> f64                 (fitted mean μ)
+//
+// Score g = Σ(yᵢ−μᵢ)[1, xᵢ], Fisher information H = Σ μᵢ[1,xᵢ]⊗[1,xᵢ], update
+// β ← β + H⁻¹g.  exp(b₁) is the multiplicative rate ratio per unit x. Standard
+// errors are √diag(H⁻¹); the slope Wald test is z = b₁/se₁.
+//
+// Pure Sounio: inline exp/ln/sqrt/erf and a 2×2 solve; flat per-iteration passes
+// over the data (no nested data-array calls).
+//
+// References:
+//   McCullagh & Nelder, "Generalized Linear Models" 2e, §6.
+
+module stats::poisson_reg
+
+fn pr_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / pr_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn pr_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn pr_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn pr_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * pr_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+fn pr_normal_sf(z: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 - pr_erf(z * INV_SQRT2))
+}
+
+pub struct PoissonFit {
+    pub b0: f64,
+    pub b1: f64,
+    pub rate_ratio: f64, // exp(b1)
+    pub se1: f64,
+    pub z1: f64,
+    pub p1: f64,
+    pub iters: i64,
+    pub converged: i64,
+}
+
+/// One-predictor Poisson regression by Newton-Raphson.
+///
+/// Parâmetros: x — predictor; y — non-negative counts; n — size (>=3, <=256).
+/// Retorno: PoissonFit (b0, b1, rate_ratio=exp(b1), se1, Wald z/p, diagnostics).
+/// Referências: McCullagh & Nelder §6.
+pub fn poisson_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> PoissonFit with Mut, Div, Panic {
+    if n < 3 {
+        return PoissonFit { b0: 0.0, b1: 0.0, rate_ratio: 1.0, se1: 0.0, z1: 0.0, p1: 1.0, iters: 0, converged: 0 }
+    }
+    var b0 = 0.0
+    var b1 = 0.0
+    var conv = 0
+    var used = 0
+    var it = 0
+    while it < 50 {
+        var g0 = 0.0
+        var g1 = 0.0
+        var h00 = 0.0
+        var h01 = 0.0
+        var h11 = 0.0
+        var i = 0
+        while i < n {
+            let xi = x[i as usize]
+            let mu = pr_exp(b0 + b1 * xi)
+            let resid = y[i as usize] - mu
+            g0 = g0 + resid
+            g1 = g1 + resid * xi
+            h00 = h00 + mu
+            h01 = h01 + mu * xi
+            h11 = h11 + mu * xi * xi
+            i = i + 1
+        }
+        let det = h00 * h11 - h01 * h01
+        if det <= 1.0e-300 && det >= 0.0 - 1.0e-300 { it = 50 }
+        else {
+            let db0 = (h11 * g0 - h01 * g1) / det
+            let db1 = (h00 * g1 - h01 * g0) / det
+            b0 = b0 + db0
+            b1 = b1 + db1
+            used = it + 1
+            let ad0 = if db0 < 0.0 { 0.0 - db0 } else { db0 }
+            let ad1 = if db1 < 0.0 { 0.0 - db1 } else { db1 }
+            if ad0 < 1.0e-10 && ad1 < 1.0e-10 { conv = 1; it = 50 } else { it = it + 1 }
+        }
+    }
+    var h00 = 0.0
+    var h01 = 0.0
+    var h11 = 0.0
+    var i2 = 0
+    while i2 < n {
+        let xi = x[i2 as usize]
+        let mu = pr_exp(b0 + b1 * xi)
+        h00 = h00 + mu
+        h01 = h01 + mu * xi
+        h11 = h11 + mu * xi * xi
+        i2 = i2 + 1
+    }
+    let det = h00 * h11 - h01 * h01
+    var se1 = 0.0
+    if det > 1.0e-300 { se1 = pr_sqrt(h00 / det) }
+    var z1 = 0.0
+    if se1 > 0.0 { z1 = b1 / se1 }
+    let az = if z1 < 0.0 { 0.0 - z1 } else { z1 }
+    let p1 = 2.0 * pr_normal_sf(az)
+    return PoissonFit { b0: b0, b1: b1, rate_ratio: pr_exp(b1), se1: se1, z1: z1, p1: p1, iters: used as i64, converged: conv as i64 }
+}
+
+/// Fitted mean μ = exp(b0 + b1·x).
+pub fn poisson_predict(fit: &PoissonFit, x: f64) -> f64 with Mut, Div, Panic {
+    return pr_exp(fit.b0 + fit.b1 * x)
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Two-point design x∈{0,1}: counts mean 3 at x=0, 12 at x=1.
+// Saturated MLE: b0=ln3=1.098612; b1=ln(12/3)=ln4=1.386294; rate ratio 4.
+// predict(0)=3, predict(1)=12.
+fn test_two_point() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=0.0; x[2]=1.0; x[3]=1.0
+    y[0]=2.0; y[1]=4.0; y[2]=8.0; y[3]=16.0
+    let r = poisson_fit(&x, &y, 4)
+    var ok = true
+    ok = check(1, r.converged == 1) && ok
+    ok = check(2, approx(r.b0, 1.098612, 1.0e-4)) && ok
+    ok = check(3, approx(r.b1, 1.386294, 1.0e-4)) && ok
+    ok = check(4, approx(r.rate_ratio, 4.0, 1.0e-3)) && ok
+    ok = check(5, approx(poisson_predict(&r, 0.0), 3.0, 1.0e-3)) && ok
+    ok = check(6, approx(poisson_predict(&r, 1.0), 12.0, 1.0e-3)) && ok
+    return ok
+}
+
+// Flat counts -> b1 = 0, rate ratio 1.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=0.0; x[1]=1.0; x[2]=2.0; x[3]=3.0
+    y[0]=5.0; y[1]=5.0; y[2]=5.0; y[3]=5.0
+    let r = poisson_fit(&x, &y, 4)
+    var ok = true
+    ok = check(10, approx(r.b1, 0.0, 1.0e-4)) && ok
+    ok = check(11, approx(r.rate_ratio, 1.0, 1.0e-4)) && ok
+    ok = check(12, approx(r.b0, 1.609438, 1.0e-4)) && ok    // ln 5
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_two_point() && ok
+    ok = test_null() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

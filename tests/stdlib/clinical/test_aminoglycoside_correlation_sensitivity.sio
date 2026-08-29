@@ -1,0 +1,200 @@
+//@ run-pass
+//@ expect-stdout: MULTI-DRUG SENSITIVITY PASS
+
+// M3.5 / Substrate-generality — Multi-drug correlation-sensitivity
+// test for the M2.5 Fréchet outer enclosure.
+//
+// Claim: the corner-enumeration band
+//   [Cmin(Vc_lo, CL_hi), Cmin(Vc_hi, CL_lo)]
+// encloses Cmin(Vc, CL) for ANY joint distribution of (Vc, CL)
+// supported on the marginal Knightian rectangle, because Cmin is
+// strictly increasing in Vc and strictly decreasing in CL on the
+// physiological domain. This holds ACROSS ALL DRUGS with the same
+// 1-compartment monotone Cmin structure — the formal soundness
+// theorem `frechet_enclosure_monotone_inc_dec_nat` does not depend
+// on drug-specific parameters.
+//
+// This test exercises three drugs:
+//   - GENTAMICIN  (Hilf 1989: Vc 0.25 L/kg, CL 0.06 L/h per CrCl)
+//   - AMIKACIN    (Marsot 2017: Vc 0.30 L/kg, CL 0.06 L/h per CrCl)
+//
+// (The vancomycin counterpart is in
+//  tests/stdlib/clinical/test_vancomycin_correlation_sensitivity.sio.
+//  Together the three tests demonstrate that the Fréchet enclosure
+//  is drug-agnostic — a property of the function shape, not the
+//  popPK estimates.)
+//
+// PASS criterion: all 500 samples (50 per ρ × 5 ρ × 2 drugs) enclosed.
+// FAIL: any sample outside.
+
+use clinical::aminoglycoside_pbpk::*
+use epistemic::knightian::*
+
+struct LcgState { seed: i64 }
+
+fn lcg_next(st: &!LcgState) -> i64 with Mut, Div, Panic {
+    let s = st.seed
+    let n = (1103515245 * s + 12345) % 2147483648
+    st.seed = n
+    n
+}
+
+fn lcg_unif(st: &!LcgState) -> f64 with Mut, Div, Panic {
+    let n = lcg_next(st)
+    (n as f64) / 2147483648.0
+}
+
+fn ts_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn ts_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn ts_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+// 12-term Taylor exp — covers θ ∈ [-7, 0] for any aminoglycoside
+// dosing regime. ag_exp_approx in stdlib is 9-term; this is a
+// stronger external check.
+fn ts_exp(x: f64) -> f64 with Mut, Div, Panic {
+    var y: f64 = 1.0
+    var term: f64 = 1.0
+    var k: f64 = 1.0
+    var i: i64 = 0
+    while i < 12 {
+        term = term * x / k
+        y = y + term
+        k = k + 1.0
+        i = i + 1
+    }
+    if y < 0.0 { return 0.0 }
+    y
+}
+
+fn ts_cmin(vc: f64, cl: f64, dose: f64, tau: f64) -> f64 with Mut, Div, Panic {
+    if vc <= 0.0 { return 0.0 }
+    if cl <= 0.0 { return 0.0 }
+    let ke = cl / vc
+    let exp_neg = ts_exp(0.0 - ke * tau)
+    let denom = 1.0 - exp_neg
+    if denom <= 0.0 { return 0.0 }
+    (dose / vc) * exp_neg / denom
+}
+
+struct PairVcCl { vc: f64, cl: f64 }
+
+// Generate a (Vc, CL) pair in the rectangle with target Pearson r ≈ ρ.
+// Marginals are uniform on the rectangle; the pair lies inside the
+// rectangle (which is what the enclosure proof needs).
+fn corr_pair(st: &!LcgState,
+             vc_lo: f64, vc_hi: f64,
+             cl_lo: f64, cl_hi: f64,
+             rho: f64) -> PairVcCl with Mut, Div, Panic {
+    let u1 = lcg_unif(st)
+    let u2 = lcg_unif(st)
+    let abs_rho = ts_abs(rho)
+    let mix = rho * (u1 - 0.5) + (1.0 - abs_rho) * (u2 - 0.5) + 0.5
+    let mix_c = ts_max(0.0, ts_min(1.0, mix))
+    let vc = vc_lo + (vc_hi - vc_lo) * u1
+    let cl = cl_lo + (cl_hi - cl_lo) * mix_c
+    PairVcCl { vc: vc, cl: cl }
+}
+
+fn run_at_rho(st: &!LcgState,
+              vc_lo: f64, vc_hi: f64,
+              cl_lo: f64, cl_hi: f64,
+              dose: f64, tau: f64,
+              cmin_lo_band: f64, cmin_hi_band: f64,
+              rho: f64,
+              n: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var ok: i64 = 1
+    while i < n {
+        let pair = corr_pair(st, vc_lo, vc_hi, cl_lo, cl_hi, rho)
+        let cmin_actual = ts_cmin(pair.vc, pair.cl, dose, tau)
+        // 1e-4 tolerance for the local-Taylor vs stdlib-9-term
+        // numerical-implementation difference (within Maclaurin
+        // truncation error in the regime).
+        if cmin_actual + 0.0001 < cmin_lo_band {
+            ok = 0
+        }
+        if cmin_actual > cmin_hi_band + 0.0001 {
+            ok = 0
+        }
+        i = i + 1
+    }
+    ok
+}
+
+fn run_drug_full_sweep(st: &!LcgState,
+                       vc_lo: f64, vc_hi: f64,
+                       cl_lo: f64, cl_hi: f64,
+                       dose: f64, tau: f64,
+                       cmin_lo_band: f64, cmin_hi_band: f64,
+                       n_per: i64) -> i64 with Mut, Div, Panic {
+    var pass: i64 = 1
+
+    let r1: f64 = 0.0 - 0.7
+    let r2: f64 = 0.0 - 0.3
+    let r3: f64 = 0.0
+    let r4: f64 = 0.3
+    let r5: f64 = 0.7
+
+    if run_at_rho(st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                  cmin_lo_band, cmin_hi_band, r1, n_per) == 0 { pass = 0 }
+    if run_at_rho(st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                  cmin_lo_band, cmin_hi_band, r2, n_per) == 0 { pass = 0 }
+    if run_at_rho(st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                  cmin_lo_band, cmin_hi_band, r3, n_per) == 0 { pass = 0 }
+    if run_at_rho(st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                  cmin_lo_band, cmin_hi_band, r4, n_per) == 0 { pass = 0 }
+    if run_at_rho(st, vc_lo, vc_hi, cl_lo, cl_hi, dose, tau,
+                  cmin_lo_band, cmin_hi_band, r5, n_per) == 0 { pass = 0 }
+
+    pass
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var st = LcgState { seed: 1 }
+    let nper: i64 = 50
+
+    // ---------------- GENTAMICIN ----------------
+    // 78.5 kg, CrCl 65, 120 mg q8h, post-TDM (3 samples).
+    let gent = agent_gentamicin(78.5, 65.0)
+    let g_pbox = predict_cmin_aminoglycoside(&gent, 78.5, 65.0, 120.0, 8.0, 3)
+    let g_lo = pb_lo_mean(&g_pbox)
+    let g_hi = pb_hi_mean(&g_pbox)
+    // Re-derive marginal rectangle (mirrors ag_band_vc/cl post-TDM).
+    let g_vc_nom = 0.25 * 78.5
+    let g_cl_nom = 0.06 * 65.0
+    let g_vc_lo = g_vc_nom * 0.93
+    let g_vc_hi = g_vc_nom * 1.07
+    let g_cl_lo = g_cl_nom * 0.93
+    let g_cl_hi = g_cl_nom * 1.07
+
+    let g_pass = run_drug_full_sweep(&!st, g_vc_lo, g_vc_hi,
+                                     g_cl_lo, g_cl_hi,
+                                     120.0, 8.0, g_lo, g_hi, nper)
+
+    // ---------------- AMIKACIN ----------------
+    // Same patient, 750 mg q12h, post-TDM.
+    let amik = agent_amikacin(78.5, 65.0)
+    let a_pbox = predict_cmin_aminoglycoside(&amik, 78.5, 65.0, 750.0, 12.0, 3)
+    let a_lo = pb_lo_mean(&a_pbox)
+    let a_hi = pb_hi_mean(&a_pbox)
+    let a_vc_nom = 0.30 * 78.5
+    let a_cl_nom = 0.06 * 65.0
+    let a_vc_lo = a_vc_nom * 0.93
+    let a_vc_hi = a_vc_nom * 1.07
+    let a_cl_lo = a_cl_nom * 0.93
+    let a_cl_hi = a_cl_nom * 1.07
+
+    let a_pass = run_drug_full_sweep(&!st, a_vc_lo, a_vc_hi,
+                                     a_cl_lo, a_cl_hi,
+                                     750.0, 12.0, a_lo, a_hi, nper)
+
+    // ---------------- VERDICT ----------------
+    if g_pass == 1 && a_pass == 1 {
+        println("MULTI-DRUG SENSITIVITY PASS")
+    } else {
+        println("MULTI-DRUG SENSITIVITY FAIL")
+        if g_pass == 0 { println("gentamicin failed") }
+        if a_pass == 0 { println("amikacin failed") }
+    }
+    0
+}

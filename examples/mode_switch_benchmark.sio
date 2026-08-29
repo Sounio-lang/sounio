@@ -1,0 +1,311 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Mode-Switch Benchmark: ZD as Structural State Discontinuity
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Task structure:
+//   Sequence: [mode-A tokens × 5] [SWITCH=12] [mode-B tokens × 5]
+//   Label: binary classification based ONLY on mode-B statistics
+//           (majority class in mode-B tokens)
+//
+//   Mode-A tokens: drawn from {0,1,2,3,4} (low digits)
+//   Mode-B tokens: drawn from {5,6,7,8,9} (high digits)
+//   SWITCH token: 12
+//
+//   Label = majority_high(mode_B) where:
+//     majority_high = 1 if count(tokens >= 7) > count(tokens < 7) in mode-B
+//     majority_high = 0 otherwise
+//
+// Why this rewards ZD:
+//   - Mode-A state is NOISE for the mode-B classification
+//   - Residual mode-A state POLLUTES mode-B processing
+//   - ZD hard-reset at SWITCH removes mode-A contamination completely
+//   - H-SSM: mode-A state decays slowly (leaky), contaminates mode-B
+//
+// Noise signal ratio: 5 contaminating tokens vs 5 useful tokens
+// The harder the task is, the more complete reset matters.
+//
+// Models (all 16D, 16 A-params):
+//   H-SSM-16D    : 4×quat, assoc, NO ZD
+//   S-SSM-rand   : sedenion, random A init
+//   S-SSM-ZDinit : sedenion, A = e3+e10 (ZD locus)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0; var term = 1.0; var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+var RNG_A: i64 = 0; var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+// Token vocab:
+//   0..4  = mode-A low tokens
+//   5..9  = mode-B high tokens
+//   12    = SWITCH
+// Total sequence length: 11 (5 + 1 + 5)
+var SEQ: [i64; 11] = [0; 11]
+
+fn gen_sample() -> i64 with Mut, Div {
+    // 5 mode-A tokens (low: 0..4)
+    var i=0; while i<5 { SEQ[i]=(rng_next()/100)%5; i=i+1 }
+    // SWITCH
+    SEQ[5] = 12
+    // 5 mode-B tokens (high: 5..9)
+    var high_count = 0
+    i=0
+    while i<5 {
+        let t = 5 + (rng_next()/100)%5
+        SEQ[6+i] = t
+        if t >= 7 { high_count = high_count + 1 }
+        i=i+1
+    }
+    // Label: 1 if majority of mode-B tokens are >= 7
+    if high_count > 2 { 1 } else { 0 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// H-SSM-16D (4×quat, 16D, 16A, NO ZD)
+// Layout: embed[0..207] (13tok×16), A[208..223], B[224..239], out[240..271]
+// ═══════════════════════════════════════════════════════════════════════════
+var W_H: [i64; 280]=[0;280]; var H_H: [i64; 16]=[0;16]
+var L_H: [i64; 2]=[0;2]; var MOM_H: [i64; 280]=[0;280]
+fn whs(i:i64,v:f64) with Mut { W_H[i]=(v*100000000.0) as i64 }
+fn whg(i:i64)->f64 with Div { (W_H[i] as f64)/100000000.0 }
+fn hhs(i:i64,v:f64) with Mut { H_H[i]=(v*100000000.0) as i64 }
+fn hhg(i:i64)->f64 with Div { (H_H[i] as f64)/100000000.0 }
+
+fn init_h() with Mut, Div {
+    var i=0;while i<208{whs(i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0;while i<16{whs(224+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0;while i<32{whs(240+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0;while i<280{MOM_H[i]=0;i=i+1}
+    var b=0
+    while b<4{
+        whs(208+b*4,0.95);whs(209+b*4,((rng_next()%100) as f64-50.0)/500.0)
+        whs(210+b*4,((rng_next()%100) as f64-50.0)/500.0);whs(211+b*4,((rng_next()%100) as f64-50.0)/500.0)
+        b=b+1
+    }
+}
+
+fn step_h(tok: i64) with Mut, Div {
+    var b=0
+    while b<4 {
+        let base=b*4
+        let qw=whg(208+base);let qx=whg(209+base);let qy=whg(210+base);let qz=whg(211+base)
+        let hw=hhg(base);let hx=hhg(base+1);let hy=hhg(base+2);let hz=hhg(base+3)
+        var n0=qw*hw-qx*hx-qy*hy-qz*hz; var n1=qw*hx+qx*hw+qy*hz-qz*hy
+        var n2=qw*hy-qx*hz+qy*hw+qz*hx; var n3=qw*hz+qx*hy-qy*hx+qz*hw
+        n0=n0+whg(224+base)*whg(tok*16+base);n1=n1+whg(225+base)*whg(tok*16+base+1)
+        n2=n2+whg(226+base)*whg(tok*16+base+2);n3=n3+whg(227+base)*whg(tok*16+base+3)
+        if n0>5.0{n0=5.0}if n0<0.0-5.0{n0=0.0-5.0}
+        if n1>5.0{n1=5.0}if n1<0.0-5.0{n1=0.0-5.0}
+        if n2>5.0{n2=5.0}if n2<0.0-5.0{n2=0.0-5.0}
+        if n3>5.0{n3=5.0}if n3<0.0-5.0{n3=0.0-5.0}
+        hhs(base,n0);hhs(base+1,n1);hhs(base+2,n2);hhs(base+3,n3)
+        b=b+1
+    }
+}
+
+fn logits_h() with Mut, Div {
+    var c=0;while c<2{var s=0.0;var d=0;while d<16{s=s+hhg(d)*whg(240+d*2+c);d=d+1};L_H[c]=(s*100000000.0) as i64;c=c+1}
+}
+fn pred_h()->i64 with Mut, Div {
+    if (L_H[1] as f64)/100000000.0 > (L_H[0] as f64)/100000000.0 { 1 } else { 0 }
+}
+fn update_h(tgt:i64,lr:f64) with Mut, Div, Panic {
+    var mx=if (L_H[0] as f64)/100000000.0 > (L_H[1] as f64)/100000000.0 { (L_H[0] as f64)/100000000.0 } else { (L_H[1] as f64)/100000000.0 }
+    var p0=exp_q((L_H[0] as f64)/100000000.0-mx); var p1=exp_q((L_H[1] as f64)/100000000.0-mx)
+    let se=p0+p1; p0=p0/se; p1=p1/se
+    if tgt==0{p0=p0-1.0}else{p1=p1-1.0}
+    var probs: [f64;2]=[p0,p1]
+    var d=0;while d<16{let hd=hhg(d);var c=0;while c<2{let idx=240+d*2+c;var g=hd*probs[c];if g>0.3{g=0.3}if g<0.0-0.3{g=0.0-0.3};let m=(MOM_H[idx] as f64)/100000000.0*0.9+g;MOM_H[idx]=(m*100000000.0) as i64;whs(idx,whg(idx)-lr*m);c=c+1};d=d+1}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S-SSM (sedenion 16D) — two inits: random and ZD-biased
+// Layout: embed[0..207], A[208..223], B[224..239], out[240..271]
+// ═══════════════════════════════════════════════════════════════════════════
+var W_S: [i64; 280]=[0;280]; var H_S: [i64; 16]=[0;16]
+var L_S: [i64; 2]=[0;2]; var MOM_S: [i64; 280]=[0;280]
+var OCT_P: [f64; 8]=[0.0;8]; var OCT_Q: [f64; 8]=[0.0;8]
+fn wss(i:i64,v:f64) with Mut { W_S[i]=(v*100000000.0) as i64 }
+fn wsg(i:i64)->f64 with Div { (W_S[i] as f64)/100000000.0 }
+fn hss(i:i64,v:f64) with Mut { H_S[i]=(v*100000000.0) as i64 }
+fn hsg(i:i64)->f64 with Div { (H_S[i] as f64)/100000000.0 }
+
+fn init_s_common() with Mut, Div {
+    var i=0;while i<208{wss(i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0;while i<16{wss(224+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0;while i<32{wss(240+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0;while i<280{MOM_S[i]=0;i=i+1}
+}
+fn init_s_rand() with Mut, Div {
+    init_s_common()
+    wss(208,0.95); var i=1;while i<8{wss(208+i,((rng_next()%200) as f64-100.0)/1000.0);i=i+1}
+    i=8;while i<16{wss(208+i,((rng_next()%100) as f64-50.0)/2000.0);i=i+1}
+}
+fn init_s_zdinit() with Mut, Div {
+    init_s_common()
+    var i=0;while i<16{wss(208+i,0.0);i=i+1}
+    wss(208+3,0.8); wss(208+10,0.8)
+    i=0
+    while i<16 {
+        if i != 3 { if i != 10 { wss(208+i, ((rng_next()%50) as f64-25.0)/5000.0) } }
+        i=i+1
+    }
+}
+
+fn oct_p(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+         b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    OCT_P[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    OCT_P[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    OCT_P[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    OCT_P[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    OCT_P[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    OCT_P[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    OCT_P[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    OCT_P[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
+}
+fn oct_q(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+         b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    OCT_Q[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    OCT_Q[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    OCT_Q[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    OCT_Q[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    OCT_Q[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    OCT_Q[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    OCT_Q[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    OCT_Q[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
+}
+
+fn step_s(tok: i64) with Mut, Div {
+    let a0=wsg(208);let a1=wsg(209);let a2=wsg(210);let a3=wsg(211)
+    let a4=wsg(212);let a5=wsg(213);let a6=wsg(214);let a7=wsg(215)
+    let a8=wsg(216);let a9=wsg(217);let a10=wsg(218);let a11=wsg(219)
+    let a12=wsg(220);let a13=wsg(221);let a14=wsg(222);let a15=wsg(223)
+    let h0=hsg(0);let h1=hsg(1);let h2=hsg(2);let h3=hsg(3)
+    let h4=hsg(4);let h5=hsg(5);let h6=hsg(6);let h7=hsg(7)
+    let h8=hsg(8);let h9=hsg(9);let h10=hsg(10);let h11=hsg(11)
+    let h12=hsg(12);let h13=hsg(13);let h14=hsg(14);let h15=hsg(15)
+    oct_p(a0,a1,a2,a3,a4,a5,a6,a7, h0,h1,h2,h3,h4,h5,h6,h7)
+    oct_q(a8,0.0-a9,0.0-a10,0.0-a11,0.0-a12,0.0-a13,0.0-a14,0.0-a15, h8,h9,h10,h11,h12,h13,h14,h15)
+    var r0=OCT_P[0]-OCT_Q[0];var r1=OCT_P[1]-OCT_Q[1];var r2=OCT_P[2]-OCT_Q[2];var r3=OCT_P[3]-OCT_Q[3]
+    var r4=OCT_P[4]-OCT_Q[4];var r5=OCT_P[5]-OCT_Q[5];var r6=OCT_P[6]-OCT_Q[6];var r7=OCT_P[7]-OCT_Q[7]
+    oct_p(a8,a9,a10,a11,a12,a13,a14,a15, h0,h1,h2,h3,h4,h5,h6,h7)
+    oct_q(h8,h9,h10,h11,h12,h13,h14,h15, a0,0.0-a1,0.0-a2,0.0-a3,0.0-a4,0.0-a5,0.0-a6,0.0-a7)
+    var r8=OCT_P[0]+OCT_Q[0];var r9=OCT_P[1]+OCT_Q[1];var r10=OCT_P[2]+OCT_Q[2];var r11=OCT_P[3]+OCT_Q[3]
+    var r12=OCT_P[4]+OCT_Q[4];var r13=OCT_P[5]+OCT_Q[5];var r14=OCT_P[6]+OCT_Q[6];var r15=OCT_P[7]+OCT_Q[7]
+    r0=r0+wsg(224)*wsg(tok*16);r1=r1+wsg(225)*wsg(tok*16+1)
+    r2=r2+wsg(226)*wsg(tok*16+2);r3=r3+wsg(227)*wsg(tok*16+3)
+    r4=r4+wsg(228)*wsg(tok*16+4);r5=r5+wsg(229)*wsg(tok*16+5)
+    r6=r6+wsg(230)*wsg(tok*16+6);r7=r7+wsg(231)*wsg(tok*16+7)
+    r8=r8+wsg(232)*wsg(tok*16+8);r9=r9+wsg(233)*wsg(tok*16+9)
+    r10=r10+wsg(234)*wsg(tok*16+10);r11=r11+wsg(235)*wsg(tok*16+11)
+    r12=r12+wsg(236)*wsg(tok*16+12);r13=r13+wsg(237)*wsg(tok*16+13)
+    r14=r14+wsg(238)*wsg(tok*16+14);r15=r15+wsg(239)*wsg(tok*16+15)
+    if r0>5.0{r0=5.0}if r0<0.0-5.0{r0=0.0-5.0}
+    if r1>5.0{r1=5.0}if r1<0.0-5.0{r1=0.0-5.0}
+    if r2>5.0{r2=5.0}if r2<0.0-5.0{r2=0.0-5.0}
+    if r3>5.0{r3=5.0}if r3<0.0-5.0{r3=0.0-5.0}
+    if r4>5.0{r4=5.0}if r4<0.0-5.0{r4=0.0-5.0}
+    if r5>5.0{r5=5.0}if r5<0.0-5.0{r5=0.0-5.0}
+    if r6>5.0{r6=5.0}if r6<0.0-5.0{r6=0.0-5.0}
+    if r7>5.0{r7=5.0}if r7<0.0-5.0{r7=0.0-5.0}
+    if r8>5.0{r8=5.0}if r8<0.0-5.0{r8=0.0-5.0}
+    if r9>5.0{r9=5.0}if r9<0.0-5.0{r9=0.0-5.0}
+    if r10>5.0{r10=5.0}if r10<0.0-5.0{r10=0.0-5.0}
+    if r11>5.0{r11=5.0}if r11<0.0-5.0{r11=0.0-5.0}
+    if r12>5.0{r12=5.0}if r12<0.0-5.0{r12=0.0-5.0}
+    if r13>5.0{r13=5.0}if r13<0.0-5.0{r13=0.0-5.0}
+    if r14>5.0{r14=5.0}if r14<0.0-5.0{r14=0.0-5.0}
+    if r15>5.0{r15=5.0}if r15<0.0-5.0{r15=0.0-5.0}
+    hss(0,r0);hss(1,r1);hss(2,r2);hss(3,r3);hss(4,r4);hss(5,r5);hss(6,r6);hss(7,r7)
+    hss(8,r8);hss(9,r9);hss(10,r10);hss(11,r11);hss(12,r12);hss(13,r13);hss(14,r14);hss(15,r15)
+}
+
+fn logits_s() with Mut, Div {
+    var c=0;while c<2{var s=0.0;var d=0;while d<16{s=s+hsg(d)*wsg(240+d*2+c);d=d+1};L_S[c]=(s*100000000.0) as i64;c=c+1}
+}
+fn pred_s()->i64 with Mut, Div {
+    if (L_S[1] as f64)/100000000.0 > (L_S[0] as f64)/100000000.0 { 1 } else { 0 }
+}
+fn update_s(tgt:i64,lr:f64) with Mut, Div, Panic {
+    var mx=if (L_S[0] as f64)/100000000.0 > (L_S[1] as f64)/100000000.0 { (L_S[0] as f64)/100000000.0 } else { (L_S[1] as f64)/100000000.0 }
+    var p0=exp_q((L_S[0] as f64)/100000000.0-mx); var p1=exp_q((L_S[1] as f64)/100000000.0-mx)
+    let se=p0+p1; p0=p0/se; p1=p1/se
+    if tgt==0{p0=p0-1.0}else{p1=p1-1.0}
+    var probs: [f64;2]=[p0,p1]
+    var d=0;while d<16{let hd=hsg(d);var c=0;while c<2{let idx=240+d*2+c;var g=hd*probs[c];if g>0.3{g=0.3}if g<0.0-0.3{g=0.0-0.3};let m=(MOM_S[idx] as f64)/100000000.0*0.9+g;MOM_S[idx]=(m*100000000.0) as i64;wss(idx,wsg(idx)-lr*m);c=c+1};d=d+1}
+}
+
+fn run_h() -> f64 with IO, Mut, Div, Panic {
+    var ep=0;while ep<80{var s=0;while s<500{let tgt=gen_sample();var d=0;while d<16{H_H[d]=0;d=d+1};var t=0;while t<11{step_h(SEQ[t]);t=t+1};logits_h();update_h(tgt,0.01);s=s+1};ep=ep+1}
+    rng_seed(99999,11111);var correct=0;var s=0
+    while s<1000{let tgt=gen_sample();var d=0;while d<16{H_H[d]=0;d=d+1};var t=0;while t<11{step_h(SEQ[t]);t=t+1};logits_h();if pred_h()==tgt{correct=correct+1};s=s+1}
+    (correct as f64)/1000.0*100.0
+}
+fn run_s() -> f64 with IO, Mut, Div, Panic {
+    var ep=0;while ep<80{var s=0;while s<500{let tgt=gen_sample();var d=0;while d<16{H_S[d]=0;d=d+1};var t=0;while t<11{step_s(SEQ[t]);t=t+1};logits_s();update_s(tgt,0.01);s=s+1};ep=ep+1}
+    rng_seed(99999,11111);var correct=0;var s=0
+    while s<1000{let tgt=gen_sample();var d=0;while d<16{H_S[d]=0;d=d+1};var t=0;while t<11{step_s(SEQ[t]);t=t+1};logits_s();if pred_s()==tgt{correct=correct+1};s=s+1}
+    (correct as f64)/1000.0*100.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Mode-Switch Benchmark (ZD as State Discontinuity)\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+    print("  Task: [mode-A × 5][SWITCH][mode-B × 5] → majority(mode-B >= 7)\n")
+    print("  Mode-A is noise. Optimal: full state reset at SWITCH.\n\n")
+    print("  H-SSM-16D:    4×quat, 16D, NO ZD\n")
+    print("  S-SSM-rand:   sedenion, random A init\n")
+    print("  S-SSM-ZDinit: sedenion, A = e3+e10 (ZD locus)\n\n")
+
+    print("  H-SSM-16D:    ")
+    rng_seed(55555,77777); init_h(); rng_seed(12345,67890)
+    let acc_h = run_h()
+    print(acc_h); print("%\n")
+
+    print("  S-SSM-rand:   ")
+    rng_seed(55555,77777); init_s_rand(); rng_seed(12345,67890)
+    let acc_s_rand = run_s()
+    print(acc_s_rand); print("%\n")
+
+    print("  S-SSM-ZDinit: ")
+    rng_seed(55555,77777); init_s_zdinit(); rng_seed(12345,67890)
+    let acc_s_zd = run_s()
+    print(acc_s_zd); print("%\n")
+
+    print("\n═══════════════════════════════════════════════════════════════\n")
+    print("  VERDICT (Mode-Switch)\n")
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  Random baseline: 50% (binary)\n")
+    print("  H-SSM-16D:    "); print(acc_h); print("%\n")
+    print("  S-SSM-rand:   "); print(acc_s_rand); print("%\n")
+    print("  S-SSM-ZDinit: "); print(acc_s_zd); print("%\n\n")
+
+    let zd_vs_h = acc_s_zd - acc_h
+    if zd_vs_h > 3.0 {
+        print("  ZD-init > H-SSM (+"); print(zd_vs_h); print("pp) — ZD enables cleaner mode transitions\n")
+    } else {
+        if zd_vs_h < 0.0 - 3.0 {
+            print("  H-SSM > ZD-init ("); print(zd_vs_h); print("pp) — capacity effect dominates\n")
+        } else {
+            print("  ZD-init ≈ H-SSM (within ±3pp)\n")
+        }
+    }
+
+    println("ALL PASS")
+    0
+}

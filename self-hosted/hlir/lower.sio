@@ -13,6 +13,8 @@
 // Pipeline position:
 //   Source -> Lexer -> Parser -> AST -> Check -> [HIR] -> **HLIR** -> Backend
 
+use hlir::opt_strategy::*
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -21,7 +23,22 @@ let HLIR_LOWER_MAX_SCOPES: i64 = 256
 let HLIR_LOWER_MAX_LOOP_DEPTH: i64 = 128
 let HLIR_LOWER_NO_LOOP: i64 = -1
 
-fn hlir_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+let HLIR_TYPE_CODE_NONE: i64 = 0
+let HLIR_TYPE_CODE_BOOL: i64 = 1
+let HLIR_TYPE_CODE_I8: i64 = 2
+let HLIR_TYPE_CODE_I16: i64 = 3
+let HLIR_TYPE_CODE_I32: i64 = 4
+let HLIR_TYPE_CODE_I64: i64 = 5
+let HLIR_TYPE_CODE_U8: i64 = 6
+let HLIR_TYPE_CODE_U16: i64 = 7
+let HLIR_TYPE_CODE_U32: i64 = 8
+let HLIR_TYPE_CODE_U64: i64 = 9
+let HLIR_TYPE_CODE_F32: i64 = 10
+let HLIR_TYPE_CODE_F64: i64 = 11
+let HLIR_TYPE_CODE_OCTONION: i64 = 12
+let HLIR_TYPE_CODE_SEDENION: i64 = 13
+
+pub fn hlir_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
     if n < 0 {
         return "0"
     }
@@ -54,12 +71,12 @@ fn hlir_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
 // Scope entry — tracks scope boundaries for pop_scope
 // ============================================================================
 
-struct HlirScopeEntry {
+pub struct HlirScopeEntry {
     depth: i64,
     env_snapshot_size: i64,  // number of bindings when scope was entered
 }
 
-fn hlir_scope_entry_empty() -> HlirScopeEntry {
+pub fn hlir_scope_entry_empty() -> HlirScopeEntry {
     HlirScopeEntry { depth: 0, env_snapshot_size: 0 }
 }
 
@@ -67,7 +84,7 @@ fn hlir_scope_entry_empty() -> HlirScopeEntry {
 // HlirLowerState — main lowering state, threaded through every operation
 // ============================================================================
 
-struct HlirLowerState {
+pub struct HlirLowerState {
     builder: HlirFunctionBuilder,
     module_builder: HlirModuleBuilder,
     // Loop context for break/continue
@@ -86,13 +103,26 @@ struct HlirLowerState {
     in_function: bool,
     // Current function name (for diagnostics)
     current_func_name: HlirName,
+    // Octonion value model (GPU first-class `a * h`): an octonion value is a repr
+    // value-id whose 8 f64 components live in 8 separate value-ids. oct_keys[k] holds
+    // the repr id, oct_comps[k*8 + c] holds component c's value-id.
+    oct_keys: [i64; 128],
+    oct_comps: [i64; 2048],
+    oct_dims: [i64; 128],
+    oct_count: i64,
+}
+
+struct HlirExprListResult {
+    state: HlirLowerState,
+    values: [i64; 64],
+    count: i64,
 }
 
 // ============================================================================
 // Constructor
 // ============================================================================
 
-fn hlir_lower_state_new() -> HlirLowerState {
+pub fn hlir_lower_state_new() -> HlirLowerState with Div, Mut, Panic {
     let mod_name = hlir_name_from_str("module")
     HlirLowerState {
         builder: hlir_builder_new(0, hlir_empty_name()),
@@ -107,20 +137,178 @@ fn hlir_lower_state_new() -> HlirLowerState {
         error_count: 0,
         in_function: false,
         current_func_name: hlir_empty_name(),
+        oct_keys: [0 - 1; 128],
+        oct_comps: [0; 2048],
+        oct_dims: [0; 128],
+        oct_count: 0,
     }
+}
+
+// --- Octonion value model helpers (GPU first-class `a * h`) ---
+
+// cd_sigma sign for octonion basis product e_i·e_j = σ(i,j)·e_{i⊕j} (bits=3, Convention X).
+fn hlir_oct_cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return hlir_oct_cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return hlir_oct_cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return hlir_oct_cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - hlir_oct_cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - hlir_oct_cd_sigma(0, a_lo, bits - 1) }
+    hlir_oct_cd_sigma(b_lo, a_lo, bits - 1)
+}
+
+// Record `dim` component value-ids (dim ∈ {8,16}) under a fresh repr id; return (state, repr).
+// Storage stride is 16 (max = sedenion); octonions use the first 8 slots.
+fn hlir_oct_record(state: HlirLowerState, comps: [i64; 16], dim: i64) -> (HlirLowerState, i64) with Mut, Panic {
+    var s = state
+    let fresh = hlir_builder_fresh_value(s.builder)
+    s.builder = fresh.0
+    let repr = fresh.1
+    if s.oct_count < 128 {
+        let k = s.oct_count
+        s.oct_keys[k as usize] = repr
+        s.oct_dims[k as usize] = dim
+        var c: i64 = 0
+        while c < dim {
+            s.oct_comps[(k * 16 + c) as usize] = comps[c as usize]
+            c = c + 1
+        }
+        s.oct_count = s.oct_count + 1
+    }
+    (s, repr)
+}
+
+// Is value_id a recorded hypercomplex repr?
+fn hlir_oct_is(state: HlirLowerState, value_id: i64) -> bool {
+    var k: i64 = 0
+    while k < state.oct_count {
+        if state.oct_keys[k as usize] == value_id { return true }
+        k = k + 1
+    }
+    false
+}
+
+// Component dimension of a recorded repr (8 = octonion, 16 = sedenion; -1 if unknown).
+fn hlir_oct_dim(state: HlirLowerState, repr: i64) -> i64 {
+    var k: i64 = 0
+    while k < state.oct_count {
+        if state.oct_keys[k as usize] == repr { return state.oct_dims[k as usize] }
+        k = k + 1
+    }
+    0 - 1
+}
+
+// Fetch up to 16 component value-ids for a repr (unused tail is -1).
+fn hlir_oct_lookup(state: HlirLowerState, repr: i64) -> [i64; 16] {
+    var out: [i64; 16] = [0 - 1; 16]
+    var k: i64 = 0
+    while k < state.oct_count {
+        if state.oct_keys[k as usize] == repr {
+            var c: i64 = 0
+            while c < 16 {
+                out[c as usize] = state.oct_comps[(k * 16 + c) as usize]
+                c = c + 1
+            }
+            return out
+        }
+        k = k + 1
+    }
+    out
+}
+
+// Load `dim` f64 components from a hypercomplex pointer value into a fresh repr.
+fn hlir_oct_load(state: HlirLowerState, ptr_val: i64, dim: i64) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+    var s = state
+    var comps: [i64; 16] = [0 - 1; 16]
+    var c: i64 = 0
+    while c < dim {
+        let idx_pair = hlir_lower_literal_int(s, c, hlir_type_i64())
+        s = idx_pair.0
+        let gep_pair = hlir_lower_gep(s, ptr_val, idx_pair.1, hlir_type_f64())
+        s = gep_pair.0
+        let load_pair = hlir_lower_load(s, gep_pair.1, hlir_type_f64())
+        s = load_pair.0
+        comps[c as usize] = load_pair.1
+        c = c + 1
+    }
+    hlir_oct_record(s, comps, dim)
+}
+
+// Cayley-Dickson multiply: r[i⊕j] += σ(i,j,bits)·a[i]·b[j] over `dim` components
+// (dim=8/bits=3 octonion, dim=16/bits=4 sedenion). Returns a fresh repr.
+fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64, dim: i64, bits: i64) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+    var s = state
+    let a = hlir_oct_lookup(s, a_repr)
+    let b = hlir_oct_lookup(s, b_repr)
+    var r: [i64; 16] = [0 - 1; 16]
+    var z: i64 = 0
+    while z < dim {
+        let zp = hlir_lower_literal_float(s, 0.0, hlir_type_f64())
+        s = zp.0
+        r[z as usize] = zp.1
+        z = z + 1
+    }
+    var i: i64 = 0
+    while i < dim {
+        var j: i64 = 0
+        while j < dim {
+            let m = i ^ j
+            let mulp = hlir_lower_binary(s, HLIR_BIN_FMUL, a[i as usize], b[j as usize], hlir_type_f64())
+            s = mulp.0
+            var t = mulp.1
+            if hlir_oct_cd_sigma(i, j, bits) < 0 {
+                let zp2 = hlir_lower_literal_float(s, 0.0, hlir_type_f64())
+                s = zp2.0
+                let negp = hlir_lower_binary(s, HLIR_BIN_FSUB, zp2.1, t, hlir_type_f64())
+                s = negp.0
+                t = negp.1
+            }
+            let addp = hlir_lower_binary(s, HLIR_BIN_FADD, r[m as usize], t, hlir_type_f64())
+            s = addp.0
+            r[m as usize] = addp.1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    hlir_oct_record(s, r, dim)
+}
+
+// Store a repr's `dim` components through a hypercomplex pointer value.
+fn hlir_oct_store(state: HlirLowerState, ptr_val: i64, repr: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
+    var s = state
+    let comps = hlir_oct_lookup(s, repr)
+    let dim = hlir_oct_dim(s, repr)
+    var c: i64 = 0
+    while c < dim {
+        let idx_pair = hlir_lower_literal_int(s, c, hlir_type_i64())
+        s = idx_pair.0
+        let gep_pair = hlir_lower_gep(s, ptr_val, idx_pair.1, hlir_type_f64())
+        s = gep_pair.0
+        s = hlir_lower_store(s, gep_pair.1, comps[c as usize])
+        c = c + 1
+    }
+    s
 }
 
 // ============================================================================
 // Error reporting
 // ============================================================================
 
-fn hlir_lower_report_error(state: HlirLowerState) -> HlirLowerState with Mut {
+pub fn hlir_lower_report_error(state: HlirLowerState) -> HlirLowerState with Mut {
     var s = state
     s.error_count = s.error_count + 1
     s
 }
 
-fn hlir_lower_has_errors(state: HlirLowerState) -> bool {
+pub fn hlir_lower_has_errors(state: HlirLowerState) -> bool {
     state.error_count > 0
 }
 
@@ -128,7 +316,7 @@ fn hlir_lower_has_errors(state: HlirLowerState) -> bool {
 // Module finalization
 // ============================================================================
 
-fn hlir_lower_finish_module(state: HlirLowerState) -> HlirModule {
+pub fn hlir_lower_finish_module(state: HlirLowerState) -> HlirModule {
     hlir_module_builder_finish(state.module_builder)
 }
 
@@ -136,7 +324,7 @@ fn hlir_lower_finish_module(state: HlirLowerState) -> HlirModule {
 // Scope management
 // ============================================================================
 
-fn hlir_lower_push_scope(state: HlirLowerState) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_push_scope(state: HlirLowerState) -> HlirLowerState with Mut, Panic {
     var s = state
     s.builder = hlir_builder_enter_scope(s.builder)
     if s.scope_stack_top < HLIR_LOWER_MAX_SCOPES {
@@ -149,7 +337,7 @@ fn hlir_lower_push_scope(state: HlirLowerState) -> HlirLowerState with Mut, Pani
     s
 }
 
-fn hlir_lower_pop_scope(state: HlirLowerState) -> HlirLowerState with Mut {
+pub fn hlir_lower_pop_scope(state: HlirLowerState) -> HlirLowerState with Mut {
     var s = state
     s.builder = hlir_builder_exit_scope(s.builder)
     if s.scope_stack_top > 0 {
@@ -163,7 +351,7 @@ fn hlir_lower_pop_scope(state: HlirLowerState) -> HlirLowerState with Mut {
 // ============================================================================
 
 // Create a new basic block with the given label, returns the block ID.
-fn hlir_lower_new_block(state: HlirLowerState, label: string) -> (HlirLowerState, i64) with Mut, Panic, Div {
+pub fn hlir_lower_new_block(state: HlirLowerState, label: string) -> (HlirLowerState, i64) with Mut, Panic, Div {
     var s = state
     let label_name = hlir_name_from_str(label)
     let pair = hlir_builder_fresh_block(s.builder, label_name)
@@ -173,21 +361,21 @@ fn hlir_lower_new_block(state: HlirLowerState, label: string) -> (HlirLowerState
 }
 
 // Switch emission to a different block (sets current_block).
-fn hlir_lower_switch_to_block(state: HlirLowerState, block_id: i64) -> HlirLowerState with Mut {
+pub fn hlir_lower_switch_to_block(state: HlirLowerState, block_id: i64) -> HlirLowerState with Mut {
     var s = state
     s.builder = hlir_builder_set_current_block(s.builder, block_id)
     s
 }
 
 // Emit an unconditional branch terminator to the target block.
-fn hlir_lower_branch(state: HlirLowerState, target: i64) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_branch(state: HlirLowerState, target: i64) -> HlirLowerState with Mut, Panic {
     var s = state
     s.builder = hlir_builder_emit_branch(s.builder, target)
     s
 }
 
 // Emit a conditional branch terminator.
-fn hlir_lower_cond_branch(state: HlirLowerState, cond: i64, then_block: i64, else_block: i64) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_cond_branch(state: HlirLowerState, cond: i64, then_block: i64, else_block: i64) -> HlirLowerState with Mut, Panic {
     var s = state
     s.builder = hlir_builder_emit_cond_branch(s.builder, cond, then_block, else_block)
     s
@@ -198,7 +386,7 @@ fn hlir_lower_cond_branch(state: HlirLowerState, cond: i64, then_block: i64, els
 // ============================================================================
 
 // Begin a new function. Creates entry block and sets builder state.
-fn hlir_lower_begin_function(state: HlirLowerState, name: string, ret_ty: HlirType) -> HlirLowerState with Mut, Panic, Div {
+pub fn hlir_lower_begin_function(state: HlirLowerState, name: string, ret_ty: HlirType) -> HlirLowerState with Mut, Panic, Div {
     var s = state
     let func_name = hlir_name_from_str(name)
     // Get a fresh function ID from the module builder
@@ -225,7 +413,7 @@ fn hlir_lower_begin_function(state: HlirLowerState, name: string, ret_ty: HlirTy
 }
 
 // End the current function, finalize and add to module.
-fn hlir_lower_end_function(state: HlirLowerState) -> HlirLowerState with Mut, Panic, Div {
+pub fn hlir_lower_end_function(state: HlirLowerState) -> HlirLowerState with Mut, Panic, Div {
     var s = state
     let finished_func = hlir_builder_finish(s.builder)
     let hints = hlir_strategy_hints_for_compile_strategy(finished_func.compile_strategy)
@@ -238,7 +426,7 @@ fn hlir_lower_end_function(state: HlirLowerState) -> HlirLowerState with Mut, Pa
 
 // Add a parameter to the current function being built.
 // Returns the value ID assigned to the parameter.
-fn hlir_lower_add_param(state: HlirLowerState, name: string, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_add_param(state: HlirLowerState, name: string, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
     var s = state
     let param_name = hlir_name_from_str(name)
     let pair = hlir_builder_add_param(s.builder, param_name, ty)
@@ -252,7 +440,7 @@ fn hlir_lower_add_param(state: HlirLowerState, name: string, ty: HlirType) -> (H
 // ============================================================================
 
 // Lower an integer literal. Emits a const instruction.
-fn hlir_lower_literal_int(state: HlirLowerState, value: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_literal_int(state: HlirLowerState, value: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let pair = hlir_builder_emit_const_int(s.builder, value, ty)
     s.builder = pair.0
@@ -261,7 +449,7 @@ fn hlir_lower_literal_int(state: HlirLowerState, value: i64, ty: HlirType) -> (H
 }
 
 // Lower a floating-point literal. Emits a const instruction.
-fn hlir_lower_literal_float(state: HlirLowerState, value: f64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_literal_float(state: HlirLowerState, value: f64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let pair = hlir_builder_emit_const_float(s.builder, value, ty)
     s.builder = pair.0
@@ -270,7 +458,7 @@ fn hlir_lower_literal_float(state: HlirLowerState, value: f64, ty: HlirType) -> 
 }
 
 // Lower a boolean literal. Emits a const instruction.
-fn hlir_lower_literal_bool(state: HlirLowerState, value: bool) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_literal_bool(state: HlirLowerState, value: bool) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let pair = hlir_builder_emit_const_bool(s.builder, value)
     s.builder = pair.0
@@ -283,7 +471,7 @@ fn hlir_lower_literal_bool(state: HlirLowerState, value: bool) -> (HlirLowerStat
 // ============================================================================
 
 // Lower a string literal. Emits a const instruction with HlirConstString.
-fn hlir_lower_literal_string(state: HlirLowerState, value: string) -> (HlirLowerState, i64) with Mut, Panic, Div {
+pub fn hlir_lower_literal_string(state: HlirLowerState, value: string) -> (HlirLowerState, i64) with Mut, Panic, Div {
     var s = state
     let str_name = hlir_name_from_str(value)
     let val_pair = hlir_builder_fresh_value(s.builder)
@@ -301,7 +489,7 @@ fn hlir_lower_literal_string(state: HlirLowerState, value: string) -> (HlirLower
 // ============================================================================
 
 // Lower a null pointer constant.
-fn hlir_lower_null(state: HlirLowerState, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_null(state: HlirLowerState, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let val_pair = hlir_builder_fresh_value(s.builder)
     s.builder = val_pair.0
@@ -313,7 +501,7 @@ fn hlir_lower_null(state: HlirLowerState, ty: HlirType) -> (HlirLowerState, i64)
 }
 
 // Lower a unit value.
-fn hlir_lower_unit(state: HlirLowerState) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_unit(state: HlirLowerState) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let ty = hlir_type_void()
     let val_pair = hlir_builder_fresh_value(s.builder)
@@ -330,7 +518,7 @@ fn hlir_lower_unit(state: HlirLowerState) -> (HlirLowerState, i64) with Mut, Pan
 // ============================================================================
 
 // Lower a binary operation. Takes pre-lowered LHS and RHS value IDs.
-fn hlir_lower_binary(state: HlirLowerState, op: i64, lhs_val: i64, rhs_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_binary(state: HlirLowerState, op: i64, lhs_val: i64, rhs_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let pair = hlir_builder_emit_binary(s.builder, op, lhs_val, rhs_val, ty)
     s.builder = pair.0
@@ -343,7 +531,7 @@ fn hlir_lower_binary(state: HlirLowerState, op: i64, lhs_val: i64, rhs_val: i64,
 // ============================================================================
 
 // Lower a unary operation. Takes a pre-lowered operand value ID.
-fn hlir_lower_unary(state: HlirLowerState, op: i64, operand_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_unary(state: HlirLowerState, op: i64, operand_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let pair = hlir_builder_emit_unary(s.builder, op, operand_val, ty)
     s.builder = pair.0
@@ -356,7 +544,7 @@ fn hlir_lower_unary(state: HlirLowerState, op: i64, operand_val: i64, ty: HlirTy
 // ============================================================================
 
 // Lower a direct function call. arg_vals is a fixed-size array of value IDs.
-fn hlir_lower_call(state: HlirLowerState, callee_name: string, arg_vals: [i64; 64], arg_count: i64, ret_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
+pub fn hlir_lower_call(state: HlirLowerState, callee_name: string, arg_vals: [i64; 64], arg_count: i64, ret_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
     var s = state
     let name = hlir_name_from_str(callee_name)
     let pair = hlir_builder_emit_call_direct(s.builder, name, arg_vals, arg_count, ret_ty)
@@ -366,7 +554,7 @@ fn hlir_lower_call(state: HlirLowerState, callee_name: string, arg_vals: [i64; 6
 }
 
 // Lower a direct function call where callee name is already an HlirName.
-fn hlir_lower_call_named(state: HlirLowerState, callee: HlirName, arg_vals: [i64; 64], arg_count: i64, ret_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_call_named(state: HlirLowerState, callee: HlirName, arg_vals: [i64; 64], arg_count: i64, ret_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let pair = hlir_builder_emit_call_direct(s.builder, callee, arg_vals, arg_count, ret_ty)
     s.builder = pair.0
@@ -379,7 +567,7 @@ fn hlir_lower_call_named(state: HlirLowerState, callee: HlirName, arg_vals: [i64
 // ============================================================================
 
 // Lower a type cast. Takes a pre-lowered value ID.
-fn hlir_lower_cast(state: HlirLowerState, val: i64, from_ty: HlirType, to_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_cast(state: HlirLowerState, val: i64, from_ty: HlirType, to_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let pair = hlir_builder_emit_cast(s.builder, val, from_ty, to_ty)
     s.builder = pair.0
@@ -392,7 +580,7 @@ fn hlir_lower_cast(state: HlirLowerState, val: i64, from_ty: HlirType, to_ty: Hl
 // ============================================================================
 
 // Lower a load from a pointer. Returns the loaded value.
-fn hlir_lower_load(state: HlirLowerState, addr_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_load(state: HlirLowerState, addr_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let pair = hlir_builder_emit_load(s.builder, addr_val, ty)
     s.builder = pair.0
@@ -401,14 +589,14 @@ fn hlir_lower_load(state: HlirLowerState, addr_val: i64, ty: HlirType) -> (HlirL
 }
 
 // Lower a store to a pointer. No value result (void operation).
-fn hlir_lower_store(state: HlirLowerState, addr_val: i64, val: i64) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_store(state: HlirLowerState, addr_val: i64, val: i64) -> HlirLowerState with Mut, Panic {
     var s = state
     s.builder = hlir_builder_emit_store(s.builder, addr_val, val)
     s
 }
 
 // Lower a GEP (get element pointer) operation.
-fn hlir_lower_gep(state: HlirLowerState, base_val: i64, index_val: i64, elem_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_gep(state: HlirLowerState, base_val: i64, index_val: i64, elem_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let pair = hlir_builder_emit_get_element_ptr(s.builder, base_val, index_val, elem_ty)
     s.builder = pair.0
@@ -417,7 +605,7 @@ fn hlir_lower_gep(state: HlirLowerState, base_val: i64, index_val: i64, elem_ty:
 }
 
 // Lower a get-field-pointer operation (struct field access).
-fn hlir_lower_get_field_ptr(state: HlirLowerState, base_val: i64, field_idx: i64, result_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_get_field_ptr(state: HlirLowerState, base_val: i64, field_idx: i64, result_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let pair = hlir_builder_emit_get_field_ptr(s.builder, base_val, field_idx, result_ty)
     s.builder = pair.0
@@ -430,7 +618,7 @@ fn hlir_lower_get_field_ptr(state: HlirLowerState, base_val: i64, field_idx: i64
 // ============================================================================
 
 // Allocate stack space for a given type. Returns a pointer value ID.
-fn hlir_lower_alloca(state: HlirLowerState, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_alloca(state: HlirLowerState, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let pair = hlir_builder_emit_alloca(s.builder, ty)
     s.builder = pair.0
@@ -444,7 +632,7 @@ fn hlir_lower_alloca(state: HlirLowerState, ty: HlirType) -> (HlirLowerState, i6
 
 // Lower a select (conditional move) — useful for simple conditional expressions
 // that don't need full basic-block branching.
-fn hlir_lower_select(state: HlirLowerState, cond_val: i64, true_val: i64, false_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_select(state: HlirLowerState, cond_val: i64, true_val: i64, false_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let pair = hlir_builder_emit_select(s.builder, cond_val, true_val, false_val, ty)
     s.builder = pair.0
@@ -457,7 +645,7 @@ fn hlir_lower_select(state: HlirLowerState, cond_val: i64, true_val: i64, false_
 // ============================================================================
 
 // Lower a value copy (SSA copy instruction).
-fn hlir_lower_copy(state: HlirLowerState, src_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_copy(state: HlirLowerState, src_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let val_pair = hlir_builder_fresh_value(s.builder)
     s.builder = val_pair.0
@@ -473,7 +661,7 @@ fn hlir_lower_copy(state: HlirLowerState, src_val: i64, ty: HlirType) -> (HlirLo
 // ============================================================================
 
 // Extract a value from a composite (struct/tuple) at the given index.
-fn hlir_lower_extract_value(state: HlirLowerState, base_val: i64, index: i64, result_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_extract_value(state: HlirLowerState, base_val: i64, index: i64, result_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let val_pair = hlir_builder_fresh_value(s.builder)
     s.builder = val_pair.0
@@ -485,7 +673,7 @@ fn hlir_lower_extract_value(state: HlirLowerState, base_val: i64, index: i64, re
 }
 
 // Insert a value into a composite at the given index.
-fn hlir_lower_insert_value(state: HlirLowerState, base_val: i64, insert_val: i64, index: i64, composite_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_insert_value(state: HlirLowerState, base_val: i64, insert_val: i64, index: i64, composite_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let val_pair = hlir_builder_fresh_value(s.builder)
     s.builder = val_pair.0
@@ -502,7 +690,7 @@ fn hlir_lower_insert_value(state: HlirLowerState, base_val: i64, insert_val: i64
 
 // Lower a `let` binding. The init_val is the already-lowered initializer.
 // Binds the name to the init value in the environment (pure SSA binding).
-fn hlir_lower_let(state: HlirLowerState, name: string, ty: HlirType, init_val: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_let(state: HlirLowerState, name: string, ty: HlirType, init_val: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
     var s = state
     let var_name = hlir_name_from_str(name)
     s.builder = hlir_builder_bind_var(s.builder, var_name, init_val)
@@ -510,7 +698,7 @@ fn hlir_lower_let(state: HlirLowerState, name: string, ty: HlirType, init_val: i
 }
 
 // Lower a `let` binding using an HlirName directly.
-fn hlir_lower_let_named(state: HlirLowerState, name: HlirName, ty: HlirType, init_val: i64) -> HlirLowerState with Mut, Alloc {
+pub fn hlir_lower_let_named(state: HlirLowerState, name: HlirName, ty: HlirType, init_val: i64) -> HlirLowerState with Mut, Alloc {
     var s = state
     s.builder = hlir_builder_bind_var(s.builder, name, init_val)
     s
@@ -523,7 +711,7 @@ fn hlir_lower_let_named(state: HlirLowerState, name: HlirName, ty: HlirType, ini
 // Lower a `var` binding. Creates an alloca slot, stores the initial value,
 // and binds the name to the alloca pointer in the environment.
 // For mutable variables, reads go through load and writes through store.
-fn hlir_lower_var(state: HlirLowerState, name: string, ty: HlirType, init_val: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_var(state: HlirLowerState, name: string, ty: HlirType, init_val: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
     var s = state
     // Allocate stack slot
     let alloca_pair = hlir_builder_emit_alloca(s.builder, ty)
@@ -538,7 +726,7 @@ fn hlir_lower_var(state: HlirLowerState, name: string, ty: HlirType, init_val: i
 }
 
 // Lower a `var` binding using an HlirName directly.
-fn hlir_lower_var_named(state: HlirLowerState, name: HlirName, ty: HlirType, init_val: i64) -> HlirLowerState with Mut, Panic, Alloc {
+pub fn hlir_lower_var_named(state: HlirLowerState, name: HlirName, ty: HlirType, init_val: i64) -> HlirLowerState with Mut, Panic, Alloc {
     var s = state
     // Allocate stack slot
     let alloca_pair = hlir_builder_emit_alloca(s.builder, ty)
@@ -556,7 +744,7 @@ fn hlir_lower_var_named(state: HlirLowerState, name: HlirName, ty: HlirType, ini
 // ============================================================================
 
 // Lower an assignment to a mutable variable. Looks up the alloca slot and stores.
-fn hlir_lower_assign(state: HlirLowerState, name: string, val: i64) -> HlirLowerState with Mut, Panic, Div {
+pub fn hlir_lower_assign(state: HlirLowerState, name: string, val: i64) -> HlirLowerState with Mut, Panic, Div {
     var s = state
     let var_name = hlir_name_from_str(name)
     let slot = hlir_builder_lookup_slot(s.builder, var_name)
@@ -571,7 +759,7 @@ fn hlir_lower_assign(state: HlirLowerState, name: string, val: i64) -> HlirLower
 }
 
 // Lower an assignment using an HlirName directly.
-fn hlir_lower_assign_named(state: HlirLowerState, name: HlirName, val: i64) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_assign_named(state: HlirLowerState, name: HlirName, val: i64) -> HlirLowerState with Mut, Panic {
     var s = state
     let slot = hlir_builder_lookup_slot(s.builder, name)
     if slot != HLIR_INVALID_VALUE {
@@ -588,7 +776,7 @@ fn hlir_lower_assign_named(state: HlirLowerState, name: HlirName, val: i64) -> H
 
 // Read the current value of a variable. For mutable vars, loads from the alloca slot.
 // For immutable bindings, returns the bound SSA value directly.
-fn hlir_lower_read_var(state: HlirLowerState, name: string, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
+pub fn hlir_lower_read_var(state: HlirLowerState, name: string, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
     var s = state
     let var_name = hlir_name_from_str(name)
     let slot = hlir_builder_lookup_slot(s.builder, var_name)
@@ -612,7 +800,7 @@ fn hlir_lower_read_var(state: HlirLowerState, name: string, ty: HlirType) -> (Hl
 }
 
 // Read variable using HlirName directly.
-fn hlir_lower_read_var_named(state: HlirLowerState, name: HlirName, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_read_var_named(state: HlirLowerState, name: HlirName, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let slot = hlir_builder_lookup_slot(s.builder, name)
     if slot != HLIR_INVALID_VALUE {
@@ -636,14 +824,14 @@ fn hlir_lower_read_var_named(state: HlirLowerState, name: HlirName, ty: HlirType
 // ============================================================================
 
 // Lower a return statement with a value.
-fn hlir_lower_return(state: HlirLowerState, val: i64) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_return(state: HlirLowerState, val: i64) -> HlirLowerState with Mut, Panic {
     var s = state
     s.builder = hlir_builder_emit_return(s.builder, val)
     s
 }
 
 // Lower a void return statement.
-fn hlir_lower_return_void(state: HlirLowerState) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_return_void(state: HlirLowerState) -> HlirLowerState with Mut, Panic {
     var s = state
     s.builder = hlir_builder_emit_return_void(s.builder)
     s
@@ -661,14 +849,14 @@ fn hlir_lower_return_void(state: HlirLowerState) -> HlirLowerState with Mut, Pan
 // Phase 1: Create then/else/merge blocks and emit the conditional branch.
 // Returns (state, then_block, else_block, merge_block) as a 4-tuple.
 // Since Sounio cannot return 4 values directly, we use a struct.
-struct HlirIfBranchResult {
+pub struct HlirIfBranchResult {
     state: HlirLowerState,
     then_block: i64,
     else_block: i64,
     merge_block: i64,
 }
 
-fn hlir_lower_if_branch(state: HlirLowerState, cond_val: i64) -> HlirIfBranchResult with Mut, Panic, Div {
+pub fn hlir_lower_if_branch(state: HlirLowerState, cond_val: i64) -> HlirIfBranchResult with Mut, Panic, Div {
     var s = state
 
     // Create the three blocks
@@ -700,7 +888,7 @@ fn hlir_lower_if_branch(state: HlirLowerState, cond_val: i64) -> HlirIfBranchRes
 // then_val and else_val are the values produced by each branch (-1 = no value).
 // then_exit_block and else_exit_block are the blocks that the branches exit from
 // (may differ from then_block/else_block if the branch body creates sub-blocks).
-fn hlir_lower_if_merge(state: HlirLowerState, merge_block: i64, then_exit_block: i64, then_val: i64, else_exit_block: i64, else_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_if_merge(state: HlirLowerState, merge_block: i64, then_exit_block: i64, then_val: i64, else_exit_block: i64, else_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
 
     // Switch to merge block
@@ -738,7 +926,7 @@ fn hlir_lower_if_merge(state: HlirLowerState, merge_block: i64, then_exit_block:
 // Convenience: full if-else lowering without closures.
 // The caller passes pre-computed then_val/else_val.
 // This is a simplified version for when both branches are single expressions.
-fn hlir_lower_if_simple(state: HlirLowerState, cond_val: i64, then_val: i64, else_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
+pub fn hlir_lower_if_simple(state: HlirLowerState, cond_val: i64, then_val: i64, else_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
     var s = state
 
     // Create blocks
@@ -796,7 +984,7 @@ fn hlir_lower_if_simple(state: HlirLowerState, cond_val: i64, then_val: i64, els
 
 // Spec-facing compatibility entrypoint.
 // For single-value branches, this forwards to the simple SSA if-lowering path.
-fn hlir_lower_if(state: HlirLowerState, cond_val: i64, then_val: i64, else_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
+pub fn hlir_lower_if(state: HlirLowerState, cond_val: i64, then_val: i64, else_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
     hlir_lower_if_simple(state, cond_val, then_val, else_val, ty)
 }
 
@@ -813,14 +1001,14 @@ fn hlir_lower_if(state: HlirLowerState, cond_val: i64, then_val: i64, else_val: 
 // ============================================================================
 
 // Create while-loop structure. Returns block IDs for the caller to fill.
-struct HlirWhileResult {
+pub struct HlirWhileResult {
     state: HlirLowerState,
     header_block: i64,
     body_block: i64,
     exit_block: i64,
 }
 
-fn hlir_lower_while_begin(state: HlirLowerState) -> HlirWhileResult with Mut, Panic, Div {
+pub fn hlir_lower_while_begin(state: HlirLowerState) -> HlirWhileResult with Mut, Panic, Div {
     var s = state
 
     // Create the three blocks
@@ -859,7 +1047,7 @@ fn hlir_lower_while_begin(state: HlirLowerState) -> HlirWhileResult with Mut, Pa
 // Complete the while loop: emits the conditional branch in the header and
 // the back-edge branch from the body to the header.
 // cond_val: the condition value (must have been emitted in the header block).
-fn hlir_lower_while_end(state: HlirLowerState, header_block: i64, body_block: i64, exit_block: i64, cond_val: i64) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_while_end(state: HlirLowerState, header_block: i64, body_block: i64, exit_block: i64, cond_val: i64) -> HlirLowerState with Mut, Panic {
     var s = state
 
     // The header block should already be current after lowering the condition.
@@ -889,7 +1077,7 @@ fn hlir_lower_while_end(state: HlirLowerState, header_block: i64, body_block: i6
 
 // Simplified while loop: handles the entire pattern for callers that
 // pre-compute the condition and body.
-fn hlir_lower_while(state: HlirLowerState, cond_val: i64, body_exit_block: i64, header_block: i64, body_block: i64, exit_block: i64) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_while(state: HlirLowerState, cond_val: i64, body_exit_block: i64, header_block: i64, body_block: i64, exit_block: i64) -> HlirLowerState with Mut, Panic {
     // Emit back-edge from body to header
     var s = state
     s = hlir_lower_switch_to_block(s, body_exit_block)
@@ -907,13 +1095,13 @@ fn hlir_lower_while(state: HlirLowerState, cond_val: i64, body_exit_block: i64, 
 //   exit_block:   continuation after loop (reached via break)
 // ============================================================================
 
-struct HlirLoopResult {
+pub struct HlirLoopResult {
     state: HlirLowerState,
     header_block: i64,
     exit_block: i64,
 }
 
-fn hlir_lower_loop_begin(state: HlirLowerState) -> HlirLoopResult with Mut, Panic, Div {
+pub fn hlir_lower_loop_begin(state: HlirLowerState) -> HlirLoopResult with Mut, Panic, Div {
     var s = state
 
     let header_pair = hlir_lower_new_block(s, "loop.header")
@@ -945,7 +1133,7 @@ fn hlir_lower_loop_begin(state: HlirLowerState) -> HlirLoopResult with Mut, Pani
     }
 }
 
-fn hlir_lower_loop_end(state: HlirLowerState, header_block: i64, exit_block: i64) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_loop_end(state: HlirLowerState, header_block: i64, exit_block: i64) -> HlirLowerState with Mut, Panic {
     var s = state
 
     // Emit back-edge from current (body) block to header
@@ -973,7 +1161,7 @@ fn hlir_lower_loop_end(state: HlirLowerState, header_block: i64, exit_block: i64
 // ============================================================================
 
 // Lower a break statement. Emits a branch to the current loop's exit block.
-fn hlir_lower_break(state: HlirLowerState) -> HlirLowerState with Mut, Panic, Div {
+pub fn hlir_lower_break(state: HlirLowerState) -> HlirLowerState with Mut, Panic, Div {
     var s = state
     if s.loop_break_block != HLIR_LOWER_NO_LOOP {
         s = hlir_lower_branch(s, s.loop_break_block)
@@ -990,7 +1178,7 @@ fn hlir_lower_break(state: HlirLowerState) -> HlirLowerState with Mut, Panic, Di
 }
 
 // Lower a continue statement. Emits a branch to the current loop's header.
-fn hlir_lower_continue(state: HlirLowerState) -> HlirLowerState with Mut, Panic, Div {
+pub fn hlir_lower_continue(state: HlirLowerState) -> HlirLowerState with Mut, Panic, Div {
     var s = state
     if s.loop_continue_block != HLIR_LOWER_NO_LOOP {
         s = hlir_lower_branch(s, s.loop_continue_block)
@@ -1010,7 +1198,7 @@ fn hlir_lower_continue(state: HlirLowerState) -> HlirLowerState with Mut, Panic,
 // ============================================================================
 
 // Emit a phi node with the given incoming entries. Used for SSA merge points.
-fn hlir_lower_phi(state: HlirLowerState, entries: [HlirPhiEntry; 64], entry_count: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_phi(state: HlirLowerState, entries: [HlirPhiEntry; 64], entry_count: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let val_pair = hlir_builder_fresh_value(s.builder)
     s.builder = val_pair.0
@@ -1027,7 +1215,7 @@ fn hlir_lower_phi(state: HlirLowerState, entries: [HlirPhiEntry; 64], entry_coun
 }
 
 // Create a phi node with two incoming values (most common case).
-fn hlir_lower_phi2(state: HlirLowerState, block_a: i64, val_a: i64, block_b: i64, val_b: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_phi2(state: HlirLowerState, block_a: i64, val_a: i64, block_b: i64, val_b: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var entries: [HlirPhiEntry; 64] = [hlir_phi_entry_empty(); 64]
     entries[0] = HlirPhiEntry { block_id: block_a, value_id: val_a }
     entries[1] = HlirPhiEntry { block_id: block_b, value_id: val_b }
@@ -1039,7 +1227,7 @@ fn hlir_lower_phi2(state: HlirLowerState, block_a: i64, val_a: i64, block_b: i64
 // ============================================================================
 
 // Emit a switch terminator (multi-way conditional).
-fn hlir_lower_switch(state: HlirLowerState, scrutinee: i64, default_block: i64, cases: [HlirSwitchCase; 256], case_count: i64) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_switch(state: HlirLowerState, scrutinee: i64, default_block: i64, cases: [HlirSwitchCase; 256], case_count: i64) -> HlirLowerState with Mut, Panic {
     var s = state
     var term = hlir_term_unreachable()
     term.kind = HLIR_TERM_SWITCH
@@ -1056,7 +1244,7 @@ fn hlir_lower_switch(state: HlirLowerState, scrutinee: i64, default_block: i64, 
 // ============================================================================
 
 // Emit an unreachable terminator (for paths that should never be reached).
-fn hlir_lower_unreachable(state: HlirLowerState) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_unreachable(state: HlirLowerState) -> HlirLowerState with Mut, Panic {
     var s = state
     s.builder = hlir_builder_set_terminator(s.builder, hlir_term_unreachable())
     s
@@ -1067,7 +1255,7 @@ fn hlir_lower_unreachable(state: HlirLowerState) -> HlirLowerState with Mut, Pan
 // ============================================================================
 
 // Emit a perform-effect instruction. Returns the effect result value.
-fn hlir_lower_perform_effect(state: HlirLowerState, effect_name: string, op_name: string, args: [i64; 16], arg_count: i64, result_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
+pub fn hlir_lower_perform_effect(state: HlirLowerState, effect_name: string, op_name: string, args: [i64; 16], arg_count: i64, result_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
     var s = state
     let val_pair = hlir_builder_fresh_value(s.builder)
     s.builder = val_pair.0
@@ -1086,7 +1274,7 @@ fn hlir_lower_perform_effect(state: HlirLowerState, effect_name: string, op_name
 }
 
 // Emit a push-handler instruction (enter an effect handler scope).
-fn hlir_lower_push_handler(state: HlirLowerState, handler_name: string, handler_id: i64) -> HlirLowerState with Mut, Panic, Div {
+pub fn hlir_lower_push_handler(state: HlirLowerState, handler_name: string, handler_id: i64) -> HlirLowerState with Mut, Panic, Div {
     var s = state
     let val_pair = hlir_builder_fresh_value(s.builder)
     s.builder = val_pair.0
@@ -1101,7 +1289,7 @@ fn hlir_lower_push_handler(state: HlirLowerState, handler_name: string, handler_
 }
 
 // Emit a pop-handler instruction (leave an effect handler scope).
-fn hlir_lower_pop_handler(state: HlirLowerState) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_pop_handler(state: HlirLowerState) -> HlirLowerState with Mut, Panic {
     var s = state
     var instr = hlir_instr_new(HLIR_OP_POP_HANDLER)
     instr.result = HLIR_INVALID_VALUE
@@ -1114,7 +1302,7 @@ fn hlir_lower_pop_handler(state: HlirLowerState) -> HlirLowerState with Mut, Pan
 // ============================================================================
 
 // Add a global variable to the module.
-fn hlir_lower_add_global(state: HlirLowerState, name: string, ty: HlirType, is_const: bool) -> (HlirLowerState, i64) with Mut, Panic, Div {
+pub fn hlir_lower_add_global(state: HlirLowerState, name: string, ty: HlirType, is_const: bool) -> (HlirLowerState, i64) with Mut, Panic, Div {
     var s = state
     let global_name = hlir_name_from_str(name)
     // Use module-level ID for the global
@@ -1126,7 +1314,7 @@ fn hlir_lower_add_global(state: HlirLowerState, name: string, ty: HlirType, is_c
 }
 
 // Add a global variable with an initializer.
-fn hlir_lower_add_global_init(state: HlirLowerState, name: string, ty: HlirType, init: HlirConstant, is_const: bool) -> (HlirLowerState, i64) with Mut, Panic, Div {
+pub fn hlir_lower_add_global_init(state: HlirLowerState, name: string, ty: HlirType, init: HlirConstant, is_const: bool) -> (HlirLowerState, i64) with Mut, Panic, Div {
     var s = state
     let global_name = hlir_name_from_str(name)
     let global_id = s.module_builder.module.global_count
@@ -1143,7 +1331,7 @@ fn hlir_lower_add_global_init(state: HlirLowerState, name: string, ty: HlirType,
 // ============================================================================
 
 // Add a struct type definition to the module.
-fn hlir_lower_add_struct_typedef(state: HlirLowerState, name: string, fields: [HlirTypeDefField; 128], field_count: i64) -> HlirLowerState with Mut, Panic, Div {
+pub fn hlir_lower_add_struct_typedef(state: HlirLowerState, name: string, fields: [HlirTypeDefField; 128], field_count: i64) -> HlirLowerState with Mut, Panic, Div {
     var s = state
     let struct_name = hlir_name_from_str(name)
     var td = hlir_typedef_struct(struct_name)
@@ -1158,42 +1346,42 @@ fn hlir_lower_add_struct_typedef(state: HlirLowerState, name: string, fields: [H
 // ============================================================================
 
 // Mark the current function as exported.
-fn hlir_lower_set_exported(state: HlirLowerState) -> HlirLowerState with Mut {
+pub fn hlir_lower_set_exported(state: HlirLowerState) -> HlirLowerState with Mut {
     var s = state
     s.builder.func.is_exported = true
     s
 }
 
 // Mark the current function as a GPU kernel.
-fn hlir_lower_set_kernel(state: HlirLowerState) -> HlirLowerState with Mut {
+pub fn hlir_lower_set_kernel(state: HlirLowerState) -> HlirLowerState with Mut {
     var s = state
     s.builder.func.is_kernel = true
     s
 }
 
 // Mark the current function as variadic.
-fn hlir_lower_set_variadic(state: HlirLowerState) -> HlirLowerState with Mut {
+pub fn hlir_lower_set_variadic(state: HlirLowerState) -> HlirLowerState with Mut {
     var s = state
     s.builder.func.is_variadic = true
     s
 }
 
 // Set the ABI for the current function.
-fn hlir_lower_set_abi(state: HlirLowerState, abi: HlirAbi) -> HlirLowerState with Mut {
+pub fn hlir_lower_set_abi(state: HlirLowerState, abi: HlirAbi) -> HlirLowerState with Mut {
     var s = state
     s.builder.func.abi = abi
     s
 }
 
 // Set the link name for the current function.
-fn hlir_lower_set_link_name(state: HlirLowerState, link_name: string) -> HlirLowerState with Mut, Panic, Div {
+pub fn hlir_lower_set_link_name(state: HlirLowerState, link_name: string) -> HlirLowerState with Mut, Panic, Div {
     var s = state
     s.builder.func.link_name = hlir_name_from_str(link_name)
     s
 }
 
 // Add an effect declaration to the current function.
-fn hlir_lower_add_effect(state: HlirLowerState, effect_name: string) -> HlirLowerState with Mut, Panic, Div {
+pub fn hlir_lower_add_effect(state: HlirLowerState, effect_name: string) -> HlirLowerState with Mut, Panic, Div {
     var s = state
     let name = hlir_name_from_str(effect_name)
     s.builder.func = hlir_function_add_effect(s.builder.func, name)
@@ -1201,14 +1389,14 @@ fn hlir_lower_add_effect(state: HlirLowerState, effect_name: string) -> HlirLowe
 }
 
 // Set the compile strategy for the current function.
-fn hlir_lower_set_strategy(state: HlirLowerState, strategy: CompileStrategy) -> HlirLowerState with Mut {
+pub fn hlir_lower_set_strategy(state: HlirLowerState, strategy: CompileStrategy) -> HlirLowerState with Mut {
     var s = state
     s.builder.func.compile_strategy = strategy
     s
 }
 
 // Transfer effects from AST EffectList to the HLIR function being built.
-fn hlir_lower_effects_from_ast(state: HlirLowerState, effects: Option<Box<EffectList>>) -> HlirLowerState with Mut, Panic, Div {
+pub fn hlir_lower_effects_from_ast(state: HlirLowerState, effects: Option<Box<EffectList>>) -> HlirLowerState with Mut, Panic, Div {
     match effects {
         Some(list) => {
             var s = state
@@ -1222,7 +1410,7 @@ fn hlir_lower_effects_from_ast(state: HlirLowerState, effects: Option<Box<Effect
 }
 
 // Check if a function has a specific named effect.
-fn hlir_func_has_effect_named(func: HlirFunction, name: string) -> bool with Mut, Panic, Div {
+pub fn hlir_func_has_effect_named(func: HlirFunction, name: string) -> bool with Mut, Panic, Div {
     let target = hlir_name_from_str(name)
     var i: i64 = 0
     while i < func.effect_count {
@@ -1243,7 +1431,7 @@ fn hlir_func_has_effect_named(func: HlirFunction, name: string) -> bool with Mut
 //   4. Knowledge<T>   → StrategyPrecisionPreserving  (uncertain, preserve precision)
 //   5. Contest/Robust → StrategyInstrumented  (reducible uncertainty, dual-path)
 //   6. otherwise      → StrategyStandard
-fn hlir_compute_strategy(func: HlirFunction) -> CompileStrategy with Mut, Panic, Div {
+pub fn hlir_compute_strategy(func: HlirFunction) -> CompileStrategy with Mut, Panic, Div {
     // Effect-based strategies take priority
     if hlir_func_has_effect_named(func, "GPU") {
         return CompileStrategy::StrategyGpuKernel
@@ -1272,7 +1460,7 @@ fn hlir_compute_strategy(func: HlirFunction) -> CompileStrategy with Mut, Panic,
 // ============================================================================
 
 // Build a tuple value from an array of element values.
-fn hlir_lower_tuple(state: HlirLowerState, elem_vals: [i64; 64], elem_count: i64, tuple_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_tuple(state: HlirLowerState, elem_vals: [i64; 64], elem_count: i64, tuple_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let val_pair = hlir_builder_fresh_value(s.builder)
     s.builder = val_pair.0
@@ -1289,7 +1477,7 @@ fn hlir_lower_tuple(state: HlirLowerState, elem_vals: [i64; 64], elem_count: i64
 }
 
 // Build an array value from an array of element values.
-fn hlir_lower_array(state: HlirLowerState, elem_vals: [i64; 64], elem_count: i64, array_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_array(state: HlirLowerState, elem_vals: [i64; 64], elem_count: i64, array_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let val_pair = hlir_builder_fresh_value(s.builder)
     s.builder = val_pair.0
@@ -1306,7 +1494,7 @@ fn hlir_lower_array(state: HlirLowerState, elem_vals: [i64; 64], elem_count: i64
 }
 
 // Build a struct value from named fields.
-fn hlir_lower_struct_lit(state: HlirLowerState, struct_name: string, fields: [HlirStructFieldEntry; 128], field_count: i64, struct_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
+pub fn hlir_lower_struct_lit(state: HlirLowerState, struct_name: string, fields: [HlirStructFieldEntry; 128], field_count: i64, struct_ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
     var s = state
     let val_pair = hlir_builder_fresh_value(s.builder)
     s.builder = val_pair.0
@@ -1328,7 +1516,7 @@ fn hlir_lower_struct_lit(state: HlirLowerState, struct_name: string, fields: [Hl
 // ============================================================================
 
 // Allocate a fresh SSA value ID.
-fn hlir_lower_fresh_value(state: HlirLowerState) -> (HlirLowerState, i64) with Mut {
+pub fn hlir_lower_fresh_value(state: HlirLowerState) -> (HlirLowerState, i64) with Mut {
     var s = state
     let pair = hlir_builder_fresh_value(s.builder)
     s.builder = pair.0
@@ -1337,7 +1525,7 @@ fn hlir_lower_fresh_value(state: HlirLowerState) -> (HlirLowerState, i64) with M
 }
 
 // Get the current block ID.
-fn hlir_lower_current_block(state: HlirLowerState) -> i64 {
+pub fn hlir_lower_current_block(state: HlirLowerState) -> i64 {
     hlir_builder_current_block(state.builder)
 }
 
@@ -1346,17 +1534,17 @@ fn hlir_lower_current_block(state: HlirLowerState) -> i64 {
 // ============================================================================
 
 // Check if we are currently inside a loop.
-fn hlir_lower_in_loop(state: HlirLowerState) -> bool {
+pub fn hlir_lower_in_loop(state: HlirLowerState) -> bool {
     state.loop_depth > 0
 }
 
 // Check if we are currently inside a function.
-fn hlir_lower_in_function(state: HlirLowerState) -> bool {
+pub fn hlir_lower_in_function(state: HlirLowerState) -> bool {
     state.in_function
 }
 
 // Get the error count.
-fn hlir_lower_error_count(state: HlirLowerState) -> i64 {
+pub fn hlir_lower_error_count(state: HlirLowerState) -> i64 {
     state.error_count
 }
 
@@ -1366,13 +1554,13 @@ fn hlir_lower_error_count(state: HlirLowerState) -> i64 {
 // Match expressions in SSA form require one block per arm plus a merge block.
 // ============================================================================
 
-struct HlirMatchArmInfo {
+pub struct HlirMatchArmInfo {
     block_id: i64,         // Block for this arm's body
     value_id: i64,         // Value produced by this arm (-1 = not yet filled)
     exit_block: i64,       // Block that this arm exits from
 }
 
-fn hlir_match_arm_info_empty() -> HlirMatchArmInfo {
+pub fn hlir_match_arm_info_empty() -> HlirMatchArmInfo {
     HlirMatchArmInfo {
         block_id: HLIR_INVALID_BLOCK,
         value_id: HLIR_INVALID_VALUE,
@@ -1381,13 +1569,13 @@ fn hlir_match_arm_info_empty() -> HlirMatchArmInfo {
 }
 
 // Begin a match expression: creates a default block and a merge block.
-struct HlirMatchBeginResult {
+pub struct HlirMatchBeginResult {
     state: HlirLowerState,
     default_block: i64,
     merge_block: i64,
 }
 
-fn hlir_lower_match_begin(state: HlirLowerState) -> HlirMatchBeginResult with Mut, Panic, Div {
+pub fn hlir_lower_match_begin(state: HlirLowerState) -> HlirMatchBeginResult with Mut, Panic, Div {
     var s = state
 
     let default_pair = hlir_lower_new_block(s, "match.default")
@@ -1406,13 +1594,13 @@ fn hlir_lower_match_begin(state: HlirLowerState) -> HlirMatchBeginResult with Mu
 }
 
 // Create a block for a match arm.
-fn hlir_lower_match_arm_block(state: HlirLowerState, arm_index: i64) -> (HlirLowerState, i64) with Mut, Panic, Div {
+pub fn hlir_lower_match_arm_block(state: HlirLowerState, arm_index: i64) -> (HlirLowerState, i64) with Mut, Panic, Div {
     // Use a generic label; arm_index is for documentation only
     hlir_lower_new_block(state, "match.arm")
 }
 
 // Merge match arms: emit a phi node collecting values from all arms.
-fn hlir_lower_match_merge(state: HlirLowerState, merge_block: i64, arm_infos: [HlirMatchArmInfo; 64], arm_count: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
+pub fn hlir_lower_match_merge(state: HlirLowerState, merge_block: i64, arm_infos: [HlirMatchArmInfo; 64], arm_count: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic, Div {
     var s = state
     s = hlir_lower_switch_to_block(s, merge_block)
 
@@ -1449,7 +1637,7 @@ fn hlir_lower_match_merge(state: HlirLowerState, merge_block: i64, arm_infos: [H
 //   exit_block:   after loop
 // ============================================================================
 
-struct HlirForResult {
+pub struct HlirForResult {
     state: HlirLowerState,
     header_block: i64,
     body_block: i64,
@@ -1457,7 +1645,7 @@ struct HlirForResult {
     exit_block: i64,
 }
 
-fn hlir_lower_for_begin(state: HlirLowerState) -> HlirForResult with Mut, Panic, Div {
+pub fn hlir_lower_for_begin(state: HlirLowerState) -> HlirForResult with Mut, Panic, Div {
     var s = state
 
     let header_pair = hlir_lower_new_block(s, "for.header")
@@ -1497,7 +1685,7 @@ fn hlir_lower_for_begin(state: HlirLowerState) -> HlirForResult with Mut, Panic,
     }
 }
 
-fn hlir_lower_for_end(state: HlirLowerState, header_block: i64, body_block: i64, step_block: i64, exit_block: i64) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_for_end(state: HlirLowerState, header_block: i64, body_block: i64, step_block: i64, exit_block: i64) -> HlirLowerState with Mut, Panic {
     var s = state
 
     // Pop loop context
@@ -1527,12 +1715,12 @@ fn hlir_lower_for_end(state: HlirLowerState, header_block: i64, body_block: i64,
 
 // Begin a block expression (push scope, no new basic block needed
 // unless the block requires one).
-fn hlir_lower_begin_block_expr(state: HlirLowerState) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_begin_block_expr(state: HlirLowerState) -> HlirLowerState with Mut, Panic {
     hlir_lower_push_scope(state)
 }
 
 // End a block expression (pop scope). The result value is passed through.
-fn hlir_lower_end_block_expr(state: HlirLowerState, result_val: i64) -> (HlirLowerState, i64) with Mut {
+pub fn hlir_lower_end_block_expr(state: HlirLowerState, result_val: i64) -> (HlirLowerState, i64) with Mut {
     let s = hlir_lower_pop_scope(state)
     (s, result_val)
 }
@@ -1541,7 +1729,7 @@ fn hlir_lower_end_block_expr(state: HlirLowerState, result_val: i64) -> (HlirLow
 // Diagnostic: dump state summary (for debugging the lowering)
 // ============================================================================
 
-fn hlir_lower_state_summary(state: HlirLowerState) -> HlirLowerStateSummary {
+pub fn hlir_lower_state_summary(state: HlirLowerState) -> HlirLowerStateSummary {
     HlirLowerStateSummary {
         function_count: state.module_builder.module.fn_count,
         global_count: state.module_builder.module.global_count,
@@ -1556,7 +1744,7 @@ fn hlir_lower_state_summary(state: HlirLowerState) -> HlirLowerStateSummary {
     }
 }
 
-struct HlirLowerStateSummary {
+pub struct HlirLowerStateSummary {
     function_count: i64,
     global_count: i64,
     typedef_count: i64,
@@ -1583,14 +1771,14 @@ struct HlirLowerStateSummary {
 //   5. Call hlir_lower_if_finish to merge
 // ============================================================================
 
-struct HlirIfBeginResult {
+pub struct HlirIfBeginResult {
     state: HlirLowerState,
     then_block: i64,
     else_block: i64,
     merge_block: i64,
 }
 
-fn hlir_lower_if_begin(state: HlirLowerState, cond_val: i64) -> HlirIfBeginResult with Mut, Panic, Div {
+pub fn hlir_lower_if_begin(state: HlirLowerState, cond_val: i64) -> HlirIfBeginResult with Mut, Panic, Div {
     let result = hlir_lower_if_branch(state, cond_val)
     HlirIfBeginResult {
         state: result.state,
@@ -1602,7 +1790,7 @@ fn hlir_lower_if_begin(state: HlirLowerState, cond_val: i64) -> HlirIfBeginResul
 
 // Called after emitting then-block code. Emits branch to merge and returns
 // the exit block ID and result value.
-fn hlir_lower_if_then_done(state: HlirLowerState, merge_block: i64, then_val: i64) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_if_then_done(state: HlirLowerState, merge_block: i64, then_val: i64) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let exit_block = hlir_lower_current_block(s)
     s = hlir_lower_branch(s, merge_block)
@@ -1611,7 +1799,7 @@ fn hlir_lower_if_then_done(state: HlirLowerState, merge_block: i64, then_val: i6
 
 // Called after emitting else-block code. Emits branch to merge and returns
 // the exit block ID and result value.
-fn hlir_lower_if_else_done(state: HlirLowerState, merge_block: i64, else_val: i64) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_if_else_done(state: HlirLowerState, merge_block: i64, else_val: i64) -> (HlirLowerState, i64) with Mut, Panic {
     var s = state
     let exit_block = hlir_lower_current_block(s)
     s = hlir_lower_branch(s, merge_block)
@@ -1619,7 +1807,7 @@ fn hlir_lower_if_else_done(state: HlirLowerState, merge_block: i64, else_val: i6
 }
 
 // Finish the if-else: switch to merge block and optionally emit phi.
-fn hlir_lower_if_finish(state: HlirLowerState, merge_block: i64, then_exit: i64, then_val: i64, else_exit: i64, else_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_if_finish(state: HlirLowerState, merge_block: i64, then_exit: i64, then_val: i64, else_exit: i64, else_val: i64, ty: HlirType) -> (HlirLowerState, i64) with Mut, Panic {
     hlir_lower_if_merge(state, merge_block, then_exit, then_val, else_exit, else_val, ty)
 }
 
@@ -1627,13 +1815,13 @@ fn hlir_lower_if_finish(state: HlirLowerState, merge_block: i64, then_exit: i64,
 // Convenience: void if (no else, no result value)
 // ============================================================================
 
-struct HlirIfVoidResult {
+pub struct HlirIfVoidResult {
     state: HlirLowerState,
     then_block: i64,
     merge_block: i64,
 }
 
-fn hlir_lower_if_void_begin(state: HlirLowerState, cond_val: i64) -> HlirIfVoidResult with Mut, Panic, Div {
+pub fn hlir_lower_if_void_begin(state: HlirLowerState, cond_val: i64) -> HlirIfVoidResult with Mut, Panic, Div {
     var s = state
 
     let then_pair = hlir_lower_new_block(s, "if.then")
@@ -1654,7 +1842,7 @@ fn hlir_lower_if_void_begin(state: HlirLowerState, cond_val: i64) -> HlirIfVoidR
     }
 }
 
-fn hlir_lower_if_void_end(state: HlirLowerState, merge_block: i64) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_if_void_end(state: HlirLowerState, merge_block: i64) -> HlirLowerState with Mut, Panic {
     var s = state
     // Branch from then (current) to merge
     s = hlir_lower_branch(s, merge_block)
@@ -1667,7 +1855,7 @@ fn hlir_lower_if_void_end(state: HlirLowerState, merge_block: i64) -> HlirLowerS
 // Module-level state: set the module name
 // ============================================================================
 
-fn hlir_lower_set_module_name(state: HlirLowerState, name: string) -> HlirLowerState with Mut, Panic, Div {
+pub fn hlir_lower_set_module_name(state: HlirLowerState, name: string) -> HlirLowerState with Mut, Panic, Div {
     var s = state
     s.module_builder.module.name = hlir_name_from_str(name)
     s
@@ -1679,7 +1867,7 @@ fn hlir_lower_set_module_name(state: HlirLowerState, name: string) -> HlirLowerS
 
 // Emit a raw instruction into the current block. For advanced users who
 // construct HlirInstr manually.
-fn hlir_lower_emit_raw(state: HlirLowerState, instr: HlirInstr) -> HlirLowerState with Mut, Panic {
+pub fn hlir_lower_emit_raw(state: HlirLowerState, instr: HlirInstr) -> HlirLowerState with Mut, Panic {
     var s = state
     s.builder = hlir_builder_emit(s.builder, instr)
     s
@@ -1689,11 +1877,11 @@ fn hlir_lower_emit_raw(state: HlirLowerState, instr: HlirInstr) -> HlirLowerStat
 // Variable lookup by HlirName (for callers that already have the name)
 // ============================================================================
 
-fn hlir_lower_lookup_var(state: HlirLowerState, name: HlirName) -> i64 {
+pub fn hlir_lower_lookup_var(state: HlirLowerState, name: HlirName) -> i64 {
     hlir_builder_lookup_var(state.builder, name)
 }
 
-fn hlir_lower_lookup_slot(state: HlirLowerState, name: HlirName) -> i64 {
+pub fn hlir_lower_lookup_slot(state: HlirLowerState, name: HlirName) -> i64 {
     hlir_builder_lookup_slot(state.builder, name)
 }
 
@@ -1703,27 +1891,27 @@ fn hlir_lower_lookup_slot(state: HlirLowerState, name: HlirName) -> i64 {
 // These wrappers preserve the existing lowering architecture while exposing
 // the naming surface used by offload scaffold specs.
 
-fn hlir_scope_push(state: HlirLowerState) -> HlirLowerState with Mut, Panic {
+pub fn hlir_scope_push(state: HlirLowerState) -> HlirLowerState with Mut, Panic {
     hlir_lower_push_scope(state)
 }
 
-fn hlir_scope_pop(state: HlirLowerState) -> HlirLowerState with Mut {
+pub fn hlir_scope_pop(state: HlirLowerState) -> HlirLowerState with Mut {
     hlir_lower_pop_scope(state)
 }
 
-fn hlir_scope_insert(state: HlirLowerState, name_hash: i64, value_id: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
+pub fn hlir_scope_insert(state: HlirLowerState, name_hash: i64, value_id: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
     var s = state
     let pseudo_name = hlir_name_from_str("v_" ++ hlir_i64_to_string(name_hash))
     s.builder = hlir_builder_bind_var(s.builder, pseudo_name, value_id)
     s
 }
 
-fn hlir_scope_lookup(state: HlirLowerState, name_hash: i64) -> i64 with Mut, Panic, Div, Alloc {
+pub fn hlir_scope_lookup(state: HlirLowerState, name_hash: i64) -> i64 with Mut, Panic, Div, Alloc {
     let pseudo_name = hlir_name_from_str("v_" ++ hlir_i64_to_string(name_hash))
     hlir_builder_lookup_var(state.builder, pseudo_name)
 }
 
-fn hlir_lower_seal_block(state: HlirLowerState) -> HlirLowerState {
+pub fn hlir_lower_seal_block(state: HlirLowerState) -> HlirLowerState {
     // Current builder model does not require explicit block sealing.
     state
 }
@@ -1732,15 +1920,74 @@ fn hlir_lower_seal_block(state: HlirLowerState) -> HlirLowerState {
 // AST/HIR compatibility layer (spec-facing entry points)
 // ============================================================================
 
-fn hlir_ast_name_to_string(name: Name) -> string with Mut, Panic, Div, Alloc {
+pub fn hlir_ast_name_to_string(name: Name) -> string with Mut, Panic, Div, Alloc {
     str_from_bytes(name.buf, name.len)
 }
 
-fn hlir_ast_path_head_to_string(path: AstPath) -> string with Mut, Panic, Div, Alloc {
+pub fn hlir_ast_path_head_to_string(path: AstPath) -> string with Mut, Panic, Div, Alloc {
     str_from_bytes(path.segments.head_buf, path.segments.head_len)
 }
 
-fn hlir_type_from_ast(ty: TypeExpr) -> HlirType with Mut, Panic, Div, Alloc {
+fn hlir_type_code_from_type(ty: HlirType) -> i64 {
+    if ty.kind == HlirTypeKind::HlirTypeBool { return HLIR_TYPE_CODE_BOOL }
+    if ty.kind == HlirTypeKind::HlirTypeI8 { return HLIR_TYPE_CODE_I8 }
+    if ty.kind == HlirTypeKind::HlirTypeI16 { return HLIR_TYPE_CODE_I16 }
+    if ty.kind == HlirTypeKind::HlirTypeI32 { return HLIR_TYPE_CODE_I32 }
+    if ty.kind == HlirTypeKind::HlirTypeI64 { return HLIR_TYPE_CODE_I64 }
+    if ty.kind == HlirTypeKind::HlirTypeU8 { return HLIR_TYPE_CODE_U8 }
+    if ty.kind == HlirTypeKind::HlirTypeU16 { return HLIR_TYPE_CODE_U16 }
+    if ty.kind == HlirTypeKind::HlirTypeU32 { return HLIR_TYPE_CODE_U32 }
+    if ty.kind == HlirTypeKind::HlirTypeU64 { return HLIR_TYPE_CODE_U64 }
+    if ty.kind == HlirTypeKind::HlirTypeF32 { return HLIR_TYPE_CODE_F32 }
+    if ty.kind == HlirTypeKind::HlirTypeF64 { return HLIR_TYPE_CODE_F64 }
+    if ty.kind == HlirTypeKind::HlirTypeOctonion { return HLIR_TYPE_CODE_OCTONION }
+    if ty.kind == HlirTypeKind::HlirTypeSedenion { return HLIR_TYPE_CODE_SEDENION }
+    HLIR_TYPE_CODE_NONE
+}
+
+fn hlir_type_from_code(code: i64) -> HlirType {
+    if code == HLIR_TYPE_CODE_BOOL { return hlir_type_bool() }
+    if code == HLIR_TYPE_CODE_I8 { return hlir_type_i8() }
+    if code == HLIR_TYPE_CODE_I16 { return hlir_type_i16() }
+    if code == HLIR_TYPE_CODE_I32 { return hlir_type_i32() }
+    if code == HLIR_TYPE_CODE_I64 { return hlir_type_i64() }
+    if code == HLIR_TYPE_CODE_U8 { return hlir_type_u8() }
+    if code == HLIR_TYPE_CODE_U16 { return hlir_type_u16() }
+    if code == HLIR_TYPE_CODE_U32 { return hlir_type_u32() }
+    if code == HLIR_TYPE_CODE_U64 { return hlir_type_u64() }
+    if code == HLIR_TYPE_CODE_F32 { return hlir_type_f32() }
+    if code == HLIR_TYPE_CODE_F64 { return hlir_type_f64() }
+    if code == HLIR_TYPE_CODE_OCTONION { return hlir_type_octonion() }
+    if code == HLIR_TYPE_CODE_SEDENION { return hlir_type_sedenion() }
+    hlir_type_void()
+}
+
+fn hlir_type_with_element(base: HlirType, elem: HlirType) -> HlirType with Mut {
+    var out = base
+    let code = hlir_type_code_from_type(elem)
+    if code != HLIR_TYPE_CODE_NONE {
+        out.type_elem_count = 1
+        out.type_elems[0] = code
+    }
+    out
+}
+
+fn hlir_type_element_or_void(ty: HlirType) -> HlirType {
+    if ty.type_elem_count > 0 {
+        return hlir_type_from_code(ty.type_elems[0])
+    }
+    hlir_type_void()
+}
+
+fn hlir_type_element_or_i64(ty: HlirType) -> HlirType {
+    let elem = hlir_type_element_or_void(ty)
+    if elem.kind != HlirTypeKind::HlirTypeVoid {
+        return elem
+    }
+    hlir_type_i64()
+}
+
+pub fn hlir_type_from_ast(ty: TypeExpr) -> HlirType with Mut, Panic, Div, Alloc {
     if ty.kind == TypeExprKind::TypeUnit {
         return hlir_type_void()
     }
@@ -1770,22 +2017,58 @@ fn hlir_type_from_ast(ty: TypeExpr) -> HlirType with Mut, Panic, Div, Alloc {
         if tname == "f64" { return hlir_type_f64() }
         if tname == "bool" { return hlir_type_bool() }
         if tname == "unit" { return hlir_type_void() }
+        // First-class hypercomplex: Hyper<Octonion, f64> → HlirTypeOctonion (8× f64).
+        // (a `&Hyper<Octonion,f64>` param then becomes ptr-with-octonion-element via the
+        // TypeReference branch below, so the GPU lowering can recognize `*pa` / `a*h`.)
+        if tname == "Hyper" {
+            match ty.type_args {
+                Some(args) => {
+                    let alg_name = hlir_ast_path_head_to_string((*args).head.path)
+                    if alg_name == "Octonion" { return hlir_type_octonion() }
+                    if alg_name == "Sedenion" { return hlir_type_sedenion() }
+                }
+                None => {}
+            }
+        }
+    }
+    if ty.kind == TypeExprKind::TypeArray {
+        match ty.inner {
+            Some(elem) => {
+                let elem_ty = hlir_type_from_ast(*elem)
+                return hlir_type_with_element(hlir_type_array(-1, 0), elem_ty)
+            }
+            None => return hlir_type_array(-1, 0),
+        }
     }
     if ty.kind == TypeExprKind::TypeReference || ty.kind == TypeExprKind::TypeRefMut {
-        return hlir_type_ptr(-1)
+        match ty.inner {
+            Some(inner) => {
+                let inner_ty = *inner
+                let elem_ty = if inner_ty.kind == TypeExprKind::TypeArray {
+                    match inner_ty.inner {
+                        Some(elem) => hlir_type_from_ast(*elem),
+                        None => hlir_type_i64(),
+                    }
+                } else {
+                    hlir_type_from_ast(inner_ty)
+                }
+                return hlir_type_with_element(hlir_type_ptr(-1), elem_ty)
+            }
+            None => return hlir_type_ptr(-1),
+        }
     }
     // Conservative fallback for unsupported/unknown AST types.
     hlir_type_i64()
 }
 
-fn hlir_type_from_ast_opt(ty: Option<Box<TypeExpr>>) -> HlirType with Mut, Panic, Div, Alloc {
+pub fn hlir_type_from_ast_opt(ty: Option<Box<TypeExpr>>) -> HlirType with Mut, Panic, Div, Alloc {
     match ty {
         Some(t) => hlir_type_from_ast(*t),
         None => hlir_type_void(),
     }
 }
 
-fn hlir_ast_binary_to_hlir(op: BinaryOp) -> i64 {
+pub fn hlir_ast_binary_to_hlir(op: BinaryOp) -> i64 {
     match op {
         BinaryOp::OpAdd => HLIR_BIN_ADD,
         BinaryOp::OpSub => HLIR_BIN_SUB,
@@ -1810,7 +2093,26 @@ fn hlir_ast_binary_to_hlir(op: BinaryOp) -> i64 {
     }
 }
 
-fn hlir_ast_binary_result_ty(op: BinaryOp) -> HlirType {
+pub fn hlir_ast_binary_to_hlir_typed(op: BinaryOp, lhs_ty: HlirType, rhs_ty: HlirType) -> i64 {
+    let is_float = lhs_ty.kind == HlirTypeKind::HlirTypeF32 || lhs_ty.kind == HlirTypeKind::HlirTypeF64 ||
+                   rhs_ty.kind == HlirTypeKind::HlirTypeF32 || rhs_ty.kind == HlirTypeKind::HlirTypeF64
+    if is_float {
+        if op == BinaryOp::OpAdd { return HLIR_BIN_FADD }
+        if op == BinaryOp::OpSub { return HLIR_BIN_FSUB }
+        if op == BinaryOp::OpMul { return HLIR_BIN_FMUL }
+        if op == BinaryOp::OpDiv { return HLIR_BIN_FDIV }
+        if op == BinaryOp::OpRem { return HLIR_BIN_FREM }
+        if op == BinaryOp::OpEq { return HLIR_BIN_FOEQ }
+        if op == BinaryOp::OpNe { return HLIR_BIN_FONE }
+        if op == BinaryOp::OpLt { return HLIR_BIN_FOLT }
+        if op == BinaryOp::OpLe { return HLIR_BIN_FOLE }
+        if op == BinaryOp::OpGt { return HLIR_BIN_FOGT }
+        if op == BinaryOp::OpGe { return HLIR_BIN_FOGE }
+    }
+    hlir_ast_binary_to_hlir(op)
+}
+
+pub fn hlir_ast_binary_result_ty(op: BinaryOp) -> HlirType {
     if op == BinaryOp::OpEq
     || op == BinaryOp::OpNe
     || op == BinaryOp::OpLt
@@ -1824,14 +2126,34 @@ fn hlir_ast_binary_result_ty(op: BinaryOp) -> HlirType {
     hlir_type_i64()
 }
 
-fn hlir_ast_unary_to_hlir(op: UnaryOp) -> i64 {
+pub fn hlir_ast_binary_result_ty_typed(op: BinaryOp, lhs_ty: HlirType, rhs_ty: HlirType) -> HlirType {
+    if op == BinaryOp::OpEq
+    || op == BinaryOp::OpNe
+    || op == BinaryOp::OpLt
+    || op == BinaryOp::OpLe
+    || op == BinaryOp::OpGt
+    || op == BinaryOp::OpGe
+    || op == BinaryOp::OpAnd
+    || op == BinaryOp::OpOr {
+        return hlir_type_bool()
+    }
+    if lhs_ty.kind == HlirTypeKind::HlirTypeF64 || rhs_ty.kind == HlirTypeKind::HlirTypeF64 {
+        return hlir_type_f64()
+    }
+    if lhs_ty.kind == HlirTypeKind::HlirTypeF32 || rhs_ty.kind == HlirTypeKind::HlirTypeF32 {
+        return hlir_type_f32()
+    }
+    hlir_ast_binary_result_ty(op)
+}
+
+pub fn hlir_ast_unary_to_hlir(op: UnaryOp) -> i64 {
     match op {
         UnaryOp::OpNot => HLIR_UNARY_NOT,
         _ => HLIR_UNARY_NEG,
     }
 }
 
-fn hlir_ast_name_hash(name: Name) -> i64 with Mut, Panic, Div {
+pub fn hlir_ast_name_hash(name: Name) -> i64 with Mut, Panic, Div {
     var h: i64 = 0
     var i: i64 = 0
     while i < name.len {
@@ -1841,19 +2163,19 @@ fn hlir_ast_name_hash(name: Name) -> i64 with Mut, Panic, Div {
     if h < 0 { 0 - h } else { h }
 }
 
-fn hlir_lower_expr_opt(state: HlirLowerState, expr: Option<Box<Expr>>) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_expr_opt(state: HlirLowerState, expr: Option<Box<Expr>>) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
     match expr {
         Some(e) => hlir_lower_expr(state, *e),
         None => hlir_lower_unit(state),
     }
 }
 
-fn hlir_lower_expr_list(
+pub fn hlir_lower_expr_list(
     state: HlirLowerState,
     list: Option<Box<ExprList>>,
     values: [i64; 64],
     count: i64,
-) -> (HlirLowerState, [i64; 64], i64) with Mut, Panic, Div, Alloc {
+) -> HlirExprListResult with Mut, Panic, Div, Alloc {
     match list {
         Some(node) => {
             var s = state
@@ -1866,21 +2188,44 @@ fn hlir_lower_expr_list(
             }
             hlir_lower_expr_list(s, (*node).tail, out, next_count)
         }
-        None => (state, values, count),
+        None => HlirExprListResult { state: state, values: values, count: count },
     }
 }
 
-fn hlir_lower_field_access(state: HlirLowerState, base: i64, field: i64) -> (HlirLowerState, i64) with Mut, Panic {
+pub fn hlir_lower_field_access(state: HlirLowerState, base: i64, field: i64) -> (HlirLowerState, i64) with Mut, Panic {
     let ptr_pair = hlir_lower_get_field_ptr(state, base, field, hlir_type_ptr(-1))
     hlir_lower_load(ptr_pair.0, ptr_pair.1, hlir_type_i64())
 }
 
-fn hlir_lower_index(state: HlirLowerState, base: i64, index: i64) -> (HlirLowerState, i64) with Mut, Panic {
-    let ptr_pair = hlir_lower_gep(state, base, index, hlir_type_i64())
-    hlir_lower_load(ptr_pair.0, ptr_pair.1, hlir_type_i64())
+fn hlir_lower_value_type(state: HlirLowerState, value_id: i64) -> HlirType {
+    hlir_function_lookup_local_type(state.builder.func, value_id)
 }
 
-fn hlir_lower_literal(state: HlirLowerState, lit: Expr) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+fn hlir_lower_index_elem_type(state: HlirLowerState, base: i64) -> HlirType {
+    let base_ty = hlir_lower_value_type(state, base)
+    hlir_type_element_or_i64(base_ty)
+}
+
+fn hlir_lower_store_index_elem_type(state: HlirLowerState, base: i64, value_id: i64) -> HlirType {
+    let base_ty = hlir_lower_value_type(state, base)
+    let elem_ty = hlir_type_element_or_void(base_ty)
+    if elem_ty.kind != HlirTypeKind::HlirTypeVoid {
+        return elem_ty
+    }
+    let value_ty = hlir_lower_value_type(state, value_id)
+    if value_ty.kind != HlirTypeKind::HlirTypeVoid {
+        return value_ty
+    }
+    hlir_type_i64()
+}
+
+pub fn hlir_lower_index(state: HlirLowerState, base: i64, index: i64) -> (HlirLowerState, i64) with Mut, Panic {
+    let elem_ty = hlir_lower_index_elem_type(state, base)
+    let ptr_pair = hlir_lower_gep(state, base, index, elem_ty)
+    hlir_lower_load(ptr_pair.0, ptr_pair.1, elem_ty)
+}
+
+pub fn hlir_lower_literal(state: HlirLowerState, lit: Expr) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
     if lit.kind == ExprKind::ExprIntLit {
         return hlir_lower_literal_int(state, lit.int_val, hlir_type_i64())
     }
@@ -1902,7 +2247,51 @@ fn hlir_lower_literal(state: HlirLowerState, lit: Expr) -> (HlirLowerState, i64)
     hlir_lower_unit(state)
 }
 
-fn hlir_lower_match(state: HlirLowerState, scrutinee: i64, arms: Option<Box<MatchArmList>>) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+fn hlir_gpu_axis_root(e: Expr) -> bool with Alloc, Div, Mut, Panic {
+    e.kind == ExprKind::ExprIdent && hlir_ast_name_to_string(e.name) == "gpu"
+}
+
+fn hlir_gpu_axis_flat_name(e: Expr) -> string with Mut, Panic, Div, Alloc {
+    if e.kind != ExprKind::ExprFieldAccess {
+        return ""
+    }
+    if hlir_ast_name_to_string(e.name) != "x" {
+        return ""
+    }
+    match e.left {
+        Some(base) => {
+            if (*base).kind == ExprKind::ExprFieldAccess {
+                match (*base).left {
+                    Some(root) => {
+                        if hlir_gpu_axis_root(*root) {
+                            let axis_name = hlir_ast_name_to_string((*base).name)
+                            if axis_name == "thread_id" { return "gpu_thread_id_x" }
+                            if axis_name == "block_id" { return "gpu_block_id_x" }
+                            if axis_name == "block_dim" { return "gpu_block_dim_x" }
+                        }
+                    }
+                    None => {}
+                }
+            } else if (*base).kind == ExprKind::ExprMethodCall {
+                match (*base).left {
+                    Some(root2) => {
+                        if hlir_gpu_axis_root(*root2) {
+                            let axis_method = hlir_ast_name_to_string((*base).name)
+                            if axis_method == "thread_id" { return "gpu_thread_id_x" }
+                            if axis_method == "block_id" { return "gpu_block_id_x" }
+                            if axis_method == "block_dim" { return "gpu_block_dim_x" }
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+        None => {}
+    }
+    ""
+}
+
+pub fn hlir_lower_match(state: HlirLowerState, scrutinee: i64, arms: Option<Box<MatchArmList>>) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
     // Minimal bridge implementation: lower first arm body if present.
     // Full pattern dispatch is handled by match_begin/match_merge APIs.
     match arms {
@@ -1911,7 +2300,7 @@ fn hlir_lower_match(state: HlirLowerState, scrutinee: i64, arms: Option<Box<Matc
     }
 }
 
-fn hlir_lower_assign_target(state: HlirLowerState, target: Expr, value_id: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_assign_target(state: HlirLowerState, target: Expr, value_id: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
     var s = state
     if target.kind == ExprKind::ExprIdent {
         let target_name = hlir_ast_name_to_string(target.name)
@@ -1920,24 +2309,28 @@ fn hlir_lower_assign_target(state: HlirLowerState, target: Expr, value_id: i64) 
     if target.kind == ExprKind::ExprFieldAccess {
         let base_pair = hlir_lower_expr_opt(s, target.left)
         s = base_pair.0
+        let base_val = base_pair.1
         let field_idx = hlir_ast_name_hash(target.name) % 16
-        let field_ptr_pair = hlir_lower_get_field_ptr(s, base_pair.1, field_idx, hlir_type_i64())
+        let field_ptr_pair = hlir_lower_get_field_ptr(s, base_val, field_idx, hlir_type_i64())
         s = field_ptr_pair.0
         return hlir_lower_store(s, field_ptr_pair.1, value_id)
     }
     if target.kind == ExprKind::ExprIndex {
         let base_pair = hlir_lower_expr_opt(s, target.left)
         s = base_pair.0
+        let base_val = base_pair.1
         let idx_pair = hlir_lower_expr_opt(s, target.right)
         s = idx_pair.0
-        let elem_ptr_pair = hlir_lower_gep(s, base_pair.1, idx_pair.1, hlir_type_i64())
+        let idx_val = idx_pair.1
+        let elem_ty = hlir_lower_store_index_elem_type(s, base_val, value_id)
+        let elem_ptr_pair = hlir_lower_gep(s, base_val, idx_val, elem_ty)
         s = elem_ptr_pair.0
         return hlir_lower_store(s, elem_ptr_pair.1, value_id)
     }
     hlir_lower_report_error(s)
 }
 
-fn hlir_lower_stmt(state: HlirLowerState, stmt: Stmt) -> HlirLowerState with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_stmt(state: HlirLowerState, stmt: Stmt) -> HlirLowerState with Mut, Panic, Div, Alloc {
     var s = state
     if stmt.kind == StmtKind::StmtLet {
         let init_pair = hlir_lower_expr_opt(s, stmt.expr)
@@ -1954,10 +2347,50 @@ fn hlir_lower_stmt(state: HlirLowerState, stmt: Stmt) -> HlirLowerState with Mut
         return hlir_lower_var(s, name, ty, init_pair.1)
     }
     if stmt.kind == StmtKind::StmtAssign {
-        let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
-        s = rhs_pair.0
         match stmt.target {
-            Some(t) => hlir_lower_assign_target(s, *t, rhs_pair.1),
+            Some(t) => {
+                let target_expr = *t
+                if target_expr.kind == ExprKind::ExprFieldAccess {
+                    let base_pair = hlir_lower_expr_opt(s, target_expr.left)
+                    s = base_pair.0
+                    let base_val = base_pair.1
+                    let field_idx = hlir_ast_name_hash(target_expr.name) % 16
+                    let field_ptr_pair = hlir_lower_get_field_ptr(s, base_val, field_idx, hlir_type_i64())
+                    s = field_ptr_pair.0
+                    let ptr_val = field_ptr_pair.1
+                    let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
+                    s = rhs_pair.0
+                    let rhs_val = rhs_pair.1
+                    return hlir_lower_store(s, ptr_val, rhs_val)
+                }
+                if target_expr.kind == ExprKind::ExprIndex {
+                    let base_pair = hlir_lower_expr_opt(s, target_expr.left)
+                    s = base_pair.0
+                    let base_val = base_pair.1
+                    let idx_pair = hlir_lower_expr_opt(s, target_expr.right)
+                    s = idx_pair.0
+                    let idx_val = idx_pair.1
+                    let elem_ty = hlir_lower_index_elem_type(s, base_val)
+                    let elem_ptr_pair = hlir_lower_gep(s, base_val, idx_val, elem_ty)
+                    s = elem_ptr_pair.0
+                    let ptr_val = elem_ptr_pair.1
+                    let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
+                    s = rhs_pair.0
+                    let rhs_val = rhs_pair.1
+                    return hlir_lower_store(s, ptr_val, rhs_val)
+                }
+                let rhs_pair = hlir_lower_expr_opt(s, stmt.expr)
+                s = rhs_pair.0
+                let rhs_val = rhs_pair.1
+                // Store an octonion through a pointer: `*pout = ah` where pout:&!Hyper<Octonion,f64>
+                // and ah is an octonion repr → write its 8 f64 components.
+                if target_expr.kind == ExprKind::ExprUnary && target_expr.un_op == UnaryOp::OpDeref && hlir_oct_is(s, rhs_val) {
+                    let dptr_pair = hlir_lower_expr_opt(s, target_expr.left)
+                    s = dptr_pair.0
+                    return hlir_oct_store(s, dptr_pair.1, rhs_val)
+                }
+                hlir_lower_assign_target(s, target_expr, rhs_val)
+            },
             None => hlir_lower_report_error(s),
         }
     }
@@ -1968,7 +2401,7 @@ fn hlir_lower_stmt(state: HlirLowerState, stmt: Stmt) -> HlirLowerState with Mut
     s
 }
 
-fn hlir_lower_stmt_list(state: HlirLowerState, stmts: Option<Box<StmtList>>) -> HlirLowerState with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_stmt_list(state: HlirLowerState, stmts: Option<Box<StmtList>>) -> HlirLowerState with Mut, Panic, Div, Alloc {
     match stmts {
         Some(list) => {
             let s1 = hlir_lower_stmt(state, (*list).head)
@@ -1978,14 +2411,14 @@ fn hlir_lower_stmt_list(state: HlirLowerState, stmts: Option<Box<StmtList>>) -> 
     }
 }
 
-fn hlir_lower_block_from_ast(state: HlirLowerState, block: Block) -> HlirLowerState with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_block_from_ast(state: HlirLowerState, block: Block) -> HlirLowerState with Mut, Panic, Div, Alloc {
     var s = hlir_scope_push(state)
     s = hlir_lower_stmt_list(s, block.stmts)
     s = hlir_scope_pop(s)
     s
 }
 
-fn hlir_lower_struct_field_values(state: HlirLowerState, fields: Option<Box<StructFieldList>>) -> HlirLowerState with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_struct_field_values(state: HlirLowerState, fields: Option<Box<StructFieldList>>) -> HlirLowerState with Mut, Panic, Div, Alloc {
     match fields {
         Some(list) => {
             let value_pair = hlir_lower_expr(state, (*list).head.value)
@@ -1995,7 +2428,7 @@ fn hlir_lower_struct_field_values(state: HlirLowerState, fields: Option<Box<Stru
     }
 }
 
-fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
     var s = state
 
     if expr.kind == ExprKind::ExprIntLit
@@ -2020,33 +2453,67 @@ fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i64) w
     if expr.kind == ExprKind::ExprBinary {
         let lhs_pair = hlir_lower_expr_opt(s, expr.left)
         s = lhs_pair.0
+        let lhs_val = lhs_pair.1
         let rhs_pair = hlir_lower_expr_opt(s, expr.right)
         s = rhs_pair.0
-        let op = hlir_ast_binary_to_hlir(expr.bin_op)
-        let ty = hlir_ast_binary_result_ty(expr.bin_op)
-        return hlir_lower_binary(s, op, lhs_pair.1, rhs_pair.1, ty)
+        let rhs_val = rhs_pair.1
+        // First-class hypercomplex multiply: both operands are recorded reprs → expand
+        // r[i⊕j] += σ(i,j,bits)·a[i]·b[j] over the components (Convention X / cd_sigma).
+        // dim/bits come from the operands: octonion (8,3) or sedenion (16,4).
+        if expr.bin_op == BinaryOp::OpMul && hlir_oct_is(s, lhs_val) && hlir_oct_is(s, rhs_val) {
+            let dim = hlir_oct_dim(s, lhs_val)
+            let bits = if dim == 16 { 4 } else { 3 }
+            return hlir_oct_mul(s, lhs_val, rhs_val, dim, bits)
+        }
+        let lhs_ty = hlir_lower_value_type(s, lhs_val)
+        let rhs_ty = hlir_lower_value_type(s, rhs_val)
+        let op = hlir_ast_binary_to_hlir_typed(expr.bin_op, lhs_ty, rhs_ty)
+        let ty = hlir_ast_binary_result_ty_typed(expr.bin_op, lhs_ty, rhs_ty)
+        return hlir_lower_binary(s, op, lhs_val, rhs_val, ty)
     }
 
     if expr.kind == ExprKind::ExprUnary {
         let src_pair = hlir_lower_expr_opt(s, expr.left)
         s = src_pair.0
+        // Deref of a hypercomplex pointer (`*pa` where pa: &Hyper<Octonion|Sedenion,f64>) →
+        // load the 8/16 f64 components into a fresh repr instead of a scalar deref.
+        if expr.un_op == UnaryOp::OpDeref {
+            let ptr_ty = hlir_lower_value_type(s, src_pair.1)
+            if ptr_ty.kind == HlirTypeKind::HlirTypePtr {
+                let elem = hlir_type_element_or_void(ptr_ty)
+                if elem.kind == HlirTypeKind::HlirTypeOctonion {
+                    return hlir_oct_load(s, src_pair.1, 8)
+                }
+                if elem.kind == HlirTypeKind::HlirTypeSedenion {
+                    return hlir_oct_load(s, src_pair.1, 16)
+                }
+            }
+        }
         let op = hlir_ast_unary_to_hlir(expr.un_op)
         return hlir_lower_unary(s, op, src_pair.1, hlir_type_i64())
     }
 
     if expr.kind == ExprKind::ExprFieldAccess {
+        let gpu_axis_name = hlir_gpu_axis_flat_name(expr)
+        if gpu_axis_name != "" {
+            var no_args: [i64; 64] = [0; 64]
+            return hlir_lower_call(s, gpu_axis_name, no_args, 0, hlir_type_i64())
+        }
         let base_pair = hlir_lower_expr_opt(s, expr.left)
         s = base_pair.0
+        let base_val = base_pair.1
         let field_idx = hlir_ast_name_hash(expr.name) % 16
-        return hlir_lower_field_access(s, base_pair.1, field_idx)
+        return hlir_lower_field_access(s, base_val, field_idx)
     }
 
     if expr.kind == ExprKind::ExprIndex {
         let base_pair = hlir_lower_expr_opt(s, expr.left)
         s = base_pair.0
+        let base_val = base_pair.1
         let idx_pair = hlir_lower_expr_opt(s, expr.right)
         s = idx_pair.0
-        return hlir_lower_index(s, base_pair.1, idx_pair.1)
+        let idx_val = idx_pair.1
+        return hlir_lower_index(s, base_val, idx_val)
     }
 
     if expr.kind == ExprKind::ExprCast {
@@ -2091,45 +2558,48 @@ fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i64) w
         if callee == "prove_robust" {
             // prove_robust(contest, policy) → Robust<T>: first arg (contest value) is the datum
             let pr_args = hlir_lower_expr_list(s, expr.args, [HLIR_INVALID_VALUE; 64], 0)
-            s = pr_args.0
-            let pr_vals: [i64; 64] = pr_args.1
+            s = pr_args.state
+            var pr_vals: [i64; 64] = pr_args.values
             return (s, pr_vals[0])
         }
         if callee == "validate_manifest" {
             // validate_manifest(robust) → Validated<T>: first arg (robust value) is the datum
             let vm_args = hlir_lower_expr_list(s, expr.args, [HLIR_INVALID_VALUE; 64], 0)
-            s = vm_args.0
-            let vm_vals: [i64; 64] = vm_args.1
+            s = vm_args.state
+            var vm_vals: [i64; 64] = vm_args.values
             return (s, vm_vals[0])
         }
         if callee == "lift_knowledge" {
             // lift_knowledge(k: Knowledge<T>) → Contest<T>: H5.4 epistemic bridge, first arg is the datum
             let lk_args = hlir_lower_expr_list(s, expr.args, [HLIR_INVALID_VALUE; 64], 0)
-            s = lk_args.0
-            let lk_vals: [i64; 64] = lk_args.1
+            s = lk_args.state
+            var lk_vals: [i64; 64] = lk_args.values
             return (s, lk_vals[0])
         }
         if callee == "measure" {
             // measure(v, uncertainty) → Knowledge<T>: H5.5 epistemic source, first arg (value) is the datum
             let ms_args = hlir_lower_expr_list(s, expr.args, [HLIR_INVALID_VALUE; 64], 0)
-            s = ms_args.0
-            let ms_vals: [i64; 64] = ms_args.1
+            s = ms_args.state
+            var ms_vals: [i64; 64] = ms_args.values
             return (s, ms_vals[0])
         }
 
         let args_pair = hlir_lower_expr_list(s, expr.args, [HLIR_INVALID_VALUE; 64], 0)
-        s = args_pair.0
-        return hlir_lower_call(s, callee, args_pair.1, args_pair.2, hlir_type_i64())
+        s = args_pair.state
+        var call_vals: [i64; 64] = args_pair.values
+        return hlir_lower_call(s, callee, call_vals, args_pair.count, hlir_type_i64())
     }
 
     if expr.kind == ExprKind::ExprMethodCall {
         let base_pair = hlir_lower_expr_opt(s, expr.left)
         s = base_pair.0
+        let base_val = base_pair.1
         var arg_vals: [i64; 64] = [HLIR_INVALID_VALUE; 64]
-        arg_vals[0] = base_pair.1
+        arg_vals[0] = base_val
         let args_pair = hlir_lower_expr_list(s, expr.args, arg_vals, 1)
-        s = args_pair.0
-        return hlir_lower_call(s, hlir_ast_name_to_string(expr.name), args_pair.1, args_pair.2, hlir_type_i64())
+        s = args_pair.state
+        var method_vals: [i64; 64] = args_pair.values
+        return hlir_lower_call(s, hlir_ast_name_to_string(expr.name), method_vals, args_pair.count, hlir_type_i64())
     }
 
     if expr.kind == ExprKind::ExprIf {
@@ -2213,7 +2683,7 @@ fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i64) w
 
     if expr.kind == ExprKind::ExprArrayLit || expr.kind == ExprKind::ExprTupleLit {
         let elems_pair = hlir_lower_expr_list(s, expr.args, [HLIR_INVALID_VALUE; 64], 0)
-        s = elems_pair.0
+        s = elems_pair.state
         s = hlir_lower_report_error(s)
         return hlir_lower_unit(s)
     }
@@ -2221,10 +2691,12 @@ fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i64) w
     if expr.kind == ExprKind::ExprRange {
         let lhs_pair = hlir_lower_expr_opt(s, expr.left)
         s = lhs_pair.0
+        let lhs_val = lhs_pair.1
         let rhs_pair = hlir_lower_expr_opt(s, expr.right)
         s = rhs_pair.0
+        let rhs_val = rhs_pair.1
         let op = hlir_ast_binary_to_hlir(expr.bin_op)
-        return hlir_lower_binary(s, op, lhs_pair.1, rhs_pair.1, hlir_type_i64())
+        return hlir_lower_binary(s, op, lhs_val, rhs_val, hlir_type_i64())
     }
 
     if expr.kind == ExprKind::ExprReturn {
@@ -2254,7 +2726,7 @@ fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i64) w
     hlir_lower_unit(s)
 }
 
-fn hlir_lower_params(state: HlirLowerState, params: Option<Box<ParamList>>) -> HlirLowerState with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_params(state: HlirLowerState, params: Option<Box<ParamList>>) -> HlirLowerState with Mut, Panic, Div, Alloc {
     match params {
         Some(list) => {
             var s = state
@@ -2269,7 +2741,7 @@ fn hlir_lower_params(state: HlirLowerState, params: Option<Box<ParamList>>) -> H
     }
 }
 
-fn hlir_lower_function(state: HlirLowerState, ast_func: FnDef, is_kernel: bool) -> HlirLowerState with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_function(state: HlirLowerState, ast_func: FnDef, is_kernel: bool) -> HlirLowerState with Mut, Panic, Div, Alloc {
     var s = state
     let fn_name = hlir_ast_name_to_string(ast_func.name)
     let ret_ty = hlir_type_from_ast_opt(ast_func.return_type)
@@ -2300,14 +2772,17 @@ fn hlir_lower_function(state: HlirLowerState, ast_func: FnDef, is_kernel: bool) 
     s
 }
 
-fn hlir_lower_items(state: HlirLowerState, items: Option<Box<ItemList>>) -> HlirLowerState with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_items(state: HlirLowerState, items: Option<Box<ItemList>>) -> HlirLowerState with Mut, Panic, Div, Alloc {
     match items {
         Some(list) => {
             var s = state
             let item = (*list).head
             if item.kind == ItemKind::ItemFn {
                 match item.fn_def {
-                    Some(fn_def) => { s = hlir_lower_function(s, *fn_def, (*fn_def).is_kernel) }
+                    Some(fn_def) => {
+                        let is_kernel = (*fn_def).is_kernel
+                        s = hlir_lower_function(s, *fn_def, is_kernel)
+                    }
                     None => { s = hlir_lower_report_error(s) }
                 }
             }
@@ -2317,7 +2792,7 @@ fn hlir_lower_items(state: HlirLowerState, items: Option<Box<ItemList>>) -> Hlir
     }
 }
 
-fn hlir_lower_module(ast_module: Program) -> HlirModule with Mut, Panic, Div, Alloc {
+pub fn hlir_lower_module(ast_module: Program) -> HlirModule with Mut, Panic, Div, Alloc {
     var s = hlir_lower_state_new()
     let mod_name = hlir_ast_path_head_to_string(ast_module.module_path)
     if str_len(mod_name) > 0 {

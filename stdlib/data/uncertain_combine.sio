@@ -1,0 +1,110 @@
+//! Combine repeated or independent measurements of the same quantity, each carrying its own
+//! uncertainty — the core operation of metrology, sensor fusion, and meta-analysis, and one pandas
+//! has no notion of.
+//!
+//! Given a value column and a parallel column of per-reading standard uncertainties, the best
+//! combined estimate is the INVERSE-VARIANCE WEIGHTED MEAN (weights wᵢ = 1/uᵢ²):
+//!   x̄ = Σ(wᵢ xᵢ) / Σ wᵢ ,   u(x̄) = 1 / √(Σ wᵢ)
+//! This is the maximum-likelihood combination for independent Gaussian measurements (ISO GUM;
+//! Bevington & Robinson §4.1). Its self-consistency is checked by the reduced chi-square
+//!   χ²_ν = [ Σ wᵢ (xᵢ − x̄)² ] / (n − 1)
+//! which should be ≈ 1 if the stated uncertainties explain the observed scatter; χ²_ν ≫ 1 means the
+//! measurements disagree by more than their error bars. When that happens, metrology practice (CODATA,
+//! PDG) inflates the combined uncertainty by the Birge ratio √χ²_ν.
+//!
+//! Reductions return a `epistemic::gum::GUMResult`. Read-only over the DataFrames; self-contained on
+//! the public `data::dataframe` and `epistemic::gum` APIs; no compiler changes.
+
+use data::dataframe::{DataFrame, df_get, df_nrows}
+use epistemic::gum::{GUMResult, GUMComponent, gum_type_b, gum_combine2, gum_value, gum_std_u}
+
+fn uc_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i: i64 = 0
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+// Σ wᵢ over rows with a positive uncertainty (wᵢ = 1/uᵢ²). Rows with uᵢ ≤ 0 are skipped (a
+// zero-uncertainty reading is not a finite weight).
+fn sum_weights(uncs: &DataFrame, ucol: i64) -> f64 with Mut, Div, Panic {
+    let n = df_nrows(uncs)
+    var sw = 0.0
+    var r: i64 = 0
+    while r < n {
+        let u = df_get(uncs, r, ucol)
+        if u > 0.0 { sw = sw + 1.0 / (u * u) }
+        r = r + 1
+    }
+    sw
+}
+
+// The inverse-variance weighted mean value x̄ = Σ(wᵢ xᵢ) / Σ wᵢ (0 if there is no weight).
+fn weighted_mean_value(vals: &DataFrame, col: i64, uncs: &DataFrame, ucol: i64) -> f64 with Mut, Div, Panic {
+    let n = df_nrows(vals)
+    var sw = 0.0
+    var swx = 0.0
+    var r: i64 = 0
+    while r < n {
+        let u = df_get(uncs, r, ucol)
+        if u > 0.0 {
+            let w = 1.0 / (u * u)
+            sw = sw + w
+            swx = swx + w * df_get(vals, r, col)
+        }
+        r = r + 1
+    }
+    if sw > 0.0 { swx / sw } else { 0.0 }
+}
+
+/// The inverse-variance weighted mean of column `col` with per-reading standard uncertainties in
+/// `uncs` column `ucol`. The result's value is x̄, its standard uncertainty is 1/√(Σ wᵢ), reported as
+/// an a-priori (Type B) quantity (coverage k ≈ 1.96 at 95 %).
+pub fn uframe_weighted_mean(vals: &DataFrame, col: i64, uncs: &DataFrame, ucol: i64) -> GUMResult with Mut, Div, Panic {
+    let xbar = weighted_mean_value(vals, col, uncs, ucol)
+    let sw = sum_weights(uncs, ucol)
+    var u = 0.0
+    if sw > 0.0 { u = 1.0 / uc_sqrt(sw) }
+    let b = gum_type_b(u)
+    let z = gum_type_b(0.0)
+    gum_combine2(xbar, b, z)
+}
+
+/// The reduced chi-square of the combination: [ Σ wᵢ (xᵢ − x̄)² ] / (n − 1). ≈ 1 means the stated
+/// uncertainties explain the scatter; ≫ 1 means the measurements disagree beyond their error bars;
+/// ≪ 1 means the uncertainties were overstated. Returns 0 for fewer than two usable rows.
+pub fn uframe_reduced_chi2(vals: &DataFrame, col: i64, uncs: &DataFrame, ucol: i64) -> f64 with Mut, Div, Panic {
+    let xbar = weighted_mean_value(vals, col, uncs, ucol)
+    let n = df_nrows(vals)
+    var chi = 0.0
+    var used: i64 = 0
+    var r: i64 = 0
+    while r < n {
+        let u = df_get(uncs, r, ucol)
+        if u > 0.0 {
+            let w = 1.0 / (u * u)
+            let d = df_get(vals, r, col) - xbar
+            chi = chi + w * d * d
+            used = used + 1
+        }
+        r = r + 1
+    }
+    if used < 2 { return 0.0 }
+    chi / ((used - 1) as f64)
+}
+
+/// The weighted mean with a Birge-ratio-inflated uncertainty: when the reduced chi-square exceeds 1
+/// (the measurements disagree by more than their stated uncertainties), the combined uncertainty is
+/// scaled by √χ²_ν — the CODATA/PDG "external" uncertainty. When χ²_ν ≤ 1 the uncertainty is left
+/// unchanged (never deflated). The value (x̄) is unchanged.
+pub fn uframe_weighted_mean_birge(vals: &DataFrame, col: i64, uncs: &DataFrame, ucol: i64) -> GUMResult with Mut, Div, Panic {
+    let base = uframe_weighted_mean(vals, col, uncs, ucol)
+    let chi = uframe_reduced_chi2(vals, col, uncs, ucol)
+    var scale = 1.0
+    if chi > 1.0 { scale = uc_sqrt(chi) }
+    let u = gum_std_u(base) * scale
+    let b = gum_type_b(u)
+    let z = gum_type_b(0.0)
+    gum_combine2(gum_value(base), b, z)
+}

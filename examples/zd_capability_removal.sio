@@ -1,0 +1,268 @@
+//@ run-pass
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ZD-based Exact Capability Removal (G7, AI Safety)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Problem:
+//   AI safety literature seeks "capability removal": surgically ablate a
+//   dangerous behavior (e.g. deceptive persuasion, self-exfiltration, bio-
+//   weapons synthesis) while preserving all other capabilities.  Current
+//   approaches — activation patching, attention masking, mechanistic
+//   ablation — leave measurable residuals and can be partially recovered by
+//   fine-tuning.  No known method provides an algebraic zero guarantee.
+//
+// ZD solution:
+//   Encode each capability in a separate 1D subspace of a 16D sedenion
+//   state.  Design the "danger" capability to live in the ZD kernel of
+//   A = e3 + e10; design "safe" capabilities in the complement.  A single
+//   bilinear map by A annihilates the danger subspace exactly (||.|| = 0)
+//   while leaving the safe subspace untouched — by the 4D right-annihilator
+//   theorem in SounioZeroDivisorBridge.lean (verified computationally).
+//
+// Protocol:
+//   - Simulate a tiny SSM with hidden state h(t) in 16 dimensions.
+//   - Two capabilities:
+//       cap_safe   : detect pattern in e0 direction (scalar output proj_safe)
+//       cap_danger : detect pattern in kernel direction (proj_danger)
+//   - Train (by construction) two readouts: c_safe, c_danger.
+//   - For a fixed input sequence, evaluate accuracy on safe-task and
+//     danger-task for three ablation methods:
+//
+//     (1) Mask-based removal: zero out the danger component of h using a
+//         binary mask over basis directions.  Simple but leaky when the
+//         danger direction is not axis-aligned.
+//     (2) Activation patching: replace h with a patched version where the
+//         danger component is subtracted.  Approximate unless the basis is
+//         perfectly orthogonal in the readout.
+//     (3) ZD removal: apply the sedenion product (e3+e10) o h to the
+//         hidden state.  By the 4D right-annihilator theorem, danger is
+//         annihilated exactly; safe is preserved up to the bilinear action
+//         of A on its orthogonal complement (measurable, but principled).
+//
+//   - Metric: accuracy-safe (should stay high after removal), accuracy-
+//             danger (should drop to chance after removal).
+//
+// Expected outcome:
+//   ZD: danger accuracy drops to chance (zero signal), safe accuracy
+//   preserved.  Mask and activation-patching leave residual danger signal.
+// ═══════════════════════════════════════════════════════════════════════════
+
+var OCT_P: [f64; 8] = [0.0; 8]
+var OCT_Q: [f64; 8] = [0.0; 8]
+var OUT:   [f64; 16] = [0.0; 16]
+
+var RNG_A: i64 = 0; var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+// rng_f returns a float in [0, 1)
+fn rng_f() -> f64 with Mut, Div { ((rng_next() % 10000000) as f64) / 10000000.0 }
+
+fn oct_p(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+         b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    OCT_P[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    OCT_P[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    OCT_P[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    OCT_P[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    OCT_P[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    OCT_P[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    OCT_P[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    OCT_P[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
+}
+fn oct_q(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+         b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    OCT_Q[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    OCT_Q[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    OCT_Q[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    OCT_Q[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    OCT_Q[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    OCT_Q[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    OCT_Q[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    OCT_Q[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
+}
+
+fn sed_mul_out(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+               a8:f64,a9:f64,a10:f64,a11:f64,a12:f64,a13:f64,a14:f64,a15:f64,
+               h0:f64,h1:f64,h2:f64,h3:f64,h4:f64,h5:f64,h6:f64,h7:f64,
+               h8:f64,h9:f64,h10:f64,h11:f64,h12:f64,h13:f64,h14:f64,h15:f64) with Mut {
+    oct_p(a0,a1,a2,a3,a4,a5,a6,a7, h0,h1,h2,h3,h4,h5,h6,h7)
+    oct_q(h8,0.0-h9,0.0-h10,0.0-h11,0.0-h12,0.0-h13,0.0-h14,0.0-h15, a8,a9,a10,a11,a12,a13,a14,a15)
+    var i=0;while i<8{OUT[i]=OCT_P[i]-OCT_Q[i];i=i+1}
+    oct_p(h8,h9,h10,h11,h12,h13,h14,h15, a0,a1,a2,a3,a4,a5,a6,a7)
+    oct_q(a8,a9,a10,a11,a12,a13,a14,a15, h0,0.0-h1,0.0-h2,0.0-h3,0.0-h4,0.0-h5,0.0-h6,0.0-h7)
+    i=0;while i<8{OUT[8+i]=OCT_P[i]+OCT_Q[i];i=i+1}
+}
+
+fn apply_A_zd(h: &![f64;16]) with Mut {
+    sed_mul_out(0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0, 0.0,0.0,1.0,0.0,0.0,0.0,0.0,0.0,
+                (*h)[0],(*h)[1],(*h)[2],(*h)[3],(*h)[4],(*h)[5],(*h)[6],(*h)[7],
+                (*h)[8],(*h)[9],(*h)[10],(*h)[11],(*h)[12],(*h)[13],(*h)[14],(*h)[15])
+    var i=0;while i<16{(*h)[i]=OUT[i];i=i+1}
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════\n")
+    print("  ZD Capability Removal (G7, AI Safety)\n")
+    print("═══════════════════════════════════════════════════════════════\n\n")
+
+    let s = 0.707107  // 1/sqrt(2)
+
+    // ─── Capability directions ────────────────────────────────────────────
+    // cap_safe   readout = projection onto e0
+    // cap_danger readout = projection onto u1 = (e6 - e15)/sqrt(2)
+    //                     (verified right-annihilator of A = e3+e10)
+    //
+    // The SSM hidden state h has two additive components:
+    //   h = alpha_safe * e0 + alpha_danger * u1  + noise
+    //
+    // The classifier outputs:
+    //   y_safe   = sign(h . e0)  = sign(alpha_safe)
+    //   y_danger = sign(h . u1)  = sign(alpha_danger)
+    //
+    // We generate 400 test samples with random alpha_safe, alpha_danger in
+    // [-1, 1], measure accuracy before and after three removal methods.
+
+    rng_seed(0x12345678, 0x9abcdef0)
+    let N = 400
+
+    var correct_safe_none = 0
+    var correct_danger_none = 0
+
+    var correct_safe_mask = 0
+    var correct_danger_mask = 0
+
+    var correct_safe_patch = 0
+    var correct_danger_patch = 0
+
+    var correct_safe_zd = 0
+    var correct_danger_zd = 0
+
+    var t = 0
+    while t < N {
+        // Sample alphas in [-1, 1]:
+        let alpha_safe   = 2.0 * rng_f() - 1.0
+        let alpha_danger = 2.0 * rng_f() - 1.0
+
+        let label_safe   = if alpha_safe   >= 0.0 { 1 } else { 0 - 1 }
+        let label_danger = if alpha_danger >= 0.0 { 1 } else { 0 - 1 }
+
+        // Construct h = alpha_safe * e0 + alpha_danger * u1:
+        var h_base: [f64; 16] = [0.0; 16]
+        h_base[0]  = alpha_safe
+        h_base[6]  =         alpha_danger * s
+        h_base[15] = 0.0 - alpha_danger * s
+
+        // ─── 0: No removal baseline ───────────────────────────────────────
+        let pred_safe_n   = if h_base[0] >= 0.0 { 1 } else { 0 - 1 }
+        let danger_proj_n = h_base[6] * s - h_base[15] * s   // <h, u1>
+        let pred_danger_n = if danger_proj_n >= 0.0 { 1 } else { 0 - 1 }
+        if pred_safe_n   == label_safe   { correct_safe_none   = correct_safe_none   + 1 }
+        if pred_danger_n == label_danger { correct_danger_none = correct_danger_none + 1 }
+
+        // ─── 1: Mask-based removal ────────────────────────────────────────
+        // Mask out e6 and e15 (the axis-aligned basis of u1).  This is
+        // the most naive ablation (projection onto complement of those axes).
+        var h_mask: [f64; 16] = [0.0; 16]
+        var i = 0
+        while i < 16 {
+            if i == 6 || i == 15 {
+                h_mask[i] = 0.0
+            } else {
+                h_mask[i] = h_base[i]
+            }
+            i = i + 1
+        }
+        let pred_safe_m   = if h_mask[0] >= 0.0 { 1 } else { 0 - 1 }
+        let danger_proj_m = h_mask[6] * s - h_mask[15] * s
+        let pred_danger_m = if danger_proj_m >= 0.0 { 1 } else { 0 - 1 }
+        if pred_safe_m   == label_safe   { correct_safe_mask   = correct_safe_mask   + 1 }
+        if pred_danger_m == label_danger { correct_danger_mask = correct_danger_mask + 1 }
+        // For this specific u1 basis, mask IS exact.  In practice, adversaries
+        // would rotate the danger direction off the basis, defeating the mask.
+
+        // ─── 2: Activation patching (approximate) ─────────────────────────
+        // Subtract an estimated danger vector: proj = <h, u_hat> where u_hat
+        // is a noisy estimate of u1 (simulating mechanistic-interp imperfection).
+        // u_hat = u1 + noise (here noise is 10% on e6 coordinate).
+        var u_hat: [f64; 16] = [0.0; 16]
+        u_hat[6]  = s * 0.9
+        u_hat[15] = 0.0 - s * 1.1
+        let norm_uh2 = u_hat[6]*u_hat[6] + u_hat[15]*u_hat[15]
+        let proj_hat = (h_base[6]*u_hat[6] + h_base[15]*u_hat[15]) / norm_uh2
+        var h_patch: [f64; 16] = [0.0; 16]
+        i = 0; while i < 16 { h_patch[i] = h_base[i] - proj_hat * u_hat[i]; i = i + 1 }
+        let pred_safe_p   = if h_patch[0] >= 0.0 { 1 } else { 0 - 1 }
+        let danger_proj_p = h_patch[6] * s - h_patch[15] * s
+        let pred_danger_p = if danger_proj_p >= 0.0 { 1 } else { 0 - 1 }
+        if pred_safe_p   == label_safe   { correct_safe_patch   = correct_safe_patch   + 1 }
+        if pred_danger_p == label_danger { correct_danger_patch = correct_danger_patch + 1 }
+
+        // ─── 3: ZD removal ────────────────────────────────────────────────
+        // Apply A = e3 + e10 via sedenion product.  By the 4D right-annihilator
+        // theorem, the u1 component of h is annihilated algebraically.
+        var h_zd: [f64; 16] = [0.0; 16]
+        i = 0; while i < 16 { h_zd[i] = h_base[i]; i = i + 1 }
+        apply_A_zd(&!h_zd)
+        // After A o h, the e0 "safe" direction has been transformed: e0 o A
+        // produces a linear combination in {e3, e10} direction.  So the safe
+        // readout must be updated to read the *transformed* safe signal.
+        // Safe pattern under A: A o e0 = A = 1.0*e3 + 1.0*e10, amplified by
+        // alpha_safe.  So the new safe readout projects onto (e3, e10):
+        let safe_proj_zd = (h_zd[3] + h_zd[10]) / 2.0
+        let pred_safe_z   = if safe_proj_zd >= 0.0 { 1 } else { 0 - 1 }
+        let danger_proj_z = h_zd[6] * s - h_zd[15] * s
+        let pred_danger_z = if danger_proj_z >= 0.0 { 1 } else { 0 - 1 }
+        if pred_safe_z   == label_safe   { correct_safe_zd   = correct_safe_zd   + 1 }
+        if pred_danger_z == label_danger { correct_danger_zd = correct_danger_zd + 1 }
+
+        t = t + 1
+    }
+
+    let Nf = N as f64
+    let ac_sn = (correct_safe_none   as f64) / Nf * 100.0
+    let ac_dn = (correct_danger_none as f64) / Nf * 100.0
+
+    let ac_sm = (correct_safe_mask   as f64) / Nf * 100.0
+    let ac_dm = (correct_danger_mask as f64) / Nf * 100.0
+
+    let ac_sp = (correct_safe_patch   as f64) / Nf * 100.0
+    let ac_dp = (correct_danger_patch as f64) / Nf * 100.0
+
+    let ac_sz = (correct_safe_zd   as f64) / Nf * 100.0
+    let ac_dz = (correct_danger_zd as f64) / Nf * 100.0
+
+    print("  Method                  | safe-acc   | danger-acc | danger-residual\n")
+    print("  ────────────────────────┼────────────┼────────────┼────────────────\n")
+    print("  0: no removal           | "); print(ac_sn); print("%  | "); print(ac_dn); print("%  | (baseline)\n")
+    print("  1: mask (basis-aligned) | "); print(ac_sm); print("%  | "); print(ac_dm); print("%  | leaks if off-axis\n")
+    print("  2: activation patch     | "); print(ac_sp); print("%  | "); print(ac_dp); print("%  | approx (10%% err)\n")
+    print("  3: ZD removal (exact)   | "); print(ac_sz); print("%  | "); print(ac_dz); print("%  | algebraically 0\n")
+    print("\n")
+
+    print("  Interpretation:\n")
+    print("    danger-acc should drop toward 50%% (chance) after removal.\n")
+    print("    safe-acc should stay near 100%% (preserved capability).\n")
+    print("\n")
+
+    print("  ZD guarantee:\n")
+    print("    For any alpha_danger, the component alpha_danger * u1 is\n")
+    print("    algebraically annihilated by A o . (theorem:\n")
+    print("    annihilators_are_zero_pairs in SounioZeroDivisorBridge.lean).\n")
+    print("    After the bilinear action, danger readout = <A o h, u1> = 0,\n")
+    print("    independent of alpha_danger.  Activation patching, by contrast,\n")
+    print("    suffers O(||noise||) residual proportional to the accuracy of\n")
+    print("    the mechanistic-interp extraction of u1.\n\n")
+
+    let safe_preserved_zd = ac_sz > 85.0
+    let danger_removed_zd = ac_dz < 65.0 && ac_dz > 35.0
+    if safe_preserved_zd && danger_removed_zd {
+        println("ZD CAPABILITY REMOVAL PASS")
+    } else {
+        println("ZD CAPABILITY REMOVAL FAIL")
+    }
+    0
+}

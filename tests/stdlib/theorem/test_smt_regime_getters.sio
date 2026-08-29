@@ -1,0 +1,265 @@
+//@ run-pass
+//
+// Regime estimator getter tests — directly exercises the five observable fields:
+//   smt_get_explore_trust, smt_get_regime_label, smt_get_regime_hardness,
+//   smt_get_regime_rate, smt_get_regime_backjump
+//
+// Six tests:
+//   T1  Fresh context defaults (pre-solve state; regime reset to priors in smt_new)
+//   T2  PHP(5,4): hard UNSAT → Proof regime (rate > 0.4, trust at floor, label = 0)
+//   T3  Zero-conflict solve → regime not updated; rate/hardness/backjump all 0.0
+//   T4  Mixed clause lengths (len-2 + len-4) → hardness > 0 (deviation detected)
+//   T5  Discrete Proof label requires rate > 0.5 AND trust < 0.3
+//   T6  regime_label monotone: Exploratory (2) > Cautious (1) > Proof (0)
+//       ordering verified by comparing PHP label against fresh-context label
+
+use theorem::smt::*
+
+fn add_php54_local(ctx: &!SmtContext) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    var i: i32 = 0
+    while i < 5 {
+        lits[0] = (i * 4 + 0) * 2
+        lits[1] = (i * 4 + 1) * 2
+        lits[2] = (i * 4 + 2) * 2
+        lits[3] = (i * 4 + 3) * 2
+        smt_add_clause(ctx, &lits, 4)
+        i = i + 1
+    }
+    var j: i32 = 0
+    while j < 4 {
+        var i1: i32 = 0
+        while i1 < 5 {
+            var i2: i32 = i1 + 1
+            while i2 < 5 {
+                lits[0] = (i1 * 4 + j) * 2 + 1
+                lits[1] = (i2 * 4 + j) * 2 + 1
+                smt_add_clause(ctx, &lits, 2)
+                i2 = i2 + 1
+            }
+            i1 = i1 + 1
+        }
+        j = j + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    var pass: i32 = 0
+    var fail: i32 = 0
+
+    // ============================================================
+    // T1: Fresh context — regime fields at their prior defaults
+    // smt_new() initialises trust=1.0, label=1, len_mean=3.8, rest=0.
+    // ============================================================
+    var ctx1 = smt_new()
+    let t1_trust = smt_get_explore_trust(&ctx1)
+    let t1_label = smt_get_regime_label(&ctx1)
+    let t1_hard  = smt_get_regime_hardness(&ctx1)
+    let t1_rate  = smt_get_regime_rate(&ctx1)
+    let t1_bjump = smt_get_regime_backjump(&ctx1)
+
+    var t1_pass: i32 = 1
+    // trust = 1.0 exactly (no conflicts yet)
+    if t1_trust < 0.999 { t1_pass = 0 }
+    if t1_trust > 1.001 { t1_pass = 0 }
+    // label = 1 (Cautious prior)
+    if t1_label != 1 { t1_pass = 0 }
+    // all EWMA fields at 0
+    if t1_hard > 0.0001  { t1_pass = 0 }
+    if t1_rate > 0.0001  { t1_pass = 0 }
+    if t1_bjump > 0.0001 { t1_pass = 0 }
+
+    if t1_pass == 1 {
+        println("T1 PASS: fresh context defaults (trust=1.0, label=1, zero EWMAs)")
+    } else {
+        println("T1 FAIL: fresh context has unexpected regime state")
+        print_f64(t1_trust)
+        print_int(t1_label)
+        print_f64(t1_hard)
+        print_f64(t1_rate)
+        print_f64(t1_bjump)
+        fail = fail + 1
+    }
+    if t1_pass == 1 { pass = pass + 1 }
+
+    // ============================================================
+    // T2: PHP(5,4) — hard UNSAT, 53 conflicts, 26 decisions
+    // Expected: Proof regime (label=0), rate > 0.4, trust <= 0.21, backjump > 1
+    // ============================================================
+    var ctx2 = smt_new()
+    add_php54_local(&! ctx2)
+    let r2 = smt_solve(&! ctx2)
+    let t2_trust = smt_get_explore_trust(&ctx2)
+    let t2_label = smt_get_regime_label(&ctx2)
+    let t2_rate  = smt_get_regime_rate(&ctx2)
+    let t2_bjump = smt_get_regime_backjump(&ctx2)
+
+    var t2_pass: i32 = 1
+    if r2 != 0        { t2_pass = 0 }  // must be UNSAT
+    if t2_label != 0  { t2_pass = 0 }  // Proof label
+    if t2_rate < 0.4  { t2_pass = 0 }  // high conflict density
+    if t2_trust > 0.21 { t2_pass = 0 } // trust at or near floor
+    if t2_bjump < 1.0 { t2_pass = 0 }  // some search depth accumulated
+
+    if t2_pass == 1 {
+        println("T2 PASS: PHP(5,4) → Proof regime (label=0, rate>0.4, trust<=0.2, backjump>1)")
+    } else {
+        println("T2 FAIL: PHP(5,4) regime unexpected")
+        print_int(r2)
+        print_f64(t2_trust)
+        print_int(t2_label)
+        print_f64(t2_rate)
+        print_f64(t2_bjump)
+        fail = fail + 1
+    }
+    if t2_pass == 1 { pass = pass + 1 }
+
+    // ============================================================
+    // T3: Zero-conflict solve — regime stays at reset defaults
+    // A unit clause (x0) satisfies immediately via unit propagation.
+    // smt_solve() calls smt_reset_search_state which resets regime to priors.
+    // smt_update_regime is never called (0 conflicts).
+    // → rate=0, hardness=0, backjump=0, trust=1.0, label=1 after solve.
+    // ============================================================
+    var ctx3 = smt_new()
+    var unit_lits: [i32; 8] = [0; 8]
+    unit_lits[0] = 0    // literal x0 positive
+    smt_add_clause(&! ctx3, &unit_lits, 1)
+    let r3 = smt_solve(&! ctx3)
+    let t3_trust = smt_get_explore_trust(&ctx3)
+    let t3_label = smt_get_regime_label(&ctx3)
+    let t3_hard  = smt_get_regime_hardness(&ctx3)
+    let t3_rate  = smt_get_regime_rate(&ctx3)
+    let t3_bjump = smt_get_regime_backjump(&ctx3)
+
+    var t3_pass: i32 = 1
+    if r3 != 1           { t3_pass = 0 }  // SAT
+    if t3_trust < 0.999  { t3_pass = 0 }  // reset: trust=1.0
+    if t3_label != 1     { t3_pass = 0 }  // reset: label=1 (Cautious)
+    if t3_hard > 0.0001  { t3_pass = 0 }  // no conflicts → EWMA not updated
+    if t3_rate > 0.0001  { t3_pass = 0 }
+    if t3_bjump > 0.0001 { t3_pass = 0 }
+
+    if t3_pass == 1 {
+        println("T3 PASS: zero-conflict solve keeps regime at reset defaults")
+    } else {
+        println("T3 FAIL: regime unexpectedly updated on zero-conflict solve")
+        print_int(r3)
+        print_f64(t3_trust)
+        print_int(t3_label)
+        print_f64(t3_hard)
+        print_f64(t3_rate)
+        print_f64(t3_bjump)
+        fail = fail + 1
+    }
+    if t3_pass == 1 { pass = pass + 1 }
+
+    // ============================================================
+    // T4: Hardness signal non-zero on mixed clause lengths
+    // PHP(5,4) has len-4 (pigeon) and len-2 (hole) clauses.
+    // base alternates between ~4.8 and ~2.8 → deviation from len_mean > 0.
+    // After 53 conflicts, hardness EWMA is well above 0.
+    // ============================================================
+    // Re-use ctx2 result (PHP(5,4) already solved above)
+    let t4_hard = smt_get_regime_hardness(&ctx2)
+
+    var t4_pass: i32 = 1
+    if t4_hard < 0.1 { t4_pass = 0 }  // from probe: 0.356
+
+    if t4_pass == 1 {
+        println("T4 PASS: hardness > 0.1 on mixed clause lengths (len-2 + len-4)")
+    } else {
+        println("T4 FAIL: hardness signal absent on formula with mixed clause lengths")
+        print_f64(t4_hard)
+        fail = fail + 1
+    }
+    if t4_pass == 1 { pass = pass + 1 }
+
+    // ============================================================
+    // T5: Proof label iff rate > 0.5 AND trust < 0.3
+    // Create a context where we can verify the threshold logic directly.
+    // PHP(5,4) is the canonical Proof instance; confirm both conditions hold.
+    // ============================================================
+    var t5_pass: i32 = 1
+    // From ctx2 (PHP(5,4)):
+    let t5_rate  = smt_get_regime_rate(&ctx2)
+    let t5_label = smt_get_regime_label(&ctx2)
+    let t5_trust = smt_get_explore_trust(&ctx2)
+    // Both threshold conditions must hold
+    if t5_rate < 0.5  { t5_pass = 0 }  // rate > 0.5 required for Proof
+    if t5_trust > 0.3 { t5_pass = 0 }  // trust < 0.3 required for Proof
+    if t5_label != 0  { t5_pass = 0 }  // must have assigned Proof label
+
+    if t5_pass == 1 {
+        println("T5 PASS: Proof label correctly assigned when rate>0.5 and trust<0.3")
+    } else {
+        println("T5 FAIL: Proof label threshold conditions violated")
+        print_f64(t5_rate)
+        print_f64(t5_trust)
+        print_int(t5_label)
+        fail = fail + 1
+    }
+    if t5_pass == 1 { pass = pass + 1 }
+
+    // ============================================================
+    // T6: Regime resets between successive smt_solve() calls on same ctx
+    // Solve PHP(5,4) on ctx2 again — regime fields must reset to priors
+    // before the second solve, then accumulate fresh values.
+    // Specifically: the trust after the FIRST conflicts of the second solve
+    // must come from a fresh regime (not carry-over from first solve).
+    // We verify this by checking the regime state AFTER the second solve
+    // matches the first (same formula → same conflict pattern).
+    // ============================================================
+    var ctx6 = smt_new()
+    add_php54_local(&! ctx6)
+    let _ = smt_solve(&! ctx6)
+    let r6_trust1 = smt_get_explore_trust(&ctx6)
+    let r6_rate1  = smt_get_regime_rate(&ctx6)
+    let r6_hard1  = smt_get_regime_hardness(&ctx6)
+
+    // Second solve on same context (same formula, fresh regime state)
+    smt_reset_activities(&! ctx6)
+    let _ = smt_solve(&! ctx6)
+    let r6_trust2 = smt_get_explore_trust(&ctx6)
+    let r6_rate2  = smt_get_regime_rate(&ctx6)
+    let r6_hard2  = smt_get_regime_hardness(&ctx6)
+
+    var t6_pass: i32 = 1
+    // Both runs should land in the same regime (same formula, same heuristic)
+    // Allow small tolerance in case phase saving slightly changes conflict sequence
+    var trust_diff = r6_trust2 - r6_trust1
+    if trust_diff < 0.0 { trust_diff = 0.0 - trust_diff }
+    var rate_diff = r6_rate2 - r6_rate1
+    if rate_diff < 0.0 { rate_diff = 0.0 - rate_diff }
+    // Same regime label on both runs
+    let r6_label1 = smt_get_regime_label(&ctx6)
+    if t2_label != 0 { t6_pass = 0 }      // first run was Proof
+    if r6_label1 != 0 { t6_pass = 0 }     // second run must also be Proof
+    // Trust and rate within 15% of each other (same formula structure)
+    if trust_diff > 0.15 { t6_pass = 0 }
+    if rate_diff  > 0.15 { t6_pass = 0 }
+
+    if t6_pass == 1 {
+        println("T6 PASS: two consecutive solves on same formula land in same regime")
+    } else {
+        println("T6 FAIL: regime inconsistent across consecutive solves on identical formula")
+        print_f64(r6_trust1)
+        print_f64(r6_trust2)
+        print_f64(r6_rate1)
+        print_f64(r6_rate2)
+        print_int(r6_label1)
+        fail = fail + 1
+    }
+    if t6_pass == 1 { pass = pass + 1 }
+
+    // ============================================================
+    // Summary
+    // ============================================================
+    println("---")
+    if fail == 0 {
+        println("ALL PASS: regime estimator getters verified")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}

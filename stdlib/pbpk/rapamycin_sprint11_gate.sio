@@ -1,0 +1,174 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint11_gate.sio — Sprint 11 AUC vs trough divergence gate
+//
+// 56 assertions proving that the AUC endpoint is epistemically more robust than
+// the trough endpoint under ke measurement uncertainty: at the ke_var threshold
+// where the trough gate fires (UNCERTAIN), the AUC gate remains THERAPEUTIC.
+//
+// Standard scenario: IV bolus rapamycin, ke=0.05 h⁻¹, Vc=70 L, D=2 mg, t=24h.
+//   AUC(0→24h)  ≈ 0.399 mg·h/L — inside [0.001, 200] mg·h/L.
+//   Trough(24h) ≈ 0.00834 mg/L — inside [0.004, 0.020] mg/L.
+//
+// Dissertation headline (Section D, assertions 21-24):
+//   ke_var=0.0025: trough = UNCERTAIN (conf=700), AUC = THERAPEUTIC (conf=950).
+//   auc_trough_diverge(0.0025) = true.
+//   A point-estimate TDM tool cannot make this distinction; the epistemic system
+//   makes it compile-time-verified.
+//
+// Assertion map:
+//   A (1–8):   assess_auc basic properties: floor/ceil/SUB/THERAPEUTIC/UNCERTAIN
+//   B (9–14):  AUC THERAPEUTIC across ke_var sweep — wide-range robustness
+//   C (15–20): AUC confidence scores — stays high while trough degrades
+//   D (21–26): Divergence: trough UNCERTAIN but AUC THERAPEUTIC at ke_var=0.0025
+//   E (27–32): auc_trough_diverge fires for range of ke_var; budget dominant = ke
+//   F (33–38): AUC conf >= trough conf for all tested ke_var (robustness dominance)
+//   G (39–44): AUC conf monotonicity — decreases slowly with ke_var
+//   H (45–48): AUC decision stable; trough decision flips at precision boundary
+//   I (49–52): Decision sentinel values
+//   J (53–56): Cross-checks wrapper vs direct
+
+use pbpk::rapamycin_auc_gate::{
+    auc_iv_classify, auc_iv_conf,
+    classify_standard_auc, conf_standard_auc, auc_dominant_standard,
+    auc_trough_diverge
+}
+use pbpk::rapamycin_precision::{classify_iv_trough, conf_iv_trough}
+use pbpk::rapamycin_clinical::{
+    assess_auc,
+    decision_therapeutic, decision_uncertain, decision_sub, decision_toxic,
+    conf_clinical_min, auc_floor_mg_h_l, auc_ceil_mg_h_l
+}
+
+var SPR11_PASS: [i64; 2] = [0; 2]
+
+fn s11_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR11_PASS[0] = SPR11_PASS[0] + 1
+    } else {
+        SPR11_PASS[1] = SPR11_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint11_gate() with IO, Epistemic, Mut, Div, Panic {
+
+    // ── Section A: assess_auc basic properties (8 assertions) ────────────────
+    // Verify floor/ceil thresholds and confidence gate behaviour of assess_auc.
+
+    // Inside window, high conf → THERAPEUTIC
+    s11_chk(assess_auc(0.4, 0.001, 950) == decision_therapeutic())     // 1
+    // Inside window but conf < 800 → UNCERTAIN
+    s11_chk(assess_auc(0.4, 0.001, 700) == decision_uncertain())        // 2
+    // Below floor (hi < 0.001 mg·h/L) → SUB
+    s11_chk(assess_auc(0.0001, 0.00001, 950) == decision_sub())         // 3
+    // At floor exactly → THERAPEUTIC (point estimate in window)
+    s11_chk(assess_auc(0.001, 0.0001, 950) == decision_therapeutic())   // 4
+    // Above ceil (lo > 200 mg·h/L) → TOXIC
+    s11_chk(assess_auc(201.0, 0.01, 950) == decision_toxic())           // 5
+    // Floor is positive
+    s11_chk(auc_floor_mg_h_l() > 0.0)                                   // 6
+    // Ceil is large (> 1 mg·h/L)
+    s11_chk(auc_ceil_mg_h_l() > 1.0)                                    // 7
+    // SUB ≠ THERAPEUTIC
+    s11_chk(decision_sub() != decision_therapeutic())                    // 8
+
+    // ── Section B: AUC THERAPEUTIC across ke_var sweep (6 assertions) ────────
+    // The integral AUC remains THERAPEUTIC even at ke_var values that flip trough.
+
+    s11_chk(classify_standard_auc(0.0001) == decision_therapeutic())    // 9
+    s11_chk(classify_standard_auc(0.001)  == decision_therapeutic())    // 10
+    s11_chk(classify_standard_auc(0.002)  == decision_therapeutic())    // 11
+    s11_chk(classify_standard_auc(0.0025) == decision_therapeutic())    // 12  ← trough fires here
+    s11_chk(classify_standard_auc(0.003)  == decision_therapeutic())    // 13
+    s11_chk(classify_standard_auc(0.01)   == decision_therapeutic())    // 14
+
+    // ── Section C: AUC confidence scores (6 assertions) ──────────────────────
+    // AUC conf stays high (950) while trough conf has already degraded to 700.
+
+    s11_chk(conf_standard_auc(0.0001) == 950)                           // 15
+    s11_chk(conf_standard_auc(0.001)  == 950)                           // 16
+    s11_chk(conf_standard_auc(0.0025) == 950)                           // 17
+    s11_chk(conf_standard_auc(0.003)  == 950)                           // 18
+    s11_chk(conf_standard_auc(0.01)   == 900)                           // 19
+    s11_chk(conf_standard_auc(0.01)   >= conf_clinical_min())           // 20 (900 >= 800)
+
+    // ── Section D: Divergence at ke_var=0.0025 (6 assertions) ────────────────
+    // Headline: same measurement quality, different endpoint → different decision.
+
+    s11_chk(classify_standard_auc(0.0025) == decision_therapeutic())    // 21 (AUC)
+    s11_chk(classify_iv_trough(0.05, 0.0025, 70.0, 2.0, 24.0, 1.0, 25, 24) == decision_uncertain())  // 22 (trough)
+    s11_chk(conf_standard_auc(0.0025) == 950)                           // 23 (AUC conf)
+    s11_chk(conf_iv_trough(0.05, 0.0025, 70.0, 2.0, 24.0, 1.0, 25, 24) == 700)  // 24 (trough conf)
+    s11_chk(classify_standard_auc(0.0025) != classify_iv_trough(0.05, 0.0025, 70.0, 2.0, 24.0, 1.0, 25, 24))  // 25
+    s11_chk(auc_trough_diverge(0.0025))                                 // 26
+
+    // ── Section E: Diverge fires for range; budget dominant = ke (6) ─────────
+
+    s11_chk(auc_trough_diverge(0.003))                                  // 27
+    s11_chk(auc_trough_diverge(0.005))                                  // 28
+    s11_chk(auc_trough_diverge(0.01))                                   // 29
+    s11_chk(!auc_trough_diverge(0.001))                                 // 30 (trough THERAPEUTIC → no diverge)
+    s11_chk(auc_dominant_standard(0.0025) == 0)                         // 31 (ke dominant for AUC)
+    s11_chk(auc_dominant_standard(0.01)   == 0)                         // 32
+
+    // ── Section F: AUC conf >= trough conf (6 assertions) ────────────────────
+    // The integral endpoint always gives at least as high a confidence score.
+
+    s11_chk(conf_standard_auc(0.0001) >= conf_iv_trough(0.05, 0.0001, 70.0, 2.0, 24.0, 1.0, 25, 24)) // 33 (950>=900)
+    s11_chk(conf_standard_auc(0.001)  >= conf_iv_trough(0.05, 0.001,  70.0, 2.0, 24.0, 1.0, 25, 24)) // 34 (950>=820)
+    s11_chk(conf_standard_auc(0.002)  >= conf_iv_trough(0.05, 0.002,  70.0, 2.0, 24.0, 1.0, 25, 24)) // 35 (950>=820)
+    s11_chk(conf_standard_auc(0.0025) >= conf_iv_trough(0.05, 0.0025, 70.0, 2.0, 24.0, 1.0, 25, 24)) // 36 (950>=700)
+    s11_chk(conf_standard_auc(0.003)  >= conf_iv_trough(0.05, 0.003,  70.0, 2.0, 24.0, 1.0, 25, 24)) // 37 (950>=700)
+    s11_chk(conf_standard_auc(0.01)   >= conf_iv_trough(0.05, 0.01,   70.0, 2.0, 24.0, 1.0, 25, 24)) // 38 (900>=700)
+
+    // ── Section G: AUC confidence monotonicity (6 assertions) ────────────────
+    // AUC conf decreases with ke_var, but far more slowly than trough conf.
+
+    s11_chk(conf_standard_auc(0.0001) >= conf_standard_auc(0.001))     // 39
+    s11_chk(conf_standard_auc(0.001)  >= conf_standard_auc(0.01))      // 40 (950 >= 900)
+    s11_chk(conf_standard_auc(0.0001) >= conf_standard_auc(0.01))      // 41 (950 >= 900)
+    // AUC conf stays above trough conf at tipping ke_var
+    s11_chk(conf_standard_auc(0.0025) > conf_iv_trough(0.05, 0.0025, 70.0, 2.0, 24.0, 1.0, 25, 24))  // 42 (950 > 700)
+    // AUC never reaches 700 in the standard ke_var range (< 25% relative std)
+    s11_chk(conf_standard_auc(0.0025) != 700)                           // 43
+    s11_chk(conf_standard_auc(0.01)   != 700)                           // 44
+
+    // ── Section H: Stability and flip boundary (4 assertions) ────────────────
+
+    // AUC THERAPEUTIC at the exact trough flip boundary and beyond
+    s11_chk(classify_standard_auc(0.002)  == decision_therapeutic())    // 45
+    s11_chk(classify_standard_auc(0.0025) == decision_therapeutic())    // 46
+    // Trough flips exactly at boundary
+    s11_chk(classify_iv_trough(0.05, 0.002,  70.0, 2.0, 24.0, 1.0, 25, 24) == decision_therapeutic()) // 47 (last THER)
+    s11_chk(classify_iv_trough(0.05, 0.0025, 70.0, 2.0, 24.0, 1.0, 25, 24) == decision_uncertain())   // 48 (first UNC)
+
+    // ── Section I: Decision sentinel values (4 assertions) ────────────────────
+
+    s11_chk(decision_therapeutic() == 1)     // 49
+    s11_chk(decision_uncertain()   == 3)     // 50
+    s11_chk(decision_sub()         == 0)     // 51
+    s11_chk(conf_clinical_min()    == 800)   // 52
+
+    // ── Section J: Cross-checks wrapper vs direct (4 assertions) ─────────────
+
+    s11_chk(classify_standard_auc(0.0025) ==
+            auc_iv_classify(0.05, 0.0025, 70.0, 2.0, 24.0, 1.0, 25))   // 53
+    s11_chk(classify_standard_auc(0.01) ==
+            auc_iv_classify(0.05, 0.01, 70.0, 2.0, 24.0, 1.0, 25))     // 54
+    s11_chk(conf_standard_auc(0.0025) ==
+            auc_iv_conf(0.05, 0.0025, 70.0, 2.0, 24.0, 1.0, 25))       // 55
+    s11_chk(conf_standard_auc(0.01) ==
+            auc_iv_conf(0.05, 0.01, 70.0, 2.0, 24.0, 1.0, 25))         // 56
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint11_gate()
+    if SPR11_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}

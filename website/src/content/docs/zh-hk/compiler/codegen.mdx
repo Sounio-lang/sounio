@@ -1,0 +1,80 @@
+---
+title: "代碼生成"
+description: "後端和降級：Cranelift、本地、LLVM、GPU和調試信息。"
+weight: 64
+category: "編譯器"
+topic_id: "website.docs.compiler.codegen"
+authority: "雙重"
+audience: "貢獻者"
+last_validated: "2026-03-07"
+validated_by: "A4"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.compiler.codegen"
+---
+
+# 代碼生成
+
+代碼生成是Sounio最清楚地有多個真實編譯器配置文件的地方。**預設公開工作流**是自主托管的本地路徑背後的`bin/souc`。分離的omega artifacts暴露了不同的後端契約的Cranelift JIT和GPU配置文件。
+
+## 當前源映射
+
+- `self-hosted/native/`覆蓋本地降級、編碼、ABI處理、註冊分配、對象格式和測試套件。
+- `self-hosted/wasm/`覆蓋降級、編碼、模塊構建和WASM路徑的驅動代碼。
+- `self-hosted/gpu/`覆蓋PTX、SPIR-V、Metal、張量導向工作以及GPU降級路徑。
+- `self-hosted/llvm/`仍然是作為後端專題子樹存在。
+
+## 已檢查的 artifacts 證明
+
+- **預設啟動器（`bin/souc`）**：自主托管的本地代碼生成到ELF/Mach-O；請參閱`artifacts/omega/selfhost_verification_report.v1.json`和`docs/guide/MINIMUM_VIABLE_SOUNIO.md`。
+- **選項 JIT 配置文件**：Cranelift JIT在獨立的已檢查的 artifact 中啟用 — 不是預設上車路徑。
+- GPU配置文件：GPU代碼生成啟用；JIT禁用；PTX排放通過`build --backend gpu`可用。
+- 自主托管的GPU模板：預設編譯器（`bin/souc`）編譯GPU語法並運行CPU fallback。`kretikos` CLI建立預定義PTX/CUBIN模板的小型內部驅動程序：`kretikos emit-ptx`（從`self-hosted/gpu/ptx.sio`）和`kretikos emit-cubin`（從`self-hosted/gpu/nvidia_bare.sio`）。`kretikos bundle`將這些 artifact 與哈希、結構檢查、選項工具鏈/運行時驗證以及明確的邊界組合在一起。
+- 因此，文檔應該區分預設配置文件行為、GPU配置文件行為、自主托管的模板行為以及源樹實現範圍。
+
+## Native v2預覽巷
+
+該庫還帶有公共預覽`native-v2`巷，後端主權計劃。舊的`native-v2-shadow`兼容別名現已退役。這不是新的穩定端用後端。
+
+- 它存在於以機器可讀 artifact 的形式固定`RuntimeContext`、目標註冊策略和機器IR預期。
+- 該 artifact 現在區分可分配的x86調用者保存集合（`r12`..`r15`）和regalloc和降級實際消費的分配順序（`r15`，`r14`，`r13`，`r12`）。
+- 當前`x86-64`預覽巷現在通過真實的機器IR + 合法性路徑進行降級，在自主托管的shell中發佈真實的堆棧映射/去優化元數據以及具體的`gc_state`塊和管理的對象描述符表通過`RuntimeContext`，發佈v2根映射/去優化ID/OSR-資格堆棧映射架構，路由native-v2堆對象通過固定容量處理器表進行`alloc`/字段/索引訪問，編譯分配溢出到真實的運行時慢路陷阱，現在攜帶可執行描述驅動的標記/壓縮GC模型，具有精確的指針槽掃描和pin-意識重定位規則；不支持的指紋族失敗關閉。
+- `AArch64`現在發佈與Mach-O輸出相同的縮放核心預覽契約，但仍然是編譯僅預覽而不是運行時證實的本地巷。
+
+## 確認活躍後端集
+
+```bash
+export SOUC_BIN="$(pwd)/bin/souc"
+"$SOUC_BIN" info
+
+# 自主托管的GPU artifact模板
+kretikos emit-ptx vec_add     -o /tmp/kretikos_vec_add.ptx
+kretikos emit-ptx vec_sub     -o /tmp/kretikos_vec_sub.ptx
+kretikos emit-ptx vec_mul     -o /tmp/kretikos_vec_mul.ptx
+kretikos emit-ptx vec_div     -o /tmp/kretikos_vec_div.ptx
+kretikos emit-ptx vec_add_f64 -o /tmp/kretikos_vec_add_f64.ptx
+kretikos emit-ptx fma         -o /tmp/kretikos_fma.ptx
+kretikos emit-ptx fma_f64     -o /tmp/kretikos_fma_f64.ptx
+kretikos emit-ptx store_u32_const -o /tmp/kretikos_store_u32.ptx
+kretikos emit-metal vec_add          -o /tmp/kretikos_vec_add.metal
+kretikos emit-metal ossm_oct_step    -o /tmp/kretikos_ossm.metal
+kretikos emit-metal sedenion_cd_step -o /tmp/kretikos_sedenion.metal
+kretikos emit-cubin vec_add_f32 -o /tmp/kretikos_vec_add.cubin
+kretikos bundle -o /tmp/kretikos-bundle
+kretikos bundle -o /tmp/kretikos-validated-bundle --validate-toolchain --validate-runtime
+
+# GPU artifact（更廣泛的模式支持）
+export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
+"$SOUC_GPU_BIN" info
+"$SOUC_GPU_BIN" build examples/kernel_vec_add.sio --backend gpu -o /tmp/kernel_vec_add.ptx
+
+export SOUNIO_NATIVE_V2_CONTRACT_PATH=/tmp/native_backend_v2_contract.v1.json
+"$SOUC_BIN" run self-hosted/compiler/main.sio -- --self-test
+```
+
+正規的闸機後端 artifact 是`artifacts/omega/native_backend_v2_contract.v1.json`。
+
+## 如何寫不變的代碼生成文檔
+
+- 在討論實施架構時描述後端目錄。
+- 在討論預設用戶體驗時描述已檢查的 JIT artifact。
+- 在討論公共GPU代碼生成時描述已檢查的GPU artifact。
+- 僅描述您已通過確切的 artifact 和命令驗證的後端執行路徑。

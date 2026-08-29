@@ -1,0 +1,262 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/welch_anova.sio — Welch's one-way ANOVA (unequal variances)
+//
+// The heteroscedasticity-robust alternative to the classical F-test: it does not
+// assume the groups share a variance, so it is the safe choice when Levene /
+// Bartlett flag unequal spread:
+//
+//   welch_anova(values, sizes, k) -> WelchAnovaResult      (groups = blocks)
+//
+// With group means x̄ᵢ, variances sᵢ² and weights wᵢ = nᵢ/sᵢ²,
+//   F = [ Σwᵢ(x̄ᵢ−x̄_w)²/(k−1) ] / [ 1 + 2(k−2)/(k²−1) · A ],
+//   A = Σ (1−wᵢ/Σw)²/(nᵢ−1),   df₁ = k−1,   df₂ = (k²−1)/(3A),
+// and F ~ F(df₁, df₂) (fractional df₂).
+//
+// Pure Sounio: per-group moments then the Welch statistic; inline Lanczos
+// log-gamma + incomplete beta for the F tail. No nested data-array calls.
+//
+// References:
+//   Welch (1951) Biometrika 38:330.
+
+module stats::welch_anova
+
+fn wa_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / wa_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn wa_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn wa_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * wa_ln(tt) - tt + wa_ln(a)
+}
+
+fn wa_betacf(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let qab = a + b
+    let qap = a + 1.0
+    let qam = a - 1.0
+    var c = 1.0
+    var d = 1.0 - qab * x / qap
+    if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+    d = 1.0 / d
+    var h = d
+    var m = 1
+    while m <= 200 {
+        let mf = m as f64
+        let m2 = 2.0 * mf
+        var aa = mf * (b - mf) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        h = h * d * c
+        aa = 0.0 - (a + mf) * (qab + mf) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-14 { m = 201 } else { m = m + 1 }
+    }
+    return h
+}
+
+fn wa_ibeta(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x >= 1.0 { return 1.0 }
+    let lbeta = wa_lgamma(a) + wa_lgamma(b) - wa_lgamma(a + b)
+    let front = wa_exp(a * wa_ln(x) + b * wa_ln(1.0 - x) - lbeta)
+    if x < (a + 1.0) / (a + b + 2.0) { return front * wa_betacf(a, b, x) / a }
+    return 1.0 - front * wa_betacf(b, a, 1.0 - x) / b
+}
+
+fn wa_f_sf(f: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic {
+    if f <= 0.0 { return 1.0 }
+    let x = d2 / (d2 + d1 * f)
+    return wa_ibeta(d2 * 0.5, d1 * 0.5, x)
+}
+
+pub struct WelchAnovaResult {
+    pub f: f64,     // Welch F statistic
+    pub df1: f64,   // k - 1
+    pub df2: f64,   // fractional denominator df
+    pub p: f64,
+}
+
+/// Welch's one-way ANOVA over k consecutive-block groups.
+///
+/// Parâmetros: values — concatenated group data; sizes — per-group n (>=2);
+///             k — groups (2..16).
+/// Retorno: WelchAnovaResult (f, df1, df2, p).
+/// Referências: Welch (1951).
+pub fn welch_anova(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> WelchAnovaResult with Mut, Div, Panic {
+    if k < 2 || k > 16 { return WelchAnovaResult { f: 0.0, df1: 0.0, df2: 0.0, p: 1.0 } }
+    var wmean: [f64; 16] = [0.0; 16]
+    var wght: [f64; 16] = [0.0; 16]
+    var wsum = 0.0
+    var swm = 0.0    // Σ w·mean
+    var off = 0
+    var g = 0
+    while g < k {
+        let ni = sizes[g as usize]
+        if ni < 2 { return WelchAnovaResult { f: 0.0, df1: 0.0, df2: 0.0, p: 1.0 } }
+        let nif = ni as f64
+        var s = 0.0
+        var a = 0
+        while a < ni { s = s + values[(off + a) as usize]; a = a + 1 }
+        let mean = s / nif
+        var ss = 0.0
+        var b = 0
+        while b < ni { let d = values[(off + b) as usize] - mean; ss = ss + d * d; b = b + 1 }
+        let var_i = ss / (nif - 1.0)
+        var w = 0.0
+        if var_i > 0.0 { w = nif / var_i }
+        wmean[g as usize] = mean
+        wght[g as usize] = w
+        wsum = wsum + w
+        swm = swm + w * mean
+        off = off + ni
+        g = g + 1
+    }
+    if wsum <= 0.0 { return WelchAnovaResult { f: 0.0, df1: 0.0, df2: 0.0, p: 1.0 } }
+    let kf = k as f64
+    let xbar = swm / wsum
+    var num = 0.0
+    var g2 = 0
+    while g2 < k {
+        let d = wmean[g2 as usize] - xbar
+        num = num + wght[g2 as usize] * d * d
+        g2 = g2 + 1
+    }
+    num = num / (kf - 1.0)
+    // A = Σ (1 - w/Σw)² / (n-1)
+    var A = 0.0
+    var off3 = 0
+    var g3 = 0
+    while g3 < k {
+        let ni = sizes[g3 as usize]
+        let term = 1.0 - wght[g3 as usize] / wsum
+        A = A + term * term / ((ni - 1) as f64)
+        off3 = off3 + ni
+        g3 = g3 + 1
+    }
+    let denom = 1.0 + (2.0 * (kf - 2.0) / (kf * kf - 1.0)) * A
+    let f = num / denom
+    let df1 = kf - 1.0
+    var df2 = 0.0
+    if A > 0.0 { df2 = (kf * kf - 1.0) / (3.0 * A) }
+    let p = wa_f_sf(f, df1, df2)
+    return WelchAnovaResult { f: f, df1: df1, df2: df2, p: p }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// g1={1,2,3,4,5}(var2.5), g2={2,4,6,8,10}(var10), g3={5,5,6,5,4}(var0.5).
+// Python: Welch F=3.40518, df1=2, df2=6.398.
+fn test_welch() -> bool with IO, Mut, Div, Panic {
+    var v: [f64; 256] = [0.0; 256]
+    var sz: [i32; 16] = [0; 16]
+    v[0]=1.0; v[1]=2.0; v[2]=3.0; v[3]=4.0; v[4]=5.0
+    v[5]=2.0; v[6]=4.0; v[7]=6.0; v[8]=8.0; v[9]=10.0
+    v[10]=5.0; v[11]=5.0; v[12]=6.0; v[13]=5.0; v[14]=4.0
+    sz[0]=5; sz[1]=5; sz[2]=5
+    let r = welch_anova(&v, &sz, 3)
+    var ok = true
+    ok = check(1, approx(r.f, 3.40518, 1.0e-3)) && ok
+    ok = check(2, approx(r.df1, 2.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.df2, 6.398, 1.0e-2)) && ok
+    return ok
+}
+
+// equal groups -> F ≈ 0, p ≈ 1.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    var v: [f64; 256] = [0.0; 256]
+    var sz: [i32; 16] = [0; 16]
+    v[0]=1.0; v[1]=2.0; v[2]=3.0; v[3]=4.0
+    v[4]=1.0; v[5]=2.0; v[6]=3.0; v[7]=4.0
+    sz[0]=4; sz[1]=4
+    let r = welch_anova(&v, &sz, 2)
+    var ok = true
+    ok = check(10, approx(r.f, 0.0, 1.0e-6)) && ok
+    ok = check(11, approx(r.p, 1.0, 1.0e-6)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_welch() && ok
+    ok = test_null() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

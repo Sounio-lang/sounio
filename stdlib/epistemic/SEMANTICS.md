@@ -301,6 +301,46 @@ let x: f64 = k.unwrap("used in non-critical calculation")
 
 ---
 
+## Zero-Event Receipts
+
+`epistemic::zero_event` distinguishes a surface `f64` value of zero from the
+evidence retained about how that surface was produced.
+
+Current evidence flags are deliberately computational:
+
+| Flag | Meaning |
+| --- | --- |
+| `absent` | A literal zero receipt with no nonzero operands asserted. |
+| `cancelled` | Two nonzero scalar operands sum exactly to zero. |
+| `annihilated` | Two positive operand norms accompany a zero product norm. |
+| `below_resolution` | A nonzero latent magnitude is below a positive declared resolution. |
+| `rounded` | The surface is zero while a nonzero numerical correction remains. |
+| `gated` | A nonzero original value was suppressed by a tagged policy gate. |
+| `unknown` | Zero is observed without a stronger path classification. |
+
+These flags are evidence, not causal conclusions. They do not imply a clinical,
+physical, or metaphysical mechanism.
+
+The concrete no-silent-unwrap surface is type-directed:
+
+```text
+ZeroReceiptF64
+    -- ze_discharge_f64(reason_tag) --> ErasedZeroF64
+    -- ze_erased_value_f64()        --> f64
+```
+
+`ZeroReceiptF64` and `ErasedZeroF64` have module-private constructors. Current
+Madaros `check` and native `compile` both reject external struct literals with
+E176; the canonical compile-fail harness gates both receipt types. The explicit discharge type
+boundary is enforced by both `check` and the compile-fail harness.
+
+EISA v2 preserves its existing `val`, `err`, and `u` lanes. Minimal
+`ZERO_OBSERVED` and `CORRECTION_NONZERO` flags are derived from register state;
+they are not stored as a competing source of truth and do not infer why the
+zero occurred.
+
+---
+
 ## Summary
 
 1. **Uncertainty ≠ Confidence**: They're orthogonal. Don't conflate them.

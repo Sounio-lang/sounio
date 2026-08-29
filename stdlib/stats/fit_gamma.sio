@@ -1,0 +1,111 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/fit_gamma.sio — gamma-distribution fitting (method of moments)
+//
+// Estimates the gamma shape and scale from data by matching the first two
+// moments — the closed-form estimator that also seeds an MLE:
+//
+//   fit_gamma(x, n) -> GammaFit
+//
+// For Gamma(shape k, scale θ):  mean = kθ,  var = kθ².  Inverting,
+//   k̂ = mean² / var,   θ̂ = var / mean,   rate = 1/θ̂ = mean/var.
+// The sample variance uses the (n−1) denominator.
+//
+// Pure Sounio: one pass for the mean, one for the variance; no external
+// dependency, no nested data-array calls.
+//
+// References:
+//   Johnson, Kotz & Balakrishnan, "Continuous Univariate Distributions" vol.1, ch.17.
+
+module stats::fit_gamma
+
+pub struct GammaFit {
+    pub shape: f64,   // k̂
+    pub scale: f64,   // θ̂
+    pub rate: f64,    // 1/θ̂
+    pub mean: f64,
+    pub variance: f64,
+}
+
+/// Method-of-moments gamma fit.
+///
+/// Parâmetros: x — positive data; n — size (>=2, <=256).
+/// Retorno: GammaFit (shape, scale, rate, mean, variance).
+/// Referências: Johnson, Kotz & Balakrishnan ch.17.
+pub fn fit_gamma(x: &[f64; 256], n: i32) -> GammaFit with Mut, Div, Panic {
+    if n < 2 { return GammaFit { shape: 0.0, scale: 0.0, rate: 0.0, mean: 0.0, variance: 0.0 } }
+    let nf = n as f64
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    let mean = s / nf
+    var ss = 0.0
+    var j = 0
+    while j < n { let d = x[j as usize] - mean; ss = ss + d * d; j = j + 1 }
+    let variance = ss / (nf - 1.0)
+    if variance <= 0.0 || mean <= 0.0 {
+        return GammaFit { shape: 0.0, scale: 0.0, rate: 0.0, mean: mean, variance: variance }
+    }
+    let shape = mean * mean / variance
+    let scale = variance / mean
+    let rate = mean / variance
+    return GammaFit { shape: shape, scale: scale, rate: rate, mean: mean, variance: variance }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// {2,2,6,6}: mean 4, sample var 16/3=5.333333.
+// shape=16/5.333333=3; scale=5.333333/4=1.333333; rate=4/5.333333=0.75.
+fn test_gamma() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=2.0; x[1]=2.0; x[2]=6.0; x[3]=6.0
+    let r = fit_gamma(&x, 4)
+    var ok = true
+    ok = check(1, approx(r.mean, 4.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.variance, 5.333333, 1.0e-5)) && ok
+    ok = check(3, approx(r.shape, 3.0, 1.0e-5)) && ok
+    ok = check(4, approx(r.scale, 1.333333, 1.0e-5)) && ok
+    ok = check(5, approx(r.rate, 0.75, 1.0e-6)) && ok
+    return ok
+}
+
+// exponential special case: shape ~ 1 when var ~ mean². data {1,3} -> mean 2,
+// var=2 -> shape=4/2=2, scale=2/2=1.
+fn test_two() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=3.0
+    let r = fit_gamma(&x, 2)
+    var ok = true
+    ok = check(10, approx(r.shape, 2.0, 1.0e-6)) && ok
+    ok = check(11, approx(r.scale, 1.0, 1.0e-6)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_gamma() && ok
+    ok = test_two() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

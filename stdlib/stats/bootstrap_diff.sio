@@ -1,0 +1,194 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/bootstrap_diff.sio — two-sample bootstrap difference in means
+//
+// Resamples each group independently to give a percentile confidence interval
+// and standard error for the difference of means — the resampling counterpart
+// to Welch's t-test:
+//
+//   bootstrap_diff(x, nx, y, ny, b, conf, seed) -> BootDiffResult
+//
+// The point estimate is x̄ − ȳ; each of `b` resamples draws nx values from x and
+// ny from y (with replacement), the SE is the sd of the resampled differences
+// and the CI is their α/2 and 1−α/2 quantiles.
+//
+// Seeded Park-Miller MINSTD (exact f64) → bit-reproducible. Pure Sounio: inline
+// sort of the resampled differences; no external dependency, no nested
+// data-array calls.
+//
+// References:
+//   Efron & Tibshirani, "An Introduction to the Bootstrap", ch.6.
+
+module stats::bootstrap_diff
+
+fn bd_floor(v: f64) -> f64 {
+    return (v as i64) as f64
+}
+
+fn bd_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct BootDiffResult {
+    pub diff: f64,   // x̄ − ȳ (point estimate)
+    pub se: f64,
+    pub lo: f64,
+    pub hi: f64,
+    pub b: i64,
+}
+
+/// Percentile bootstrap CI and SE for the difference in means x̄ − ȳ.
+///
+/// Parâmetros: x, y — the two samples; nx, ny — sizes (<=256); b — resamples
+///             (2..1024); conf — confidence; seed — PRNG seed (>0).
+/// Retorno: BootDiffResult (diff, se, lo, hi, b).
+/// Referências: Efron & Tibshirani ch.6.
+pub fn bootstrap_diff(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, b: i32, conf: f64, seed: i64) -> BootDiffResult with Mut, Div, Panic {
+    if nx < 2 || ny < 2 || b < 2 { return BootDiffResult { diff: 0.0, se: 0.0, lo: 0.0, hi: 0.0, b: 0 } }
+    var bb = b
+    if bb > 1024 { bb = 1024 }
+    let nxf = nx as f64
+    let nyf = ny as f64
+    var sx = 0.0
+    var i = 0
+    while i < nx { sx = sx + x[i as usize]; i = i + 1 }
+    var sy = 0.0
+    var j = 0
+    while j < ny { sy = sy + y[j as usize]; j = j + 1 }
+    let diff0 = sx / nxf - sy / nyf
+    let A = 16807.0
+    let M = 2147483647.0
+    var st = seed as f64
+    if st < 1.0 { st = 1.0 }
+    var diffs: [f64; 1024] = [0.0; 1024]
+    var rep = 0
+    while rep < bb {
+        var accx = 0.0
+        var kx = 0
+        while kx < nx {
+            let prod = A * st
+            st = prod - bd_floor(prod / M) * M
+            let u = st / M
+            var idx = bd_floor(u * nxf) as i32
+            if idx >= nx { idx = nx - 1 }
+            accx = accx + x[idx as usize]
+            kx = kx + 1
+        }
+        var accy = 0.0
+        var ky = 0
+        while ky < ny {
+            let prod = A * st
+            st = prod - bd_floor(prod / M) * M
+            let u = st / M
+            var idy = bd_floor(u * nyf) as i32
+            if idy >= ny { idy = ny - 1 }
+            accy = accy + y[idy as usize]
+            ky = ky + 1
+        }
+        diffs[rep as usize] = accx / nxf - accy / nyf
+        rep = rep + 1
+    }
+    var sm = 0.0
+    var a = 0
+    while a < bb { sm = sm + diffs[a as usize]; a = a + 1 }
+    let mbar = sm / (bb as f64)
+    var ss = 0.0
+    var c = 0
+    while c < bb { let d = diffs[c as usize] - mbar; ss = ss + d * d; c = c + 1 }
+    let se = bd_sqrt(ss / ((bb - 1) as f64))
+    var p = 1
+    while p < bb {
+        let key = diffs[p as usize]
+        var q = p - 1
+        while q >= 0 && diffs[q as usize] > key { diffs[(q + 1) as usize] = diffs[q as usize]; q = q - 1 }
+        diffs[(q + 1) as usize] = key
+        p = p + 1
+    }
+    let alpha = 1.0 - conf
+    var ilo = bd_floor(alpha * 0.5 * (bb as f64)) as i32
+    var ihi = bd_floor((1.0 - alpha * 0.5) * (bb as f64)) as i32
+    if ilo < 0 { ilo = 0 }
+    if ihi > bb - 1 { ihi = bb - 1 }
+    return BootDiffResult { diff: diff0, se: se, lo: diffs[ilo as usize], hi: diffs[ihi as usize], b: bb as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x={5,6,7}, y={1,2,3}: point diff = 6 - 2 = 4 (exact). CI brackets 4.
+fn test_diff() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=5.0; x[1]=6.0; x[2]=7.0
+    y[0]=1.0; y[1]=2.0; y[2]=3.0
+    let r = bootstrap_diff(&x, 3, &y, 3, 800, 0.95, 20260715)
+    var ok = true
+    ok = check(1, approx(r.diff, 4.0, 1.0e-9)) && ok
+    ok = check(2, r.lo < 4.0 && r.hi > 4.0) && ok
+    ok = check(3, r.se > 0.0) && ok
+    return ok
+}
+
+// identical groups -> point diff 0, CI brackets 0.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=1.0; y[1]=2.0; y[2]=3.0; y[3]=4.0
+    let r = bootstrap_diff(&x, 4, &y, 4, 600, 0.95, 31)
+    var ok = true
+    ok = check(10, approx(r.diff, 0.0, 1.0e-9)) && ok
+    ok = check(11, r.lo < 0.0 && r.hi > 0.0) && ok
+    return ok
+}
+
+// reproducibility.
+fn test_reproducible() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=3.0; x[1]=5.0; x[2]=7.0
+    y[0]=2.0; y[1]=4.0; y[2]=6.0
+    let r1 = bootstrap_diff(&x, 3, &y, 3, 500, 0.9, 88)
+    let r2 = bootstrap_diff(&x, 3, &y, 3, 500, 0.9, 88)
+    var ok = true
+    ok = check(20, approx(r1.lo, r2.lo, 1.0e-12)) && ok
+    ok = check(21, approx(r1.hi, r2.hi, 1.0e-12)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_diff() && ok
+    ok = test_null() && ok
+    ok = test_reproducible() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -1,0 +1,144 @@
+// random::pcg64_core — Shared canonical PCG64-XSL-RR-128/64 helpers.
+//
+// Authored by Sounio-Pure R.2.6 (2026-05-17) to deduplicate the bit-
+// identical helper sets shipped by distributions.sio (R.2.4), rng.sio
+// (R.2.5), and sampling.sio (R.2.5). All bodies are byte-equivalent to
+// the R.2.4-certified `dst_pcg_*` family; `pcg_umod` is the R.2.5
+// rejection-modulo helper.
+//
+// Stdlib-internal: not part of the user-facing module surface. Callers
+// import explicitly via `use stdlib::random::pcg64_core::{...}`.
+
+pub struct PcgU128 {
+    hi: i64,
+    lo: i64,
+}
+
+// Unsigned less-than on u64 bit-patterns stored in i64.
+pub fn pcg_u_lt(a: i64, b: i64) -> bool {
+    let top: i64 = 1
+    let mask = top << 63
+    (a ^ mask) < (b ^ mask)
+}
+
+// Logical right shift on signed i64. Valid for 0 <= n <= 64.
+pub fn pcg_lshr(x: i64, n: i64) -> i64 {
+    if n <= 0 { return x }
+    if n >= 64 { return 0 }
+    let raw = x >> n
+    let one: i64 = 1
+    let mask = (one << (64 - n)) - 1
+    return raw & mask
+}
+
+// High 64 of u64 × u64 via 32-bit half decomposition.
+pub fn pcg_umul64_high(a: i64, b: i64) -> i64 {
+    let mask32: i64 = 4294967295
+    let al = a & mask32
+    let ah = pcg_lshr(a, 32)
+    let bl = b & mask32
+    let bh = pcg_lshr(b, 32)
+    let ll = al * bl
+    let lh = al * bh
+    let hl = ah * bl
+    let hh = ah * bh
+    let t = pcg_lshr(ll, 32) + (lh & mask32) + (hl & mask32)
+    return pcg_lshr(t, 32) + pcg_lshr(lh, 32) + pcg_lshr(hl, 32) + hh
+}
+
+// 128-bit add mod 2^128.
+pub fn pcg_u128_add(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> PcgU128 {
+    let res_lo = a_lo + b_lo
+    let carry: i64 = if pcg_u_lt(res_lo, a_lo) { 1 } else { 0 }
+    let res_hi = a_hi + b_hi + carry
+    return PcgU128 { hi: res_hi, lo: res_lo }
+}
+
+// 128-bit multiply mod 2^128.
+pub fn pcg_u128_mul(a_hi: i64, a_lo: i64, b_hi: i64, b_lo: i64) -> PcgU128 {
+    let res_lo = a_lo * b_lo
+    let res_hi = pcg_umul64_high(a_lo, b_lo) + a_hi * b_lo + a_lo * b_hi
+    return PcgU128 { hi: res_hi, lo: res_lo }
+}
+
+// 64-bit right rotate. Valid for 0 <= rot < 64.
+pub fn pcg_rotr64(x: i64, rot: i64) -> i64 {
+    let r = rot & 63
+    if r == 0 { return x }
+    let right = pcg_lshr(x, r)
+    let left = x << (64 - r)
+    return right | left
+}
+
+// Canonical PCG64 state — shared across distributions/rng/sampling callers.
+pub struct PcgState {
+    state_hi: i64,
+    state_lo: i64,
+    inc_hi: i64,
+    inc_lo: i64,
+}
+
+// PCG64-XSL-RR-128/64 step. Bit-exact pcg-cpp output_previous=false.
+pub fn pcg_step(rng: PcgState) -> (PcgState, i64) {
+    let mult_hi: i64 = 2549297995355413924
+    let mult_lo: i64 = 4865540595714422341
+    let mul = pcg_u128_mul(rng.state_hi, rng.state_lo, mult_hi, mult_lo)
+    let add = pcg_u128_add(mul.hi, mul.lo, rng.inc_hi, rng.inc_lo)
+    let new_hi = add.hi
+    let new_lo = add.lo
+    let xorshifted = new_hi ^ new_lo
+    let rot = pcg_lshr(new_hi, 58) & 63
+    let output = pcg_rotr64(xorshifted, rot)
+    return (PcgState {
+        state_hi: new_hi,
+        state_lo: new_lo,
+        inc_hi: rng.inc_hi,
+        inc_lo: rng.inc_lo,
+    }, output)
+}
+
+// Canonical uniform f64 in [0, 1) — top 53 bits / 2^53.
+pub fn pcg_next_f64(rng: PcgState) -> (PcgState, f64) {
+    let result = pcg_step(rng)
+    let mantissa = pcg_lshr(result.1, 11)
+    let fraction = (mantissa as f64) / 9007199254740992.0
+    return (result.0, fraction)
+}
+
+// Strictly positive uniform f64 — at most 10 retries, then 1e-7 floor.
+pub fn pcg_next_f64_nonzero(rng: PcgState) -> (PcgState, f64) {
+    var current = rng
+    var attempts = 0
+    while attempts < 10 {
+        let result = pcg_next_f64(current)
+        current = result.0
+        if result.1 > 0.0 {
+            return (current, result.1)
+        }
+        attempts = attempts + 1
+    }
+    (current, 0.0000001)
+}
+
+// Rejection-modulo bounded sampler [0, n). n must be > 0.
+pub fn pcg_bounded(rng: PcgState, n: i64) -> (PcgState, i64) {
+    let result = pcg_step(rng)
+    let v = pcg_umod(result.1, n)
+    return (result.0, v)
+}
+
+// Unsigned 64-bit mod n via binary long-division. n must be > 0.
+// Power-of-two fast path. Used by rejection-modulo in *_bounded.
+pub fn pcg_umod(x: i64, n: i64) -> i64 {
+    let n_minus_1 = n - 1
+    if (n & n_minus_1) == 0 { return x & n_minus_1 }
+    var rem: i64 = 0
+    var i: i64 = 63
+    while i >= 0 {
+        let bit = pcg_lshr(x, i) & 1
+        rem = rem + rem + bit
+        if !pcg_u_lt(rem, n) { rem = rem - n }
+        i = i - 1
+    }
+    return rem
+}

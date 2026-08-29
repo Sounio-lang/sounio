@@ -9,11 +9,11 @@
 // Symbols from modules that still have unresolved deps are left as forward refs
 // (accepted by the self-hosted runtime's flat-bundle approach).
 // Named imports only — glob imports caused type-checker stack overflow
-use parser::ast::{AstPath, empty_path, ImportItemList, ItemKind, ItemList, Name, Program, StringList}
+use parser::ast::{AstPath, empty_path, ImportItemList, ItemKind, ItemList, Name, Program, StringList, ast_reset_global_var_inits, GLOBAL_VAR_INIT_SUPPRESS_RESET}
 use ir::ir::{ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_name, ir_empty_validated_patch_stats, IrAlgebraTable, IrEpistemicSection, IrFunction, IrInstr, IrLowerResult, IR_MAX_EPI_ACQUISITION_PLANS, IR_MAX_EPI_ACQUISITION_POLICIES, IR_MAX_EPI_ACQUISITION_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_CANDIDATES, IR_MAX_EPI_ALTERNATIVE_FRONTIERS, IR_MAX_EPI_ALTERNATIVE_POLICIES, IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_SETS, IR_MAX_EPI_AUDITS, IR_MAX_EPI_CONTESTS, IR_MAX_EPI_CONTEST_WITNESSES, IR_MAX_EPI_COUNTEREXAMPLES, IR_MAX_EPI_DECISION_CERTIFICATES, IR_MAX_EPI_DECISION_POLICIES, IR_MAX_EPI_DEFERRAL_POLICIES, IR_MAX_EPI_DEFERRED_CERTIFICATES, IR_MAX_EPI_DEFERRED_REASON_WITNESSES, IR_MAX_EPI_MECHANISTIC_REPORTS, IR_MAX_EPI_MODEL_FAMILIES, IR_MAX_EPI_MONITORING_POLICIES, IR_MAX_EPI_OBSERVED_TRANSITIONS, IR_MAX_EPI_POLICIES, IR_MAX_EPI_POSTERIOR_WEIGHTS, IR_MAX_EPI_RECOURSE_PLANS, IR_MAX_EPI_RECOURSE_POLICIES, IR_MAX_EPI_RECOURSE_REASON_WITNESSES, IR_MAX_EPI_ROBUST_PROOFS, IR_MAX_EPI_ROLLBACK_CERTIFICATES, IR_MAX_EPI_TRANSITION_PLANS, IR_MAX_EPI_TRANSITION_POLICIES, IR_MAX_EPI_TRANSITION_PROTOCOLS, IR_MAX_EPI_TRANSITION_REASON_WITNESSES, IR_MAX_EPI_TRANSITION_STEPS, IR_MAX_EPI_VALIDATED_MANIFESTS, IR_MAX_EPI_VALIDATIONS, IR_MAX_FUNCS, IR_MAX_STRINGS, IrModule, ir_name_eq, IrOpcode, IrProfCounterInfo, IR_STRATEGY_STANDARD, make_name}
 use check::mod::{check_program_epistemic_into, check_program_with_artifacts, checker_apply_ir_metadata, checker_to_ir_epistemic_into}
 use resolve::mod::{resolve_modules, ResolveBatchResult}
-use resolve::imports::{collect_module_exports, ModuleEntry, ModuleRegistry, module_registry_find, module_registry_new, module_registry_put}
+use resolve::imports::{collect_module_exports, ModuleEntry, ModuleRegistry, module_registry_find, module_registry_new, module_registry_put, module_registry_report_overflow, modreg_export_kind_at, modreg_export_name_at}
 use resolve::symbol::{SymbolKind}
 use parser::mod::{parse_program_preloaded, count_items}
 use lexer::mod::{sourcefile_load, sourcefile_parse_program_loaded, sourcefile_status_ok}
@@ -33,7 +33,7 @@ use native::frame::{compiler_new, NativeCompiler}
 use native::machine_ir::{native_v2_legalize_function, native_v2_lower_function_to_machine, MachineFunction}
 use native::elf::{Elf64Binary}
 use wasm::lower::{wasm_lower_module}
-use native::codegen::{ARCH_X86_64, compile_ir_function, compile_ir_function_v2, compile_module_streaming_begin, compile_module_streaming_finish, compile_native, finalize_compiled_elf, name_is_file_size, name_is_get_arg, name_is_get_arg_count, name_is_main, name_is_print, name_is_print_char, name_is_print_int, name_is_read_file, name_is_starts_with, name_is_str_concat, name_is_str_eq, name_is_str_len, name_is_str_slice, name_is_write_file, ERR_BACKEND_NOT_IMPLEMENTED, FORMAT_ELF64, NativeCompileResult, native_compile_result_error, native_compile_result_ok, native_matrix_mode_string, native_resolve_target, native_target_source_string, NativeTargetSpec, OS_LINUX, read_env}
+use native::codegen::{ARCH_X86_64, compile_ir_function, compile_ir_function_v2, compile_ir_function_v2_into, compile_module_streaming_begin, compile_module_streaming_begin_into, compile_module_streaming_finish, compile_module_streaming_finish_into, compile_native, finalize_compiled_elf, name_is_file_size, name_is_get_arg, name_is_get_arg_count, name_is_main, name_is_print, name_is_print_char, name_is_print_int, name_is_read_file, name_is_starts_with, name_is_str_concat, name_is_str_eq, name_is_str_len, name_is_str_slice, name_is_write_file, ERR_BACKEND_NOT_IMPLEMENTED, FORMAT_ELF64, NativeCompileResult, native_compile_result_error, native_compile_result_ok, native_matrix_mode_string, native_resolve_target, native_target_source_string, NativeTargetSpec, OS_LINUX, read_env}
 
 // ============================================================
 // Path conversion: AstPath segments → string
@@ -176,6 +176,176 @@ fn use_path_to_file_path(path: AstPath, prefix: string) -> string with Mut, Pani
     buf_to_string(final_buf, fp)
 }
 
+fn buf_append_lit(buf: [i8; 512], pos: i64, lit: string) -> ([i8; 512], i64) with Mut, Panic, Div {
+    let n = str_len(lit)
+    var i: i64 = 0
+    var p = pos
+    var out = buf
+    while i < n && p < 500 {
+        out[p] = str_char_at(lit, i) as i8
+        p = p + 1
+        i = i + 1
+    }
+    (out, p)
+}
+
+fn string_list_seg_to_buf_mapped(sl: StringList, out: [i8; 512], pos: i64, map_underscore: bool) -> ([i8; 512], i64) with Mut, Panic, Div {
+    var buf = out
+    var p = pos
+    var i: i64 = 0
+    while i < sl.head_len && p < 500 {
+        var c = sl.head_buf[i]
+        if map_underscore && c == (95 as i8) {
+            c = 45 as i8
+        }
+        buf[p] = c
+        p = p + 1
+        i = i + 1
+    }
+    (buf, p)
+}
+
+fn use_path_to_package_file_path(path: AstPath) -> string with Mut, Panic, Div, Alloc {
+    if path.seg_count == 0 {
+        return ""
+    }
+    var buf: [i8; 512] = [0; 512]
+    var pos: i64 = 0
+    let p1 = buf_append_lit(buf, pos, "packages/")
+    buf = p1.0
+    pos = p1.1
+    let root_pair = string_list_seg_to_buf_mapped(path.segments, buf, pos, true)
+    buf = root_pair.0
+    pos = root_pair.1
+    let p2 = buf_append_lit(buf, pos, "/src")
+    buf = p2.0
+    pos = p2.1
+    match path.segments.tail {
+        None => {
+            let p3 = buf_append_lit(buf, pos, "/lib.sio")
+            buf_to_string(p3.0, p3.1)
+        }
+        Some(rest) => {
+            let path_pair = use_path_segs_to_buf(*rest, buf, pos)
+            var final_buf = path_pair.0
+            var fp = path_pair.1
+            if fp < 508 {
+                final_buf[fp] = 46 as i8
+                final_buf[fp + 1] = 115 as i8
+                final_buf[fp + 2] = 105 as i8
+                final_buf[fp + 3] = 111 as i8
+                fp = fp + 4
+            }
+            buf_to_string(final_buf, fp)
+        }
+    }
+}
+
+fn file_path_mod_fallback(path: string) -> string with Mut, Panic, Div {
+    let path_len = str_len(path)
+    if path_len < 5 {
+        return path
+    }
+    if str_char_at(path, path_len - 4) != 46 {
+        return path
+    }
+    let base = str_slice(path, 0, path_len - 4)
+    str_concat(str_concat(base, "/mod"), ".sio")
+}
+
+// Drop the last segment of an AstPath. Returns (parent_path, true) when a
+// parent exists (original had >= 2 segments).
+fn ast_path_drop_last_segment(path: AstPath) -> (AstPath, bool) with Mut, Panic, Div, Alloc {
+    if path.seg_count < 2 {
+        return (path, false)
+    }
+    let segs = path.segments
+    match segs.tail {
+        None => (path, false)
+        Some(rest1) => {
+            match (*rest1).tail {
+                None => {
+                    // path was [head, last] → parent is [head]
+                    let parent = AstPath {
+                        segments: StringList {
+                            head_buf: segs.head_buf,
+                            head_len: segs.head_len,
+                            tail: None,
+                        },
+                        seg_count: 1,
+                    }
+                    (parent, true)
+                }
+                Some(_) => {
+                    // path was [head, ..., last] with >= 3 segments.
+                    let nested = AstPath {
+                        segments: *rest1,
+                        seg_count: path.seg_count - 1,
+                    }
+                    let nested_pair = ast_path_drop_last_segment(nested)
+                    if !nested_pair.1 {
+                        return (path, false)
+                    }
+                    let parent_tail = nested_pair.0.segments
+                    let parent = AstPath {
+                        segments: StringList {
+                            head_buf: segs.head_buf,
+                            head_len: segs.head_len,
+                            tail: Some(Box::new(parent_tail)),
+                        },
+                        seg_count: path.seg_count - 1,
+                    }
+                    (parent, true)
+                }
+            }
+        }
+    }
+}
+
+fn resolve_import_file_path(path: AstPath, cur_dir: string) -> string with IO, Mut, Panic, Div, Alloc {
+    let local = use_path_to_file_path(path, cur_dir)
+    if file_exists(local) {
+        return local
+    }
+    let stdlib = use_path_to_file_path(path, "stdlib")
+    if file_exists(stdlib) {
+        return stdlib
+    }
+    let pkg = use_path_to_package_file_path(path)
+    if file_exists(pkg) {
+        return pkg
+    }
+    let pkg_mod = file_path_mod_fallback(pkg)
+    if file_exists(pkg_mod) {
+        return pkg_mod
+    }
+    // Named-import fallback (see module_frontend.resolve_import_file_path):
+    // bare `use mod::symbol` when `mod/symbol.sio` is missing → load `mod.sio`.
+    if path.seg_count >= 2 {
+        let parent_pair = ast_path_drop_last_segment(path)
+        if parent_pair.1 {
+            let parent = parent_pair.0
+            let parent_local = use_path_to_file_path(parent, cur_dir)
+            if file_exists(parent_local) {
+                return parent_local
+            }
+            let parent_stdlib = use_path_to_file_path(parent, "stdlib")
+            if file_exists(parent_stdlib) {
+                return parent_stdlib
+            }
+            let parent_pkg = use_path_to_package_file_path(parent)
+            if file_exists(parent_pkg) {
+                return parent_pkg
+            }
+            let parent_pkg_mod = file_path_mod_fallback(parent_pkg)
+            if file_exists(parent_pkg_mod) {
+                return parent_pkg_mod
+            }
+        }
+    }
+    local
+}
+
 // Convert byte buffer to VM string using str_from_bytes builtin
 fn buf_to_string(buf: [i8; 512], len: i64) -> string with Mut, Panic, Div {
     str_from_bytes(buf, len)
@@ -244,6 +414,30 @@ pub fn load_module_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc
     prog
 }
 
+// Module identity. This is what `visibility_allows_access` compares (check/check.sio:90 via
+// ast_path_eq, its ONLY call site), so it decides which accesses count as "same module".
+//
+// It used to be the file BASENAME alone, which made every same-named file in a different
+// directory THE SAME MODULE. In compiler/main.sio's 105-file closure that merged 20 files
+// across 8 basenames — encode, env, ir, layout, lower, mod, opt_strategy, types — so
+// visibility was really "basename-private", and on those pairs the predicate either no-op'd
+// or reached a live crash: with a colliding basename and a private callee, ast_path_eq falls
+// through to string_list_eq_sl (check/check.sio:42-52), whose tail walk reads
+// Option<Box<StringList>> — the Box-typed-field read Madaros miscompiles — and the compiler
+// SIGSEGVs with zero diagnostics. The comment at check/check.sio:49 is a warning left by
+// whoever hit it.
+//
+// Identity is now the PARENT DIRECTORY plus the basename, which distinguishes all 8 colliding
+// groups. Two properties are deliberate:
+//  - It stays a SINGLE segment (seg_count 1, tail None). Uniqueness is all this needs, and a
+//    multi-segment path would make string_list_eq_sl walk `tail` on EVERY comparison instead
+//    of only on collisions — i.e. it would turn a rare crash into a universal one. Widening
+//    identity therefore does NOT depend on the Box-field read being fixed first.
+//  - It uses the last two components rather than the whole path, so the same file reached by
+//    different spellings (absolute vs relative, different cwd) still gets one identity. An
+//    absolute prefix in the key would split one module in two.
+// The in-file `module a::b` declaration is still not consulted; 42 of those 105 files, including
+// the two largest, carry none, so it cannot serve as identity without authoring them first.
 fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
     var seg_buf: [i8; 128] = [0; 128]
     var seg_len: i64 = 0
@@ -252,10 +446,12 @@ fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
     var path_len = str_len(path)
     var i: i64 = 0
     var last_slash: i64 = 0 - 1
+    var prev_slash: i64 = 0 - 1
     var dot_pos: i64 = path_len
     while i < path_len {
         let ch = str_char_at(path, i)
         if ch == 47 {
+            prev_slash = last_slash
             last_slash = i
         }
         if ch == 46 {
@@ -263,7 +459,12 @@ fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
         }
         i = i + 1
     }
-    var start = last_slash + 1
+    // Start one byte after the SECOND-to-last slash so the parent directory is included;
+    // fall back to the old basename-only behaviour when the path has fewer components.
+    var start = prev_slash + 1
+    if prev_slash < 0 {
+        start = last_slash + 1
+    }
     var end = dot_pos
     if end <= start {
         end = path_len
@@ -817,13 +1018,13 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
         // Adjust call targets: shift fn_id by fn_offset
         var ii: i64 = 0
         while ii < func.instr_count {
-            if func.instrs[ii].op == IrOpcode::IrCall {
-                if func.instrs[ii].fn_id >= 0 {
-                    func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
+            if (IR_A_OP[(ir_region_slot_r(func.region, (ii))) as usize] as IrOpcode) == IrOpcode::IrCall {
+                if IR_A_FN_ID[(ir_region_slot_r(func.region, (ii))) as usize] >= 0 {
+                    IR_A_FN_ID[(ir_region_slot_w(func.region, (ii))) as usize] = IR_A_FN_ID[(ir_region_slot_r(func.region, (ii))) as usize] + fn_offset
                 }
             }
-            func.instrs[ii] = ir_merge_adjust_epistemic_instr(
-                func.instrs[ii],
+            ir_arena_store(ir_region_slot_w(func.region, (ii)), ir_merge_adjust_epistemic_instr(
+                ir_arena_load(ir_region_slot_r(func.region, (ii))),
                 contest_offset,
                 robust_offset,
                 decision_offset,
@@ -835,7 +1036,7 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
                 transition_plan_offset,
                 observed_transition_offset,
                 rollback_certificate_offset
-            )
+            ))
             ii = ii + 1
         }
         func.compile_strategy = src.functions[fi].compile_strategy
@@ -1028,6 +1229,13 @@ fn multimodule_frontend_error(msg: string) -> MultiModuleFrontendResult {
 }
 
 pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
+    // One compilation = one fresh global-init table, then accumulate every module.
+    // Preflight is the first thing every compile path runs and it loads main + all
+    // imports, so resetting once here and suppressing the per-parse reset lets an
+    // imported module's f64 constants survive to lowering (they were previously
+    // wiped when the next module was parsed). See ast_record_global_var_init.
+    ast_reset_global_var_inits()
+    GLOBAL_VAR_INIT_SUPPRESS_RESET = 1
     let main_prog = load_module_file(main_path)
     let main_items = count_items(main_prog)
 
@@ -1056,12 +1264,7 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
 
         i = 0
         while i < work_imports.count && loaded < 64 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = resolve_import_file_path(work_imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
@@ -1145,12 +1348,7 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 64 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = resolve_import_file_path(work_imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
@@ -1205,7 +1403,7 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         var seed_lower_result = load_multimodule_lower_program_traced(programs[0], seed_epistemic, 0, trace)
         seed_lower_had_error = seed_lower_result.had_error
         if !seed_lower_had_error {
-            checker_apply_ir_metadata(&seed_artifacts.checker, &! seed_lower_result.module)
+            checker_apply_ir_metadata(&seed_artifacts.checker, &! (*seed_lower_result.module))
             merged_module = seed_lower_result.module
         }
     }
@@ -1235,7 +1433,7 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
             var lower_result = load_multimodule_lower_program_traced(programs[i], epistemic, i, trace)
             lower_had_error = lower_result.had_error
             if !lower_had_error {
-                checker_apply_ir_metadata(&artifacts.checker, &! lower_result.module)
+                checker_apply_ir_metadata(&artifacts.checker, &! (*lower_result.module))
                 lowered_module = lower_result.module
             }
         }
@@ -1293,12 +1491,7 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 64 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = resolve_import_file_path(work_imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
@@ -1351,7 +1544,7 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
         print("IR lowering failed for module 0\n")
         return multimodule_ir_error("ir_lowering_failed")
     }
-    checker_apply_ir_metadata(&seed_artifacts.checker, &! seed_lower_result.module)
+    checker_apply_ir_metadata(&seed_artifacts.checker, &! (*seed_lower_result.module))
     trace.lowered_modules = 1
     trace.merged_modules = 1
     var merged_module = seed_lower_result.module
@@ -1378,7 +1571,7 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
             print("\n")
             return multimodule_ir_error("ir_lowering_failed")
         }
-        checker_apply_ir_metadata(&artifacts.checker, &! lower_result.module)
+        checker_apply_ir_metadata(&artifacts.checker, &! (*lower_result.module))
         trace.lowered_modules = trace.lowered_modules + 1
         trace.last_stage = "merge"
         merged_module = ir_merge_modules(merged_module, lower_result.module)
@@ -1425,12 +1618,7 @@ pub fn load_multimodule_epistemic_into(main_path: string, out: &! IrEpistemicSec
         work_front = work_front + 1
         i = 0
         while i < work_imports.count && loaded < 64 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = resolve_import_file_path(work_imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
@@ -1522,8 +1710,20 @@ fn native_streaming_can_skip_checker(main_path: string, prog: &Program) -> bool 
     starts_with(main_path, "examples/render/") && extract_imports_from_ast(*prog).count == 0
 }
 
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var NATIVE_STREAMING_DIAG_ENABLED_ON: i64 = 0
+var NATIVE_STREAMING_DIAG_ENABLED_CHECKED: i64 = 0
+
 fn native_streaming_diag_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_NATIVE_STREAM_DIAG"), "1")
+    if NATIVE_STREAMING_DIAG_ENABLED_CHECKED == 0 {
+        NATIVE_STREAMING_DIAG_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_NATIVE_STREAM_DIAG"), "1") {
+            NATIVE_STREAMING_DIAG_ENABLED_ON = 1
+        }
+    }
+    NATIVE_STREAMING_DIAG_ENABLED_ON == 1
 }
 
 fn thin_copy_huge_to_small(src: [i8; 16777216], len: i64) -> [i8; 131072] with Mut, Panic, Div {
@@ -1624,7 +1824,8 @@ fn compile_singlemodule_native_streaming_result_from_program(
         print("\n")
     }
 
-    var nc: NativeCompiler = compile_module_streaming_begin(compiler_new(), full_module)
+    var nc: NativeCompiler = compiler_new()
+    compile_module_streaming_begin_into(&!nc, full_module)
     var fi: i64 = 0
     while fi < (*full_module).fn_count {
         let fn_body = (*full_module).functions[fi as usize]
@@ -1641,11 +1842,11 @@ fn compile_singlemodule_native_streaming_result_from_program(
                 "streaming_native_v2_unsupported:" + legal.unsupported_detail
             )
         }
-        nc = compile_ir_function_v2(nc, fn_body, legal, fi)
+        compile_ir_function_v2_into(&!nc, &fn_body, &legal, fi)
         fi = fi + 1
     }
 
-    nc = compile_module_streaming_finish(nc, full_module)
+    compile_module_streaming_finish_into(&!nc, full_module)
     let elf: Elf64Binary = finalize_compiled_elf(nc, 4194304)
     thin_native_compile_result_from_elf(elf.bytes, elf.len, FORMAT_ELF64())
 }
@@ -1934,7 +2135,7 @@ fn thin_try_write_ir_cache(path: string, module: &IrModule, stats: &! ThinCacheS
 
 fn thin_try_read_ir_cache(path: string, stats: &! ThinCacheStats) -> (bool, IrModule) with IO, Mut, Panic, Div, Alloc {
     let read_pair = thin_read_small_file(path)
-    if !read_pair.0 {
+    if read_pair.0 == 0 {
         return (false, ir_empty_module())
     }
     (*stats).persistent_bytes = (*stats).persistent_bytes + read_pair.2
@@ -1947,7 +2148,7 @@ fn thin_try_read_ir_cache(path: string, stats: &! ThinCacheStats) -> (bool, IrMo
 
 fn thin_try_read_ir_cache_no_stats(path: string) -> (bool, IrModule) with IO, Mut, Panic, Div, Alloc {
     let read_pair = thin_read_small_file(path)
-    if !read_pair.0 {
+    if read_pair.0 == 0 {
         return (false, ir_empty_module())
     }
     let restored = deserialize_ir_module(read_pair.1, read_pair.2)
@@ -1970,7 +2171,7 @@ fn thin_try_write_binary_cache(path: string, bytes: [i8; 16777216], len: i64, st
 
 fn thin_try_read_binary_cache(path: string, stats: &! ThinCacheStats) -> (bool, [i8; 131072], i64) with IO, Mut, Panic, Div {
     let read_pair = thin_read_small_file(path)
-    if !read_pair.0 {
+    if read_pair.0 == 0 {
         return (false, [0; 131072], 0)
     }
     (*stats).persistent_bytes = (*stats).persistent_bytes + read_pair.2
@@ -2075,7 +2276,7 @@ fn thin_try_read_summary_cache(
     stats: &! ThinCacheStats
 ) -> (bool, ModuleSummary) with IO, Mut, Panic, Div {
     let read_pair = thin_read_small_file(path)
-    if !read_pair.0 {
+    if read_pair.0 == 0 {
         return (false, thin_empty_module_summary())
     }
     let bytes = read_pair.1
@@ -2154,7 +2355,7 @@ fn thin_try_write_unit_cache(path: string, unit: CompiledUnit, stats: &! ThinCac
 
 fn thin_try_read_unit_cache(path: string, stats: &! ThinCacheStats) -> (bool, CompiledUnit) with IO, Mut, Panic, Div {
     let read_pair = thin_read_small_file(path)
-    if !read_pair.0 {
+    if read_pair.0 == 0 {
         return (false, thin_empty_compiled_unit())
     }
     let bytes = read_pair.1
@@ -2257,9 +2458,12 @@ fn thin_collect_selective_imports(
 fn thin_collect_glob_imports_from_entry(map: ThinImportMap, module_idx: i64, entry: ModuleEntry) -> ThinImportMap with Mut, Panic, Div {
     var out = map
     var i: i64 = 0
-    while i < entry.export_count && i < 1024 {
-        if entry.exports[i as usize].kind == SymbolKind::SymFunction {
-            out = thin_import_map_add(out, entry.exports[i as usize].name, module_idx, entry.exports[i as usize].name)
+    while i < entry.export_count {
+        // #1689: pool-backed exports; the old `&& i < 1024` was a silent cap.
+        let at = entry.export_base + i
+        if modreg_export_kind_at(at) == SymbolKind::SymFunction {
+            let nm = modreg_export_name_at(at)
+            out = thin_import_map_add(out, nm, module_idx, nm)
         }
         i = i + 1
     }
@@ -2314,12 +2518,7 @@ fn thin_load_module_graph(main_path: string) -> ThinModuleGraph with IO, Mut, Pa
         work_front = work_front + 1
         var i: i64 = 0
         while i < imports.count && graph.count < 64 {
-            let file_path_local = use_path_to_file_path(imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
+            let file_path = resolve_import_file_path(imports.paths[i], cur_dir)
             if !visited_contains(visited_paths, visited_count, file_path) {
                 visited_paths[visited_count] = file_path
                 visited_count = visited_count + 1
@@ -2346,6 +2545,9 @@ fn thin_load_module_graph(main_path: string) -> ThinModuleGraph with IO, Mut, Pa
         graph.nodes[pi as usize].source_hash = thin_hash_file(graph.nodes[pi as usize].file_path)
         pi = pi + 1
     }
+    // #1689: ASK. The overflow flag was written and never read, so a dropped
+    // module surfaced as E137 on innocent call sites.
+    let _ovf = module_registry_report_overflow(graph.registry)
     println("[thinlink] graph:registry_ready")
 
     graph
@@ -2385,7 +2587,7 @@ fn thin_load_or_build_module_summary(
     let cache_path = thin_cache_path(cache_dir, "summary", summary_digest, ".soir")
     if str_len(cache_dir) > 0 && thin_cache_mode_can_read(cache_mode) {
         let cached = thin_try_read_ir_cache(cache_path, &! stats)
-        if cached.0 {
+        if cached.0 != 0 {
             (*stats).summary_hits = (*stats).summary_hits + 1
             let cached_module = cached.1
             let summary = thin_module_summary_from_ir_module(module_idx, variant.digest, node.source_hash, &cached_module)
@@ -2476,7 +2678,7 @@ fn thin_append_stub_if_missing(module: IrModule, func: IrFunction, stub_name: Na
         return (module, found)
     }
     var out = module
-    if out.fn_count >= 1024 {
+    if out.fn_count >= IR_MAX_FUNCS {
         return (out, -1)
     }
     let idx = out.fn_count
@@ -2522,7 +2724,7 @@ fn thin_function_importable(func: IrFunction) -> bool with Mut, Panic, Div {
     }
     var i: i64 = 0
     while i < func.instr_count {
-        let op = func.instrs[i as usize].op
+        let op = (IR_A_OP[(ir_region_slot_r(func.region, (i))) as usize] as IrOpcode)
         if op == IrOpcode::IrCall ||
            op == IrOpcode::IrJump ||
            op == IrOpcode::IrBranchTrue ||
@@ -2666,7 +2868,7 @@ fn thin_build_compiled_unit(
     var body_module = ir_empty_module()
     if str_len(cache_dir) > 0 && thin_cache_mode_can_read(cache_mode) {
         let cached_body = thin_try_read_ir_cache(body_cache_path, &! stats)
-        if cached_body.0 {
+        if cached_body.0 != 0 {
             (*stats).body_hits = (*stats).body_hits + 1
             body_module = cached_body.1
         }
@@ -2683,7 +2885,7 @@ fn thin_build_compiled_unit(
             let local_name = import_map.names[map_i as usize]
             if callee_module >= 0 && callee_module < graph.count {
                 let export_lookup = thin_module_summary_lookup_local(summaries[callee_module as usize], export_name)
-                if export_lookup.0 {
+                if export_lookup.0 != 0 {
                     let pair = thin_append_stub_if_missing(*working_summary.module, export_lookup.2, local_name)
                     working_summary.module = Box::new(pair.0)
                 }
@@ -2755,7 +2957,7 @@ fn thin_build_compiled_unit(
     var object_module = ir_empty_module()
     if str_len(cache_dir) > 0 && thin_cache_mode_can_read(cache_mode) {
         let cached_object = thin_try_read_ir_cache(object_cache_path, &! stats)
-        if cached_object.0 {
+        if cached_object.0 != 0 {
             (*stats).object_hits = (*stats).object_hits + 1
             object_module = cached_object.1
         }
@@ -2833,7 +3035,7 @@ fn thin_map_target_to_global(
     let imported = thin_import_map_find(owner_import_map, target_name)
     if imported.0 && imported.1 >= 0 {
         let lookup = thin_module_summary_lookup_local(summaries[imported.1 as usize], imported.2)
-        if lookup.0 {
+        if lookup.0 != 0 {
             let global_id = units[imported.1 as usize].global_ids[lookup.1 as usize]
             if global_id >= 0 {
                 return (true, global_id)
@@ -2844,14 +3046,14 @@ fn thin_map_target_to_global(
 }
 
 fn thin_remap_prof_counter(func: IrFunction, new_counter_id: i64) -> IrFunction with Mut, Panic, Div {
-    var out = func
+    var out = ir_function_clone(&func)
     out.prof_counter_id = new_counter_id
     var i: i64 = 0
     while i < out.instr_count {
-        if out.instrs[i as usize].op == IrOpcode::IrProfCounter {
-            var instr = out.instrs[i as usize]
+        if (IR_A_OP[(ir_region_slot_r(out.region, (i))) as usize] as IrOpcode) == IrOpcode::IrProfCounter {
+            var instr = ir_arena_load(ir_region_slot_r(out.region, (i)))
             instr.imm_i64 = new_counter_id
-            out.instrs[i as usize] = instr
+            ir_arena_store(ir_region_slot_w(out.region, (i)), instr)
         }
         i = i + 1
     }
@@ -3087,7 +3289,7 @@ pub fn compile_multimodule_native_advanced(
     if target_spec.arch_id != ARCH_X86_64() || target_spec.os_id != OS_LINUX() || !program_has_imports(main_prog) {
         let stream_pair = compile_multimodule_native_maybe_streaming(main_path, target_spec)
         var fallback_result = native_compile_result_error(ERR_OK(), "")
-        if stream_pair.0 {
+        if stream_pair.0 != 0 {
             fallback_result = stream_pair.1
         } else {
             let ir_result = load_multimodule_ir(main_path)
@@ -3198,7 +3400,7 @@ pub fn compile_multimodule_native_advanced(
             cache_mode,
             &! cache_stats_accum
         )
-        if !summary_pair.0 {
+        if summary_pair.0 == 0 {
             let _ = thin_write_native_decision_trace_extended(
                 multimodule_native_trace_output_path(),
                 target_spec.requested_target,
@@ -3254,7 +3456,7 @@ pub fn compile_multimodule_native_advanced(
             cache_mode,
             &! cache_stats_accum
         )
-        if !unit_pair.0 {
+        if unit_pair.0 == 0 {
             let _ = thin_write_native_decision_trace_extended(
                 multimodule_native_trace_output_path(),
                 target_spec.requested_target,
@@ -3421,7 +3623,7 @@ pub fn compile_multimodule_native_advanced(
             cache_mode,
             &! cache_stats_accum
         )
-        if !remat_pair.0 || owner_slot >= remat_pair.2.fn_count {
+        if remat_pair.0 == 0 || owner_slot >= remat_pair.2.fn_count {
             let _ = thin_write_native_decision_trace_extended(
                 multimodule_native_trace_output_path(),
                 target_spec.requested_target,
@@ -3446,8 +3648,8 @@ pub fn compile_multimodule_native_advanced(
 
         var ii: i64 = 0
         while ii < func.instr_count {
-            if func.instrs[ii as usize].op == IrOpcode::IrCall {
-                var instr = func.instrs[ii as usize]
+            if (IR_A_OP[(ir_region_slot_r(func.region, (ii))) as usize] as IrOpcode) == IrOpcode::IrCall {
+                var instr = ir_arena_load(ir_region_slot_r(func.region, (ii)))
                 let mapped = thin_map_target_to_global(
                     owner_module,
                     import_maps[owner_module as usize],
@@ -3456,7 +3658,7 @@ pub fn compile_multimodule_native_advanced(
                     instr.fn_id,
                     instr.name
                 )
-                if !mapped.0 {
+                if mapped.0 == 0 {
                     let _ = thin_write_native_decision_trace_extended(
                         multimodule_native_trace_output_path(),
                         target_spec.requested_target,
@@ -3479,7 +3681,7 @@ pub fn compile_multimodule_native_advanced(
                     return 1
                 }
                 instr.fn_id = mapped.1
-                func.instrs[ii as usize] = instr
+                ir_arena_store(ir_region_slot_w(func.region, (ii)), instr)
             }
             ii = ii + 1
         }
@@ -3519,7 +3721,7 @@ pub fn compile_multimodule_native_advanced(
     var final_result = native_compile_result_error(ERR_OK(), "")
     if str_len(cache_dir) > 0 && thin_cache_mode_can_read(cache_mode) {
         let cached_link = thin_try_read_binary_cache(link_cache_path, &! cache_stats_accum)
-        if cached_link.0 {
+        if cached_link.0 != 0 {
             cache_stats_accum.link_hits = cache_stats_accum.link_hits + 1
             final_result = native_compile_result_ok(cached_link.1, cached_link.2, FORMAT_ELF64())
         }
@@ -3530,19 +3732,20 @@ pub fn compile_multimodule_native_advanced(
         if cache_stats {
             println("[thinlink] codegen start")
         }
-        var nc = compile_module_streaming_begin(compiler_new(), &final_module)
+        var nc = compiler_new()
+        compile_module_streaming_begin_into(&!nc, &final_module)
         gi = 0
         while gi < final_module.fn_count {
             let lowered = native_v2_lower_function_to_machine(built_functions[gi as usize])
             let legal = native_v2_legalize_function(lowered)
             if legal.supported {
-                nc = compile_ir_function_v2(nc, built_functions[gi as usize], legal, gi)
+                compile_ir_function_v2_into(&!nc, &built_functions[gi as usize], &legal, gi)
             } else {
                 nc = compile_ir_function(nc, built_functions[gi as usize], gi)
             }
             gi = gi + 1
         }
-        nc = compile_module_streaming_finish(nc, &final_module)
+        compile_module_streaming_finish_into(&!nc, &final_module)
         let elf = finalize_compiled_elf(nc, 4194304)
         final_result = thin_native_compile_result_from_wide(elf.bytes, elf.len, FORMAT_ELF64())
         if str_len(cache_dir) > 0 && thin_cache_mode_can_write(cache_mode) {
@@ -3878,7 +4081,7 @@ pub fn compile_multimodule_native(
 
     var native_result = native_compile_result_error(ERR_OK(), "")
     let stream_pair = compile_multimodule_native_maybe_streaming(main_path, target_spec)
-    if stream_pair.0 {
+    if stream_pair.0 != 0 {
         native_result = stream_pair.1
     } else {
         let ir_result = load_multimodule_ir(main_path)

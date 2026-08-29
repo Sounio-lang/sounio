@@ -1,0 +1,313 @@
+// Canonical standalone wire codec for the compiler-owned wide numeric arena.
+//
+// This is not a SOIR serializer and does not change the current SOIR version.
+// Its section-sized, versioned envelope is intentionally suitable for later
+// embedding as one section of a future SOIR v6 container. All integers are
+// little-endian. Payload limbs retain arena order: limb 0 is least-significant.
+//
+// Wire v1:
+//   0  u32 magic "SNWP"       16 i64 payload_count
+//   4  u16 version             24 i64 limb_count
+//   6  u16 header_bytes        32 i64 zero-extended Adler-32
+//   8  i64 section_bytes       40 entries[payload_count]
+// Each 24-byte entry is { opaque format_id, limb_start, limb_count } as i64.
+// Entries are followed by raw i64 limb words with no numeric reinterpretation.
+
+module ir::numeric_payload_wire
+
+use ir::numeric_payload::*
+
+pub let IR_NUMERIC_WIRE_MAX_BYTES: i64 = 16384
+pub let IR_NUMERIC_WIRE_MAGIC: i64 = 1347898963  // bytes "SNWP"
+pub let IR_NUMERIC_WIRE_VERSION: i64 = 1
+pub let IR_NUMERIC_WIRE_HEADER_BYTES: i64 = 40
+pub let IR_NUMERIC_WIRE_ENTRY_BYTES: i64 = 24
+pub let IR_NUMERIC_WIRE_LIMB_BYTES: i64 = 8
+
+pub let IR_NUMERIC_WIRE_OK: i64 = 0
+pub let IR_NUMERIC_WIRE_ERR_BAD_MAGIC: i64 = 1
+pub let IR_NUMERIC_WIRE_ERR_BAD_VERSION: i64 = 2
+pub let IR_NUMERIC_WIRE_ERR_TRUNCATED: i64 = 3
+pub let IR_NUMERIC_WIRE_ERR_BAD_HEADER: i64 = 4
+pub let IR_NUMERIC_WIRE_ERR_BAD_COUNTS: i64 = 5
+pub let IR_NUMERIC_WIRE_ERR_BAD_LENGTH: i64 = 6
+pub let IR_NUMERIC_WIRE_ERR_UNKNOWN_FORMAT: i64 = 7
+pub let IR_NUMERIC_WIRE_ERR_NONCANONICAL_SPAN: i64 = 8
+pub let IR_NUMERIC_WIRE_ERR_NONCANONICAL_COUNT: i64 = 9
+pub let IR_NUMERIC_WIRE_ERR_TRAILING_BYTES: i64 = 10
+pub let IR_NUMERIC_WIRE_ERR_CHECKSUM: i64 = 11
+pub let IR_NUMERIC_WIRE_ERR_SOURCE_POOL: i64 = 12
+pub let IR_NUMERIC_WIRE_ERR_CAPACITY: i64 = 13
+
+pub struct IrNumericPayloadWireStatus {
+    code: i64,
+    byte_offset: i64,
+    detail: i64,
+}
+
+pub struct IrNumericPayloadWireBuffer {
+    bytes: [i8; 16384],
+    len: i64,
+}
+
+pub fn ir_numeric_payload_wire_status_ok() -> IrNumericPayloadWireStatus {
+    IrNumericPayloadWireStatus { code: IR_NUMERIC_WIRE_OK, byte_offset: 0, detail: 0 }
+}
+
+fn ir_numeric_payload_wire_status(code: i64, byte_offset: i64, detail: i64) -> IrNumericPayloadWireStatus {
+    IrNumericPayloadWireStatus { code: code, byte_offset: byte_offset, detail: detail }
+}
+
+pub fn ir_empty_numeric_payload_wire_buffer() -> IrNumericPayloadWireBuffer {
+    IrNumericPayloadWireBuffer { bytes: [0; 16384], len: 0 }
+}
+
+fn wire_put_u16(wire: &! IrNumericPayloadWireBuffer, offset: i64, value: i64) with Mut, Panic, Div {
+    (*wire).bytes[offset] = (value & 255) as i8
+    (*wire).bytes[offset + 1] = ((value >> 8) & 255) as i8
+}
+
+fn wire_put_u32(wire: &! IrNumericPayloadWireBuffer, offset: i64, value: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 4 {
+        (*wire).bytes[offset + i] = ((value >> (i * 8)) & 255) as i8
+        i = i + 1
+    }
+}
+
+fn wire_put_i64(wire: &! IrNumericPayloadWireBuffer, offset: i64, value: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 8 {
+        (*wire).bytes[offset + i] = ((value >> (i * 8)) & 255) as i8
+        i = i + 1
+    }
+}
+
+fn wire_get_u16(wire: &IrNumericPayloadWireBuffer, offset: i64) -> i64 with Mut, Panic, Div {
+    let b0 = ((*wire).bytes[offset] as i64) & 255
+    let b1 = ((*wire).bytes[offset + 1] as i64) & 255
+    b0 | (b1 << 8)
+}
+
+fn wire_get_u32(wire: &IrNumericPayloadWireBuffer, offset: i64) -> i64 with Mut, Panic, Div {
+    var value: i64 = 0
+    var i: i64 = 0
+    while i < 4 {
+        value = value | (((*wire).bytes[offset + i] as i64 & 255) << (i * 8))
+        i = i + 1
+    }
+    value
+}
+
+fn wire_get_i64(wire: &IrNumericPayloadWireBuffer, offset: i64) -> i64 with Mut, Panic, Div {
+    var value: i64 = 0
+    var i: i64 = 0
+    while i < 8 {
+        value = value | (((*wire).bytes[offset + i] as i64 & 255) << (i * 8))
+        i = i + 1
+    }
+    value
+}
+
+// Adler-32 is a non-cryptographic integrity checksum, not authentication. The checksum slot
+// itself (bytes 32..39) is excluded so the same routine serves encode, decode,
+// and adversarial canonical-repair probes.
+fn ir_numeric_payload_wire_checksum_unchecked(wire: &IrNumericPayloadWireBuffer) -> i64 with Mut, Panic, Div {
+    var a: i64 = 1
+    var b: i64 = 0
+    var i: i64 = 0
+    while i < (*wire).len {
+        if i < 32 || i >= 40 {
+            let octet = ((*wire).bytes[i] as i64) & 255
+            a = (a + octet) % 65521
+            b = (b + a) % 65521
+        }
+        i = i + 1
+    }
+    (b << 16) | a
+}
+
+// Test-facing canonical repair for adversarial fixtures. It intentionally does
+// not validate entry semantics, because malformed-but-integrity-correct entries
+// are required to exercise decoder diagnostics. Length is proven before the
+// checksum loop or slot write; rejected calls leave every byte unchanged.
+pub fn ir_numeric_payload_wire_reseal_canonical(
+    wire: &! IrNumericPayloadWireBuffer,
+) -> IrNumericPayloadWireStatus with Mut, Panic, Div {
+    if (*wire).len < IR_NUMERIC_WIRE_HEADER_BYTES {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_TRUNCATED, (*wire).len, IR_NUMERIC_WIRE_HEADER_BYTES)
+    }
+    if (*wire).len > IR_NUMERIC_WIRE_MAX_BYTES {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_BAD_LENGTH, 8, (*wire).len)
+    }
+    let checksum = ir_numeric_payload_wire_checksum_unchecked(wire)
+    wire_put_i64(wire, 32, checksum)
+    ir_numeric_payload_wire_status_ok()
+}
+
+pub fn ir_numeric_payload_wire_encode(
+    pool: &IrWideNumericPayloadPool,
+    out: &! IrNumericPayloadWireBuffer,
+) -> IrNumericPayloadWireStatus with Mut, Panic, Div {
+    let pool_status = ir_wide_numeric_payload_pool_validate(pool)
+    if pool_status != IR_WIDE_NUMERIC_OK {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_SOURCE_POOL, 0, pool_status)
+    }
+
+    let section_bytes = IR_NUMERIC_WIRE_HEADER_BYTES
+        + (*pool).payload_count * IR_NUMERIC_WIRE_ENTRY_BYTES
+        + (*pool).limb_count * IR_NUMERIC_WIRE_LIMB_BYTES
+    if section_bytes > IR_NUMERIC_WIRE_MAX_BYTES {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_CAPACITY, 8, section_bytes)
+    }
+
+    // After validation and capacity proof there are no fallible encode steps,
+    // so publishing directly is transactional without relying on a wide
+    // temporary-struct copy in bootstrap compilers.
+    (*out).len = section_bytes
+    wire_put_u32(out, 0, IR_NUMERIC_WIRE_MAGIC)
+    wire_put_u16(out, 4, IR_NUMERIC_WIRE_VERSION)
+    wire_put_u16(out, 6, IR_NUMERIC_WIRE_HEADER_BYTES)
+    wire_put_i64(out, 8, section_bytes)
+    wire_put_i64(out, 16, (*pool).payload_count)
+    wire_put_i64(out, 24, (*pool).limb_count)
+    wire_put_i64(out, 32, 0)
+
+    var cursor: i64 = IR_NUMERIC_WIRE_HEADER_BYTES
+    var payload_id: i64 = 0
+    while payload_id < (*pool).payload_count {
+        let entry = (*pool).entries[payload_id as usize]
+        wire_put_i64(out, cursor, entry.format_id)
+        wire_put_i64(out, cursor + 8, entry.limb_start)
+        wire_put_i64(out, cursor + 16, entry.limb_count)
+        cursor = cursor + IR_NUMERIC_WIRE_ENTRY_BYTES
+        payload_id = payload_id + 1
+    }
+    var limb_index: i64 = 0
+    while limb_index < (*pool).limb_count {
+        wire_put_i64(out, cursor, (*pool).limbs[limb_index as usize])
+        cursor = cursor + IR_NUMERIC_WIRE_LIMB_BYTES
+        limb_index = limb_index + 1
+    }
+    let reseal_status = ir_numeric_payload_wire_reseal_canonical(out)
+    if reseal_status.code != IR_NUMERIC_WIRE_OK { return reseal_status }
+    ir_numeric_payload_wire_status_ok()
+}
+
+pub fn ir_numeric_payload_wire_decode(
+    wire: &IrNumericPayloadWireBuffer,
+    out: &! IrWideNumericPayloadPool,
+) -> IrNumericPayloadWireStatus with Mut, Panic, Div {
+    // Status precedence is stable and every indexed read is preceded by a
+    // length proof. The destination is not touched until all checks pass.
+    if (*wire).len < IR_NUMERIC_WIRE_HEADER_BYTES {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_TRUNCATED, (*wire).len, IR_NUMERIC_WIRE_HEADER_BYTES)
+    }
+    if (*wire).len > IR_NUMERIC_WIRE_MAX_BYTES {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_BAD_LENGTH, 8, (*wire).len)
+    }
+    if wire_get_u32(wire, 0) != IR_NUMERIC_WIRE_MAGIC {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_BAD_MAGIC, 0, wire_get_u32(wire, 0))
+    }
+    if wire_get_u16(wire, 4) != IR_NUMERIC_WIRE_VERSION {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_BAD_VERSION, 4, wire_get_u16(wire, 4))
+    }
+    if wire_get_u16(wire, 6) != IR_NUMERIC_WIRE_HEADER_BYTES {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_BAD_HEADER, 6, wire_get_u16(wire, 6))
+    }
+
+    let section_bytes = wire_get_i64(wire, 8)
+    if section_bytes < IR_NUMERIC_WIRE_HEADER_BYTES || section_bytes > IR_NUMERIC_WIRE_MAX_BYTES {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_BAD_LENGTH, 8, section_bytes)
+    }
+    if section_bytes > (*wire).len {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_TRUNCATED, (*wire).len, section_bytes)
+    }
+    if section_bytes < (*wire).len {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_TRAILING_BYTES, section_bytes, (*wire).len - section_bytes)
+    }
+
+    let payload_count = wire_get_i64(wire, 16)
+    let limb_count = wire_get_i64(wire, 24)
+    if payload_count < 0 || payload_count > IR_WIDE_NUMERIC_MAX_PAYLOADS {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_BAD_COUNTS, 16, payload_count)
+    }
+    if limb_count < 0 || limb_count > IR_WIDE_NUMERIC_MAX_LIMBS {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_BAD_COUNTS, 24, limb_count)
+    }
+    let expected_bytes = IR_NUMERIC_WIRE_HEADER_BYTES
+        + payload_count * IR_NUMERIC_WIRE_ENTRY_BYTES
+        + limb_count * IR_NUMERIC_WIRE_LIMB_BYTES
+    if section_bytes != expected_bytes {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_BAD_LENGTH, 8, expected_bytes)
+    }
+
+    let stored_checksum = wire_get_i64(wire, 32)
+    let actual_checksum = ir_numeric_payload_wire_checksum_unchecked(wire)
+    if stored_checksum != actual_checksum {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_CHECKSUM, 32, 0)
+    }
+
+    var cursor: i64 = IR_NUMERIC_WIRE_HEADER_BYTES
+    var expected_start: i64 = 0
+    var payload_id: i64 = 0
+    while payload_id < payload_count {
+        let format_id = wire_get_i64(wire, cursor)
+        let limb_start = wire_get_i64(wire, cursor + 8)
+        let entry_limb_count = wire_get_i64(wire, cursor + 16)
+        let required = ir_wide_numeric_required_limb_count(format_id)
+        if required == 0 {
+            return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_UNKNOWN_FORMAT, cursor, format_id)
+        }
+        if entry_limb_count != required {
+            return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_NONCANONICAL_COUNT, cursor + 16, entry_limb_count)
+        }
+        if limb_start != expected_start {
+            return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_NONCANONICAL_SPAN, cursor + 8, limb_start)
+        }
+        // At this point limb_start == expected_start and expected_start is
+        // monotonically bounded by limb_count, so subtraction cannot overflow.
+        if limb_start < 0 || entry_limb_count > limb_count - limb_start {
+            return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_NONCANONICAL_SPAN, cursor + 8, limb_start)
+        }
+        expected_start = expected_start + entry_limb_count
+        cursor = cursor + IR_NUMERIC_WIRE_ENTRY_BYTES
+        payload_id = payload_id + 1
+    }
+    if expected_start != limb_count {
+        return ir_numeric_payload_wire_status(IR_NUMERIC_WIRE_ERR_NONCANONICAL_SPAN, 24, expected_start)
+    }
+
+    // All failure conditions have been discharged above. Publish only now;
+    // this keeps the caller's destination unchanged on every decoder error.
+    var clear_payload: i64 = 0
+    while clear_payload < IR_WIDE_NUMERIC_MAX_PAYLOADS {
+        (*out).entries[clear_payload as usize] = ir_empty_wide_numeric_payload_entry()
+        clear_payload = clear_payload + 1
+    }
+    var clear_limb: i64 = 0
+    while clear_limb < IR_WIDE_NUMERIC_MAX_LIMBS {
+        (*out).limbs[clear_limb as usize] = 0
+        clear_limb = clear_limb + 1
+    }
+    (*out).payload_count = payload_count
+    (*out).limb_count = limb_count
+    cursor = IR_NUMERIC_WIRE_HEADER_BYTES
+    payload_id = 0
+    while payload_id < payload_count {
+        (*out).entries[payload_id as usize] = IrWideNumericPayloadEntry {
+            format_id: wire_get_i64(wire, cursor),
+            limb_start: wire_get_i64(wire, cursor + 8),
+            limb_count: wire_get_i64(wire, cursor + 16),
+        }
+        cursor = cursor + IR_NUMERIC_WIRE_ENTRY_BYTES
+        payload_id = payload_id + 1
+    }
+    var limb_index: i64 = 0
+    while limb_index < limb_count {
+        (*out).limbs[limb_index as usize] = wire_get_i64(wire, cursor)
+        cursor = cursor + IR_NUMERIC_WIRE_LIMB_BYTES
+        limb_index = limb_index + 1
+    }
+    ir_numeric_payload_wire_status_ok()
+}

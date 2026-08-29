@@ -77,15 +77,8 @@ function getAssociator(i: number, j: number, k: number): boolean {
   // lhs = (ei*ej)*ek
   const ij = octMul(i, j);
   const lhs = octMulComplex(ij, k);
-  // rhs = ei*(ej*ek)
-  const jk = octMul(j, k);
-  const rhs = octMulComplex(jk, i); // wait: ei*(ej*ek) = ei * jk
-  // Actually rhs: we need i * (jk)
+  // rhs = ei*(ej*ek) via jki, jks = ej*ek then compare to (ei*ej)*ek
   const [jki, jks] = octMul(j, k);
-  const [rhsi, rhss] = octMulComplex([jki, jks], i); // wrong order
-  // Correct: ei * (ej*ek) = oct_mul(ei, result_of_ej_ek)
-  // which is octMulComplex([jki, jks], i) but reversed
-  // Let's redo: rhs = (sign_jk) * oct_mul(i, jki)
   const [rjki, rjks] = octMul(i, jki);
   const final_rhs: [number,number] = [rjki, jks * rjks];
   return lhs[0] !== final_rhs[0] || lhs[1] !== final_rhs[1];
@@ -133,7 +126,7 @@ export default function OctonionFanoViz() {
   const [nonAssocCount, setNonAssocCount] = useState(0);
   const [computed, setComputed] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
-  const animRef = useRef<number>();
+  const animRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     // Compute 168 on mount
@@ -258,7 +251,6 @@ export default function OctonionFanoViz() {
               {[1,2,3,4,5,6,7].map(n => {
                 const [nx, ny] = nodePositions[n];
                 const active = isNodeActive(n);
-                const lineIdx = FANO_LINES.findIndex(l => l.includes(n) && selectedLine !== null && FANO_LINES[selectedLine].includes(n));
                 const color = active && selectedLine !== null ? LINE_COLORS[selectedLine] : 'var(--color-text-tertiary)';
                 return (
                   <g key={n}>

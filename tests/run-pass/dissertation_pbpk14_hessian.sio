@@ -1,0 +1,176 @@
+// tests/run-pass/dissertation_pbpk14_hessian.sio
+//
+// End-to-end demonstration of the second-order GUM Hessian propagator.
+// Two halves:
+//
+//   (1) Synthetic-output residual proof.  For a controlled non-linear
+//       endpoint y = a · x², the analytic variance is closed-form.  We
+//       compute it three ways: ground truth, GUM 1st order (Jacobian),
+//       GUM 2nd order (Jacobian + Hessian correction).  The acceptance
+//       check is |GUM_2nd − truth| < |GUM_1st − truth| — the dissertation
+//       claim that the 2nd-order term moves the GUM estimate toward the
+//       true variance for non-linear outputs.
+//
+//   (2) Rapamycin AUC Hessian budget.  Runs the propagator on a
+//       2-parameter rapamycin sub-case (CL_hep × fu_plasma) and emits a
+//       CSV-format budget.  The companion gate redirects this section
+//       to benchmarks/pbpk/hessian_budget.csv.
+//
+// Final stdout line: "PASS hessian_correction_reduces_residual"
+
+use darwin_pbpk::tsit5_pbpk14::*
+use darwin_pbpk::epistemic_pbpk14::{EpPrior14, ep14_rapamycin_params}
+use darwin_pbpk::epistemic_pbpk14_hessian::*
+
+fn hessian_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var v = x
+    var scale = 1.0
+    while v < 1.0 {
+        v = v * 4.0
+        scale = scale * 2.0
+    }
+    var y = v
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + v / y)
+        i = i + 1
+    }
+    y / scale
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool with Mut, Div, Panic {
+    var d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    d < tol
+}
+
+fn abs_diff(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    var d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    d
+}
+
+fn fail(tag: string) with IO, Mut, Panic, Div {
+    print("FAIL hessian_correction_reduces_residual: ")
+    println(tag)
+}
+
+// ----------------------------------------------------------------------
+// (1) Synthetic non-linear endpoint y = a · x²
+// ----------------------------------------------------------------------
+//
+// For x ~ N(μ, σ²):
+//   E[y]      = a (μ² + σ²)
+//   Var(y)    = a² · ( 4 μ² σ² + 2 σ⁴ )         (exact)
+//
+// GUM 1st order:
+//   c = ∂y/∂x = 2 a μ
+//   Var₁ = c² σ² = 4 a² μ² σ²                    (misses 2 a² σ⁴)
+//
+// GUM 2nd order:
+//   H = ∂²y/∂x² = 2 a
+//   correction = ½ · H² · σ⁴ = 2 a² σ⁴
+//   Var₂ = Var₁ + correction = 4 a² μ² σ² + 2 a² σ⁴   (exact)
+//
+// So |Var₁ − truth| = 2 a² σ⁴, |Var₂ − truth| = 0.
+
+fn synthetic_residual_test() -> bool with IO, Mut, Div, Panic {
+    let a:    f64 = 0.7
+    let mu:   f64 = 1.5
+    let sig2: f64 = 0.04            // σ² = 0.04, σ = 0.2
+
+    // Ground truth.
+    let var_truth = a * a * (4.0 * mu * mu * sig2 + 2.0 * sig2 * sig2)
+
+    // GUM 1st order (analytic c).
+    let c1 = 2.0 * a * mu
+    let var_1 = c1 * c1 * sig2
+
+    // GUM 2nd order via 4-point central FD on the synthetic output.
+    let h: f64 = 0.01 * hessian_sqrt(sig2)
+    let f0  = a * mu * mu
+    let fp  = a * (mu + h) * (mu + h)
+    let fn1 = a * (mu - h) * (mu - h)
+    let c_fd = (fp - fn1) / (2.0 * h)
+    let h_fd = (fp - 2.0 * f0 + fn1) / (h * h)
+    let var_2 = c_fd * c_fd * sig2 + 0.5 * h_fd * h_fd * sig2 * sig2
+
+    let r1 = abs_diff(var_1, var_truth)
+    let r2 = abs_diff(var_2, var_truth)
+
+    print("synthetic var_truth="); print_f64(var_truth)
+    print(" var_o1=");             print_f64(var_1)
+    print(" var_o2=");              print_f64(var_2)
+    print(" r1=");                  print_f64(r1)
+    print(" r2=");                  print_f64(r2)
+    println("")
+
+    r2 < r1
+}
+
+// ----------------------------------------------------------------------
+// (2) Rapamycin AUC Hessian budget — emit CSV-format rows.
+//
+// Use a 2-parameter sub-case (CL_hep, fu_plasma) to limit the
+// simulation count.  ~9 PBPK simulations total (1 ref + 4 Jacobian +
+// 4 off-diagonal corner + 0 extra diagonal — 3-point diagonal reuses
+// the Jacobian's perturbed AUC values).
+// ----------------------------------------------------------------------
+
+fn rapamycin_priors_2param() -> EpPrior14 with Mut, Div, Panic {
+    var p = EpPrior14 {
+        mean:       [0.0; 8],
+        variance:   [0.0; 8],
+        confidence: [0.0; 8],
+        n: 0,
+    }
+    p.n = 2
+    // 0: cl_hepatic (CYP3A4, CV~60%)
+    p.mean[0]       = 12.4
+    p.variance[0]   = 6.0       // smaller σ to keep sims well-conditioned
+    p.confidence[0] = 0.65
+    // 1: fu_plasma (Schreiber 1991)
+    p.mean[1]       = 0.08
+    p.variance[1]   = 0.0001
+    p.confidence[1] = 0.55
+    p
+}
+
+fn emit_rapamycin_budget() with IO, Mut, Panic, Div {
+    let prm    = ep14_rapamycin_params()
+    let priors = rapamycin_priors_2param()
+    let dose   = 6.0
+    let t_end  = 1.0       // 1 h window — short enough that Euler is stable
+
+    let bud = hessian_pbpk14_auc(prm, priors, dose, t_end)
+
+    // Full-precision channel for the first-order variance (pbpk28-parity
+    // gate pattern: raw values out of Sounio, CSV shaping in the gate).
+    // print_f64 emits six fixed decimals, which floors var_first_order
+    // (~2e-7 (ng·h/mL)²) to 0.000000 in the budget row below — a bytewise
+    // reader cannot witness the value from that row. The companion gate
+    // reads this scaled line and canonicalises it back to %.6e.
+    print("HESSBUD|var_o1_scaled_1e9=")
+    print_f64(bud.var_first_order * 1000000000.0)
+    println("")
+
+    println("# rapamycin_hessian_budget_v1")
+    hessian_emit_csv_header()
+    hessian_emit_budget_csv(bud)
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // (1) synthetic non-linear residual proof
+    let ok = synthetic_residual_test()
+    if !ok {
+        fail("synthetic_test_did_not_reduce_residual")
+        return
+    }
+
+    // (2) rapamycin Hessian CSV emission (smoke — checked by the gate
+    // for the bytestable header line, not for numerical match)
+    emit_rapamycin_budget()
+
+    println("PASS hessian_correction_reduces_residual")
+}

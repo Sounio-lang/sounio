@@ -67,6 +67,18 @@ check_souc_or_skip() {
     check_souc "$label" "$file"
 }
 
+run_souc_tail() {
+    local file="$1"
+    local log="/tmp/gate_ptx_run_$(basename "$file").log"
+    local _ec=0
+    timeout 30 "$SOUC" run "$file" >"$log" 2>&1 || _ec=$?
+    if [ $_ec -eq 124 ]; then
+        echo "timeout (30s)"
+    else
+        tail -1 "$log"
+    fi
+}
+
 echo "=== GPU PTX Codegen Gate ==="
 echo "SOUC:               $SOUC"
 echo "SOUNIO_STDLIB_PATH: $SOUNIO_STDLIB_PATH"
@@ -119,8 +131,9 @@ echo "--- Section 2: GPU compile pipeline ---"
     TOTAL=$((TOTAL + 1))
     # Verify run_gpu_compile_pipeline is wired in compiler/main.sio with PTX+Metal+SPIR-V
     if grep -q "run_gpu_compile_pipeline" self-hosted/compiler/main.sio && \
-       grep -q 'use hlir::lower:.*hlir_lower_module' self-hosted/compiler/main.sio && \
-       grep -q 'use gpu::hlir_to_gpu:.*hlir_kernels_to_ptx' self-hosted/compiler/main.sio; then
+       grep -q 'use hlir::lower::\*' self-hosted/compiler/main.sio && \
+       grep -q 'use gpu::hlir_to_gpu::\*' self-hosted/compiler/main.sio && \
+       grep -q 'hlir_kernels_to_ptx' self-hosted/compiler/main.sio; then
         PASS=$((PASS + 1))
         echo "PASS  T6_gpu_pipeline_wired"
     else
@@ -133,8 +146,8 @@ echo "--- Section 2: GPU compile pipeline ---"
 {
     TOTAL=$((TOTAL + 1))
     # Verify hlir_kernels_to_spirv is imported and dispatched in compiler/main.sio
-    if grep -q 'hlir_kernels_to_spirv' self-hosted/compiler/main.sio && \
-       grep -q 'use gpu::spirv:.*spv_to_bytes' self-hosted/compiler/main.sio && \
+    if grep -q 'hlir_kernels_to_spirv_artifact' self-hosted/compiler/main.sio && \
+       grep -q 'use gpu::epistemic_spirv::\*' self-hosted/compiler/main.sio && \
        grep -q 'hlir_kernels_to_spirv' self-hosted/gpu/hlir_to_gpu.sio; then
         PASS=$((PASS + 1))
         echo "PASS  T8_spirv_dispatch_wired"
@@ -201,7 +214,7 @@ echo "--- Section 2: GPU compile pipeline ---"
        grep -q 'jad_gum_combine' self-hosted/gpu/epistemic_autodiff.sio && \
        grep -q 'jad_propagate_mul' self-hosted/gpu/epistemic_autodiff.sio; then
         # Run self-tests
-        RESULT=$($SOUC run self-hosted/gpu/epistemic_autodiff.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail self-hosted/gpu/epistemic_autodiff.sio)
         if echo "$RESULT" | grep -q "12/12 tests passed"; then
             PASS=$((PASS + 1))
             echo "PASS  T13_jacobian_gum (12/12 self-tests)"
@@ -221,7 +234,7 @@ echo "--- Section 2: GPU compile pipeline ---"
     if [ -f self-hosted/gpu/kernel_autodiff.sio ] && \
        grep -q 'kad_generate_backward' self-hosted/gpu/kernel_autodiff.sio && \
        grep -q 'kad_tape_backward' self-hosted/gpu/kernel_autodiff.sio; then
-        RESULT=$($SOUC run self-hosted/gpu/kernel_autodiff.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail self-hosted/gpu/kernel_autodiff.sio)
         if echo "$RESULT" | grep -q "10/10 tests passed"; then
             PASS=$((PASS + 1))
             echo "PASS  T14_kernel_autodiff (10/10 self-tests)"
@@ -242,7 +255,7 @@ echo "--- Section 2: GPU compile pipeline ---"
        grep -q 'gpu_lower_to_cuda_tile' self-hosted/gpu/cuda_tile.sio && \
        grep -q 'gpu_lower_to_cuda_tile' self-hosted/compiler/main.sio && \
        grep -q 'hlir_kernels_to_cuda_tile' self-hosted/gpu/hlir_to_gpu.sio; then
-        RESULT=$($SOUC run self-hosted/gpu/cuda_tile.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail self-hosted/gpu/cuda_tile.sio)
         if echo "$RESULT" | grep -q "ALL 10 PASS"; then
             PASS=$((PASS + 1))
             echo "PASS  T15_cuda_tile_ir (10/10 self-tests)"
@@ -268,7 +281,7 @@ echo "--- Section 2b: Boundary-Breaking Novelties (T16-T18) ---"
        grep -q 'epfuse_build_graph' self-hosted/gpu/opt/epistemic_fusion.sio && \
        grep -q 'epfuse_score_edge' self-hosted/gpu/opt/epistemic_fusion.sio && \
        grep -q 'hlir_kernels_to_epistemic_fused_ptx' self-hosted/gpu/hlir_to_gpu.sio; then
-        RESULT=$($SOUC run self-hosted/gpu/opt/epistemic_fusion.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail self-hosted/gpu/opt/epistemic_fusion.sio)
         if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
             PASS=$((PASS + 1))
             echo "PASS  T16_epistemic_fusion (10/10 self-tests)"
@@ -289,7 +302,7 @@ echo "--- Section 2b: Boundary-Breaking Novelties (T16-T18) ---"
        grep -q 'spec_classify_kernels' self-hosted/gpu/speculative.sio && \
        grep -q 'spec_emit_branch_guard' self-hosted/gpu/speculative.sio && \
        grep -q 'hlir_kernels_to_speculative_ptx' self-hosted/gpu/hlir_to_gpu.sio; then
-        RESULT=$($SOUC run self-hosted/gpu/speculative.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail self-hosted/gpu/speculative.sio)
         if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
             PASS=$((PASS + 1))
             echo "PASS  T17_speculative_execution (10/10 self-tests)"
@@ -311,7 +324,7 @@ echo "--- Section 2b: Boundary-Breaking Novelties (T16-T18) ---"
        grep -q 'dag_topo_sort' self-hosted/gpu/dag_scheduler.sio && \
        grep -q 'dag_assign_streams' self-hosted/gpu/dag_scheduler.sio && \
        grep -q 'hlir_kernels_to_dag_scheduled_ptx' self-hosted/gpu/hlir_to_gpu.sio; then
-        RESULT=$($SOUC run self-hosted/gpu/dag_scheduler.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail self-hosted/gpu/dag_scheduler.sio)
         if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
             PASS=$((PASS + 1))
             echo "PASS  T18_dag_scheduler (10/10 self-tests)"
@@ -334,7 +347,7 @@ echo "--- Section 2c: Deep Novelties (T19-T21) ---"
     if [ -f self-hosted/gpu/opt/warp_vote_fastpath.sio ] && \
        grep -q 'wv_emit_ballot_check' self-hosted/gpu/opt/warp_vote_fastpath.sio && \
        grep -q 'wv_emit_epsilon_check' self-hosted/gpu/opt/warp_vote_fastpath.sio; then
-        RESULT=$($SOUC run self-hosted/gpu/opt/warp_vote_fastpath.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail self-hosted/gpu/opt/warp_vote_fastpath.sio)
         if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
             PASS=$((PASS + 1))
             echo "PASS  T19_warp_vote_fastpath (10/10 self-tests)"
@@ -354,7 +367,7 @@ echo "--- Section 2c: Deep Novelties (T19-T21) ---"
     if [ -f self-hosted/gpu/opt/entropy_dispatch.sio ] && \
        grep -q 'ed_shannon_entropy' self-hosted/gpu/opt/entropy_dispatch.sio && \
        grep -q 'ed_decide_variant' self-hosted/gpu/opt/entropy_dispatch.sio; then
-        RESULT=$($SOUC run self-hosted/gpu/opt/entropy_dispatch.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail self-hosted/gpu/opt/entropy_dispatch.sio)
         if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
             PASS=$((PASS + 1))
             echo "PASS  T20_entropy_dispatch (10/10 self-tests)"
@@ -388,7 +401,7 @@ echo "--- Section 2c: Deep Novelties (T19-T21) ---"
 {
     TOTAL=$((TOTAL + 1))
     if [ -f examples/gpu_epistemic_showcase.sio ]; then
-        RESULT=$($SOUC run examples/gpu_epistemic_showcase.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail examples/gpu_epistemic_showcase.sio)
         if echo "$RESULT" | grep -q "10/10 tests passed"; then
             PASS=$((PASS + 1))
             echo "PASS  T22_epistemic_showcase (10/10 tests)"
@@ -411,7 +424,7 @@ echo "--- Section 2d: Limitation Resolution (T23-T25) ---"
     if [ -f self-hosted/gpu/opt/second_order_gum.sio ] && \
        grep -q 'so_compute_hessian_correction' self-hosted/gpu/opt/second_order_gum.sio && \
        grep -q 'so_compute_first_order' self-hosted/gpu/opt/second_order_gum.sio; then
-        RESULT=$($SOUC run self-hosted/gpu/opt/second_order_gum.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail self-hosted/gpu/opt/second_order_gum.sio)
         if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
             PASS=$((PASS + 1))
             echo "PASS  T23_second_order_gum (10/10 self-tests)"
@@ -431,7 +444,7 @@ echo "--- Section 2d: Limitation Resolution (T23-T25) ---"
     if [ -f self-hosted/gpu/opt/covariance_shadow.sio ] && \
        grep -q 'cs_propagate_nd' self-hosted/gpu/opt/covariance_shadow.sio && \
        grep -q 'cs_tri_index' self-hosted/gpu/opt/covariance_shadow.sio; then
-        RESULT=$($SOUC run self-hosted/gpu/opt/covariance_shadow.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail self-hosted/gpu/opt/covariance_shadow.sio)
         if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
             PASS=$((PASS + 1))
             echo "PASS  T24_covariance_shadow (10/10 self-tests)"
@@ -451,7 +464,7 @@ echo "--- Section 2d: Limitation Resolution (T23-T25) ---"
     if [ -f self-hosted/gpu/opt/divergence_cost.sio ] && \
        grep -q 'dc_compute_penalty' self-hosted/gpu/opt/divergence_cost.sio && \
        grep -q 'dc_estimate_speedup' self-hosted/gpu/opt/divergence_cost.sio; then
-        RESULT=$($SOUC run self-hosted/gpu/opt/divergence_cost.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail self-hosted/gpu/opt/divergence_cost.sio)
         if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
             PASS=$((PASS + 1))
             echo "PASS  T25_divergence_cost (10/10 self-tests)"
@@ -471,7 +484,7 @@ echo "--- Section 2d: Limitation Resolution (T23-T25) ---"
     if [ -f self-hosted/gpu/opt/tiled_covariance.sio ] && \
        grep -q 'tc_propagate_tile' self-hosted/gpu/opt/tiled_covariance.sio && \
        grep -q 'tc_build_plan' self-hosted/gpu/opt/tiled_covariance.sio; then
-        RESULT=$($SOUC run self-hosted/gpu/opt/tiled_covariance.sio 2>&1 | tail -1)
+        RESULT=$(run_souc_tail self-hosted/gpu/opt/tiled_covariance.sio)
         if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
             PASS=$((PASS + 1))
             echo "PASS  T26_tiled_covariance (10/10 self-tests)"

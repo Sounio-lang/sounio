@@ -1,0 +1,162 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/rmst.sio — restricted mean survival time
+//
+// The area under the Kaplan-Meier curve up to a horizon τ — a clinically
+// interpretable single-number summary (mean event-free time within τ), often
+// preferred to the hazard ratio when hazards are non-proportional:
+//
+//   rmst(time, event, n, tau) -> f64
+//
+//   RMST(τ) = ∫₀^τ Ŝ(t) dt = Σ Ŝ(t_(j−1))·(min(t_(j), τ) − t_(j−1)),
+// the exact area of the right-continuous KM step function truncated at τ.
+//
+// Pure Sounio: a sort-free ordered walk over the distinct death times, adding
+// each rectangle as it goes (no nested data-array calls).
+//
+// References:
+//   Royston & Parmar (2013) BMC Med. Res. Methodol. 13:152.
+
+module stats::rmst
+
+/// Restricted mean survival time up to horizon tau (area under the KM curve).
+///
+/// Parâmetros: time — follow-up times; event — 1 death / 0 censored; n — size;
+///             tau — horizon (>0).
+/// Retorno: RMST(tau).
+/// Referências: Royston & Parmar (2013).
+pub fn rmst(time: &[f64; 256], event: &[i64; 256], n: i32, tau: f64) -> f64 with Mut, Div, Panic {
+    if n < 1 || tau <= 0.0 { return 0.0 }
+    var surv = 1.0
+    var area = 0.0
+    var prev = 0.0
+    var have_prev = false
+    var done = false
+    var guard = 0
+    while guard <= n {
+        if done { guard = n + 1 }
+        else {
+            // next distinct death time strictly greater than prev
+            var found = false
+            var tau_j = 0.0
+            var i = 0
+            while i < n {
+                if event[i as usize] == 1 {
+                    let ti = time[i as usize]
+                    let after = if have_prev { ti > prev } else { ti > 0.0 - 1.0 }
+                    if after {
+                        if found == false || ti < tau_j { tau_j = ti; found = true }
+                    }
+                }
+                i = i + 1
+            }
+            if found == false {
+                // tail segment [prev, tau)
+                if prev < tau { area = area + surv * (tau - prev) }
+                done = true
+            } else {
+                let seg_end = if tau_j < tau { tau_j } else { tau }
+                if seg_end > prev { area = area + surv * (seg_end - prev) }
+                if tau_j >= tau { done = true }
+                else {
+                    // update survival by the KM factor at tau_j
+                    var d = 0
+                    var at_risk = 0
+                    var j = 0
+                    while j < n {
+                        let tj = time[j as usize]
+                        if tj >= tau_j { at_risk = at_risk + 1 }
+                        if tj == tau_j && event[j as usize] == 1 { d = d + 1 }
+                        j = j + 1
+                    }
+                    if at_risk > 0 { surv = surv * (1.0 - (d as f64) / (at_risk as f64)) }
+                    prev = tau_j
+                    have_prev = true
+                }
+            }
+            guard = guard + 1
+        }
+    }
+    return area
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// times 1..5 all deaths. KM steps: S=1,0.8,0.6,0.4,0.2 on unit intervals.
+// RMST(5) = 1+0.8+0.6+0.4+0.2 = 3.0.
+fn test_rmst_full() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=1; e[4]=1
+    return check(1, approx(rmst(&t, &e, 5, 5.0), 3.0, 1.0e-9))
+}
+
+// RMST(3) = area on [0,1)+[1,2)+[2,3) = 1 + 0.8 + 0.6 = 2.4.
+fn test_rmst_tau3() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=1; e[4]=1
+    return check(10, approx(rmst(&t, &e, 5, 3.0), 2.4, 1.0e-9))
+}
+
+// horizon beyond last death: RMST(6) = 3.0 (S=0 after t=5, no extra area).
+fn test_rmst_beyond() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=1; e[4]=1
+    return check(20, approx(rmst(&t, &e, 5, 6.0), 3.0, 1.0e-9))
+}
+
+// mid-interval horizon: RMST(2.5) = 1 + 0.8 + 0.6·0.5 = 2.1.
+fn test_rmst_mid() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=1; e[4]=1
+    return check(30, approx(rmst(&t, &e, 5, 2.5), 2.1, 1.0e-9))
+}
+
+// censoring: times 1..5, events {1,0,1,0,1}. S: 0.8 after t=1, 0.533333 after t=3.
+// RMST(5) = 1·1 + 0.8·2 + 0.533333·2 = 1 + 1.6 + 1.066667 = 3.666667.
+fn test_rmst_censor() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=0; e[2]=1; e[3]=0; e[4]=1
+    return check(40, approx(rmst(&t, &e, 5, 5.0), 3.666667, 1.0e-5))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_rmst_full() && ok
+    ok = test_rmst_tau3() && ok
+    ok = test_rmst_beyond() && ok
+    ok = test_rmst_mid() && ok
+    ok = test_rmst_censor() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

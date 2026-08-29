@@ -1,0 +1,168 @@
+//@ run-pass
+//@ requires: madaros
+// Regression test for the final mod-p reduction step inside `fe_reduce`
+// (called by `fe_to_bytes`) -- added 2026-08-25 after an independent
+// review found that neither committed test exercised the branch where
+// the reduction's quotient estimate `q` is non-zero (i.e. the case where
+// a represented value is >= p and a genuine multiple of p must be
+// subtracted to reach canonical [0, p) form). The reviewer proved this
+// by mutation: both removing `fe_reduce`'s `h0 += 19*q` fold entirely,
+// and separately flipping one shift amount in `fe_to_bytes`'s byte
+// packing, still passed the full committed suite unchanged -- exactly
+// the "missing final carry, invisible to a small fixed set of test
+// cases" bug class this whole file (and this task's own brief) exists to
+// prevent (see stdlib/crypto/poly1305.sio's real history of exactly this
+// bug class).
+//
+// PART A -- encode/decode at the field boundary. p = 2^255-19, so:
+//   encode(p)       decodes+re-encodes to encode(0)   (p mod p = 0)
+//   encode(p+1)     decodes+re-encodes to encode(1)   (p+1 mod p = 1)
+//   encode(2^255-1) decodes+re-encodes to encode(18)  (p+18 mod p = 18,
+//                                                       since 2^255-1
+//                                                       = p + 18)
+// All three moduli are derived purely from p's own definition, not
+// self-generated magic numbers. The 32-byte little-endian encodings were
+// independently computed (not hand-guessed) via:
+//   python3 -c "p=2**255-19
+//     for v in (p, p+1, 2**255-1):
+//         print(v.to_bytes(32,'little').hex())"
+// giving byte0/byte31 pairs (bytes 1..30 always 0xff):
+//   p:        byte0=0xed, byte31=0x7f
+//   p+1:      byte0=0xee, byte31=0x7f
+//   2^255-1:  byte0=0xff, byte31=0x7f
+//
+// IMPORTANT HONEST CAVEAT (found while building this test, not assumed):
+// decoding any of these three specific boundary values does NOT, by
+// itself, drive `fe_reduce`'s own q-estimation to a non-zero value.
+// `fe_from_bytes` has its OWN single-step carry-propagation pass that
+// folds a carry out of limb 9 back into limb 0 via the same `2^255 = 19
+// (mod p)` identity fe_reduce uses -- and because bytes 29..31 are
+// identical (0xff,0xff,0x7f) for all three of these boundary values,
+// that fold fires identically for all of them *during decode*, already
+// subtracting exactly one p before `fe_reduce` ever runs. This was
+// verified directly: a temporary debug instrumentation of `fe_reduce`'s
+// internal `q` (added locally, exercised against all three of these
+// encodings, and removed again before this test file's own final commit
+// -- see task-2-report.md's fix-round section for the exact transcript)
+// showed q=0 for all three. The round-trip itself is still correct and
+// still a legitimate, valuable regression test (Part A below) -- it is
+// just not, on its own, sufficient to prove `fe_reduce`'s own q>=1
+// branch is exercised. That is why Part B exists.
+//
+// PART B -- forces `fe_reduce`'s own q=1 branch directly, sidestepping
+// `fe_from_bytes`'s opportunistic fold above by constructing the
+// oversized input via `fe_add` instead (which performs NO carry
+// propagation or p-folding of any kind -- pure limb-wise addition, see
+// `fe_add`'s own header comment). Let v be a value with p/2 < v < p,
+// decoded from bytes chosen so `fe_from_bytes`'s own fold does NOT fire
+// during decode (byte31 = 0x3f keeps limb 9's raw pre-carry value below
+// its own carry threshold -- independently verified below). Then
+// `fe_add(v, v)` represents `2v` (unreduced, never carry-propagated), and
+// since p < 2v < 2p, calling `fe_to_bytes` on it MUST subtract exactly
+// one p inside `fe_reduce` (q=1) to reach the canonical encoding of
+// `2v mod p`. Computed independently via:
+//   python3 -c "p=2**255-19
+//     b=bytearray([0xff]*32); b[31]=0x3f
+//     v=int.from_bytes(bytes(b),'little')
+//     print(v>p//2, 2*v>p, (2*v)%p)"
+// giving `True True 17` -- i.e. v > p/2, 2v > p, and 2v mod p = 17. This
+// was directly confirmed to fire q=1 (not q=0) via the same temporary
+// debug instrumentation mentioned above, and separately confirmed to
+// actually catch the reviewer's exact mutation: temporarily removing
+// `fe_reduce`'s `h0 += 19*q` line made this specific check below fail
+// (byte0 became 254 instead of 17), then the line was restored and this
+// file's own commit contains no such mutation.
+use crypto::x25519::*
+
+fn fe_bytes_equal(x: &[u8;32], y: &[u8;32]) -> bool {
+    var i: i64 = 0
+    while i < 32 {
+        if x[i as usize] != y[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn build_p_like(low_byte: i64) -> [u8;32] {
+    // bytes 1..30 = 0xff, byte 31 = 0x7f, byte 0 = low_byte -- the shape
+    // shared by p, p+1 and 2^255-1's little-endian encodings.
+    var b: [u8;32] = [0;32]
+    b[0] = (low_byte & 255) as u8
+    var i: i64 = 1
+    while i < 31 {
+        b[i as usize] = 255
+        i = i + 1
+    }
+    b[31] = 127
+    b
+}
+
+fn encoding_of_small(n: i64) -> [u8;32] {
+    var b: [u8;32] = [0;32]
+    b[0] = (n & 255) as u8
+    b
+}
+
+fn build_v_for_part_b() -> [u8;32] {
+    // bytes 0..30 = 0xff, byte 31 = 0x3f (0011_1111) -- keeps limb 9's
+    // raw pre-carry value strictly below the from_bytes carry threshold
+    // (independently verified: raw h9 = 16777212 < 2^24 = 16777216, so
+    // from_bytes's own carry9 is 0 for this input, unlike build_p_like's
+    // byte31=0x7f which trips it to 1).
+    var b: [u8;32] = [0;32]
+    var i: i64 = 0
+    while i < 31 {
+        b[i as usize] = 255
+        i = i + 1
+    }
+    b[31] = 63
+    b
+}
+
+fn main() -> i64 with IO {
+    // --- Part A: boundary encode/decode round-trips ---
+    let p_bytes = build_p_like(0xed)
+    let p_fe = fe_from_bytes(&p_bytes)
+    let p_out = fe_to_bytes(&p_fe)
+    let zero_bytes = encoding_of_small(0)
+    if !fe_bytes_equal(&p_out, &zero_bytes) {
+        print_int(1)
+        return 1
+    }
+
+    let p1_bytes = build_p_like(0xee)
+    let p1_fe = fe_from_bytes(&p1_bytes)
+    let p1_out = fe_to_bytes(&p1_fe)
+    let one_bytes = encoding_of_small(1)
+    if !fe_bytes_equal(&p1_out, &one_bytes) {
+        print_int(2)
+        return 1
+    }
+
+    let allff_bytes = build_p_like(0xff)
+    let allff_fe = fe_from_bytes(&allff_bytes)
+    let allff_out = fe_to_bytes(&allff_fe)
+    let eighteen_bytes = encoding_of_small(18)
+    if !fe_bytes_equal(&allff_out, &eighteen_bytes) {
+        print_int(3)
+        return 1
+    }
+
+    // --- Part B: force fe_reduce's own q=1 branch via fe_add (which
+    // never carry-propagates), independently verified above to yield
+    // 2v mod p = 17. ---
+    let v_bytes = build_v_for_part_b()
+    let v = fe_from_bytes(&v_bytes)
+    let doubled = fe_add(&v, &v)
+    let doubled_out = fe_to_bytes(&doubled)
+    let seventeen_bytes = encoding_of_small(17)
+    if !fe_bytes_equal(&doubled_out, &seventeen_bytes) {
+        print_int(4)
+        return 1
+    }
+
+    println("x25519_field_reduction_regression: mod-p reduction boundary + q>=1 branch both exercised and correct")
+    return 0
+}

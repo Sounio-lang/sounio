@@ -9,7 +9,7 @@
  * - Benchmark comparison dashboard
  */
 
-import React, { useState, useCallback } from 'react';
+import { useState, useCallback, type FC } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Slider } from '@/components/ui/Slider';
@@ -55,14 +55,8 @@ const getTruthScoreColor = (score: number): string => {
   return '#ef4444'; // Red - low confidence
 };
 
-const getTruthScoreLabel = (score: number): string => {
-  if (score >= 0.9) return 'High';
-  if (score >= 0.7) return 'Moderate';
-  return 'Low';
-};
-
 // Token Display Component
-const TokenDisplay: React.FC<{ token: TruthScoreToken }> = ({ token }) => {
+const TokenDisplay: FC<{ token: TruthScoreToken }> = ({ token }) => {
   const color = getTruthScoreColor(token.truth_score);
   const isLow = token.is_low_confidence;
   
@@ -85,7 +79,7 @@ const TokenDisplay: React.FC<{ token: TruthScoreToken }> = ({ token }) => {
 };
 
 // Truth Score Legend Component
-const TruthScoreLegend: React.FC = () => (
+const TruthScoreLegend: FC = () => (
   <div className="flex items-center gap-4 text-sm text-gray-600">
     <div className="flex items-center gap-2">
       <span className="w-3 h-3 rounded-full" style={{ backgroundColor: '#22c55e' }}></span>
@@ -103,7 +97,7 @@ const TruthScoreLegend: React.FC = () => (
 );
 
 // Attention Heatmap Component
-const AttentionHeatmap: React.FC<{ weights: AttentionWeight }> = ({ weights }) => {
+const AttentionHeatmap: FC<{ weights: AttentionWeight }> = ({ weights }) => {
   const { layer, head, weights: w } = weights;
   const size = Math.sqrt(w.length);
   
@@ -137,7 +131,7 @@ const AttentionHeatmap: React.FC<{ weights: AttentionWeight }> = ({ weights }) =
 };
 
 // Confidence Bar Component
-const ConfidenceBar: React.FC<{ score: number; label: string }> = ({ score, label }) => {
+const ConfidenceBar: FC<{ score: number; label: string }> = ({ score, label }) => {
   const color = getTruthScoreColor(score);
   
   return (
@@ -160,12 +154,11 @@ const ConfidenceBar: React.FC<{ score: number; label: string }> = ({ score, labe
 };
 
 // Main Workbench Component
-export const EOTWorkbench: React.FC = () => {
+export const EOTWorkbench: FC = () => {
   // State
   const [prompt, setPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [result, setResult] = useState<GenerationResult | null>(null);
-  const [attentionWeights, setAttentionWeights] = useState<AttentionWeight[]>([]);
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResult[]>([]);
   
   // Controls

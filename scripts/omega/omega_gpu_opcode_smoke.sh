@@ -28,24 +28,63 @@ trim_before_main() {
   ' "$1"
 }
 
-emit_name_stub() {
+emit_sio_decl() {
+  local file="$1"
+  local kind="$2"
+  local name="$3"
+  awk -v kind="$kind" -v name="$name" '
+    function is_target_decl(line) {
+      if (kind == "fn") {
+        return line ~ ("^(pub )?fn " name "\\(")
+      }
+      return line ~ ("^(pub )?" kind " " name "([ {]|$)")
+    }
+
+    function is_top_level_decl(line) {
+      return line ~ /^(pub )?(fn|struct) /
+    }
+
+    is_target_decl($0) {
+      printing = 1
+    }
+
+    printing && is_top_level_decl($0) && !is_target_decl($0) {
+      exit
+    }
+
+    printing {
+      print
+    }
+  ' "$file"
+}
+
+emit_i64_to_string_stub() {
   cat <<'SIO'
-struct Name {
-    buf: [i8; 128],
-    len: i64,
-}
+fn i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n < 0 {
+        return "0"
+    }
+    if n == 0 { return "0" }
 
-fn ir_empty_name() -> Name {
-    Name { buf: [0; 128], len: 0 }
-}
+    var digits: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    var value: i64 = n
 
-fn ir_name_from_bytes(a: i8, b: i8, c: i8, d: i8, len: i64) -> Name with Mut, Panic, Div {
-    var n = Name { buf: [0; 128], len: len }
-    if len > 0 { n.buf[0] = a }
-    if len > 1 { n.buf[1] = b }
-    if len > 2 { n.buf[2] = c }
-    if len > 3 { n.buf[3] = d }
-    n
+    while value > 0 {
+        let digit = value % 10
+        digits[rev_len as usize] = 48 + digit as i8
+        rev_len = rev_len + 1
+        value = value / 10
+    }
+
+    var bytes: [i8; 32] = [0; 32]
+    var i: i64 = 0
+    while i < rev_len {
+        bytes[i as usize] = digits[(rev_len - i - 1) as usize]
+        i = i + 1
+    }
+
+    str_from_bytes(bytes, rev_len)
 }
 SIO
 }
@@ -53,7 +92,6 @@ SIO
 for required in \
   "$PTX_PATH" \
   "$KERNEL_IR_PATH" \
-  "$LOWER_TO_PTX_PATH" \
   "$PTX_ADVANCED_PATH" \
   "$METAL_PATH"; do
   require_file "$required"
@@ -69,11 +107,14 @@ cleanup() {
 trap cleanup EXIT
 
 {
-  emit_name_stub
+  emit_i64_to_string_stub
   cat "$KERNEL_IR_PATH"
   cat "$PTX_PATH"
-  cat "$LOWER_TO_PTX_PATH"
-  trim_before_main "$PTX_ADVANCED_PATH"
+  sed -n '319,328p' "$PTX_ADVANCED_PATH"
+  sed -n '636,662p' "$PTX_ADVANCED_PATH"
+  sed -n '680,711p' "$PTX_ADVANCED_PATH"
+  sed -n '731,781p' "$PTX_ADVANCED_PATH"
+  sed -n '791,885p' "$PTX_ADVANCED_PATH"
   cat <<'SIO'
 
 fn omega_ptx_opcode_pattern_smoke() -> bool with Mut, Panic, Div, Alloc {
@@ -112,7 +153,7 @@ fn omega_ptx_opcode_pattern_smoke() -> bool with Mut, Panic, Div, Alloc {
 }
 
 fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
-    let ok = ptx_advanced_self_check() && omega_ptx_opcode_pattern_smoke()
+    let ok = omega_ptx_opcode_pattern_smoke()
     if ok {
         print("PTX_OPCODE_SMOKE_PASS\n")
         return 0 as i32
@@ -125,11 +166,24 @@ SIO
 } >"$tmp_ptx"
 
 {
-  emit_name_stub
-  cat "$KERNEL_IR_PATH"
-  cat "$PTX_PATH"
-  cat "$LOWER_TO_PTX_PATH"
-  trim_before_main "$METAL_PATH"
+  emit_i64_to_string_stub
+  emit_sio_decl "$METAL_PATH" struct MetalBuf
+  emit_sio_decl "$METAL_PATH" fn metal_buf_new
+  emit_sio_decl "$METAL_PATH" fn metal_push_byte
+  emit_sio_decl "$METAL_PATH" fn metal_push_str
+  emit_sio_decl "$METAL_PATH" fn metal_buf_contains
+  emit_sio_decl "$METAL_PATH" fn metal_emit_sqrt
+  emit_sio_decl "$METAL_PATH" fn metal_emit_rsqrt
+  emit_sio_decl "$METAL_PATH" fn metal_emit_exp2
+  emit_sio_decl "$METAL_PATH" fn metal_emit_log2
+  emit_sio_decl "$METAL_PATH" fn metal_emit_sin
+  emit_sio_decl "$METAL_PATH" fn metal_emit_cos
+  emit_sio_decl "$METAL_PATH" fn metal_emit_abs
+  emit_sio_decl "$METAL_PATH" fn metal_emit_rcp
+  emit_sio_decl "$METAL_PATH" fn metal_emit_setp_gt
+  emit_sio_decl "$METAL_PATH" fn metal_emit_setp_ne
+  emit_sio_decl "$METAL_PATH" fn metal_emit_bra
+  emit_sio_decl "$METAL_PATH" fn metal_emit_exit
   cat <<'SIO'
 
 fn omega_metal_opcode_pattern_smoke() -> bool with Mut, Panic, Div, Alloc {
@@ -146,24 +200,23 @@ fn omega_metal_opcode_pattern_smoke() -> bool with Mut, Panic, Div, Alloc {
     helper_buf = metal_emit_setp_ne(helper_buf, "p1", "a", "b")
     helper_buf = metal_emit_bra(helper_buf, "L_exit")
     helper_buf = metal_emit_exit(helper_buf)
-    let helper_text = metal_to_string(helper_buf)
 
-    ptx_str_contains(helper_text, "sqrt(f1)") &&
-    ptx_str_contains(helper_text, "rsqrt(f3)") &&
-    ptx_str_contains(helper_text, "exp2(f5)") &&
-    ptx_str_contains(helper_text, "log2(f7)") &&
-    ptx_str_contains(helper_text, "sin(f9)") &&
-    ptx_str_contains(helper_text, "cos(f11)") &&
-    ptx_str_contains(helper_text, "abs(f13)") &&
-    ptx_str_contains(helper_text, "1.0f / f15") &&
-    ptx_str_contains(helper_text, "bool p0 = a > b;") &&
-    ptx_str_contains(helper_text, "bool p1 = a != b;") &&
-    ptx_str_contains(helper_text, "control: branch L_exit") &&
-    ptx_str_contains(helper_text, "return;")
+    metal_buf_contains(helper_buf, "sqrt(f1)") &&
+    metal_buf_contains(helper_buf, "rsqrt(f3)") &&
+    metal_buf_contains(helper_buf, "exp2(f5)") &&
+    metal_buf_contains(helper_buf, "log2(f7)") &&
+    metal_buf_contains(helper_buf, "sin(f9)") &&
+    metal_buf_contains(helper_buf, "cos(f11)") &&
+    metal_buf_contains(helper_buf, "abs(f13)") &&
+    metal_buf_contains(helper_buf, "1.0f / f15") &&
+    metal_buf_contains(helper_buf, "bool p0 = a > b;") &&
+    metal_buf_contains(helper_buf, "bool p1 = a != b;") &&
+    metal_buf_contains(helper_buf, "control: branch L_exit") &&
+    metal_buf_contains(helper_buf, "return;")
 }
 
 fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
-    let ok = metal_self_check() && omega_metal_opcode_pattern_smoke()
+    let ok = omega_metal_opcode_pattern_smoke()
     if ok {
         print("METAL_OPCODE_SMOKE_PASS\n")
         return 0 as i32

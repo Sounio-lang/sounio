@@ -4,7 +4,7 @@ set -euo pipefail
 # Resolve a reproducible standard souc binary for CI jobs.
 # Default pin tracks the latest stable release asset with signatures.
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 : "${SOUNIO_CI_SOUC_VERSION:=0.100.3}"

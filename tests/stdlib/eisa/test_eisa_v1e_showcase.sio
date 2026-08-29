@@ -1,0 +1,182 @@
+//@ run-pass
+// validated_lane: lean_single
+// V1e showcase images are hand-lowered with EisaxBuild because the Metron
+// source compiler currently has a documented Str-size cap for larger kernels.
+
+use eisa::format::*
+use eisa::evm::*
+
+fn f64_bits_eq(a: f64, b: f64) -> bool with Mut, Div, Panic {
+    let pa = f64_parts(a)
+    let pb = f64_parts(b)
+    pa.sign == pb.sign && pa.exp == pb.exp && pa.mant == pb.mant
+}
+
+// Babylonian iteration x <- (x + a/x)/2 for a = 4 from x0 = 1.0. On IEEE
+// doubles this reaches the EXACT fixed point 2.0 (perfect square), so the
+// `while delta != 0.0` shape terminates without fuel: the loop body runs a
+// deterministic, measurable number of times. fuel_left is pinned below
+// (measured, then asserted) so any change in iteration count or fuel
+// accounting trips the witness.
+fn build_s1_fixedpoint() -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 100)
+    b.consts[0] = 2.0
+    b.consts[1] = 4.0
+    b.consts[2] = 1.0
+    b.n_const = 3
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 2
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_econst()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.ops[3] = op_ediv()
+    b.dsts[3] = 3
+    b.as_[3] = 1
+    b.bs_[3] = 0
+    b.ops[4] = op_eadd()
+    b.dsts[4] = 4
+    b.as_[4] = 0
+    b.bs_[4] = 3
+    b.ops[5] = op_ediv()
+    b.dsts[5] = 5
+    b.as_[5] = 4
+    b.bs_[5] = 2
+    b.ops[6] = op_esub()
+    b.dsts[6] = 6
+    b.as_[6] = 5
+    b.bs_[6] = 0
+    b.ops[7] = op_emov()
+    b.dsts[7] = 0
+    b.as_[7] = 5
+    b.ops[8] = op_ebrz()
+    b.as_[8] = 6
+    b.bs_[8] = 10
+    b.ops[9] = op_ebr()
+    b.as_[9] = 3
+    b.ops[10] = op_egate()
+    b.dsts[10] = 0
+    b.ops[11] = op_ehalt()
+    b.n_code = 12
+    b
+}
+
+fn build_s2_frail() -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 30)
+    b.consts[0] = 1.0e16
+    b.consts[1] = 1.0
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_eadd()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+    b.ops[3] = op_esub()
+    b.dsts[3] = 3
+    b.as_[3] = 2
+    b.bs_[3] = 0
+    b.ops[4] = op_ebrz()
+    b.as_[4] = 3
+    b.bs_[4] = 6
+    b.ops[5] = op_ehalt()
+    b.ops[6] = op_egate()
+    b.dsts[6] = 3
+    b.ops[7] = op_ehalt()
+    b.n_code = 8
+    b
+}
+
+fn build_s3_emov_negzero() -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v1())
+    b = eisax_build_set_fuel(b, 30)
+    b.consts[0] = 1.0
+    b.consts[1] = 0.0
+    b.n_const = 2
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+    b.ops[2] = op_esub()
+    b.dsts[2] = 2
+    b.as_[2] = 1
+    b.bs_[2] = 0
+    b.ops[3] = op_ediv()
+    b.dsts[3] = 3
+    b.as_[3] = 1
+    b.bs_[3] = 2
+    b.ops[4] = op_emov()
+    b.dsts[4] = 4
+    b.as_[4] = 3
+    b.ops[5] = op_egate()
+    b.dsts[5] = 3
+    b.ops[6] = op_egate()
+    b.dsts[6] = 4
+    b.ops[7] = op_ehalt()
+    b.n_code = 8
+    b
+}
+
+// NOTE: the Rump 1988 showcase lane was withdrawn from V1e. Its bridge lane
+// hit the unfinished high-register template work and was rolled back; the
+// drafted hand-lowered image (build_s4_rump) was left uncalled and has been
+// removed rather than shipped unwitnessed. The dd64 err lane cannot reach the
+// ~122-bit true value in any case (see test_dd64_cancellation.sio); the Rump
+// showcase ships in EISA v2 on the qd128 err lane, where the receipt can pin
+// the exact value -54767/66192.
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+
+    // S1: Babylonian sqrt(4) from x0 = 1.0 reaches the exact fixed point 2.0.
+    // Step arithmetic (measured, then derived): init 3 econsts; 6 full body
+    // iterations of 7 steps (ediv, eadd, ediv, esub, emov, ebrz, ebr); a
+    // final iteration of 6 (ebrz taken, no back edge); egate + ehalt = 2.
+    // Total 3 + 42 + 6 + 2 = 53; fuel 100 - 53 = 47, far from exhaustion.
+    // frail == 1 is load-bearing: the loop's EXIT test fires on delta whose
+    // val is exactly 0 while its err lane is nonzero — the fixed-point exit
+    // decision happens at the noise floor. Framing (math-review 2026-07-05):
+    // EISA deterministically measures a post-facto residual bound via EFTs
+    // and flags the branch when the decision occurs inside that bound;
+    // CADNA/DSA (Vignes 2004) detects the same instability class via
+    // disagreement across random-rounding samples. Same failure class
+    // flagged, different detection semantics. The penultimate delta
+    // (~2.2e-15) sits 10-20x above the accumulated err band (~1.1e-16), so
+    // exactly one frail firing is derivable, not coincidental.
+    var s1 = evm_load(eisax_encode(build_s1_fixedpoint()))
+    if evm_run(&!s1) != 0 { fails = fails + 1 }
+    if evm_stop_kind(&s1) != 0 { fails = fails + 1 }
+    if evm_fuel_left(&s1) != 47 { fails = fails + 1 }
+    if evm_frail_count(&s1) != 1 { fails = fails + 1 }
+    if !f64_bits_eq(evm_reg_val(&s1, 0), 2.0) { fails = fails + 1 }
+
+    var s2 = evm_load(eisax_encode(build_s2_frail()))
+    if evm_run(&!s2) != 0 { fails = fails + 1 }
+    if evm_frail_count(&s2) != 1 { fails = fails + 1 }
+    if evm_gate_count(&s2) != 1 { fails = fails + 1 }
+
+    var s3 = evm_load(eisax_encode(build_s3_emov_negzero()))
+    if evm_run(&!s3) != 0 { fails = fails + 1 }
+    let inv_src = 1.0 / evm_reg_val(&s3, 3)
+    let inv_dst = 1.0 / evm_reg_val(&s3, 4)
+    if inv_src >= 0.0 { fails = fails + 1 }
+    if inv_dst >= 0.0 { fails = fails + 1 }
+
+    assert(fails == 0)
+    println("ALL PASS: eisa v1e S1 ... S3")
+    0
+}

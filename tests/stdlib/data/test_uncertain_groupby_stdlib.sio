@@ -1,0 +1,82 @@
+// Run-proof for stdlib data::uncertain_groupby — GUM-compliant uncertainty-aware GROUP BY.
+// Flagship: one row per distinct key with [key, mean, u_c, U95, dof] where the mean's Type A
+// uncertainty (ISO/IEC Guide 98-3 "GUM" §4.2) is computed by the epistemic::gum engine.
+// Data (col0=key, col1=value), fed interleaved to prove grouping + ascending key sort:
+//   key 1 -> {10,12,14}          : mean 12, s=2,          u_c=2/sqrt(3)=1.1547005, dof=2, k95=4.303
+//   key 2 -> {20,22,24,26}       : mean 23, s=2.5819889,  u_c=s/2=1.2909944,       dof=3, k95=3.182
+// lean_single engine.
+use data::dataframe::*
+use data::uncertain_groupby::*
+use epistemic::gum::{GUMResult, gum_report}
+
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+fn add2(df: &!DataFrame, k: f64, v: f64) with Mut, Div, Panic { var r: [f64; 64] = [0.0; 64]; r[0]=k; r[1]=v; df_add_row(df, &r) }
+// find the output row whose key column equals `key` (0-based; -1 if absent)
+fn krow(df: &DataFrame, key: f64) -> i64 with Mut, Div, Panic { var r: i64=0; while r<df_nrows(df){ if df_get(df,r,0)==key {return r} r=r+1 } 0-1 }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var df = df_new(2)
+    // interleaved insertion order: grouping and ascending-key sort must both hold
+    add2(&!df, 2.0, 20.0)
+    add2(&!df, 1.0, 10.0)
+    add2(&!df, 2.0, 22.0)
+    add2(&!df, 1.0, 12.0)
+    add2(&!df, 2.0, 24.0)
+    add2(&!df, 1.0, 14.0)
+    add2(&!df, 2.0, 26.0)
+
+    let g = ugroupby_mean_type_a(&df, 0, 1)
+
+    // shape: 2 distinct keys, 5 columns
+    if df_nrows(&g) != 2 { print("FAIL nrows\n"); return 1 }
+    if df_ncols(&g) != 5 { print("FAIL ncols\n"); return 2 }
+
+    // sorted ascending: row 0 is key 1, row 1 is key 2
+    if ae(df_get(&g, 0, 0), 1.0) >= 1.0e-12 { print("FAIL sort_row0\n"); return 3 }
+    if ae(df_get(&g, 1, 0), 2.0) >= 1.0e-12 { print("FAIL sort_row1\n"); return 4 }
+
+    // column names are ids 0..4
+    if df_get_col_name(&g, 0) != 0 { print("FAIL name0\n"); return 5 }
+    if df_get_col_name(&g, 4) != 4 { print("FAIL name4\n"); return 6 }
+
+    // ---- key 1: {10,12,14}  mean 12, s=2, u_c=1.1547005, dof=2, U95=4.303*1.1547005 ----
+    let r1 = krow(&g, 1.0)
+    if ae(df_get(&g, r1, 1), 12.0) >= 1.0e-9 { print("FAIL k1_mean\n"); return 7 }
+    if ae(df_get(&g, r1, 2), 1.1547005384) >= 1.0e-6 { print("FAIL k1_uc\n"); return 8 }
+    if ae(df_get(&g, r1, 4), 2.0) >= 1.0e-9 { print("FAIL k1_dof\n"); return 9 }
+    // U95 = k95(dof=2)=4.303 * u_c = 4.303 * 1.1547005384 = 4.968656...  (3-dp table k -> looser tol)
+    if ae(df_get(&g, r1, 3), 4.9686664) >= 1.0e-4 { print("FAIL k1_U95\n"); return 10 }
+
+    // ---- key 2: {20,22,24,26}  mean 23, s=2.5819889, u_c=1.2909944, dof=3, U95=3.182*u_c ----
+    let r2 = krow(&g, 2.0)
+    if ae(df_get(&g, r2, 1), 23.0) >= 1.0e-9 { print("FAIL k2_mean\n"); return 11 }
+    if ae(df_get(&g, r2, 2), 1.2909944487) >= 1.0e-6 { print("FAIL k2_uc\n"); return 12 }
+    if ae(df_get(&g, r2, 4), 3.0) >= 1.0e-9 { print("FAIL k2_dof\n"); return 13 }
+    // U95 = 3.182 * 1.2909944487 = 4.107943...
+    if ae(df_get(&g, r2, 3), 4.1079443) >= 1.0e-4 { print("FAIL k2_U95\n"); return 14 }
+
+    // ---- singleton group: size 1 -> s=0, u_c=0, dof=1 (no div-by-zero, no ∞ sentinel) ----
+    var d1 = df_new(2)
+    add2(&!d1, 7.0, 42.0)
+    let gs = ugroupby_mean_type_a(&d1, 0, 1)
+    if df_nrows(&gs) != 1 { print("FAIL single_rows\n"); return 15 }
+    if ae(df_get(&gs, 0, 1), 42.0) >= 1.0e-9 { print("FAIL single_mean\n"); return 16 }
+    if ae(df_get(&gs, 0, 2), 0.0) >= 1.0e-12 { print("FAIL single_uc\n"); return 17 }
+    if ae(df_get(&gs, 0, 3), 0.0) >= 1.0e-12 { print("FAIL single_U95\n"); return 18 }
+    if ae(df_get(&gs, 0, 4), 1.0) >= 1.0e-9 { print("FAIL single_dof\n"); return 19 }
+
+    // ---- multi-row all-identical group: n=3 with zero scatter -> u_c=0, U95=0, but dof = n-1 = 2
+    //      (metrologically correct: the readings still carry n-1 dof; the engine's ∞ sentinel is fixed) ----
+    var d0 = df_new(2)
+    add2(&!d0, 5.0, 8.0); add2(&!d0, 5.0, 8.0); add2(&!d0, 5.0, 8.0)
+    let gz = ugroupby_mean_type_a(&d0, 0, 1)
+    if ae(df_get(&gz, 0, 1), 8.0) >= 1.0e-9 { print("FAIL zvar_mean\n"); return 20 }
+    if ae(df_get(&gz, 0, 2), 0.0) >= 1.0e-12 { print("FAIL zvar_uc\n"); return 21 }
+    if ae(df_get(&gz, 0, 4), 2.0) >= 1.0e-9 { print("FAIL zvar_dof\n"); return 22 }
+
+    // human-readable metrology report (one line per group)
+    ugroupby_report(&df, 0, 1)
+
+    print("UNCERTAIN_GROUPBY_STDLIB_OK\n")
+    return 0
+}

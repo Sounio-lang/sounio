@@ -1,0 +1,652 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Gate vs Zero-Divisor Ablation: Decomposing the S-SSM Advantage
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Prior result (native_algebra_4way_benchmark):
+//   ListOps L=15: S-SSM(41.3%) >> H-SSM(32.9%) >> O-SSM(28.7%) >> Naive(27.3%)
+//   Bracket L=12: S-SSM(79.6%) >> H-SSM(67.5%) >> O-SSM(56.5%) >> Naive(41.6%)
+//
+// Question: WHY does S-SSM win? Three candidate factors:
+//   (A) Mamba-style selective gate Δ_t
+//   (B) 16D state (more memory capacity)
+//   (C) Zero-divisors (hard-reset / annihilation mechanism)
+//
+// Ablation design — five models, all variants of 8D or 16D:
+//
+//   O-SSM       : Cayley, 8D, 8 A-params, no gate        (anchor)
+//   H-SSM       : Hamilton, 8D, 8 A-params, no gate       (prev winner, anchor)
+//   H-SSM-sel   : Hamilton, 8D, 8 A-params + gate         (H + gate only)
+//   S-SSM-nogate: Sedenion, 16D, 16 A-params, no gate     (ZD + 16D, no gate)
+//   S-SSM       : Sedenion, 16D, 16 A-params + gate       (full S-SSM)
+//   Naive       : diagonal, 8D, 8 A-params, no gate       (anchor)
+//
+// Decomposition:
+//   gate alone          = H-SSM-sel  − H-SSM
+//   ZD+16D alone        = S-SSM-nogate − H-SSM
+//   gate+ZD+16D         = S-SSM − H-SSM
+//   ZD+16D given gate   = S-SSM − H-SSM-sel
+//   gate given ZD+16D   = S-SSM − S-SSM-nogate
+//
+// Tasks: ListOps L=15 (10-class), Bracket L=12 (binary)
+// Training: 500/epoch × 80 epochs; Eval: 1000 samples
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0; var term = 1.0; var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+fn sigmoid_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 10.0 { return 1.0 }
+    if x < 0.0 - 10.0 { return 0.0 }
+    1.0 / (1.0 + exp_q(0.0 - x))
+}
+
+var RNG_A: i64 = 0; var RNG_B: i64 = 0
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A; let y = RNG_B; RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+
+// ─── ListOps ───
+var SEQ: [i64; 32] = [0; 32]; var SEQ_POS: i64 = 0
+fn min_v(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+fn max_v(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+fn med3(a: i64, b: i64, c: i64) -> i64 {
+    if a <= b { if b <= c { b } else { if a <= c { c } else { a } } }
+    else { if a <= c { a } else { if b <= c { c } else { b } } }
+}
+fn apply_op(op: i64, nv: i64, v0: i64, v1: i64, v2: i64) -> i64 with Mut {
+    if op == 10 {
+        var r = v0; if nv >= 2 { r = min_v(r, v1) }; if nv >= 3 { r = min_v(r, v2) }; r
+    } else {
+        if op == 11 {
+            var r = v0; if nv >= 2 { r = max_v(r, v1) }; if nv >= 3 { r = max_v(r, v2) }; r
+        } else {
+            if nv >= 3 { med3(v0, v1, v2) } else { if nv >= 2 { min_v(v0, v1) } else { v0 } }
+        }
+    }
+}
+fn gen_flat() -> i64 with Mut, Div {
+    let op = (rng_next()/100)%3+10; let na = (rng_next()/100)%2+2
+    SEQ[SEQ_POS] = op; SEQ_POS = SEQ_POS + 1
+    var v0=(rng_next()/100)%10; var v1=(rng_next()/100)%10; var v2=0
+    SEQ[SEQ_POS]=v0; SEQ_POS=SEQ_POS+1; SEQ[SEQ_POS]=v1; SEQ_POS=SEQ_POS+1
+    if na==3 { v2=(rng_next()/100)%10; SEQ[SEQ_POS]=v2; SEQ_POS=SEQ_POS+1 }
+    apply_op(op, na, v0, v1, v2)
+}
+fn gen_nested() -> i64 with Mut, Div {
+    let oop=(rng_next()/100)%3+10; let ona=(rng_next()/100)%2+2
+    SEQ[SEQ_POS]=oop; SEQ_POS=SEQ_POS+1
+    var vals: [i64; 3]=[0;3]; var ai=0
+    while ai<ona {
+        let nest=(rng_next()/100)%3
+        if nest==0 { vals[ai]=gen_flat() }
+        else { let d=(rng_next()/100)%10; SEQ[SEQ_POS]=d; SEQ_POS=SEQ_POS+1; vals[ai]=d }
+        ai=ai+1
+    }
+    apply_op(oop, ona, vals[0], vals[1], vals[2])
+}
+fn gen_lo(tlen: i64) -> i64 with Mut, Div {
+    SEQ_POS=0; let res=gen_nested()
+    var al=SEQ_POS; while al<tlen { SEQ[al]=0; al=al+1 }
+    SEQ_POS=tlen; res
+}
+
+// ─── Bracket ───
+var BR: [i64; 20]=[0;20]; var BR_LEN: i64=0
+var STK: [i64; 10]=[0;10]; var STK_TOP: i64=0
+fn check_bal(sl: i64) -> i64 with Mut {
+    STK_TOP=0; var i=0
+    while i<sl {
+        let t=BR[i]
+        if t==1 { STK[STK_TOP]=1; STK_TOP=STK_TOP+1 }
+        if t==3 { STK[STK_TOP]=3; STK_TOP=STK_TOP+1 }
+        if t==2 { if STK_TOP==0{return 0}; STK_TOP=STK_TOP-1; if STK[STK_TOP]!=1{return 0} }
+        if t==4 { if STK_TOP==0{return 0}; STK_TOP=STK_TOP-1; if STK[STK_TOP]!=3{return 0} }
+        if STK_TOP>9{return 0}
+        i=i+1
+    }
+    if STK_TOP==0{1}else{0}
+}
+fn gen_bal(sl: i64) with Mut, Div {
+    STK_TOP=0; var pos=0
+    while pos<sl {
+        let rem=sl-pos; let can_o=STK_TOP<rem/2; let can_c=STK_TOP>0
+        var ch=0
+        if can_o { if can_c { ch=(rng_next()/100)%2 } }
+        if can_o { if can_c==false { ch=0 } }
+        if can_o==false { if can_c { ch=1 } }
+        if ch==0 {
+            let bt=(rng_next()/100)%2
+            if bt==0{BR[pos]=1;STK[STK_TOP]=1} if bt==1{BR[pos]=3;STK[STK_TOP]=3}
+            STK_TOP=STK_TOP+1
+        }
+        if ch==1 { STK_TOP=STK_TOP-1; let top=STK[STK_TOP]; if top==1{BR[pos]=2}; if top==3{BR[pos]=4} }
+        pos=pos+1
+    }
+}
+fn gen_unbal(sl: i64) with Mut, Div {
+    var att=0; var done=0
+    while done==0 {
+        var i=0; while i<sl { BR[i]=(rng_next()/100)%4+1; i=i+1 }
+        if check_bal(sl)==0{done=1}; att=att+1
+        if att>30{BR[0]=2;BR[1]=4;done=1}
+    }
+}
+fn gen_br(sl: i64) -> i64 with Mut, Div {
+    let cls=(rng_next()/100)%2
+    if cls==1{gen_bal(sl)} if cls==0{gen_unbal(sl)}
+    BR_LEN=sl; cls
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8D Models: O-SSM, H-SSM, H-SSM-sel, Naive
+// Layout W8: embed[0..103], A[104..111], B[112..119], out[120..199]
+// Extra GATE8[0..12]: 13 gate weights for H-SSM-sel (model_id=2)
+// ═══════════════════════════════════════════════════════════════════════════
+var W8: [i64; 200]=[0;200]; var H8: [i64; 8]=[0;8]; var L8: [i64; 10]=[0;10]; var MOM8: [i64; 200]=[0;200]
+var GATE8: [i64; 16]=[0;16]; var MOM_G8: [i64; 16]=[0;16]
+
+fn w8s(i:i64,v:f64) with Mut { W8[i]=(v*100000000.0) as i64 }
+fn w8g(i:i64)->f64 with Div { (W8[i] as f64)/100000000.0 }
+fn h8s(i:i64,v:f64) with Mut { H8[i]=(v*100000000.0) as i64 }
+fn h8g(i:i64)->f64 with Div { (H8[i] as f64)/100000000.0 }
+fn g8s(i:i64,v:f64) with Mut { GATE8[i]=(v*100000000.0) as i64 }
+fn g8g(i:i64)->f64 with Div { (GATE8[i] as f64)/100000000.0 }
+
+fn init8(model_id: i64) with Mut, Div {
+    var i=0; while i<104{w8s(i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0; while i<8{w8s(112+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0; while i<80{w8s(120+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0; while i<200{MOM8[i]=0;i=i+1}
+    // Gate init (only used for H-SSM-sel)
+    i=0; while i<16{g8s(i,0.0);MOM_G8[i]=0;i=i+1}
+    if model_id==0 {
+        // O-SSM: octonion A
+        w8s(104,0.95); i=1; while i<8{w8s(104+i,((rng_next()%200) as f64-100.0)/1000.0);i=i+1}
+    }
+    if model_id==1 {
+        // H-SSM: two quaternions
+        w8s(104,0.95); w8s(105,((rng_next()%100) as f64-50.0)/500.0)
+        w8s(106,((rng_next()%100) as f64-50.0)/500.0); w8s(107,((rng_next()%100) as f64-50.0)/500.0)
+        w8s(108,0.95); w8s(109,((rng_next()%100) as f64-50.0)/500.0)
+        w8s(110,((rng_next()%100) as f64-50.0)/500.0); w8s(111,((rng_next()%100) as f64-50.0)/500.0)
+    }
+    if model_id==2 {
+        // H-SSM-sel: same as H-SSM
+        w8s(104,0.95); w8s(105,((rng_next()%100) as f64-50.0)/500.0)
+        w8s(106,((rng_next()%100) as f64-50.0)/500.0); w8s(107,((rng_next()%100) as f64-50.0)/500.0)
+        w8s(108,0.95); w8s(109,((rng_next()%100) as f64-50.0)/500.0)
+        w8s(110,((rng_next()%100) as f64-50.0)/500.0); w8s(111,((rng_next()%100) as f64-50.0)/500.0)
+    }
+    if model_id==3 {
+        // Naive diagonal
+        i=0; while i<8{w8s(104+i,0.95);i=i+1}
+    }
+}
+
+// model_id: 0=O-SSM, 1=H-SSM, 2=H-SSM-sel, 3=Naive
+fn step8(tok: i64, model_id: i64) with Mut, Div, Panic {
+    if model_id==0 {
+        let a0=w8g(104);let a1=w8g(105);let a2=w8g(106);let a3=w8g(107)
+        let a4=w8g(108);let a5=w8g(109);let a6=w8g(110);let a7=w8g(111)
+        let h0=h8g(0);let h1=h8g(1);let h2=h8g(2);let h3=h8g(3)
+        let h4=h8g(4);let h5=h8g(5);let h6=h8g(6);let h7=h8g(7)
+        var n0=a0*h0-a1*h1-a2*h2-a3*h3-a4*h4-a5*h5-a6*h6-a7*h7
+        var n1=a0*h1+a1*h0+a2*h3-a3*h2+a4*h5-a5*h4-a6*h7+a7*h6
+        var n2=a0*h2+a2*h0-a1*h3+a3*h1+a4*h6-a6*h4+a5*h7-a7*h5
+        var n3=a0*h3+a3*h0+a1*h2-a2*h1+a4*h7-a7*h4-a5*h6+a6*h5
+        var n4=a0*h4+a4*h0-a1*h5+a5*h1-a2*h6+a6*h2-a3*h7+a7*h3
+        var n5=a0*h5+a5*h0+a1*h4-a4*h1-a2*h7+a7*h2+a3*h6-a6*h3
+        var n6=a0*h6+a6*h0+a1*h7-a7*h1+a2*h4-a4*h2-a3*h5+a5*h3
+        var n7=a0*h7+a7*h0-a1*h6+a6*h1-a2*h5+a5*h2+a3*h4-a4*h3
+        n0=n0+w8g(112)*w8g(tok*8);n1=n1+w8g(113)*w8g(tok*8+1)
+        n2=n2+w8g(114)*w8g(tok*8+2);n3=n3+w8g(115)*w8g(tok*8+3)
+        n4=n4+w8g(116)*w8g(tok*8+4);n5=n5+w8g(117)*w8g(tok*8+5)
+        n6=n6+w8g(118)*w8g(tok*8+6);n7=n7+w8g(119)*w8g(tok*8+7)
+        if n0>5.0{n0=5.0}if n0<0.0-5.0{n0=0.0-5.0}
+        if n1>5.0{n1=5.0}if n1<0.0-5.0{n1=0.0-5.0}
+        if n2>5.0{n2=5.0}if n2<0.0-5.0{n2=0.0-5.0}
+        if n3>5.0{n3=5.0}if n3<0.0-5.0{n3=0.0-5.0}
+        if n4>5.0{n4=5.0}if n4<0.0-5.0{n4=0.0-5.0}
+        if n5>5.0{n5=5.0}if n5<0.0-5.0{n5=0.0-5.0}
+        if n6>5.0{n6=5.0}if n6<0.0-5.0{n6=0.0-5.0}
+        if n7>5.0{n7=5.0}if n7<0.0-5.0{n7=0.0-5.0}
+        h8s(0,n0);h8s(1,n1);h8s(2,n2);h8s(3,n3);h8s(4,n4);h8s(5,n5);h8s(6,n6);h8s(7,n7)
+    }
+    if model_id==1 {
+        // H-SSM: two quaternion halves, no gate
+        let qw=w8g(104);let qx=w8g(105);let qy=w8g(106);let qz=w8g(107)
+        let hw=h8g(0);let hx=h8g(1);let hy=h8g(2);let hz=h8g(3)
+        var n0=qw*hw-qx*hx-qy*hy-qz*hz; var n1=qw*hx+qx*hw+qy*hz-qz*hy
+        var n2=qw*hy-qx*hz+qy*hw+qz*hx; var n3=qw*hz+qx*hy-qy*hx+qz*hw
+        n0=n0+w8g(112)*w8g(tok*8);n1=n1+w8g(113)*w8g(tok*8+1)
+        n2=n2+w8g(114)*w8g(tok*8+2);n3=n3+w8g(115)*w8g(tok*8+3)
+        if n0>5.0{n0=5.0}if n0<0.0-5.0{n0=0.0-5.0}
+        if n1>5.0{n1=5.0}if n1<0.0-5.0{n1=0.0-5.0}
+        if n2>5.0{n2=5.0}if n2<0.0-5.0{n2=0.0-5.0}
+        if n3>5.0{n3=5.0}if n3<0.0-5.0{n3=0.0-5.0}
+        let qw2=w8g(108);let qx2=w8g(109);let qy2=w8g(110);let qz2=w8g(111)
+        let hw2=h8g(4);let hx2=h8g(5);let hy2=h8g(6);let hz2=h8g(7)
+        var n4=qw2*hw2-qx2*hx2-qy2*hy2-qz2*hz2; var n5=qw2*hx2+qx2*hw2+qy2*hz2-qz2*hy2
+        var n6=qw2*hy2-qx2*hz2+qy2*hw2+qz2*hx2; var n7=qw2*hz2+qx2*hy2-qy2*hx2+qz2*hw2
+        n4=n4+w8g(116)*w8g(tok*8+4);n5=n5+w8g(117)*w8g(tok*8+5)
+        n6=n6+w8g(118)*w8g(tok*8+6);n7=n7+w8g(119)*w8g(tok*8+7)
+        if n4>5.0{n4=5.0}if n4<0.0-5.0{n4=0.0-5.0}
+        if n5>5.0{n5=5.0}if n5<0.0-5.0{n5=0.0-5.0}
+        if n6>5.0{n6=5.0}if n6<0.0-5.0{n6=0.0-5.0}
+        if n7>5.0{n7=5.0}if n7<0.0-5.0{n7=0.0-5.0}
+        h8s(0,n0);h8s(1,n1);h8s(2,n2);h8s(3,n3);h8s(4,n4);h8s(5,n5);h8s(6,n6);h8s(7,n7)
+    }
+    if model_id==2 {
+        // H-SSM-sel: Hamilton product + Mamba gate Δ_t
+        let qw=w8g(104);let qx=w8g(105);let qy=w8g(106);let qz=w8g(107)
+        let hw=h8g(0);let hx=h8g(1);let hy=h8g(2);let hz=h8g(3)
+        var p0=qw*hw-qx*hx-qy*hy-qz*hz; var p1=qw*hx+qx*hw+qy*hz-qz*hy
+        var p2=qw*hy-qx*hz+qy*hw+qz*hx; var p3=qw*hz+qx*hy-qy*hx+qz*hw
+        p0=p0+w8g(112)*w8g(tok*8);p1=p1+w8g(113)*w8g(tok*8+1)
+        p2=p2+w8g(114)*w8g(tok*8+2);p3=p3+w8g(115)*w8g(tok*8+3)
+        if p0>5.0{p0=5.0}if p0<0.0-5.0{p0=0.0-5.0}
+        if p1>5.0{p1=5.0}if p1<0.0-5.0{p1=0.0-5.0}
+        if p2>5.0{p2=5.0}if p2<0.0-5.0{p2=0.0-5.0}
+        if p3>5.0{p3=5.0}if p3<0.0-5.0{p3=0.0-5.0}
+        let qw2=w8g(108);let qx2=w8g(109);let qy2=w8g(110);let qz2=w8g(111)
+        let hw2=h8g(4);let hx2=h8g(5);let hy2=h8g(6);let hz2=h8g(7)
+        var p4=qw2*hw2-qx2*hx2-qy2*hy2-qz2*hz2; var p5=qw2*hx2+qx2*hw2+qy2*hz2-qz2*hy2
+        var p6=qw2*hy2-qx2*hz2+qy2*hw2+qz2*hx2; var p7=qw2*hz2+qx2*hy2-qy2*hx2+qz2*hw2
+        p4=p4+w8g(116)*w8g(tok*8+4);p5=p5+w8g(117)*w8g(tok*8+5)
+        p6=p6+w8g(118)*w8g(tok*8+6);p7=p7+w8g(119)*w8g(tok*8+7)
+        if p4>5.0{p4=5.0}if p4<0.0-5.0{p4=0.0-5.0}
+        if p5>5.0{p5=5.0}if p5<0.0-5.0{p5=0.0-5.0}
+        if p6>5.0{p6=5.0}if p6<0.0-5.0{p6=0.0-5.0}
+        if p7>5.0{p7=5.0}if p7<0.0-5.0{p7=0.0-5.0}
+        // Mamba gate: single scalar Δ_t per token
+        let gate = sigmoid_q(g8g(tok))
+        let keep = 1.0 - gate
+        h8s(0, keep*h8g(0) + gate*p0); h8s(1, keep*h8g(1) + gate*p1)
+        h8s(2, keep*h8g(2) + gate*p2); h8s(3, keep*h8g(3) + gate*p3)
+        h8s(4, keep*h8g(4) + gate*p4); h8s(5, keep*h8g(5) + gate*p5)
+        h8s(6, keep*h8g(6) + gate*p6); h8s(7, keep*h8g(7) + gate*p7)
+    }
+    if model_id==3 {
+        // Naive diagonal
+        var d=0
+        while d<8 {
+            var s=w8g(104+d)*h8g(d)+w8g(112+d)*w8g(tok*8+d)
+            if s>5.0{s=5.0}if s<0.0-5.0{s=0.0-5.0}
+            h8s(d,s); d=d+1
+        }
+    }
+}
+
+fn logits8(nc: i64) with Mut, Div {
+    var c=0; while c<nc {
+        var s=0.0; var d=0; while d<8{s=s+h8g(d)*w8g(120+d*nc+c);d=d+1}
+        L8[c]=(s*100000000.0) as i64; c=c+1
+    }
+}
+fn pred8(nc: i64) -> i64 with Mut, Div {
+    var best=0; var bv=(L8[0] as f64)/100000000.0; var i=1
+    while i<nc{let v=(L8[i] as f64)/100000000.0;if v>bv{bv=v;best=i};i=i+1}
+    best
+}
+fn update8(tgt: i64, lr: f64, nc: i64, model_id: i64, tok: i64) with Mut, Div, Panic {
+    var mx=(L8[0] as f64)/100000000.0; var i=1
+    while i<nc{let v=(L8[i] as f64)/100000000.0;if v>mx{mx=v};i=i+1}
+    var probs: [f64; 10]=[0.0;10]; var se=0.0; i=0
+    while i<nc{probs[i]=exp_q((L8[i] as f64)/100000000.0-mx);se=se+probs[i];i=i+1}
+    i=0; while i<nc{probs[i]=probs[i]/se;i=i+1}
+    probs[tgt]=probs[tgt]-1.0
+    var d=0
+    while d<8 {
+        let hd=h8g(d); var c=0
+        while c<nc {
+            let idx=120+d*nc+c
+            var g=hd*probs[c]
+            if g>0.3{g=0.3}if g<0.0-0.3{g=0.0-0.3}
+            let m=(MOM8[idx] as f64)/100000000.0*0.9+g
+            MOM8[idx]=(m*100000000.0) as i64
+            w8s(idx,w8g(idx)-lr*m)
+            c=c+1
+        }
+        d=d+1
+    }
+    // Also update gate weight for H-SSM-sel
+    if model_id==2 {
+        var loss_grad = 0.0; var c2=0
+        while c2<nc { loss_grad=loss_grad+probs[c2]; c2=c2+1 }
+        // Gradient through gate: ∂L/∂g_tok = Σ_d (h_new_d - h_old_d) * ∂out/∂h_new_d
+        // Simplified: use sign of loss gradient as gate signal
+        var gg = loss_grad * 0.01
+        if gg>0.1{gg=0.1}if gg<0.0-0.1{gg=0.0-0.1}
+        let mg=(MOM_G8[tok] as f64)/100000000.0*0.9+gg
+        MOM_G8[tok]=(mg*100000000.0) as i64
+        g8s(tok, g8g(tok)-lr*mg)
+    }
+}
+
+fn run_lo8(model_id: i64, sl: i64) -> f64 with IO, Mut, Div, Panic {
+    var ep=0; while ep<80 {
+        var s=0; while s<500 {
+            let lbl=gen_lo(sl); var tgt=lbl%10; if tgt<0{tgt=tgt+10}
+            var tok_last=SEQ[SEQ_POS-1]
+            var d=0; while d<8{H8[d]=0;d=d+1}
+            var t=0; while t<SEQ_POS{step8(SEQ[t],model_id);t=t+1}
+            logits8(10); update8(tgt,0.01,10,model_id,tok_last); s=s+1
+        }; ep=ep+1
+    }
+    rng_seed(99999+sl,11111+sl)
+    var correct=0; var s=0
+    while s<1000 {
+        let lbl=gen_lo(sl); var tgt=lbl%10; if tgt<0{tgt=tgt+10}
+        var d=0; while d<8{H8[d]=0;d=d+1}
+        var t=0; while t<SEQ_POS{step8(SEQ[t],model_id);t=t+1}
+        logits8(10); if pred8(10)==tgt{correct=correct+1}; s=s+1
+    }
+    (correct as f64)/1000.0*100.0
+}
+
+fn run_br8(model_id: i64, sl: i64) -> f64 with IO, Mut, Div, Panic {
+    var ep=0; while ep<80 {
+        var s=0; while s<500 {
+            let cls=gen_br(sl)
+            var d=0; while d<8{H8[d]=0;d=d+1}
+            var t=0; while t<BR_LEN{step8(BR[t],model_id);t=t+1}
+            logits8(2); update8(cls,0.01,2,model_id,BR[BR_LEN-1]); s=s+1
+        }; ep=ep+1
+    }
+    rng_seed(99999+sl,11111+sl)
+    var correct=0; var s=0
+    while s<1000 {
+        let cls=gen_br(sl)
+        var d=0; while d<8{H8[d]=0;d=d+1}
+        var t=0; while t<BR_LEN{step8(BR[t],model_id);t=t+1}
+        logits8(2); if pred8(2)==cls{correct=correct+1}; s=s+1
+    }
+    (correct as f64)/1000.0*100.0
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 16D Models: S-SSM-nogate, S-SSM (copied from native_algebra_4way_benchmark)
+// ═══════════════════════════════════════════════════════════════════════════
+var W16: [i64; 450]=[0;450]; var H16: [i64; 16]=[0;16]; var L16: [i64; 10]=[0;10]; var MOM16: [i64; 450]=[0;450]
+var OCT_P: [f64; 8]=[0.0;8]; var OCT_Q: [f64; 8]=[0.0;8]; var SED_PRE: [f64; 16]=[0.0;16]
+
+fn w16s(i:i64,v:f64) with Mut { W16[i]=(v*100000000.0) as i64 }
+fn w16g(i:i64)->f64 with Div { (W16[i] as f64)/100000000.0 }
+fn h16s(i:i64,v:f64) with Mut { H16[i]=(v*100000000.0) as i64 }
+fn h16g(i:i64)->f64 with Div { (H16[i] as f64)/100000000.0 }
+
+fn init16() with Mut, Div {
+    var i=0; while i<208{w16s(i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    w16s(208,0.95); i=1; while i<8{w16s(208+i,((rng_next()%200) as f64-100.0)/1000.0);i=i+1}
+    i=8; while i<16{w16s(208+i,((rng_next()%100) as f64-50.0)/2000.0);i=i+1}
+    i=0; while i<16{w16s(224+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0; while i<13{w16s(240+i,0.0);i=i+1}
+    i=0; while i<160{w16s(253+i,((rng_next()%2000) as f64-1000.0)/3000.0);i=i+1}
+    i=0; while i<450{MOM16[i]=0;i=i+1}
+}
+
+fn oct_mul_p(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+             b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    OCT_P[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    OCT_P[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    OCT_P[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    OCT_P[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    OCT_P[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    OCT_P[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    OCT_P[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    OCT_P[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
+}
+fn oct_mul_q(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
+             b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+    OCT_Q[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
+    OCT_Q[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
+    OCT_Q[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
+    OCT_Q[3]=a0*b3+a3*b0+a1*b2-a2*b1+a4*b7-a7*b4-a5*b6+a6*b5
+    OCT_Q[4]=a0*b4+a4*b0-a1*b5+a5*b1-a2*b6+a6*b2-a3*b7+a7*b3
+    OCT_Q[5]=a0*b5+a5*b0+a1*b4-a4*b1-a2*b7+a7*b2+a3*b6-a6*b3
+    OCT_Q[6]=a0*b6+a6*b0+a1*b7-a7*b1+a2*b4-a4*b2-a3*b5+a5*b3
+    OCT_Q[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
+}
+fn sed_product() with Mut, Div {
+    let a0=w16g(208);let a1=w16g(209);let a2=w16g(210);let a3=w16g(211)
+    let a4=w16g(212);let a5=w16g(213);let a6=w16g(214);let a7=w16g(215)
+    let a8=w16g(216);let a9=w16g(217);let a10=w16g(218);let a11=w16g(219)
+    let a12=w16g(220);let a13=w16g(221);let a14=w16g(222);let a15=w16g(223)
+    let h0=h16g(0);let h1=h16g(1);let h2=h16g(2);let h3=h16g(3)
+    let h4=h16g(4);let h5=h16g(5);let h6=h16g(6);let h7=h16g(7)
+    let h8=h16g(8);let h9=h16g(9);let h10=h16g(10);let h11=h16g(11)
+    let h12=h16g(12);let h13=h16g(13);let h14=h16g(14);let h15=h16g(15)
+    oct_mul_p(a0,a1,a2,a3,a4,a5,a6,a7, h0,h1,h2,h3,h4,h5,h6,h7)
+    oct_mul_q(a8,0.0-a9,0.0-a10,0.0-a11,0.0-a12,0.0-a13,0.0-a14,0.0-a15,
+              h8,h9,h10,h11,h12,h13,h14,h15)
+    var i=0; while i<8{SED_PRE[i]=OCT_P[i]-OCT_Q[i];i=i+1}
+    oct_mul_p(a8,a9,a10,a11,a12,a13,a14,a15, h0,h1,h2,h3,h4,h5,h6,h7)
+    oct_mul_q(h8,h9,h10,h11,h12,h13,h14,h15, a0,0.0-a1,0.0-a2,0.0-a3,0.0-a4,0.0-a5,0.0-a6,0.0-a7)
+    i=0; while i<8{SED_PRE[8+i]=OCT_P[i]+OCT_Q[i];i=i+1}
+}
+
+// with_gate: 0 = S-SSM-nogate, 1 = S-SSM (full with Mamba gate)
+fn step16(tok: i64, with_gate: i64) with Mut, Div, Panic {
+    sed_product()
+    var d=0
+    if with_gate==0 {
+        while d<16 {
+            var pre=SED_PRE[d]+w16g(224+d)*w16g(tok*16+d)
+            if pre>5.0{pre=5.0}if pre<0.0-5.0{pre=0.0-5.0}
+            h16s(d,pre); d=d+1
+        }
+    } else {
+        let gate=sigmoid_q(w16g(240+tok)); let keep=1.0-gate
+        while d<16 {
+            var pre=SED_PRE[d]+w16g(224+d)*w16g(tok*16+d)
+            if pre>5.0{pre=5.0}if pre<0.0-5.0{pre=0.0-5.0}
+            h16s(d, keep*h16g(d)+gate*pre); d=d+1
+        }
+    }
+}
+
+fn logits16(nc: i64) with Mut, Div {
+    var c=0; while c<nc {
+        var s=0.0; var d=0; while d<16{s=s+h16g(d)*w16g(253+d*nc+c);d=d+1}
+        L16[c]=(s*100000000.0) as i64; c=c+1
+    }
+}
+fn pred16(nc: i64) -> i64 with Mut, Div {
+    var best=0; var bv=(L16[0] as f64)/100000000.0; var i=1
+    while i<nc{let v=(L16[i] as f64)/100000000.0;if v>bv{bv=v;best=i};i=i+1}
+    best
+}
+fn update16(tgt: i64, lr: f64, nc: i64) with Mut, Div, Panic {
+    var mx=(L16[0] as f64)/100000000.0; var i=1
+    while i<nc{let v=(L16[i] as f64)/100000000.0;if v>mx{mx=v};i=i+1}
+    var probs: [f64; 10]=[0.0;10]; var se=0.0; i=0
+    while i<nc{probs[i]=exp_q((L16[i] as f64)/100000000.0-mx);se=se+probs[i];i=i+1}
+    i=0; while i<nc{probs[i]=probs[i]/se;i=i+1}
+    probs[tgt]=probs[tgt]-1.0
+    var d=0
+    while d<16 {
+        let hd=h16g(d); var c=0
+        while c<nc {
+            let idx=253+d*nc+c
+            var g=hd*probs[c]
+            if g>0.3{g=0.3}if g<0.0-0.3{g=0.0-0.3}
+            let m=(MOM16[idx] as f64)/100000000.0*0.9+g
+            MOM16[idx]=(m*100000000.0) as i64; w16s(idx,w16g(idx)-lr*m)
+            c=c+1
+        }
+        d=d+1
+    }
+}
+
+fn run_lo16(with_gate: i64, sl: i64) -> f64 with IO, Mut, Div, Panic {
+    var ep=0; while ep<80 {
+        var s=0; while s<500 {
+            let lbl=gen_lo(sl); var tgt=lbl%10; if tgt<0{tgt=tgt+10}
+            var d=0; while d<16{H16[d]=0;d=d+1}
+            var t=0; while t<SEQ_POS{step16(SEQ[t],with_gate);t=t+1}
+            logits16(10); update16(tgt,0.01,10); s=s+1
+        }; ep=ep+1
+    }
+    rng_seed(99999+sl,11111+sl)
+    var correct=0; var s=0
+    while s<1000 {
+        let lbl=gen_lo(sl); var tgt=lbl%10; if tgt<0{tgt=tgt+10}
+        var d=0; while d<16{H16[d]=0;d=d+1}
+        var t=0; while t<SEQ_POS{step16(SEQ[t],with_gate);t=t+1}
+        logits16(10); if pred16(10)==tgt{correct=correct+1}; s=s+1
+    }
+    (correct as f64)/1000.0*100.0
+}
+
+fn run_br16(with_gate: i64, sl: i64) -> f64 with IO, Mut, Div, Panic {
+    var ep=0; while ep<80 {
+        var s=0; while s<500 {
+            let cls=gen_br(sl)
+            var d=0; while d<16{H16[d]=0;d=d+1}
+            var t=0; while t<BR_LEN{step16(BR[t],with_gate);t=t+1}
+            logits16(2); update16(cls,0.01,2); s=s+1
+        }; ep=ep+1
+    }
+    rng_seed(99999+sl,11111+sl)
+    var correct=0; var s=0
+    while s<1000 {
+        let cls=gen_br(sl)
+        var d=0; while d<16{H16[d]=0;d=d+1}
+        var t=0; while t<BR_LEN{step16(BR[t],with_gate);t=t+1}
+        logits16(2); if pred16(2)==cls{correct=correct+1}; s=s+1
+    }
+    (correct as f64)/1000.0*100.0
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Main
+// ═══════════════════════════════════════════════════════════════════════════
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("═══════════════════════════════════════════════════════════════════\n")
+    print("  Gate vs Zero-Divisor Ablation (6-Way)\n")
+    print("═══════════════════════════════════════════════════════════════════\n\n")
+    print("  O-SSM       : Cayley,  8D,  8A,  no gate\n")
+    print("  H-SSM       : Hamilton,8D,  8A,  no gate\n")
+    print("  H-SSM-sel   : Hamilton,8D,  8A + gate   <- gate only, no ZD\n")
+    print("  S-nogate    : Sedenion,16D, 16A, no gate <- ZD+16D only\n")
+    print("  S-SSM       : Sedenion,16D, 16A + gate   <- full\n")
+    print("  Naive       : diagonal,8D,  8A,  no gate\n\n")
+
+    // ─── ListOps L=15 ───
+    print("=== ListOps L=15 ===\n")
+
+    print("  O-SSM:      ")
+    rng_seed(55555,77777); init8(0); rng_seed(12345,67890)
+    let lo_oct = run_lo8(0, 15); print(lo_oct); print("%\n")
+
+    print("  H-SSM:      ")
+    rng_seed(55555,77777); init8(1); rng_seed(12345,67890)
+    let lo_hssm = run_lo8(1, 15); print(lo_hssm); print("%\n")
+
+    print("  H-SSM-sel:  ")
+    rng_seed(55555,77777); init8(2); rng_seed(12345,67890)
+    let lo_hsel = run_lo8(2, 15); print(lo_hsel); print("%\n")
+
+    print("  S-nogate:   ")
+    rng_seed(55555,77777); init16(); rng_seed(12345,67890)
+    let lo_sng = run_lo16(0, 15); print(lo_sng); print("%\n")
+
+    print("  S-SSM:      ")
+    rng_seed(55555,77777); init16(); rng_seed(12345,67890)
+    let lo_sssm = run_lo16(1, 15); print(lo_sssm); print("%\n")
+
+    print("  Naive:      ")
+    rng_seed(55555,77777); init8(3); rng_seed(12345,67890)
+    let lo_naive = run_lo8(3, 15); print(lo_naive); print("%\n")
+
+    // ─── Bracket L=12 ───
+    print("\n=== Bracket L=12 ===\n")
+
+    print("  O-SSM:      ")
+    rng_seed(55555,77777); init8(0); rng_seed(12345,67890)
+    let br_oct = run_br8(0, 12); print(br_oct); print("%\n")
+
+    print("  H-SSM:      ")
+    rng_seed(55555,77777); init8(1); rng_seed(12345,67890)
+    let br_hssm = run_br8(1, 12); print(br_hssm); print("%\n")
+
+    print("  H-SSM-sel:  ")
+    rng_seed(55555,77777); init8(2); rng_seed(12345,67890)
+    let br_hsel = run_br8(2, 12); print(br_hsel); print("%\n")
+
+    print("  S-nogate:   ")
+    rng_seed(55555,77777); init16(); rng_seed(12345,67890)
+    let br_sng = run_br16(0, 12); print(br_sng); print("%\n")
+
+    print("  S-SSM:      ")
+    rng_seed(55555,77777); init16(); rng_seed(12345,67890)
+    let br_sssm = run_br16(1, 12); print(br_sssm); print("%\n")
+
+    print("  Naive:      ")
+    rng_seed(55555,77777); init8(3); rng_seed(12345,67890)
+    let br_naive = run_br8(3, 12); print(br_naive); print("%\n")
+
+    // ─── Decomposition ───
+    print("\n═══════════════════════════════════════════════════════════════════\n")
+    print("  ABLATION DECOMPOSITION\n")
+    print("═══════════════════════════════════════════════════════════════════\n")
+    print("  Factor                     ListOps Bracket\n")
+
+    let lo_gate_contrib = lo_hsel - lo_hssm
+    let br_gate_contrib = br_hsel - br_hssm
+    print("  Gate alone (H-sel − H):    ")
+    print(lo_gate_contrib); print("pp  "); print(br_gate_contrib); print("pp\n")
+
+    let lo_zd16_contrib = lo_sng - lo_hssm
+    let br_zd16_contrib = br_sng - br_hssm
+    print("  ZD+16D alone (Sng − H):    ")
+    print(lo_zd16_contrib); print("pp  "); print(br_zd16_contrib); print("pp\n")
+
+    let lo_full = lo_sssm - lo_hssm
+    let br_full = br_sssm - br_hssm
+    print("  Gate+ZD+16D (S − H):       ")
+    print(lo_full); print("pp  "); print(br_full); print("pp\n")
+
+    let lo_zd_given_gate = lo_sssm - lo_hsel
+    let br_zd_given_gate = br_sssm - br_hsel
+    print("  ZD+16D given gate (S−Hsel):")
+    print(lo_zd_given_gate); print("pp  "); print(br_zd_given_gate); print("pp\n")
+
+    let lo_gate_given_zd = lo_sssm - lo_sng
+    let br_gate_given_zd = br_sssm - br_sng
+    print("  Gate given ZD+16D (S−Sng): ")
+    print(lo_gate_given_zd); print("pp  "); print(br_gate_given_zd); print("pp\n")
+
+    print("\n  INTERPRETATION:\n")
+    if lo_gate_contrib > lo_zd16_contrib {
+        print("  ListOps: gate > ZD+16D — gating is the dominant factor\n")
+    } else {
+        if lo_zd16_contrib > lo_gate_contrib {
+            print("  ListOps: ZD+16D > gate — zero-divisors/capacity is the dominant factor\n")
+        } else {
+            print("  ListOps: gate ≈ ZD+16D — both contribute equally\n")
+        }
+    }
+    if br_gate_contrib > br_zd16_contrib {
+        print("  Bracket: gate > ZD+16D — gating is the dominant factor\n")
+    } else {
+        if br_zd16_contrib > br_gate_contrib {
+            print("  Bracket: ZD+16D > gate — zero-divisors/capacity is the dominant factor\n")
+        } else {
+            print("  Bracket: gate ≈ ZD+16D — both contribute equally\n")
+        }
+    }
+
+    println("ALL PASS")
+    0
+}

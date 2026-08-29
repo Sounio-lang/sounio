@@ -1,0 +1,231 @@
+//! stdlib/crypto/csprng.sio — OS-entropy source (genuine CSPRNG input)
+//!
+//! Reads raw entropy from `/dev/urandom` via the compiler's builtin
+//! `read_file`. This is the ONLY randomness source in this repository
+//! suitable for private-key material or other security-sensitive use;
+//! stdlib/crypto/random.sio is a deterministic PRNG, not this.
+//!
+//! Measured behaviour worth recording for future maintainers: `read_file`
+//! returns a packed, NUL-terminated `string`, and `str_len` on this
+//! compiler is a plain byte scan for the first 0x00 (see
+//! self-hosted/native/codegen.sio's emit_builtin_str_len) -- it does NOT
+//! report the real `read()` byte count. Because /dev/urandom output is
+//! uniformly random, roughly 1 byte in 256 is zero, so a single
+//! `read_file("/dev/urandom")` call yields a `str_len` that is effectively
+//! geometrically distributed (mean ~255 bytes over repeated spikes: 157,
+//! 551, 489 were observed), NOT a fixed per-call maximum -- it just means a
+//! call occasionally yields fewer bytes than requested. (An earlier version
+//! of this comment claimed the scan "does not bias the bytes that ARE
+//! returned" -- that claim was FALSE, a conditioning-on-a-stopping-rule
+//! fallacy; see the "CORRECTED CLAIM" paragraph below for the actual
+//! behaviour and the fix.) `crypto_os_random_bytes` therefore
+//! loops, issuing fresh `read_file` calls (each one opens/reads/closes
+//! `/dev/urandom` again, so a short read never re-uses truncated data)
+//! until `n` bytes have been collected.
+//!
+//! One further edge case of the same NUL-scan behaviour: `str_len` returns
+//! exactly 0 whenever a call's very FIRST byte happens to be 0x00 -- this
+//! happens with probability exactly 1/256 (~0.39%) per `read_file` call,
+//! independent of `n`, and does NOT indicate anything is actually wrong
+//! with /dev/urandom. Treating a single zero-length read as a hard failure
+//! would make `crypto_os_random_bytes` spuriously fail on ~1-in-256 calls
+//! even when the OS entropy source is perfectly healthy -- unacceptable for
+//! a function future TLS key-generation code will call live. So a
+//! zero-length read is retried (fresh `read_file` calls are independent;
+//! a repeated leading zero byte is not "more of the same" data, it's a new
+//! coincidence that has to happen again to persist) rather than treated as
+//! fatal. A bounded consecutive-zero-length counter still exists as a
+//! genuine circuit-breaker for a truly broken source (permission denied,
+//! path missing, or a `read_file` that always returns empty) -- see
+//! MAX_CONSECUTIVE_EMPTY_READS below.
+//!
+//! CORRECTED CLAIM (this module previously stated the opposite here, which
+//! was a conditioning-on-a-stopping-rule fallacy -- caught and fixed
+//! 2026-08-25): the NUL scan DOES bias the bytes it returns, if you only
+//! ever copy the bytes strictly BEFORE the terminating zero. "The scan
+//! stopped at position N" is conditioning information -- it happened
+//! specifically BECAUSE byte N is 0x00. Every byte in `s[0..N)` is
+//! therefore drawn from the sub-population "bytes that precede a zero",
+//! which is NOT the same distribution as a uniformly random byte: it can
+//! never itself be 0x00. Measured directly: drawing 8192 bytes via the
+//! pre-fix `crypto_os_random_bytes` produced ZERO 0x00 bytes, versus an
+//! expected ~32 from a genuinely uniform source (P(this by chance) ~=
+//! 1.3e-14). The byte at `s[N]` -- one past everything currently copied --
+//! IS itself real, freshly-read `/dev/urandom` data (that's precisely why
+//! the scan stopped there: it found a real embedded zero), so
+//! `crypto_os_random_bytes` below also copies that one extra byte whenever
+//! it is safely known to be genuine and there is still room for it -- see
+//! `max_trusted_terminator_position()`.
+//!
+//! Trusting `s[N]` unconditionally would be wrong in one specific case:
+//! Madaros's native 1-arg `read_file(path) -> string`
+//! (`self-hosted/native/codegen_x86_linux.sio::emit_builtin_read_file`)
+//! backs the returned string with a freshly anonymous-mmap'd buffer (>=
+//! ~1 MiB, zero-filled by the kernel) and does exactly ONE `read()`
+//! syscall into it. If that single `read()` ever returned fewer bytes than
+//! requested (a "short read"), everything from the actual end of the real
+//! data onward would still be the mmap's own virgin zero-fill -- not
+//! `/dev/urandom` output. In that scenario, if `str_len` happened to find
+//! no genuine embedded zero within the short-read region, its scan would
+//! run off the end of real data and report the *first zero-fill byte* as
+//! `N` -- a synthetic zero, not entropy. Appending that byte would inject
+//! deterministic (non-random) data into the CSPRNG output, silently.
+//! `crypto_os_random_bytes` cannot see the underlying syscall's actual
+//! `bytes_read` count (the 1-arg `read_file` API does not expose it), so
+//! it cannot distinguish these two cases directly. Instead it uses a
+//! probabilistic ceiling: for `N` below `max_trusted_terminator_position()`
+//! (64 KiB), the probability that a truly random byte stream of that
+//! length contains NO embedded zero is `(255/256)^65536 ~= 1.7e-111` --
+//! indistinguishable from impossible -- so any `N` that small is
+//! overwhelmingly certain to be a genuine embedded zero, never the
+//! zero-fill boundary of an anomalous short read. (Linux itself does not
+//! short-read `/dev/urandom` for a single-syscall request of this size
+//! absent a delivered signal -- the kernel loops internally until the
+//! request is filled -- so this ceiling is not expected to ever bind in
+//! practice; it exists purely as defense-in-depth, per this project's
+//! "don't blindly trust, verify" discipline.) Measured over 20,000
+//! `read_file("/dev/urandom")` calls: max observed `str_len` was small and
+//! nowhere near either the 64 KiB ceiling or the underlying ~1 MiB buffer
+//! capacity, consistent with every read being a full, single-syscall read
+//! (see `docs/superpowers/sdd/2026-08-25-madaros-x25519-plan/final-review-fix-report.md`
+//! for the raw measurement). If `N` is ever at or above the ceiling, the
+//! extra byte is simply not appended for that call -- functionally
+//! identical to the pre-fix behaviour for that one read, and never
+//! expected to trigger.
+//!
+//! RESIDUAL BIAS (found in independent re-review, 2026-08-25; not fixed
+//! here, documented for honesty): the fix above closes the catastrophic
+//! case -- pre-fix, `crypto_os_random_bytes` was structurally INCAPABLE of
+//! ever returning a 0x00 byte at all, at any position, in any draw. It no
+//! longer is: the genuine terminator zero byte is now copied whenever it
+//! is safely trusted (see above). But a smaller, real, structural bias
+//! remains, and this comment previously implied the output was now fully
+//! unbiased -- it is not. The `available <= 0` branch is taken whenever a
+//! single `read_file("/dev/urandom")` call's very FIRST byte happens to be
+//! a genuine 0x00; when that happens, this function does not use that
+//! real entropy byte, it discards the whole read and retries with a fresh
+//! `read_file` call. Consequence: byte 0 of every `crypto_os_random_bytes`
+//! draw can deterministically NEVER be 0x00 -- not merely improbable, but
+//! structurally excluded by this retry logic. That deficit then compounds
+//! across the rest of a draw, because each subsequent byte's probability
+//! of being a *fresh* draw's leading byte (and thus also excluded) is
+//! small but nonzero via the same mechanism at internal `read_file`
+//! restart points. For a 32-byte draw (the size `crypto_os_random_key32`
+//! below actually consumes), the expected fraction of zero bytes across
+//! the draw is `1 - (255/256)^31 ~= 0.1143` per byte on average versus the
+//! true uniform expectation `1/256 ~= 0.125` -- about 8.6% low. The
+//! deficit is worst at the START of a draw and shrinks for longer draws,
+//! asymptotically approaching only a ~0.39% deficit (an effective
+//! zero-rate of `1/257` instead of `1/256`) for very long draws -- but
+//! this module's actual callers only ever draw fixed 32-byte keys, so
+//! "the start of the draw" IS the entire key for every real caller today.
+//! Independently assessed security impact: small, well under 0.1 bit of
+//! Shannon-entropy loss on a 256-bit key -- real, but not remotely
+//! catastrophic, and NOT something that needs a code fix right now. Noted
+//! here purely so this doc comment stops overclaiming "fixed" as "fully
+//! unbiased".
+//!
+//! The actual root cause of this residual is structural, not a logic
+//! error: this module has no way to distinguish "the `read_file` call
+//! returned fewer bytes than requested because the OS genuinely gave us
+//! less" from "`str_len`'s NUL-scan happened to hit a real embedded zero
+//! at some position" -- both look identical from the outside, since
+//! `str_len` on this compiler is a NUL-byte scan, not a true byte-count
+//! (see the top of this module doc). A proper fix would need a
+//! `read_file` variant (or an equivalent Madaros builtin) that exposes the
+//! TRUE number of bytes the underlying `read()` syscall actually returned,
+//! instead of reconstructing a length by NUL-scanning the result. That is
+//! a separate, future compiler/stdlib primitive enhancement -- out of
+//! scope for this module to implement on its own.
+
+use net::socket::*
+
+// Bound on CONSECUTIVE zero-length `read_file("/dev/urandom")` results
+// before giving up. A single zero-length result is expected background
+// noise (see module doc above, ~1/256 per call) and must not fail the
+// whole function. Ten in a row from a genuinely healthy source has
+// probability (1/256)^10 ~= 1.7e-24 -- indistinguishable from zero -- so
+// hitting this bound is strong evidence of a truly broken source (missing
+// device file, permission denied, etc.), not bad luck. The counter resets
+// to 0 on any read that returns available > 0, since only CONSECUTIVE
+// failures are evidence of a broken source.
+fn max_consecutive_empty_reads() -> i64 { 10 }
+
+// Ceiling below which a `str_len`-reported NUL position is trusted as a
+// genuine embedded `/dev/urandom` zero byte rather than a possible
+// anonymous-mmap zero-fill artifact from an anomalous short `read_file`
+// syscall -- see the module doc above ("Trusting `s[N]` unconditionally
+// ...") for the full derivation. `(255/256)^65536 ~= 1.7e-111`: a truly
+// random byte stream this long containing NO zero is not a real
+// possibility, so any `N` below this bound is certain (for all practical
+// purposes) to be a genuine embedded zero. Measured empirically over
+// 20,000 `read_file("/dev/urandom")` calls: max observed str_len was 2527,
+// nowhere near this ceiling -- see the fix report referenced above.
+fn max_trusted_terminator_position() -> i64 { 65536 }
+
+// Returns (buf, true) with `n` bytes of real OS entropy in `buf[0..n]`,
+// or (buf, false) only if `/dev/urandom` produces a zero-length
+// `read_file` result max_consecutive_empty_reads() times in a row (a
+// genuine circuit-breaker for a broken entropy source -- see module doc).
+// A single incidental zero-length read (the ~1/256 leading-zero-byte
+// coincidence) is retried, not treated as failure.
+pub fn crypto_os_random_bytes(n: i64) -> (RawBuf, bool) with IO {
+    let out = rawbuf_new(n + 8)
+    var filled: i64 = 0
+    var consecutive_empty: i64 = 0
+    while filled < n {
+        let s = read_file("/dev/urandom")
+        let available = str_len(s)
+        if available <= 0 {
+            consecutive_empty = consecutive_empty + 1
+            if consecutive_empty >= max_consecutive_empty_reads() {
+                return (out, false)
+            }
+        } else {
+            consecutive_empty = 0
+            var to_copy = available
+            if filled + to_copy > n {
+                to_copy = n - filled
+            }
+            var i: i64 = 0
+            while i < to_copy {
+                rawbuf_set(&out, filled + i, str_char_at(s, i) as i64)
+                i = i + 1
+            }
+            filled = filled + to_copy
+            // Also copy the genuine terminating zero byte at s[available] --
+            // see module doc. Only if the caller's buffer still has room
+            // (to_copy was NOT truncated to satisfy `n`, i.e. we consumed
+            // the whole `available`-byte prefix) AND `available` is small
+            // enough to trust as a real embedded zero rather than a
+            // possible short-read zero-fill artifact.
+            if to_copy == available && filled < n && available < max_trusted_terminator_position() {
+                rawbuf_set(&out, filled, 0)
+                filled = filled + 1
+            }
+        }
+    }
+    (out, true)
+}
+
+// Convenience wrapper: draws 32 bytes of real OS entropy and hands them
+// back as a fixed-size array instead of a `RawBuf`, doing the
+// `RawBuf` -> `[u8; 32]` extraction loop internally. Every future caller
+// (TLS key generation, X25519 private-key material, etc.) needs exactly
+// this conversion; centralising it once here avoids re-deriving the same
+// small `while i < 32 { arr[i] = rawbuf_get(&buf, i) as u8 }`-shaped
+// boilerplate at each call site, where it is easy to get subtly wrong
+// (off-by-one, wrong cast, forgetting to check `ok`).
+pub fn crypto_os_random_key32() -> ([u8; 32], bool) with IO {
+    let (buf, ok) = crypto_os_random_bytes(32)
+    var key: [u8; 32] = [0; 32]
+    if !ok {
+        return (key, false)
+    }
+    var i: i64 = 0
+    while i < 32 {
+        key[i as usize] = rawbuf_get(&buf, i) as u8
+        i = i + 1
+    }
+    (key, true)
+}

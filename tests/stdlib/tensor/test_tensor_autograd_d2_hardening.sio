@@ -1,0 +1,165 @@
+//@ run-pass
+//@ expect-stdout: D2_HARDENED_GENERAL_SHAPES_PASS
+
+use tensor::types::{
+    Tensor,
+    shape1, shape2,
+    tensor_get, tensor_set,
+}
+use tensor::ops::{
+    tensor_zeros, tensor_free,
+    tensor_matmul, tensor_sum,
+    tensor_tanh, tensor_sigmoid, tensor_relu,
+}
+use tensor::tape::{
+    tape_begin, tape_drop, tape_leaf, tape_backward,
+    tape_tensor_matmul, tape_tensor_add, tape_tensor_sum,
+    tape_tensor_tanh, tape_tensor_sigmoid, tape_tensor_relu,
+    tape_grad_at, tape_value_at,
+}
+
+fn h_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn assert_close_abs(a: f64, b: f64, tol: f64) with Panic {
+    assert(h_abs(a - b) <= tol)
+}
+
+fn fill_matrix(t: &!Tensor) with Mut, Panic {
+    var i: usize = 0 as usize
+    while i < t.shape.len {
+        let v = ((i + 3 as usize) as f64) * 0.071 - 0.23
+        tensor_set(t, i, v)
+        i = i + 1 as usize
+    }
+}
+
+fn matmul_sum_loss(w: &Tensor, x: &Tensor) -> f64 with Alloc, Mut, Panic, Div {
+    var y = tensor_matmul(w, x)
+    var s = tensor_sum(&y, None, false)
+    let out = tensor_get(&s, 0 as usize)
+    tensor_free(&!y)
+    tensor_free(&!s)
+    out
+}
+
+fn fd_matmul_w(w: &!Tensor, x: &Tensor, idx: usize, eps: f64) -> f64 with Alloc, Mut, Panic, Div {
+    let saved = tensor_get(w, idx)
+    tensor_set(w, idx, saved + eps)
+    let plus = matmul_sum_loss(w, x)
+    tensor_set(w, idx, saved - eps)
+    let minus = matmul_sum_loss(w, x)
+    tensor_set(w, idx, saved)
+    (plus - minus) / (2.0 * eps)
+}
+
+fn fd_matmul_x(w: &Tensor, x: &!Tensor, idx: usize, eps: f64) -> f64 with Alloc, Mut, Panic, Div {
+    let saved = tensor_get(x, idx)
+    tensor_set(x, idx, saved + eps)
+    let plus = matmul_sum_loss(w, x)
+    tensor_set(x, idx, saved - eps)
+    let minus = matmul_sum_loss(w, x)
+    tensor_set(x, idx, saved)
+    (plus - minus) / (2.0 * eps)
+}
+
+fn check_matmul_shape(m: usize, k: usize, n: usize) with Alloc, Mut, Panic, Div {
+    var w = tensor_zeros(shape2(m, k))
+    var x = tensor_zeros(shape2(k, n))
+    fill_matrix(&!w)
+    fill_matrix(&!x)
+
+    var tape = tape_begin()
+    let wid = tape_leaf(&!tape, &w, true)
+    let xid = tape_leaf(&!tape, &x, true)
+    let out = tape_tensor_matmul(&!tape, wid, xid)
+    let loss = tape_tensor_sum(&!tape, out, None, false)
+    tape_backward(&!tape, loss)
+    assert_close_abs(tape_value_at(&tape, loss, 0 as usize), matmul_sum_loss(&w, &x), 1.0e-10)
+
+    let eps = 1.0e-6
+    var i: usize = 0 as usize
+    while i < w.shape.len {
+        assert_close_abs(tape_grad_at(&tape, wid, i), fd_matmul_w(&!w, &x, i, eps), 1.0e-6)
+        i = i + 1 as usize
+    }
+    i = 0 as usize
+    while i < x.shape.len {
+        assert_close_abs(tape_grad_at(&tape, xid, i), fd_matmul_x(&w, &!x, i, eps), 1.0e-6)
+        i = i + 1 as usize
+    }
+
+    tape_drop(&!tape)
+    tensor_free(&!w)
+    tensor_free(&!x)
+}
+
+fn unary_sum_loss(x: &Tensor, op: i32) -> f64 with Alloc, Mut, Panic, Div {
+    var y = if op == 0 { tensor_tanh(x) } else if op == 1 { tensor_sigmoid(x) } else { tensor_relu(x) }
+    var s = tensor_sum(&y, None, false)
+    let out = tensor_get(&s, 0 as usize)
+    tensor_free(&!y)
+    tensor_free(&!s)
+    out
+}
+
+fn fd_unary(x: &!Tensor, idx: usize, op: i32, eps: f64) -> f64 with Alloc, Mut, Panic, Div {
+    let saved = tensor_get(x, idx)
+    tensor_set(x, idx, saved + eps)
+    let plus = unary_sum_loss(x, op)
+    tensor_set(x, idx, saved - eps)
+    let minus = unary_sum_loss(x, op)
+    tensor_set(x, idx, saved)
+    (plus - minus) / (2.0 * eps)
+}
+
+fn check_unary(op: i32) with Alloc, Mut, Panic, Div {
+    var x = tensor_zeros(shape1(5 as usize))
+    tensor_set(&!x, 0 as usize, 0.5)
+    tensor_set(&!x, 1 as usize, 0.0 - 0.3)
+    tensor_set(&!x, 2 as usize, 1.2)
+    if op == 2 {
+        tensor_set(&!x, 3 as usize, 0.0)
+    } else {
+        tensor_set(&!x, 3 as usize, 2.0)
+    }
+    tensor_set(&!x, 4 as usize, 0.0 - 1.5)
+    var tape = tape_begin()
+    let xid = tape_leaf(&!tape, &x, true)
+    var yid = xid
+    if op == 0 {
+        yid = tape_tensor_tanh(&!tape, xid)
+    } else if op == 1 {
+        yid = tape_tensor_sigmoid(&!tape, xid)
+    } else {
+        yid = tape_tensor_relu(&!tape, xid)
+    }
+    let loss = tape_tensor_sum(&!tape, yid, None, false)
+    tape_backward(&!tape, loss)
+    let eps = 1.0e-6
+    var i: usize = 0 as usize
+    while i < x.shape.len {
+        if op == 2 && i == 3 as usize {
+            let g0 = tape_grad_at(&tape, xid, i)
+            assert(g0 == 0.0 || h_abs(g0 - 0.5) <= 1.0e-6)
+        } else {
+            assert_close_abs(tape_grad_at(&tape, xid, i), fd_unary(&!x, i, op, eps), 1.0e-6)
+        }
+        i = i + 1 as usize
+    }
+    tape_drop(&!tape)
+    tensor_free(&!x)
+}
+
+fn main() -> i32 with Alloc, IO, Mut, Panic, Div {
+    check_matmul_shape(3 as usize, 4 as usize, 1 as usize)
+    check_matmul_shape(8 as usize, 6 as usize, 1 as usize)
+    check_matmul_shape(4 as usize, 4 as usize, 4 as usize)
+    check_matmul_shape(1 as usize, 5 as usize, 3 as usize)
+    check_unary(0)
+    check_unary(1)
+    check_unary(2)
+    println("D2_HARDENED_GENERAL_SHAPES_PASS")
+    0
+}

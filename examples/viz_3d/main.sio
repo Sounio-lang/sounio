@@ -1,0 +1,403 @@
+// examples/viz_3d/main.sio — Rotating 3D tetrahedron with Phong shading
+//
+// Renders a colour tetrahedron spinning in real time using the
+// stdlib/render/renderer3d.sio software rasterizer.
+// Press ESC or close the window to exit.
+
+use display::window::{Window, window_open, window_set_title, window_present, window_pending,
+                       window_next_event, window_close}
+use display::canvas::{Canvas, canvas_from_window, canvas_clear}
+use display::canvas_ext::{canvas_draw_line_aa}
+use display::event::{EV_CLOSE, EV_KEY_PRESS}
+use render::renderer3d::{Camera3D, Light3D, Vec3f, FogParams,
+                          r3d_depth_buf_alloc, r3d_depth_buf_clear,
+                          r3d_project, r3d_rasterize_tri_phong,
+                          r3d_rasterize_tri_cel, r3d_rasterize_tri_pbr,
+                          r3d_normalise}
+
+// ============================================================
+// Rotation helpers (Y and X axis)
+// ============================================================
+
+// Taylor series accurate on [0, π/2]; combined with quadrant reduction below.
+fn trig_core_cos(t: f64) -> f64 with Div {
+    let t2 = t * t
+    1.0 - t2 * (0.5 - t2 * (1.0 / 24.0 - t2 * (1.0 / 720.0 - t2 / 40320.0)))
+}
+fn trig_core_sin(t: f64) -> f64 with Div {
+    let t2 = t * t
+    t * (1.0 - t2 * (1.0 / 6.0 - t2 * (1.0 / 120.0 - t2 * (1.0 / 5040.0 - t2 / 362880.0))))
+}
+
+fn rot_cos(t: f64) -> f64 with Mut, Div {
+    let half_pi: f64 = 1.57079632679490
+    let pi: f64 = 3.14159265358979
+    let two_pi: f64 = 6.28318530717958
+    var a: f64 = t
+    if a > two_pi { a = a - two_pi }
+    if a < 0.0 { a = a + two_pi }
+    if a <= half_pi {
+        trig_core_cos(a)
+    } else if a <= pi {
+        0.0 - trig_core_cos(pi - a)
+    } else if a <= pi + half_pi {
+        0.0 - trig_core_cos(a - pi)
+    } else {
+        trig_core_cos(two_pi - a)
+    }
+}
+
+fn rot_sin(t: f64) -> f64 with Mut, Div {
+    let half_pi: f64 = 1.57079632679490
+    let pi: f64 = 3.14159265358979
+    let two_pi: f64 = 6.28318530717958
+    var a: f64 = t
+    if a > two_pi { a = a - two_pi }
+    if a < 0.0 { a = a + two_pi }
+    if a <= half_pi {
+        trig_core_sin(a)
+    } else if a <= pi {
+        trig_core_sin(pi - a)
+    } else if a <= pi + half_pi {
+        0.0 - trig_core_sin(a - pi)
+    } else {
+        0.0 - trig_core_sin(two_pi - a)
+    }
+}
+
+fn rotate_y(x: f64, y: f64, z: f64, angle: f64, out: &!Vec3f) with Mut, Div {
+    let c = rot_cos(angle)
+    let s = rot_sin(angle)
+    out.x = x * c + z * s
+    out.y = y
+    out.z = 0.0 - x * s + z * c
+}
+
+fn rotate_x(x: f64, y: f64, z: f64, angle: f64, out: &!Vec3f) with Mut, Div {
+    let c = rot_cos(angle)
+    let s = rot_sin(angle)
+    out.x = x
+    out.y = y * c - z * s
+    out.z = y * s + z * c
+}
+
+// Cross product → face normal
+fn cross_norm(
+    ax: f64, ay: f64, az: f64,
+    bx: f64, by: f64, bz: f64,
+) -> Vec3f with Mut, Div {
+    let nx = ay * bz - az * by
+    let ny = az * bx - ax * bz
+    let nz = ax * by - ay * bx
+    r3d_normalise(nx, ny, nz)
+}
+
+// ============================================================
+// Tetrahedron geometry
+// ============================================================
+//
+// 4 vertices in model space; 4 triangular faces.
+// Vertices (regular tetrahedron inscribed in unit sphere):
+//   A = ( 0,  1,  0)
+//   B = ( √(8/9),  -1/3,  0)
+//   C = (-√(2/9), -1/3,  √(2/3))
+//   D = (-√(2/9), -1/3, -√(2/3))
+//
+// Vertex normals = normalised average of 3 adjacent face normals.
+// Combined with per-face base colours and r3d_shade, this gives Gouraud
+// shading: smooth gradients + Blinn-Phong specular that travels around.
+
+// Cel-shaded tetrahedron: same geometry as Phong but with flat bands + silhouette ring.
+fn tet_draw_cel(
+    angle_y: f64, angle_x: f64,
+    cam: &Camera3D, light: &Light3D,
+    depth_buf: *mut i64, c: &!Canvas,
+) with Mut, Div {
+    let ax: f64 = 0.0;       let ay: f64 = 1.0;             let az: f64 = 0.0
+    let bx: f64 = 0.942809;  let by: f64 = 0.0 - 0.333333;  let bz: f64 = 0.0
+    let cx: f64 = 0.0 - 0.471405; let cy: f64 = 0.0 - 0.333333; let cz: f64 = 0.816497
+    let dx: f64 = 0.0 - 0.471405; let dy: f64 = 0.0 - 0.333333; let dz: f64 = 0.0 - 0.816497
+
+    var ra = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    var rb = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    var rc = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    var rd = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    var tmp = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+
+    rotate_y(ax, ay, az, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!ra)
+    rotate_y(bx, by, bz, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!rb)
+    rotate_y(cx, cy, cz, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!rc)
+    rotate_y(dx, dy, dz, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!rd)
+
+    let scale: f64 = 2.0
+    let tz: f64 = 5.0
+    let va_x = ra.x * scale; let va_y = ra.y * scale; let va_z = ra.z * scale + tz
+    let vb_x = rb.x * scale; let vb_y = rb.y * scale; let vb_z = rb.z * scale + tz
+    let vc_x = rc.x * scale; let vc_y = rc.y * scale; let vc_z = rc.z * scale + tz
+    let vd_x = rd.x * scale; let vd_y = rd.y * scale; let vd_z = rd.z * scale + tz
+
+    let n0 = cross_norm(vc_x - va_x, vc_y - va_y, vc_z - va_z,
+                        vb_x - va_x, vb_y - va_y, vb_z - va_z)
+    let n1 = cross_norm(vb_x - va_x, vb_y - va_y, vb_z - va_z,
+                        vd_x - va_x, vd_y - va_y, vd_z - va_z)
+    let n2 = cross_norm(vd_x - va_x, vd_y - va_y, vd_z - va_z,
+                        vc_x - va_x, vc_y - va_y, vc_z - va_z)
+    let n3 = cross_norm(vc_x - vb_x, vc_y - vb_y, vc_z - vb_z,
+                        vd_x - vb_x, vd_y - vb_y, vd_z - vb_z)
+
+    let vna = r3d_normalise(n0.x+n1.x+n2.x, n0.y+n1.y+n2.y, n0.z+n1.z+n2.z)
+    let vnb = r3d_normalise(n0.x+n1.x+n3.x, n0.y+n1.y+n3.y, n0.z+n1.z+n3.z)
+    let vnc = r3d_normalise(n0.x+n2.x+n3.x, n0.y+n2.y+n3.y, n0.z+n2.z+n3.z)
+    let vnd = r3d_normalise(n1.x+n2.x+n3.x, n1.y+n2.y+n3.y, n1.z+n2.z+n3.z)
+
+    let pa = r3d_project(va_x, va_y, va_z, cam, c.width, c.height)
+    let pb = r3d_project(vb_x, vb_y, vb_z, cam, c.width, c.height)
+    let pc = r3d_project(vc_x, vc_y, vc_z, cam, c.width, c.height)
+    let pd = r3d_project(vd_x, vd_y, vd_z, cam, c.width, c.height)
+
+    // Face 0: A-B-C (red 220,80,60)
+    r3d_rasterize_tri_cel(
+        pa.x as i64, pa.y as i64, pb.x as i64, pb.y as i64, pc.x as i64, pc.y as i64,
+        pa.z, pb.z, pc.z, vna, vnb, vnc, 220, 80, 60, light, depth_buf, c)
+    // Face 1: A-B-D (green 80,200,120)
+    r3d_rasterize_tri_cel(
+        pa.x as i64, pa.y as i64, pb.x as i64, pb.y as i64, pd.x as i64, pd.y as i64,
+        pa.z, pb.z, pd.z, vna, vnb, vnd, 80, 200, 120, light, depth_buf, c)
+    // Face 2: A-C-D (blue 80,140,255)
+    r3d_rasterize_tri_cel(
+        pa.x as i64, pa.y as i64, pc.x as i64, pc.y as i64, pd.x as i64, pd.y as i64,
+        pa.z, pc.z, pd.z, vna, vnc, vnd, 80, 140, 255, light, depth_buf, c)
+    // Face 3: B-C-D (yellow 255,220,60)
+    r3d_rasterize_tri_cel(
+        pb.x as i64, pb.y as i64, pc.x as i64, pc.y as i64, pd.x as i64, pd.y as i64,
+        pb.z, pc.z, pd.z, vnb, vnc, vnd, 255, 220, 60, light, depth_buf, c)
+}
+
+// PBR (Cook-Torrance GGX) tetrahedron — glossy plastic, roughness=0.28.
+// Strong GGX specular highlights travel sharply across each face.
+fn tet_draw_pbr(
+    angle_y: f64, angle_x: f64,
+    cam: &Camera3D, light: &Light3D,
+    depth_buf: *mut i64, c: &!Canvas,
+) with Mut, Div {
+    let ax: f64 = 0.0;       let ay: f64 = 1.0;             let az: f64 = 0.0
+    let bx: f64 = 0.942809;  let by: f64 = 0.0 - 0.333333;  let bz: f64 = 0.0
+    let cx: f64 = 0.0 - 0.471405; let cy: f64 = 0.0 - 0.333333; let cz: f64 = 0.816497
+    let dx: f64 = 0.0 - 0.471405; let dy: f64 = 0.0 - 0.333333; let dz: f64 = 0.0 - 0.816497
+
+    var ra = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    var rb = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    var rc = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    var rd = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    var tmp = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+
+    rotate_y(ax, ay, az, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!ra)
+    rotate_y(bx, by, bz, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!rb)
+    rotate_y(cx, cy, cz, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!rc)
+    rotate_y(dx, dy, dz, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!rd)
+
+    let scale: f64 = 2.0
+    let tz: f64 = 5.0
+    let va_x = ra.x * scale; let va_y = ra.y * scale; let va_z = ra.z * scale + tz
+    let vb_x = rb.x * scale; let vb_y = rb.y * scale; let vb_z = rb.z * scale + tz
+    let vc_x = rc.x * scale; let vc_y = rc.y * scale; let vc_z = rc.z * scale + tz
+    let vd_x = rd.x * scale; let vd_y = rd.y * scale; let vd_z = rd.z * scale + tz
+
+    let n0 = cross_norm(vc_x - va_x, vc_y - va_y, vc_z - va_z,
+                        vb_x - va_x, vb_y - va_y, vb_z - va_z)
+    let n1 = cross_norm(vb_x - va_x, vb_y - va_y, vb_z - va_z,
+                        vd_x - va_x, vd_y - va_y, vd_z - va_z)
+    let n2 = cross_norm(vd_x - va_x, vd_y - va_y, vd_z - va_z,
+                        vc_x - va_x, vc_y - va_y, vc_z - va_z)
+    let n3 = cross_norm(vc_x - vb_x, vc_y - vb_y, vc_z - vb_z,
+                        vd_x - vb_x, vd_y - vb_y, vd_z - vb_z)
+
+    let vna = r3d_normalise(n0.x+n1.x+n2.x, n0.y+n1.y+n2.y, n0.z+n1.z+n2.z)
+    let vnb = r3d_normalise(n0.x+n1.x+n3.x, n0.y+n1.y+n3.y, n0.z+n1.z+n3.z)
+    let vnc = r3d_normalise(n0.x+n2.x+n3.x, n0.y+n2.y+n3.y, n0.z+n2.z+n3.z)
+    let vnd = r3d_normalise(n1.x+n2.x+n3.x, n1.y+n2.y+n3.y, n1.z+n2.z+n3.z)
+
+    let pa = r3d_project(va_x, va_y, va_z, cam, c.width, c.height)
+    let pb = r3d_project(vb_x, vb_y, vb_z, cam, c.width, c.height)
+    let pc = r3d_project(vc_x, vc_y, vc_z, cam, c.width, c.height)
+    let pd = r3d_project(vd_x, vd_y, vd_z, cam, c.width, c.height)
+
+    let fog = FogParams { near: 12.0, far: 35.0, r: 18, g: 20, b: 30 }
+    let roughness: f64 = 0.28
+
+    r3d_rasterize_tri_pbr(
+        pa.x as i64, pa.y as i64, pb.x as i64, pb.y as i64, pc.x as i64, pc.y as i64,
+        pa.z, pb.z, pc.z, vna, vnb, vnc, 220, 80, 60, roughness, &fog, light, depth_buf, c)
+    r3d_rasterize_tri_pbr(
+        pa.x as i64, pa.y as i64, pb.x as i64, pb.y as i64, pd.x as i64, pd.y as i64,
+        pa.z, pb.z, pd.z, vna, vnb, vnd, 80, 200, 120, roughness, &fog, light, depth_buf, c)
+    r3d_rasterize_tri_pbr(
+        pa.x as i64, pa.y as i64, pc.x as i64, pc.y as i64, pd.x as i64, pd.y as i64,
+        pa.z, pc.z, pd.z, vna, vnc, vnd, 80, 140, 255, roughness, &fog, light, depth_buf, c)
+    r3d_rasterize_tri_pbr(
+        pb.x as i64, pb.y as i64, pc.x as i64, pc.y as i64, pd.x as i64, pd.y as i64,
+        pb.z, pc.z, pd.z, vnb, vnc, vnd, 255, 220, 60, roughness, &fog, light, depth_buf, c)
+}
+
+fn tet_draw_gouraud(
+    angle_y: f64, angle_x: f64,
+    cam: &Camera3D, light: &Light3D,
+    depth_buf: *mut i64, c: &!Canvas,
+) with Mut, Div {
+    let ax: f64 = 0.0;       let ay: f64 = 1.0;             let az: f64 = 0.0
+    let bx: f64 = 0.942809;  let by: f64 = 0.0 - 0.333333;  let bz: f64 = 0.0
+    let cx: f64 = 0.0 - 0.471405; let cy: f64 = 0.0 - 0.333333; let cz: f64 = 0.816497
+    let dx: f64 = 0.0 - 0.471405; let dy: f64 = 0.0 - 0.333333; let dz: f64 = 0.0 - 0.816497
+
+    var ra = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    var rb = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    var rc = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    var rd = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+    var tmp = Vec3f { x: 0.0, y: 0.0, z: 0.0 }
+
+    rotate_y(ax, ay, az, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!ra)
+    rotate_y(bx, by, bz, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!rb)
+    rotate_y(cx, cy, cz, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!rc)
+    rotate_y(dx, dy, dz, angle_y, &!tmp)
+    rotate_x(tmp.x, tmp.y, tmp.z, angle_x, &!rd)
+
+    let scale: f64 = 2.0
+    let tz: f64 = 5.0
+    let va_x = ra.x * scale; let va_y = ra.y * scale; let va_z = ra.z * scale + tz
+    let vb_x = rb.x * scale; let vb_y = rb.y * scale; let vb_z = rb.z * scale + tz
+    let vc_x = rc.x * scale; let vc_y = rc.y * scale; let vc_z = rc.z * scale + tz
+    let vd_x = rd.x * scale; let vd_y = rd.y * scale; let vd_z = rd.z * scale + tz
+
+    // Face normals (outward)
+    // Face 0: A-B-C  Face 1: A-B-D  Face 2: A-C-D  Face 3: B-C-D
+    let n0 = cross_norm(vc_x - va_x, vc_y - va_y, vc_z - va_z,
+                        vb_x - va_x, vb_y - va_y, vb_z - va_z)
+    let n1 = cross_norm(vb_x - va_x, vb_y - va_y, vb_z - va_z,
+                        vd_x - va_x, vd_y - va_y, vd_z - va_z)
+    let n2 = cross_norm(vd_x - va_x, vd_y - va_y, vd_z - va_z,
+                        vc_x - va_x, vc_y - va_y, vc_z - va_z)
+    let n3 = cross_norm(vc_x - vb_x, vc_y - vb_y, vc_z - vb_z,
+                        vd_x - vb_x, vd_y - vb_y, vd_z - vb_z)
+
+    // Vertex normals: A∈{0,1,2}  B∈{0,1,3}  C∈{0,2,3}  D∈{1,2,3}
+    let vna = r3d_normalise(n0.x+n1.x+n2.x, n0.y+n1.y+n2.y, n0.z+n1.z+n2.z)
+    let vnb = r3d_normalise(n0.x+n1.x+n3.x, n0.y+n1.y+n3.y, n0.z+n1.z+n3.z)
+    let vnc = r3d_normalise(n0.x+n2.x+n3.x, n0.y+n2.y+n3.y, n0.z+n2.z+n3.z)
+    let vnd = r3d_normalise(n1.x+n2.x+n3.x, n1.y+n2.y+n3.y, n1.z+n2.z+n3.z)
+
+    // Project all 4 vertices to screen
+    let pa = r3d_project(va_x, va_y, va_z, cam, c.width, c.height)
+    let pb = r3d_project(vb_x, vb_y, vb_z, cam, c.width, c.height)
+    let pc = r3d_project(vc_x, vc_y, vc_z, cam, c.width, c.height)
+    let pd = r3d_project(vd_x, vd_y, vd_z, cam, c.width, c.height)
+
+    // Fog: camera at z=20, object at z≈5±2 → depth≈13-17; fade toward background navy
+    let fog = FogParams { near: 12.0, far: 35.0, r: 18, g: 20, b: 30 }
+
+    // Face 0: A-B-C (red 220,80,60)
+    r3d_rasterize_tri_phong(
+        pa.x as i64, pa.y as i64, pb.x as i64, pb.y as i64, pc.x as i64, pc.y as i64,
+        pa.z, pb.z, pc.z, vna, vnb, vnc, 220, 80, 60, &fog, light, depth_buf, c)
+    canvas_draw_line_aa(c, pa.x as i64, pa.y as i64, pb.x as i64, pb.y as i64, 66, 24, 18)
+    canvas_draw_line_aa(c, pb.x as i64, pb.y as i64, pc.x as i64, pc.y as i64, 66, 24, 18)
+    canvas_draw_line_aa(c, pc.x as i64, pc.y as i64, pa.x as i64, pa.y as i64, 66, 24, 18)
+
+    // Face 1: A-B-D (green 80,200,120)
+    r3d_rasterize_tri_phong(
+        pa.x as i64, pa.y as i64, pb.x as i64, pb.y as i64, pd.x as i64, pd.y as i64,
+        pa.z, pb.z, pd.z, vna, vnb, vnd, 80, 200, 120, &fog, light, depth_buf, c)
+    canvas_draw_line_aa(c, pa.x as i64, pa.y as i64, pb.x as i64, pb.y as i64, 24, 60, 36)
+    canvas_draw_line_aa(c, pb.x as i64, pb.y as i64, pd.x as i64, pd.y as i64, 24, 60, 36)
+    canvas_draw_line_aa(c, pd.x as i64, pd.y as i64, pa.x as i64, pa.y as i64, 24, 60, 36)
+
+    // Face 2: A-C-D (blue 80,140,255)
+    r3d_rasterize_tri_phong(
+        pa.x as i64, pa.y as i64, pc.x as i64, pc.y as i64, pd.x as i64, pd.y as i64,
+        pa.z, pc.z, pd.z, vna, vnc, vnd, 80, 140, 255, &fog, light, depth_buf, c)
+    canvas_draw_line_aa(c, pa.x as i64, pa.y as i64, pc.x as i64, pc.y as i64, 24, 42, 76)
+    canvas_draw_line_aa(c, pc.x as i64, pc.y as i64, pd.x as i64, pd.y as i64, 24, 42, 76)
+    canvas_draw_line_aa(c, pd.x as i64, pd.y as i64, pa.x as i64, pa.y as i64, 24, 42, 76)
+
+    // Face 3: B-C-D (yellow 255,220,60)
+    r3d_rasterize_tri_phong(
+        pb.x as i64, pb.y as i64, pc.x as i64, pc.y as i64, pd.x as i64, pd.y as i64,
+        pb.z, pc.z, pd.z, vnb, vnc, vnd, 255, 220, 60, &fog, light, depth_buf, c)
+    canvas_draw_line_aa(c, pb.x as i64, pb.y as i64, pc.x as i64, pc.y as i64, 76, 66, 18)
+    canvas_draw_line_aa(c, pc.x as i64, pc.y as i64, pd.x as i64, pd.y as i64, 76, 66, 18)
+    canvas_draw_line_aa(c, pd.x as i64, pd.y as i64, pb.x as i64, pb.y as i64, 76, 66, 18)
+}
+
+// ============================================================
+// Main
+// ============================================================
+
+fn main() with IO, Alloc, Mut, Div {
+    let W: i64 = 640
+    let H: i64 = 480
+
+    var title: [i8; 128] = [0; 128]
+    title[0]  = 83   // S
+    title[1]  = 111  // o
+    title[2]  = 117  // u
+    title[3]  = 110  // n
+    title[4]  = 105  // i
+    title[5]  = 111  // o
+    title[6]  = 32   // space
+    title[7]  = 51   // 3
+    title[8]  = 68   // D
+    let title_len: i64 = 9
+
+    var win = window_open(W, H)
+    window_set_title(&!win, &title, title_len)
+    let depth_buf = r3d_depth_buf_alloc(W, H)
+
+    // Tetrahedron at tz=5; camera at pos_z=20 → depth≈15, scale≈27 px/unit.
+    let cam = Camera3D { pos_x: 0.0, pos_y: 0.0, pos_z: 20.0, focal: 400.0 }
+    let light = Light3D {
+        dx: 0.577350,   // normalised (1,1,1)
+        dy: 0.577350,
+        dz: 0.577350,
+        r: 255, g: 255, b: 255,
+        ambient: 0.22,
+    }
+
+    var angle_y: f64 = 0.6
+    var angle_x: f64 = 0.3
+
+    var running = true
+    while running {
+        while window_pending(&!win) > 0 {
+            let ev = window_next_event(&!win)
+            if ev.kind == EV_CLOSE { running = false }
+            if ev.kind == EV_KEY_PRESS && ev.key == 27 { running = false }
+        }
+
+        var c = canvas_from_window(&!win)
+        canvas_clear(&!c, 18, 20, 30)
+        r3d_depth_buf_clear(depth_buf, W, H)
+
+        tet_draw_pbr(angle_y, angle_x, &cam, &light, depth_buf, &!c)
+
+        window_present(&!win)
+
+        // Tumble: Y ~1°/frame, X ~0.4°/frame — shows all faces and specular highlights
+        angle_y = angle_y + 0.017453
+        if angle_y > 6.28318 { angle_y = angle_y - 6.28318 }
+        angle_x = angle_x + 0.004
+        if angle_x > 6.28318 { angle_x = angle_x - 6.28318 }
+    }
+
+    heap_free(depth_buf as *mut i8)
+    window_close(&!win)
+}

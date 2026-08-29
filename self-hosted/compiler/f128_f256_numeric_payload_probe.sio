@@ -1,0 +1,139 @@
+use check::numeric_format::*
+use ir::numeric_payload::*
+
+fn expect_limb(pool: &IrWideNumericPayloadPool, payload_id: i64, limb_index: i64, expected: i64, code: i32) -> i32 with Mut, Panic, Div {
+    let (actual, status) = ir_wide_numeric_payload_limb_checked(pool, payload_id, limb_index)
+    if status != IR_WIDE_NUMERIC_OK { return code }
+    if actual != expected { return code }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let by_id_128 = binary_format_descriptor_for_id(numeric_format_binary128_id())
+    if by_id_128.format_id != 128 || by_id_128.storage_bits != 128 { return 9 }
+    if by_id_128.exponent_bits != 15 || by_id_128.precision_bits != 113 { return 34 }
+    if by_id_128.trailing_significand_bits != 112 { return 35 }
+    let by_id_256 = binary_format_descriptor_for_id(numeric_format_binary256_id())
+    if by_id_256.format_id != 256 || by_id_256.storage_bits != 256 { return 10 }
+    if by_id_256.exponent_bits != 19 || by_id_256.precision_bits != 237 { return 36 }
+    if by_id_256.trailing_significand_bits != 236 { return 37 }
+    let by_id_invalid = binary_format_descriptor_for_id(999)
+    if by_id_invalid.format_id != 0 || by_id_invalid.storage_bits != 0 { return 11 }
+    if by_id_invalid.exponent_bits != 0 || by_id_invalid.precision_bits != 0 { return 53 }
+    if by_id_invalid.trailing_significand_bits != 0 { return 54 }
+
+    var pool = ir_empty_wide_numeric_payload_pool()
+    let limbs128: [i64; 8] = [72623859790382856, -1, 0, 0, 0, 0, 0, 0]
+    let (id128, add128_status) = ir_wide_numeric_payload_pool_add(
+        &! pool, numeric_format_binary128_id(), limbs128, 2
+    )
+    if add128_status != IR_WIDE_NUMERIC_OK || id128 != 0 { return 12 }
+
+    let limbs256: [i64; 8] = [
+        2387509390608836392,
+        -2,
+        4702394921427289928,
+        5859837686836516696,
+        0,
+        0,
+        0,
+        0
+    ]
+    let (id256, add256_status) = ir_wide_numeric_payload_pool_add(
+        &! pool, numeric_format_binary256_id(), limbs256, 4
+    )
+    if add256_status != IR_WIDE_NUMERIC_OK || id256 != 1 { return 13 }
+
+    let (duplicate_id, duplicate_status) = ir_wide_numeric_payload_pool_add(
+        &! pool, numeric_format_binary128_id(), limbs128, 2
+    )
+    if duplicate_status != IR_WIDE_NUMERIC_OK || duplicate_id != 2 { return 38 }
+
+    if pool.payload_count != 3 || pool.limb_count != 8 { return 14 }
+    if ir_wide_numeric_payload_pool_validate(&pool) != IR_WIDE_NUMERIC_OK { return 15 }
+    if expect_limb(&pool, id128, 0, limbs128[0], 16) != 0 { return 16 }
+    if expect_limb(&pool, id128, 1, limbs128[1], 17) != 0 { return 17 }
+    if expect_limb(&pool, id256, 0, limbs256[0], 18) != 0 { return 18 }
+    if expect_limb(&pool, id256, 1, limbs256[1], 19) != 0 { return 19 }
+    if expect_limb(&pool, id256, 2, limbs256[2], 20) != 0 { return 20 }
+    if expect_limb(&pool, id256, 3, limbs256[3], 21) != 0 { return 21 }
+    if expect_limb(&pool, duplicate_id, 0, limbs128[0], 39) != 0 { return 39 }
+    if expect_limb(&pool, duplicate_id, 1, limbs128[1], 40) != 0 { return 40 }
+
+    let (bad_format_id, bad_format_status) = ir_wide_numeric_payload_pool_add(&! pool, 999, limbs128, 2)
+    if bad_format_id != -1 || bad_format_status != IR_WIDE_NUMERIC_ERR_UNKNOWN_FORMAT { return 22 }
+    let (bad_count_id, bad_count_status) = ir_wide_numeric_payload_pool_add(
+        &! pool, numeric_format_binary128_id(), limbs128, 4
+    )
+    if bad_count_id != -1 || bad_count_status != IR_WIDE_NUMERIC_ERR_LIMB_COUNT { return 23 }
+    if pool.payload_count != 3 || pool.limb_count != 8 { return 30 }
+
+    var full_pool = ir_empty_wide_numeric_payload_pool()
+    var full_i: i64 = 0
+    while full_i < IR_WIDE_NUMERIC_MAX_PAYLOADS {
+        let (full_id, full_status) = ir_wide_numeric_payload_pool_add(
+            &! full_pool, numeric_format_binary256_id(), limbs256, 4
+        )
+        if full_status != IR_WIDE_NUMERIC_OK || full_id != full_i { return 41 }
+        full_i = full_i + 1
+    }
+    if full_pool.payload_count != 256 || full_pool.limb_count != 1024 { return 42 }
+    if ir_wide_numeric_payload_pool_validate(&full_pool) != IR_WIDE_NUMERIC_OK { return 43 }
+    let full_last_limb = full_pool.limbs[1023]
+    let (payload_capacity_id, payload_capacity_status) = ir_wide_numeric_payload_pool_add(
+        &! full_pool, numeric_format_binary128_id(), limbs128, 2
+    )
+    if payload_capacity_id != -1 || payload_capacity_status != IR_WIDE_NUMERIC_ERR_PAYLOAD_CAPACITY { return 44 }
+    if full_pool.payload_count != 256 || full_pool.limb_count != 1024 { return 45 }
+    if full_pool.limbs[1023] != full_last_limb { return 46 }
+
+    let (_, invalid_id_status) = ir_wide_numeric_payload_entry_checked(&pool, 3)
+    if invalid_id_status != IR_WIDE_NUMERIC_ERR_PAYLOAD_ID { return 24 }
+    let (_, invalid_limb_status) = ir_wide_numeric_payload_limb_checked(&pool, id128, 2)
+    if invalid_limb_status != IR_WIDE_NUMERIC_ERR_LIMB_INDEX { return 25 }
+
+    pool.entries[1].limb_start = 3
+    if ir_wide_numeric_payload_pool_validate(&pool) != IR_WIDE_NUMERIC_ERR_CORRUPT_ENTRY { return 26 }
+    pool.entries[1].limb_start = 2
+
+    pool.entries[0].limb_count = 4
+    if ir_wide_numeric_payload_pool_validate(&pool) != IR_WIDE_NUMERIC_ERR_LIMB_COUNT { return 27 }
+    pool.entries[0].limb_count = 2
+
+    pool.entries[0].format_id = 999
+    if ir_wide_numeric_payload_pool_validate(&pool) != IR_WIDE_NUMERIC_ERR_UNKNOWN_FORMAT { return 28 }
+    pool.entries[0].format_id = numeric_format_binary128_id()
+
+    pool.limb_count = 5
+    if ir_wide_numeric_payload_pool_validate(&pool) != IR_WIDE_NUMERIC_ERR_CORRUPT_ENTRY { return 29 }
+    pool.limb_count = 8
+    if ir_wide_numeric_payload_pool_validate(&pool) != IR_WIDE_NUMERIC_OK { return 31 }
+
+    var corrupt_add_pool = ir_empty_wide_numeric_payload_pool()
+    corrupt_add_pool.payload_count = 1
+    corrupt_add_pool.entries[0] = IrWideNumericPayloadEntry {
+        format_id: numeric_format_binary128_id(),
+        limb_start: 0,
+        limb_count: 4,
+    }
+    let corrupt_before_entry0 = corrupt_add_pool.entries[0]
+    let corrupt_before_entry1 = corrupt_add_pool.entries[1]
+    let corrupt_before_limb0 = corrupt_add_pool.limbs[0]
+    let corrupt_before_limb1 = corrupt_add_pool.limbs[1]
+    let (corrupt_add_id, corrupt_add_status) = ir_wide_numeric_payload_pool_add(
+        &! corrupt_add_pool, 999, limbs128, 2
+    )
+    if corrupt_add_id != -1 || corrupt_add_status != IR_WIDE_NUMERIC_ERR_LIMB_COUNT { return 47 }
+    if corrupt_add_pool.payload_count != 1 || corrupt_add_pool.limb_count != 0 { return 48 }
+    if corrupt_add_pool.entries[0].format_id != corrupt_before_entry0.format_id { return 49 }
+    if corrupt_add_pool.entries[0].limb_start != corrupt_before_entry0.limb_start { return 50 }
+    if corrupt_add_pool.entries[0].limb_count != corrupt_before_entry0.limb_count { return 51 }
+    if corrupt_add_pool.entries[1].format_id != corrupt_before_entry1.format_id { return 52 }
+    if corrupt_add_pool.entries[1].limb_start != corrupt_before_entry1.limb_start { return 55 }
+    if corrupt_add_pool.entries[1].limb_count != corrupt_before_entry1.limb_count { return 56 }
+    if corrupt_add_pool.limbs[0] != corrupt_before_limb0 { return 57 }
+    if corrupt_add_pool.limbs[1] != corrupt_before_limb1 { return 58 }
+
+    println("PASS f128_f256_numeric_payload_probe payloads=3 limbs=8 order=lsw-first duplicate_ids=distinct full=256x4 negative_cases=10")
+    0
+}

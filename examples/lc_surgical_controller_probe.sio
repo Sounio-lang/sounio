@@ -1,0 +1,280 @@
+// examples/lc_surgical_controller_probe.sio
+//
+// Probe: LC-inspired control policy on the sedenion Mandelbrot orbit.
+//
+// Translates the Aston-Jones & Cohen (2005) phasic/tonic split onto the
+// verified surgical vocabulary (SounioSurgicalCalculus):
+//   PHASIC/UNLEARN  — zero out ZD-fiber-2 component pair (e3, e11) when
+//                     fiber energy exceeds threshold (model-failure event;
+//                     Jordan 2024 "global model-failure → reset").
+//   TONIC/GATE      — dampen all 7 ZD fiber pairs by 0.85 when orbit
+//                     norm is near zero (exploration / disengagement;
+//                     Aston-Jones & Cohen 2005 tonic gain).
+//   NO-OP            — quiescent, no surgery.
+//
+// Null: fixed UNLEARN on fiber 0 (e1, e9) every step, signal-blind.
+//       Same surgery budget, wrong fiber — tests whether signal-conditioning
+//       matters, not whether surgery itself has an effect.
+//
+// Verdict metric: cumulative ZD-fiber-2 energy over the trajectory.
+// A controller that reduces fiber-2 energy vs the null demonstrates that
+// signal-driven surgery is more targeted than signal-blind surgery.
+//
+// MATH-REVIEW NOTE: any quantitative claim about *how* surgery shifts the
+// associator field or Hessian spectrum must pass
+//   bin/llm-offload -t math-review -p xai
+// before commit.  This probe reports energy reduction, not a bound.
+//
+// Self-contained: no imports.  Arithmetic matches sedenion_hessian_brain_demo.sio.
+// See docs/research/locus-coeruleus-surgical-controller-sounio-note.md §6-§7.
+
+// ============================================================================
+// SEDENION ARITHMETIC (matches sedenion_hessian_brain_demo.sio exactly)
+// ============================================================================
+
+struct Sed {
+    e0: f64, e1: f64, e2: f64, e3: f64,
+    e4: f64, e5: f64, e6: f64, e7: f64,
+    e8: f64, e9: f64, e10: f64, e11: f64,
+    e12: f64, e13: f64, e14: f64, e15: f64,
+}
+
+fn sed_zero() -> Sed {
+    Sed { e0:0.0, e1:0.0, e2:0.0, e3:0.0, e4:0.0, e5:0.0, e6:0.0, e7:0.0,
+          e8:0.0, e9:0.0, e10:0.0, e11:0.0, e12:0.0, e13:0.0, e14:0.0, e15:0.0 }
+}
+
+fn sed_add(a: Sed, b: Sed) -> Sed {
+    Sed {
+        e0: a.e0+b.e0, e1: a.e1+b.e1, e2: a.e2+b.e2, e3: a.e3+b.e3,
+        e4: a.e4+b.e4, e5: a.e5+b.e5, e6: a.e6+b.e6, e7: a.e7+b.e7,
+        e8: a.e8+b.e8, e9: a.e9+b.e9, e10: a.e10+b.e10, e11: a.e11+b.e11,
+        e12: a.e12+b.e12, e13: a.e13+b.e13, e14: a.e14+b.e14, e15: a.e15+b.e15,
+    }
+}
+
+fn sed_norm_sq(a: Sed) -> f64 {
+    a.e0*a.e0 + a.e1*a.e1 + a.e2*a.e2 + a.e3*a.e3 +
+    a.e4*a.e4 + a.e5*a.e5 + a.e6*a.e6 + a.e7*a.e7 +
+    a.e8*a.e8 + a.e9*a.e9 + a.e10*a.e10 + a.e11*a.e11 +
+    a.e12*a.e12 + a.e13*a.e13 + a.e14*a.e14 + a.e15*a.e15
+}
+
+struct C2 { r: f64, i: f64 }
+struct Q4 { a: f64, b: f64, c: f64, d: f64 }
+struct O8 { e0: f64, e1: f64, e2: f64, e3: f64, e4: f64, e5: f64, e6: f64, e7: f64 }
+
+fn cmul(a: C2, b: C2) -> C2 {
+    C2 { r: a.r*b.r - a.i*b.i, i: a.r*b.i + a.i*b.r }
+}
+fn cconj(a: C2) -> C2 { C2 { r: a.r, i: 0.0 - a.i } }
+
+fn qmul(a: Q4, b: Q4) -> Q4 {
+    let al = C2 { r: a.a, i: a.b }
+    let ah = C2 { r: a.c, i: a.d }
+    let bl = C2 { r: b.a, i: b.b }
+    let bh = C2 { r: b.c, i: b.d }
+    let ac = cmul(al, bl)
+    let db = cmul(cconj(bh), ah)
+    let da = cmul(bh, al)
+    let bc = cmul(ah, cconj(bl))
+    Q4 { a: ac.r - db.r, b: ac.i - db.i, c: da.r + bc.r, d: da.i + bc.i }
+}
+fn qconj(a: Q4) -> Q4 { Q4 { a: a.a, b: 0.0-a.b, c: 0.0-a.c, d: 0.0-a.d } }
+
+fn omul(a: O8, b: O8) -> O8 {
+    let al = Q4 { a: a.e0, b: a.e1, c: a.e2, d: a.e3 }
+    let ah = Q4 { a: a.e4, b: a.e5, c: a.e6, d: a.e7 }
+    let bl = Q4 { a: b.e0, b: b.e1, c: b.e2, d: b.e3 }
+    let bh = Q4 { a: b.e4, b: b.e5, c: b.e6, d: b.e7 }
+    let ac = qmul(al, bl)
+    let db = qmul(qconj(bh), ah)
+    let da = qmul(bh, al)
+    let bc = qmul(ah, qconj(bl))
+    O8 { e0: ac.a-db.a, e1: ac.b-db.b, e2: ac.c-db.c, e3: ac.d-db.d,
+         e4: da.a+bc.a, e5: da.b+bc.b, e6: da.c+bc.c, e7: da.d+bc.d }
+}
+fn oconj(a: O8) -> O8 {
+    O8 { e0: a.e0, e1: 0.0-a.e1, e2: 0.0-a.e2, e3: 0.0-a.e3,
+         e4: 0.0-a.e4, e5: 0.0-a.e5, e6: 0.0-a.e6, e7: 0.0-a.e7 }
+}
+
+fn sed_mul(a: Sed, b: Sed) -> Sed {
+    let al = O8 { e0:a.e0, e1:a.e1, e2:a.e2, e3:a.e3, e4:a.e4, e5:a.e5, e6:a.e6, e7:a.e7 }
+    let ah = O8 { e0:a.e8, e1:a.e9, e2:a.e10, e3:a.e11, e4:a.e12, e5:a.e13, e6:a.e14, e7:a.e15 }
+    let bl = O8 { e0:b.e0, e1:b.e1, e2:b.e2, e3:b.e3, e4:b.e4, e5:b.e5, e6:b.e6, e7:b.e7 }
+    let bh = O8 { e0:b.e8, e1:b.e9, e2:b.e10, e3:b.e11, e4:b.e12, e5:b.e13, e6:b.e14, e7:b.e15 }
+    let ac = omul(al, bl)
+    let db = omul(oconj(bh), ah)
+    let da = omul(bh, al)
+    let bc = omul(ah, oconj(bl))
+    Sed {
+        e0: ac.e0-db.e0, e1: ac.e1-db.e1, e2: ac.e2-db.e2, e3: ac.e3-db.e3,
+        e4: ac.e4-db.e4, e5: ac.e5-db.e5, e6: ac.e6-db.e6, e7: ac.e7-db.e7,
+        e8: da.e0+bc.e0, e9: da.e1+bc.e1, e10: da.e2+bc.e2, e11: da.e3+bc.e3,
+        e12: da.e4+bc.e4, e13: da.e5+bc.e5, e14: da.e6+bc.e6, e15: da.e7+bc.e7,
+    }
+}
+
+// ============================================================================
+// SURGICAL PERTURBATIONS (semantics derived from SounioSurgicalCalculus)
+// ============================================================================
+
+// PHASIC / UNLEARN on ZD fiber-2: zero out the (e3, e11) component pair.
+// Interpretation: annihilate the fiber-2 support in the orbit state —
+// the "4 right-annihilator" UNLEARN action, applied at the orbit level.
+fn surgery_unlearn_fiber2(z: Sed) -> Sed {
+    Sed {
+        e0: z.e0, e1: z.e1,  e2: z.e2, e3: 0.0,
+        e4: z.e4, e5: z.e5,  e6: z.e6, e7: z.e7,
+        e8: z.e8, e9: z.e9, e10: z.e10, e11: 0.0,
+        e12: z.e12, e13: z.e13, e14: z.e14, e15: z.e15,
+    }
+}
+
+// TONIC / GATE: dampen all 7 ZD fiber pairs (e1,e9)..(e7,e15) by factor.
+// Leaves real part e0 unchanged.  The "79-preserved / broad suppression"
+// GATE action, read as a global multiplicative gain reduction.
+fn surgery_gate_tonic(z: Sed, factor: f64) -> Sed {
+    Sed {
+        e0: z.e0,
+        e1:  z.e1  * factor, e2:  z.e2  * factor, e3:  z.e3  * factor,
+        e4:  z.e4  * factor, e5:  z.e5  * factor, e6:  z.e6  * factor,
+        e7:  z.e7  * factor,
+        e8:  z.e8,
+        e9:  z.e9  * factor, e10: z.e10 * factor, e11: z.e11 * factor,
+        e12: z.e12 * factor, e13: z.e13 * factor, e14: z.e14 * factor,
+        e15: z.e15 * factor,
+    }
+}
+
+// NULL surgery: always zero out fiber-0 (e1, e9), regardless of signal.
+// Represents signal-blind surgery on the "wrong" fiber — the null baseline.
+fn surgery_null_fiber0(z: Sed) -> Sed {
+    Sed {
+        e0: z.e0, e1: 0.0,  e2: z.e2,  e3: z.e3,
+        e4: z.e4, e5: z.e5, e6: z.e6,  e7: z.e7,
+        e8: z.e8, e9: 0.0, e10: z.e10, e11: z.e11,
+        e12: z.e12, e13: z.e13, e14: z.e14, e15: z.e15,
+    }
+}
+
+// ============================================================================
+// LC CONTROLLER SIGNAL
+// ============================================================================
+
+// ZD-fiber-2 energy: squared magnitude of the (e3, e11) component pair.
+// Proxy for the orbit's proximity to the fiber-2 ZD variety.
+// High energy → orbit "confused" near this fiber → phasic trigger.
+fn zd_fiber2_energy(z: Sed) -> f64 {
+    z.e3 * z.e3 + z.e11 * z.e11
+}
+
+// ============================================================================
+// ORBIT RUNS
+// ============================================================================
+
+// Run n_steps of z_{n+1} = z² + c with the LC controller active.
+// Returns cumulative ZD-fiber-2 energy over the trajectory.
+fn orbit_controlled(c: Sed, n_steps: i64) -> f64 with Mut {
+    let PHASIC_THRESH = 0.3
+    let TONIC_THRESH  = 0.05
+    let ESCAPE_R_SQ   = 16.0
+    let TONIC_FACTOR  = 0.85
+
+    var z                = sed_zero()
+    var cumulative_energy = 0.0
+    var step             = 0
+    while step < n_steps {
+        var z_new = sed_add(sed_mul(z, z), c)
+
+        let signal     = zd_fiber2_energy(z_new)
+        let orbit_nsq  = sed_norm_sq(z_new)
+
+        if signal > PHASIC_THRESH {
+            z_new = surgery_unlearn_fiber2(z_new)
+        } else {
+            if orbit_nsq < TONIC_THRESH {
+                z_new = surgery_gate_tonic(z_new, TONIC_FACTOR)
+            }
+        }
+
+        cumulative_energy = cumulative_energy + zd_fiber2_energy(z_new)
+        if orbit_nsq > ESCAPE_R_SQ {
+            step = n_steps
+        }
+        z    = z_new
+        step = step + 1
+    }
+    cumulative_energy
+}
+
+// Run n_steps with the null policy: apply surgery_null_fiber0 every step.
+fn orbit_null(c: Sed, n_steps: i64) -> f64 with Mut {
+    let ESCAPE_R_SQ = 16.0
+
+    var z                = sed_zero()
+    var cumulative_energy = 0.0
+    var step             = 0
+    while step < n_steps {
+        var z_new = sed_add(sed_mul(z, z), c)
+
+        z_new = surgery_null_fiber0(z_new)
+
+        cumulative_energy = cumulative_energy + zd_fiber2_energy(z_new)
+        let orbit_nsq = sed_norm_sq(z_new)
+        if orbit_nsq > ESCAPE_R_SQ {
+            step = n_steps
+        }
+        z    = z_new
+        step = step + 1
+    }
+    cumulative_energy
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() with IO, Mut, Div {
+    print("=== LC Surgical Controller Probe — Sedenion Mandelbrot ===\n")
+    print("Orbit: z_{n+1} = z^2 + c, N=50 steps\n")
+    print("Seed: c in ZD-fiber-2 direction (e3=0.4, e11=0.3, e0=0.1)\n\n")
+    print("Controller: phasic=UNLEARN-fiber2 (signal > 0.3), ")
+    print("tonic=GATE-all (orbit_nsq < 0.05)\n")
+    print("Null:       UNLEARN-fiber0 every step (signal-blind)\n\n")
+
+    // Seed with energy concentrated in ZD-fiber-2 (e3 + e11 direction).
+    let c = Sed {
+        e0: 0.1, e1: 0.0, e2: 0.0, e3: 0.4,
+        e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0,
+        e8: 0.0, e9: 0.0, e10: 0.0, e11: 0.3,
+        e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0,
+    }
+
+    let energy_ctrl = orbit_controlled(c, 50)
+    let energy_null = orbit_null(c, 50)
+
+    print("Cumulative ZD-fiber-2 energy (controller): ")
+    println(energy_ctrl)
+    print("Cumulative ZD-fiber-2 energy (null):       ")
+    println(energy_null)
+
+    if energy_null > 0.0 {
+        print("Ratio controller/null: ")
+        println(energy_ctrl / energy_null)
+    }
+
+    print("\nVERDICT: ")
+    if energy_ctrl < energy_null {
+        print("controller < null — signal-driven surgery reduced fiber-2 energy.\n")
+        print("The LC-like controller targeted the right fiber.\n")
+    } else {
+        print("controller >= null — surgery signal needs refinement.\n")
+        print("Result is honest: not all seeds will show separation.\n")
+    }
+
+    print("\nCapability demonstration only.  No clinical or geometric claim.\n")
+    print("GPU path: kaxi_emit_sedenion_associator_asm (kretikos_emit_kaxi.sio:2691)\n")
+    print("See docs/research/locus-coeruleus-surgical-controller-sounio-note.md\n")
+}

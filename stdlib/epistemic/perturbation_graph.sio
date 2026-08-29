@@ -1,0 +1,104 @@
+// stdlib/epistemic/perturbation_graph.sio — order-safe uncertain octonion products
+//
+// The value-semantics UncertainOct (uncertain_octonion.sio) is order-NAIVE under
+// binary chaining: a.mul(b).mul(c) cannot add the structural term, because the
+// intermediate product has forgotten its operands. This module fixes that by
+// giving each value IDENTITY in a perturbation DAG — a Wengert tape: a flat arena
+// of nodes addressed by index (no Box-per-node, so it avoids the large-boxed-
+// struct codegen hazard; the arena is mutated through a bare `&!` param, the safe
+// deref-store path).
+//
+// Each product node records its two operands. When a product node (a·b) is
+// multiplied by c, the triple (a,b,c) is recoverable from the graph, so the
+// regrouping associator κ·‖[a,b,c]‖² is added automatically — at every internal
+// node, for ANY association. Binary chaining becomes order-safe: ((a·b)·c) and
+// (a·(b·c)) carry the same total variance, equal to the explicit mul3.
+//
+// This is the runtime correlation graph: a type cannot see correlation, so the
+// VALUE must carry identity. No new algebra — reuses algebra::octonion.
+//
+// Execution-verified (self-contained build): left chain, right chain, and mul3
+// all yield 4.75 for a non-Fano triple (σ²=0.25 each, κ=1); Fano triple yields
+// 0.75; the order-naive binary would drop to 0.75. All paths agree.
+
+use algebra::octonion::{oct_mul, oct_associator, oct_norm_sq}
+
+// Arena capacity: 64 nodes (vals flattened to 64 * 8 = 512 f64).
+pub struct PerturbGraph {
+    count: i64,
+    vals: [f64; 512],   // node n, component c, at vals[n*8 + c]
+    pvar: [f64; 64],    // per-node variance budget
+    kind: [i64; 64],    // 0 = leaf, 1 = product
+    lc:   [i64; 64],    // left operand index  (products only)
+    rc:   [i64; 64],    // right operand index (products only)
+}
+
+pub fn pg_new() -> PerturbGraph {
+    PerturbGraph { count: 0, vals: [0.0; 512], pvar: [0.0; 64], kind: [0; 64], lc: [0; 64], rc: [0; 64] }
+}
+
+fn pg_get(g: &!PerturbGraph, n: i64, out: &![f64; 8]) with Mut {
+    var c: i64 = 0
+    while c < 8 { out[c] = g.vals[n * 8 + c]; c = c + 1 }
+}
+
+// Add a measured leaf octonion; returns its node index.
+pub fn pg_leaf(g: &!PerturbGraph, v: &[f64; 8], std_dev: f64) -> i64 with Mut {
+    let n = g.count
+    var c: i64 = 0
+    while c < 8 { g.vals[n * 8 + c] = v[c]; c = c + 1 }
+    g.pvar[n] = std_dev * std_dev
+    g.kind[n] = 0
+    g.count = n + 1
+    n
+}
+
+// Multiply nodes i and j; returns the product node. The regrouping associator is
+// added automatically for whichever operand is itself a product, so chaining is
+// order-safe:  Var = ‖j‖²·Var(i) + ‖i‖²·Var(j) + κ·(regrouping ‖α‖²).
+pub fn pg_mul(g: &!PerturbGraph, i: i64, j: i64, kappa: f64) -> i64 with Mut, Div, NonAssoc {
+    var vi: [f64; 8] = [0.0; 8]
+    pg_get(g, i, &!vi)
+    var vj: [f64; 8] = [0.0; 8]
+    pg_get(g, j, &!vj)
+    var prod: [f64; 8] = [0.0; 8]
+    oct_mul(&vi, &vj, &!prod)
+    let ni = oct_norm_sq(&vi)
+    let nj = oct_norm_sq(&vj)
+
+    var structural: f64 = 0.0
+    // left operand is a product (a·b): regrouping ambiguity is [a, b, j]
+    if g.kind[i] == 1 {
+        var la: [f64; 8] = [0.0; 8]
+        pg_get(g, g.lc[i], &!la)
+        var lb: [f64; 8] = [0.0; 8]
+        pg_get(g, g.rc[i], &!lb)
+        var as1: [f64; 8] = [0.0; 8]
+        oct_associator(&la, &lb, &vj, &!as1)
+        structural = structural + kappa * oct_norm_sq(&as1)
+    }
+    // right operand is a product (b·c): regrouping ambiguity is [i, b, c]
+    if g.kind[j] == 1 {
+        var ra: [f64; 8] = [0.0; 8]
+        pg_get(g, g.lc[j], &!ra)
+        var rb: [f64; 8] = [0.0; 8]
+        pg_get(g, g.rc[j], &!rb)
+        var as2: [f64; 8] = [0.0; 8]
+        oct_associator(&vi, &ra, &rb, &!as2)
+        structural = structural + kappa * oct_norm_sq(&as2)
+    }
+
+    let n = g.count
+    var c: i64 = 0
+    while c < 8 { g.vals[n * 8 + c] = prod[c]; c = c + 1 }
+    g.pvar[n] = nj * g.pvar[i] + ni * g.pvar[j] + structural
+    g.kind[n] = 1
+    g.lc[n] = i
+    g.rc[n] = j
+    g.count = n + 1
+    n
+}
+
+pub fn pg_variance(g: &!PerturbGraph, n: i64) -> f64 { g.pvar[n] }
+
+pub fn pg_component(g: &!PerturbGraph, n: i64, c: i64) -> f64 { g.vals[n * 8 + c] }

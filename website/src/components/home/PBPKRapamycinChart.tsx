@@ -94,7 +94,7 @@ export default function PBPKRapamycinChart() {
 
   // X scale: positions for each time point (non-linear spacing matches log-time feel)
   const times = ROWS.map(r => r.time);
-  const xPositions = times.map((t, i) => (i / (times.length - 1)) * cw);
+  const xPositions = times.map((_t, i) => (i / (times.length - 1)) * cw);
 
   const bloodPath = ROWS.map((r, i) =>
     `${i === 0 ? 'M' : 'L'}${xPositions[i].toFixed(1)},${yScale(r.blood_value).toFixed(1)}`

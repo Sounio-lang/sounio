@@ -1,0 +1,334 @@
+// scripts/dissertation/dossier_generator.sio — Regulatory dossier
+// generator (Markdown).
+//
+// Dissertation contribution #3 narrative wrapper.  Phase Y emits the
+// ISO 17025 GUM budget as a CSV; this module renders the budget plus
+// model card, parameter priors, numerical-method statement, Phase J
+// confidence-gate evidence, clinical validation, and an audit trail
+// into a single human-readable Markdown dossier.
+//
+// Design choice — no file I/O.  Sounio's stdlib does not expose a
+// blocking read_file in the running compiler (only buffered IoBuffer
+// abstractions); rather than introduce a new builtin for one lane, the
+// generator takes a fully-populated DossierInput struct and emits the
+// Markdown to stdout.  Callers that have CSVs on disk pre-load the
+// rows into the struct from their own driver (the smoke test in
+// tests/run-pass/dossier_smoke.sio shows a representative shape).
+// This keeps the generator deterministic and testable without
+// fixture files.
+//
+// All print-ordering is stable: §1..§9, one row per loop iteration,
+// no sets/maps with non-deterministic iteration.
+
+// ----------------------------------------------------------------------
+// Input shape
+// ----------------------------------------------------------------------
+
+pub struct ParamRow {
+    name:       string,   // e.g. "CL_hep"
+    units:      string,   // e.g. "L/h"
+    value:      f64,
+    rel_u:      f64,      // relative standard uncertainty (fractional)
+    confidence: f64,      // 0..1
+}
+
+pub struct BudgetRow {
+    source:        string,   // e.g. "rapamycin_iv_dose"
+    type_a_or_b:   string,   // "A" or "B"
+    u_i:           f64,
+    contribution:  f64,      // fraction of u_c² (0..1)
+}
+
+pub struct ClinicalRow {
+    endpoint:        string,    // e.g. "AUC_brain"
+    units:           string,
+    sounio_value:    f64,
+    reference_value: f64,
+    pct_diff:        f64,
+}
+
+pub struct DossierInput {
+    drug_name:        string,
+    model_name:       string,
+    n_params:         i32,
+    params:           [ParamRow; 16],
+
+    method_name:      string,   // e.g. "Tsit5 adaptive"
+    abs_tol:          f64,
+    rel_tol:          f64,
+    h_min:            f64,
+    h_max:            f64,
+
+    // §5: 1st-order GUM budget (Phase Y CSV pre-parsed)
+    n_budget_rows_o1: i32,
+    budget_o1:        [BudgetRow; 16],
+    u_c_o1:           f64,
+    u95_o1:           f64,
+
+    // §6: 2nd-order Hessian budget (optional — n_rows = 0 disables §6)
+    n_budget_rows_o2: i32,
+    budget_o2:        [BudgetRow; 16],
+    u_c_o2:           f64,
+    u95_o2:           f64,
+
+    // §7: Phase J evidence
+    phase_j_pass:     bool,
+    phase_j_min_conf: f64,
+    phase_j_observed: f64,
+
+    // §8: Clinical validation
+    n_clinical:       i32,
+    clinical:         [ClinicalRow; 8],
+
+    // §9: Audit trail
+    commit_sha:        string,
+    generated_at_utc:  string,
+    sounio_version:    string,
+}
+
+pub fn dossier_input_zero() -> DossierInput {
+    DossierInput {
+        drug_name: "",
+        model_name: "",
+        n_params: 0,
+        params: [ParamRow {
+            name: "", units: "", value: 0.0, rel_u: 0.0, confidence: 0.0,
+        }; 16],
+
+        method_name: "",
+        abs_tol: 0.0,
+        rel_tol: 0.0,
+        h_min: 0.0,
+        h_max: 0.0,
+
+        n_budget_rows_o1: 0,
+        budget_o1: [BudgetRow {
+            source: "", type_a_or_b: "", u_i: 0.0, contribution: 0.0,
+        }; 16],
+        u_c_o1: 0.0,
+        u95_o1: 0.0,
+
+        n_budget_rows_o2: 0,
+        budget_o2: [BudgetRow {
+            source: "", type_a_or_b: "", u_i: 0.0, contribution: 0.0,
+        }; 16],
+        u_c_o2: 0.0,
+        u95_o2: 0.0,
+
+        phase_j_pass: false,
+        phase_j_min_conf: 0.0,
+        phase_j_observed: 0.0,
+
+        n_clinical: 0,
+        clinical: [ClinicalRow {
+            endpoint: "", units: "", sounio_value: 0.0,
+            reference_value: 0.0, pct_diff: 0.0,
+        }; 8],
+
+        commit_sha: "",
+        generated_at_utc: "",
+        sounio_version: "",
+    }
+}
+
+// ----------------------------------------------------------------------
+// Section emitters — one per dossier §
+// ----------------------------------------------------------------------
+
+fn emit_header(d: DossierInput) with IO, Mut, Panic, Div {
+    print("# PBPK Dossier — ")
+    println(d.drug_name)
+    println("")
+}
+
+fn emit_subject(d: DossierInput) with IO, Mut, Panic, Div {
+    println("## §1. Subject of submission")
+    println("")
+    print("- Drug: "); println(d.drug_name)
+    print("- Model: "); println(d.model_name)
+    println("")
+}
+
+fn emit_model_card(d: DossierInput) with IO, Mut, Panic, Div {
+    println("## §2. Model card")
+    println("")
+    print("Compartmental PBPK system: "); println(d.model_name)
+    println("")
+}
+
+fn emit_params(d: DossierInput) with IO, Mut, Panic, Div {
+    println("## §3. Parameter priors")
+    println("")
+    println("| name | units | value | rel_u | confidence |")
+    println("|---|---|---|---|---|")
+    var i: i32 = 0
+    while i < d.n_params {
+        let idx = i as usize
+        print("| "); print(d.params[idx].name)
+        print(" | "); print(d.params[idx].units)
+        print(" | "); print_f64(d.params[idx].value)
+        print(" | "); print_f64(d.params[idx].rel_u)
+        print(" | "); print_f64(d.params[idx].confidence)
+        println(" |")
+        i = i + 1
+    }
+    println("")
+}
+
+fn emit_method(d: DossierInput) with IO, Mut, Panic, Div {
+    println("## §4. Numerical method")
+    println("")
+    print("- Integrator: "); println(d.method_name)
+    print("- abs_tol: "); print_f64(d.abs_tol); println("")
+    print("- rel_tol: "); print_f64(d.rel_tol); println("")
+    print("- h_min: "); print_f64(d.h_min); println("")
+    print("- h_max: "); print_f64(d.h_max); println("")
+    println("")
+}
+
+fn emit_budget(rows: [BudgetRow; 16], n: i32, u_c: f64, u95: f64)
+              with IO, Mut, Panic, Div {
+    println("| source | A/B | u_i | contribution |")
+    println("|---|---|---|---|")
+    var i: i32 = 0
+    while i < n {
+        let idx = i as usize
+        print("| "); print(rows[idx].source)
+        print(" | "); print(rows[idx].type_a_or_b)
+        print(" | "); print_f64(rows[idx].u_i)
+        print(" | "); print_f64(rows[idx].contribution)
+        println(" |")
+        i = i + 1
+    }
+    println("")
+    print("- combined u_c: "); print_f64(u_c); println("")
+    print("- expanded U_95: "); print_f64(u95); println("")
+    println("")
+}
+
+fn emit_budget_o1(d: DossierInput) with IO, Mut, Panic, Div {
+    println("## §5. ISO 17025 GUM budget (1st order)")
+    println("")
+    emit_budget(d.budget_o1, d.n_budget_rows_o1, d.u_c_o1, d.u95_o1)
+}
+
+fn emit_budget_o2(d: DossierInput) with IO, Mut, Panic, Div {
+    if d.n_budget_rows_o2 <= 0 {
+        println("## §6. ISO 17025 GUM budget (2nd order)")
+        println("")
+        println("_(Hessian budget not available in this run.)_")
+        println("")
+        return
+    }
+    println("## §6. ISO 17025 GUM budget (2nd order)")
+    println("")
+    emit_budget(d.budget_o2, d.n_budget_rows_o2, d.u_c_o2, d.u95_o2)
+}
+
+fn emit_phase_j(d: DossierInput) with IO, Mut, Panic, Div {
+    println("## §7. Confidence gate evidence (Phase J)")
+    println("")
+    print("- min_conf threshold: "); print_f64(d.phase_j_min_conf); println("")
+    print("- observed confidence: "); print_f64(d.phase_j_observed); println("")
+    if d.phase_j_pass {
+        println("- verdict: ADMIT")
+    } else {
+        println("- verdict: REFUSE")
+    }
+    println("")
+}
+
+fn emit_clinical(d: DossierInput) with IO, Mut, Panic, Div {
+    println("## §8. Clinical validation")
+    println("")
+    println("| endpoint | units | sounio | reference | pct_diff |")
+    println("|---|---|---|---|---|")
+    var i: i32 = 0
+    while i < d.n_clinical {
+        let idx = i as usize
+        print("| "); print(d.clinical[idx].endpoint)
+        print(" | "); print(d.clinical[idx].units)
+        print(" | "); print_f64(d.clinical[idx].sounio_value)
+        print(" | "); print_f64(d.clinical[idx].reference_value)
+        print(" | "); print_f64(d.clinical[idx].pct_diff)
+        println(" |")
+        i = i + 1
+    }
+    println("")
+}
+
+fn emit_audit(d: DossierInput) with IO, Mut, Panic, Div {
+    println("## §9. Audit trail")
+    println("")
+    print("- commit_sha: "); println(d.commit_sha)
+    print("- generated_at_utc: "); println(d.generated_at_utc)
+    print("- sounio_version: "); println(d.sounio_version)
+    println("")
+}
+
+// §10 — pointer to the live browser-native interactive viewer. The URL is
+// stable across runs (canonical site is configured in website/astro.config.mjs)
+// so the dossier links survive future regenerations.
+fn emit_live_viewer() with IO {
+    println("## §10. Live interactive viewer — multi-drug A/B (Stage G)")
+    println("")
+    println("A 3D, browser-native interactive view of this model is hosted at:")
+    println("")
+    println("> **https://www.souniolang.org/dissertation/**")
+    println("")
+    println("The Stage-G viewer is drug-agnostic: a chip-row selector at the top of the")
+    println("canvas (or the `D` keyboard shortcut) toggles between rapamycin (Cypher")
+    println("coronary stent — Higuchi diffusion release) and semaglutide (subcutaneous")
+    println("depot — first-order absorption, k_a = ln 2 / 60 h, F = 0.89 per Overgaard")
+    println("2019 / Carlsson 2020). Release-source visual, receptor-occupancy bars, PD")
+    println("readout panel, Phase J evidence band, patient-profile dropdown and the")
+    println("release-scale slider all swap with the active drug.")
+    println("")
+    println("The PBPK kernel is PBPK28 — permeability-limited (C_v, C_t) per organ with")
+    println("a PS coupling — plus per-organ TMDD blocks (Mager 2004) and the drug's PD")
+    println("ODE. The fully-coupled Crank-Nicolson step on the 27-state arrow matrix is")
+    println("parity-locked (<= 1% RMSE per organ) against the Sounio reference solver")
+    println("by scripts/ci/dissertation_pbpk28_parity_gate.sh, which runs nine hard")
+    println("cases in a single pass (PBPK28 Node<->Sounio, QSS analytical, PBPK14")
+    println("model-form reporting, mass-conservation monotonicity, rapamycin TMDD/PD,")
+    println("semaglutide PBPK28/TMDD/PD).")
+    println("")
+    println("Six narrated tours are available — three per drug. Press `T` to cycle")
+    println("within the active drug; `D` cycles drug and resets tour selection:")
+    println("")
+    println("Rapamycin:")
+    println("1. **Cypher -> blood -> liver** (30 s) — Higuchi release; Kp = 5.4 hepatic")
+    println("   accumulation.")
+    println("2. **BBB closeup — Kp = 0.10** (20 s) — P-gp efflux; why BPR stays < 0.15.")
+    println("3. **GUM cone widening under CL_hep variability** (20 s) — direct visual")
+    println("   proof of contribution #1 (GUM-through-ODE).")
+    println("")
+    println("Semaglutide:")
+    println("4. **SC depot -> blood -> pancreas** (30 s) — first-order absorption from")
+    println("   the abdominal depot, slow systemic distribution.")
+    println("5. **GLP-1R occupancy — brain, gut, pancreas** (24 s) — TMDD bars filling")
+    println("   at three sites; appetite, satiety, insulinotropic pathways narrated.")
+    println("6. **Bergman PD — DG falls as DI rises** (22 s) — pancreatic occupancy")
+    println("   drives insulin secretion which suppresses plasma glucose; switches")
+    println("   mid-tour to \"slow CL\" so the PD GUM cone widens visibly.")
+    println("")
+    println("For committee handouts the viewer's `Snapshot PNG` button (or the `S`")
+    println("keyboard shortcut) exports a print-quality PNG of the current frame,")
+    println("file-named with the active drug so multi-drug demos remain unambiguous.")
+    println("")
+}
+
+// Top-level driver.
+pub fn dossier_emit(d: DossierInput) with IO, Mut, Panic, Div {
+    emit_header(d)
+    emit_subject(d)
+    emit_model_card(d)
+    emit_params(d)
+    emit_method(d)
+    emit_budget_o1(d)
+    emit_budget_o2(d)
+    emit_phase_j(d)
+    emit_clinical(d)
+    emit_audit(d)
+    emit_live_viewer()
+}

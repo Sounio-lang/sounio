@@ -1,0 +1,387 @@
+// self-hosted/gpu/kretikos_json_emit.sio
+//
+// Pure-Sounio streaming JSON emitter. Replaces `python3 - <<PY ...
+// json.dump` heredocs in bin/kretikos.
+//
+// Emits keys in argv order — caller controls ordering. Supports nested
+// objects 1 level deep via dotted paths (e.g., "source.path").
+//
+// Usage: driver.elf <flag>... > out.json
+//
+//   --string PATH=VAL          string leaf
+//   --int    PATH=VAL          integer leaf
+//   --bool   PATH=true|false   boolean leaf
+//   --null   PATH              null literal leaf
+//   --array-strings PATH=v1|v2|...   array of strings (pipe-separated)
+//   --string-if-nonempty PATH=VAL    string leaf, omitted if VAL empty
+//   --raw-json PATH=JSON             pre-formatted JSON value (caller-validated)
+//
+// PATH is a dotted key. When consecutive entries share the same prefix
+// (e.g., "source.path" then "source.bytes"), they are emitted inside
+// one object. The caller MUST emit prefixed keys contiguously.
+//
+// Output goes to stdout; the calling shell redirects to the file.
+//
+// ISO-8601 timestamps come from shell (`date -u +%Y-%m-%dT%H:%M:%SZ`),
+// passed via --string PATH=$TS — POSIX, not Python.
+
+use gpu::kaxi_backend::*
+
+const KIND_NULL: i64 = 0
+const KIND_BOOL: i64 = 1
+const KIND_INT: i64 = 2
+const KIND_STRING: i64 = 3
+const KIND_ARRAY_STRINGS: i64 = 4
+const KIND_RAW: i64 = 5
+
+struct State {
+    out: KaxiAsmBuf,
+    open_prefix: KaxiAsmBuf,   // current open prefix bytes
+    open_prefix_len: i64,
+    has_emitted_top: bool,     // emitted any top-level entry yet?
+    has_emitted_in_obj: bool,  // emitted entry inside the open prefix object?
+}
+
+fn st_new() -> State with Mut, Panic, Div, Alloc {
+    State {
+        out: kaxi_asm_new(),
+        open_prefix: kaxi_asm_new(),
+        open_prefix_len: 0,
+        has_emitted_top: false,
+        has_emitted_in_obj: false,
+    }
+}
+
+fn st_push_str(st: State, s: string) -> State with Mut, Panic, Div, Alloc {
+    var x = st
+    x.out = kaxi_asm_push_str(x.out, s)
+    x
+}
+
+fn st_push_byte(st: State, b: i8) -> State with Mut, Panic, Div, Alloc {
+    var x = st
+    x.out = kaxi_asm_push_byte(x.out, b)
+    x
+}
+
+// Find first '.' in s, or str_len if none.
+fn dot_pos(s: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(s, i) == 46 { return i }
+        i = i + 1
+    }
+    n
+}
+
+// True if s[0..len_a] equals open_prefix bytes.
+fn same_prefix(open_prefix: KaxiAsmBuf, open_len: i64, s: string, slen: i64) -> bool with Mut, Panic, Div {
+    if open_len != slen { return false }
+    var i: i64 = 0
+    while i < slen {
+        if open_prefix.data[i as usize] != str_char_at(s, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Emit a JSON-quoted string from a Sounio string with escape handling.
+fn emit_quoted_str(st: State, s: string) -> State with Mut, Panic, Div, Alloc {
+    var x = st
+    x.out = kaxi_asm_push_byte(x.out, 34 as i8)
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        let c = str_char_at(s, i)
+        if c == 34 {
+            x.out = kaxi_asm_push_byte(x.out, 92 as i8)
+            x.out = kaxi_asm_push_byte(x.out, 34 as i8)
+        } else if c == 92 {
+            x.out = kaxi_asm_push_byte(x.out, 92 as i8)
+            x.out = kaxi_asm_push_byte(x.out, 92 as i8)
+        } else if c == 10 {
+            x.out = kaxi_asm_push_byte(x.out, 92 as i8)
+            x.out = kaxi_asm_push_byte(x.out, 110 as i8)
+        } else {
+            x.out = kaxi_asm_push_byte(x.out, c)
+        }
+        i = i + 1
+    }
+    x.out = kaxi_asm_push_byte(x.out, 34 as i8)
+    x
+}
+
+// Emit decimal integer.
+fn emit_int(st: State, n: i64) -> State with Mut, Panic, Div, Alloc {
+    var x = st
+    if n == 0 {
+        x.out = kaxi_asm_push_byte(x.out, 48 as i8)
+        return x
+    }
+    var v = n
+    if v < 0 {
+        x.out = kaxi_asm_push_byte(x.out, 45 as i8)
+        v = 0 - v
+    }
+    var digits: [i8; 24] = [0; 24]
+    var count: i64 = 0
+    while v > 0 {
+        digits[count as usize] = (48 + (v - (v / 10) * 10)) as i8
+        v = v / 10
+        count = count + 1
+    }
+    var i: i64 = count - 1
+    while i >= 0 {
+        x.out = kaxi_asm_push_byte(x.out, digits[i as usize])
+        i = i - 1
+    }
+    x
+}
+
+// Emit pipe-separated chunks as a JSON array of strings.
+fn emit_array_strings(st: State, payload: string) -> State with Mut, Panic, Div, Alloc {
+    var x = st
+    let n = str_len(payload)
+    if n == 0 {
+        x.out = kaxi_asm_push_str(x.out, "[]")
+        return x
+    }
+    x.out = kaxi_asm_push_str(x.out, "[\n")
+    var chunk_start: i64 = 0
+    var first = true
+    var i: i64 = 0
+    while i <= n {
+        let at_end = i == n
+        let is_pipe = !at_end && str_char_at(payload, i) == 124
+        if at_end || is_pipe {
+            if !first { x.out = kaxi_asm_push_str(x.out, ",\n") }
+            x.out = kaxi_asm_push_str(x.out, "    ")
+            x.out = kaxi_asm_push_byte(x.out, 34 as i8)
+            var k: i64 = chunk_start
+            while k < i {
+                let c = str_char_at(payload, k)
+                if c == 34 {
+                    x.out = kaxi_asm_push_byte(x.out, 92 as i8)
+                    x.out = kaxi_asm_push_byte(x.out, 34 as i8)
+                } else if c == 92 {
+                    x.out = kaxi_asm_push_byte(x.out, 92 as i8)
+                    x.out = kaxi_asm_push_byte(x.out, 92 as i8)
+                } else {
+                    x.out = kaxi_asm_push_byte(x.out, c)
+                }
+                k = k + 1
+            }
+            x.out = kaxi_asm_push_byte(x.out, 34 as i8)
+            first = false
+            chunk_start = i + 1
+        }
+        i = i + 1
+    }
+    x.out = kaxi_asm_push_str(x.out, "\n  ]")
+    x
+}
+
+// Close any open prefix object.
+fn close_prefix(st: State) -> State with Mut, Panic, Div, Alloc {
+    var x = st
+    if x.open_prefix_len > 0 {
+        x.out = kaxi_asm_push_str(x.out, "\n  }")
+        x.open_prefix_len = 0
+        x.has_emitted_in_obj = false
+    }
+    x
+}
+
+// Open a new prefix (path[0..plen] is the prefix bytes).
+fn open_prefix(st: State, path: string, plen: i64) -> State with Mut, Panic, Div, Alloc {
+    var x = st
+    if x.has_emitted_top { x.out = kaxi_asm_push_str(x.out, ",\n") }
+    x.out = kaxi_asm_push_str(x.out, "  ")
+    x.out = kaxi_asm_push_byte(x.out, 34 as i8)
+    var i: i64 = 0
+    var pbuf = kaxi_asm_new()
+    while i < plen {
+        x.out = kaxi_asm_push_byte(x.out, str_char_at(path, i))
+        pbuf = kaxi_asm_push_byte(pbuf, str_char_at(path, i))
+        i = i + 1
+    }
+    x.out = kaxi_asm_push_byte(x.out, 34 as i8)
+    x.out = kaxi_asm_push_str(x.out, ": {\n")
+    x.open_prefix = pbuf
+    x.open_prefix_len = plen
+    x.has_emitted_in_obj = false
+    x.has_emitted_top = true
+    x
+}
+
+// Emit a leaf "key": value pair, prefixing comma/indent based on context.
+fn emit_leaf(st: State, leaf_key: string, leaf_off: i64, leaf_len: i64,
+             kind: i64, str_val: string, int_val: i64, bool_val: i64,
+             nested: bool) -> State with Mut, Panic, Div, Alloc {
+    var x = st
+    if nested {
+        if x.has_emitted_in_obj { x.out = kaxi_asm_push_str(x.out, ",\n") }
+        x.out = kaxi_asm_push_str(x.out, "    ")
+    } else {
+        if x.has_emitted_top { x.out = kaxi_asm_push_str(x.out, ",\n") }
+        x.out = kaxi_asm_push_str(x.out, "  ")
+    }
+    x.out = kaxi_asm_push_byte(x.out, 34 as i8)
+    var i: i64 = leaf_off
+    while i < leaf_off + leaf_len {
+        x.out = kaxi_asm_push_byte(x.out, str_char_at(leaf_key, i))
+        i = i + 1
+    }
+    x.out = kaxi_asm_push_byte(x.out, 34 as i8)
+    x.out = kaxi_asm_push_str(x.out, ": ")
+    if kind == KIND_NULL {
+        x.out = kaxi_asm_push_str(x.out, "null")
+    } else if kind == KIND_BOOL {
+        x.out = kaxi_asm_push_str(x.out, if bool_val != 0 { "true" } else { "false" })
+    } else if kind == KIND_INT {
+        x = emit_int(x, int_val)
+    } else if kind == KIND_STRING {
+        x = emit_quoted_str(x, str_val)
+    } else if kind == KIND_ARRAY_STRINGS {
+        x = emit_array_strings(x, str_val)
+    } else if kind == KIND_RAW {
+        x.out = kaxi_asm_push_str(x.out, str_val)
+    }
+    if nested { x.has_emitted_in_obj = true }
+    else { x.has_emitted_top = true }
+    x
+}
+
+fn find_eq(s: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(s, i) == 61 { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn slice_to_int(s: string, start: i64, len: i64) -> i64 with Mut, Panic, Div {
+    if len == 0 { return 0 }
+    var i: i64 = 0
+    var neg = false
+    if str_char_at(s, start) == 45 { neg = true; i = 1 }
+    var v: i64 = 0
+    while i < len {
+        let c = str_char_at(s, start + i)
+        if c < 48 || c > 57 { return 0 }
+        v = v * 10 + (c - 48) as i64
+        i = i + 1
+    }
+    if neg { 0 - v } else { v }
+}
+
+// Slice path bytes [path_off..path_off+path_len) and values [val_off..val_off+val_len)
+// from spec, copy into temp buffers, return strings via kaxi_asm.
+fn slice_string(spec: string, off: i64, len: i64) -> string with Mut, Panic, Div, Alloc {
+    var b = kaxi_asm_new()
+    var i: i64 = 0
+    while i < len {
+        b = kaxi_asm_push_byte(b, str_char_at(spec, off + i))
+        i = i + 1
+    }
+    kaxi_asm_to_string(b)
+}
+
+// Given a path string, find dot position and produce two slices:
+// prefix [0..dot) and leaf [dot+1..end). If no dot, prefix is empty
+// and leaf is the whole string.
+struct SplitPath { has_prefix: bool, prefix_len: i64, leaf_off: i64, leaf_len: i64 }
+
+fn split_path(path: string) -> SplitPath with Mut, Panic, Div {
+    let n = str_len(path)
+    let dot = dot_pos(path)
+    if dot >= n {
+        return SplitPath { has_prefix: false, prefix_len: 0, leaf_off: 0, leaf_len: n }
+    }
+    SplitPath { has_prefix: true, prefix_len: dot, leaf_off: dot + 1, leaf_len: n - dot - 1 }
+}
+
+fn handle_entry(st: State, path: string, kind: i64,
+                str_val: string, int_val: i64, bool_val: i64) -> State with Mut, Panic, Div, Alloc {
+    var x = st
+    let sp = split_path(path)
+    if !sp.has_prefix {
+        x = close_prefix(x)
+        x = emit_leaf(x, path, 0, str_len(path), kind, str_val, int_val, bool_val, false)
+        return x
+    }
+    // Has prefix. Check if same as currently open.
+    let same = same_prefix(x.open_prefix, x.open_prefix_len, path, sp.prefix_len)
+    if !same {
+        x = close_prefix(x)
+        x = open_prefix(x, path, sp.prefix_len)
+    }
+    x = emit_leaf(x, path, sp.leaf_off, sp.leaf_len, kind, str_val, int_val, bool_val, true)
+    x
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    var st = st_new()
+    st.out = kaxi_asm_push_str(st.out, "{\n")
+
+    var i: i64 = 0
+    while i < argc {
+        let a = get_arg(i)
+        if str_eq(a, "--null") {
+            if i + 1 >= argc { println("json-emit: --null requires PATH"); return 2 }
+            let path = get_arg(i + 1)
+            st = handle_entry(st, path, KIND_NULL, "", 0, 0)
+            i = i + 2
+        } else if str_eq(a, "--bool") || str_eq(a, "--int") || str_eq(a, "--string")
+               || str_eq(a, "--array-strings") || str_eq(a, "--string-if-nonempty")
+               || str_eq(a, "--raw-json") {
+            if i + 1 >= argc {
+                print("json-emit: ")
+                print(a)
+                println(" requires PATH=VAL")
+                return 2
+            }
+            let spec = get_arg(i + 1)
+            let eq = find_eq(spec)
+            if eq < 0 {
+                print("json-emit: bad spec (no '='): ")
+                println(spec)
+                return 2
+            }
+            let n = str_len(spec)
+            let path = slice_string(spec, 0, eq)
+            let val_len = n - eq - 1
+            let val = slice_string(spec, eq + 1, val_len)
+
+            if str_eq(a, "--bool") {
+                let bv: i64 = if str_eq(val, "true") { 1 } else { 0 }
+                st = handle_entry(st, path, KIND_BOOL, "", 0, bv)
+            } else if str_eq(a, "--int") {
+                st = handle_entry(st, path, KIND_INT, "", slice_to_int(spec, eq + 1, val_len), 0)
+            } else if str_eq(a, "--string") {
+                st = handle_entry(st, path, KIND_STRING, val, 0, 0)
+            } else if str_eq(a, "--array-strings") {
+                st = handle_entry(st, path, KIND_ARRAY_STRINGS, val, 0, 0)
+            } else if str_eq(a, "--string-if-nonempty") {
+                if val_len > 0 {
+                    st = handle_entry(st, path, KIND_STRING, val, 0, 0)
+                }
+            } else if str_eq(a, "--raw-json") {
+                st = handle_entry(st, path, KIND_RAW, val, 0, 0)
+            }
+            i = i + 2
+        } else {
+            i = i + 1
+        }
+    }
+
+    st = close_prefix(st)
+    st.out = kaxi_asm_push_str(st.out, "\n}\n")
+    let s = kaxi_asm_to_string(st.out)
+    print(s)
+    0
+}

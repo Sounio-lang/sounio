@@ -1,0 +1,186 @@
+// examples/erdos/168_zd_regime_a2.sio
+//
+// A2 probe: 84 near-threshold 3-SAT instances, one per ZD primitive.
+// Formula seeded by the primitive's algebraic coordinates (lo, hi, neg),
+// NOT by sequential index — so the formula structure reflects ZD algebra.
+//
+// Design:
+//   n_vars = 30, n_cls = 128  (ratio 4.27 ≈ threshold for maximum CDCL hardness)
+//   seed(idx) = (lo * 16 + hi) * 2 + neg_val  (unique per primitive)
+//
+// Falsifiable prediction:
+//   Primitives from the same fiber (same lo value, 12 per fiber) show
+//   correlated hardness — mean hardness within fiber has lower variance
+//   than between fibers.  If ZD algebra maps to epistemic difficulty,
+//   the 7 fibers should produce 7 distinct hardness levels.
+//
+// Connection:
+//   docs/research/locus-coeruleus-surgical-controller-sounio-note.md §5(c)
+//   Stepping stone to A1 (14-vertex probe with structurally diverse surgeries).
+
+use hypercomplex_graph::erdos_unit_distance::*
+use theorem::smt::*
+
+var lcg_state: i64 = 0
+
+fn lcg_next() -> i64 with Mut {
+    lcg_state = (lcg_state * 1664525 + 1013904223) & 0x7FFFFFFF
+    return lcg_state
+}
+
+fn lrand(n: i64) -> i64 with Mut {
+    return lcg_next() % n
+}
+
+fn pri(x: i32) with IO, Div, Panic {
+    if x < 0 { print("-"); pri(0 - x); return }
+    if x == 0 { print("0"); return }
+    if x >= 10 { pri(x / 10) }
+    let d = x - (x / 10) * 10
+    if d == 0 { print("0") } if d == 1 { print("1") } if d == 2 { print("2") }
+    if d == 3 { print("3") } if d == 4 { print("4") } if d == 5 { print("5") }
+    if d == 6 { print("6") } if d == 7 { print("7") } if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+fn prf(x: f64) with IO, Mut, Div, Panic {
+    if x < 0.0 { print("-"); prf(0.0 - x); return }
+    let ip = x as i32
+    pri(ip)
+    print(".")
+    let f0 = (x - (ip as f64)) * 10.0
+    let d0 = f0 as i32
+    let f1 = (f0 - (d0 as f64)) * 10.0
+    let d1 = f1 as i32
+    pri(d0)
+    pri(d1)
+}
+
+fn add3(ctx: &!SmtContext, a: i32, b: i32, c: i32) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    lits[0] = a; lits[1] = b; lits[2] = c
+    smt_add_clause(ctx, &lits, 3)
+}
+
+// Generate n_cls random 3-clauses over vars [0, n_vars). LCG must be seeded.
+fn add_nsat(ctx: &!SmtContext, n_vars: i32, n_cls: i32) with Mut, Div {
+    var i: i32 = 0
+    while i < n_cls {
+        let v0 = (lrand(n_vars as i64)) as i32
+        let s0 = (lrand(2)) as i32
+        let v1 = (lrand(n_vars as i64)) as i32
+        let s1 = (lrand(2)) as i32
+        let v2 = (lrand(n_vars as i64)) as i32
+        let s2 = (lrand(2)) as i32
+        add3(ctx, v0*2 + s0, v1*2 + s1, v2*2 + s2)
+        i = i + 1
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    build_prims()
+
+    print("=== A2: ZD-seeded near-threshold 3-SAT regime probe ===\n")
+    print("30 vars / 128 cls (ratio 4.27). Seed = (lo*16+hi)*2+neg.\n")
+    print("Prediction: prims from same fiber cluster in hardness.\n\n")
+    print("idx lo hi ng seed  confl trust  hard\n")
+    print("--- -- -- -- ----  ----- -----  ----\n")
+
+    // Per-fiber accumulators (fibers lo=1..7 → index 0..6)
+    var fiber_sum:   [f64; 7] = [0.0; 7]
+    var fiber_sum2:  [f64; 7] = [0.0; 7]   // for variance
+    var fiber_n:     [i32; 7] = [0; 7]
+
+    var idx: i64 = 0
+    while idx < 84 {
+        let lo  = get_prim_lo(idx)
+        let hi  = get_prim_hi(idx)
+        let neg = get_prim_neg(idx)
+
+        // Algebraic seed unique per primitive.
+        let seed = (lo * 16 + hi) * 2 + neg
+        lcg_state = seed
+
+        var ctx = smt_new()
+        add_nsat(&! ctx, 30, 128)
+        smt_set_score_mode(&! ctx, 3)
+        smt_set_no_ple(&! ctx, 1)
+        let _r = smt_solve(&! ctx)
+
+        let confl = smt_get_conflicts(&ctx)
+        let trust = smt_get_explore_trust(&ctx)
+        let hard  = smt_get_regime_hardness(&ctx)
+
+        // Fiber index 0-based: lo ranges 1..7.
+        let fi = (lo - 1) as usize
+        fiber_sum[fi]  = fiber_sum[fi]  + hard
+        fiber_sum2[fi] = fiber_sum2[fi] + hard * hard
+        fiber_n[fi]    = fiber_n[fi] + 1
+
+        pri(idx as i32);  print(" ")
+        pri(lo as i32);   print("  ")
+        pri(hi as i32);   print("  ")
+        pri(neg as i32);  print("  ")
+        pri(seed as i32); print("  ")
+        pri(confl);       print("  ")
+        prf(trust);       print("  ")
+        prf(hard);        print("\n")
+
+        idx = idx + 1
+    }
+
+    print("\n=== Fiber summary (lo=1..7, 12 prims each) ===\n")
+    print("lo  mean_hard  var_hard  n\n")
+    print("--  ---------  --------  --\n")
+
+    var grand_mean: f64 = 0.0
+    var grand_n: i32 = 0
+    var fi2: i32 = 0
+    while fi2 < 7 {
+        let n = fiber_n[fi2]
+        let s = fiber_sum[fi2]
+        let s2 = fiber_sum2[fi2]
+        let mean = s / (n as f64)
+        let variance = s2 / (n as f64) - mean * mean
+        grand_mean = grand_mean + s
+        grand_n = grand_n + n
+        pri(fi2 + 1); print("   ")
+        prf(mean); print("     ")
+        prf(variance); print("     ")
+        pri(n); print("\n")
+        fi2 = fi2 + 1
+    }
+
+    let gm = grand_mean / (grand_n as f64)
+    print("\nGrand mean hardness: "); prf(gm); print("\n")
+
+    print("\n--- Verdict ---\n")
+    // Fiber clustering: if between-fiber variance >> within-fiber variance,
+    // the ZD fiber structure correlates with epistemic difficulty.
+    // Simple proxy: does max_fiber_mean / min_fiber_mean > 1.5?
+    var min_mean: f64 = 999.0
+    var max_mean: f64 = 0.0
+    var fi3: i32 = 0
+    while fi3 < 7 {
+        let n = fiber_n[fi3]
+        let mean = fiber_sum[fi3] / (n as f64)
+        if mean < min_mean { min_mean = mean }
+        if mean > max_mean { max_mean = mean }
+        fi3 = fi3 + 1
+    }
+    print("Max fiber mean: "); prf(max_mean); print("  Min: "); prf(min_mean); print("\n")
+    if min_mean > 0.001 {
+        let ratio = max_mean / min_mean
+        print("Max/min ratio: "); prf(ratio); print("\n")
+        if ratio > 1.5 {
+            print("CONFIRMED: fiber hardness spread >1.5x — ZD fiber maps to epistemic regime.\n")
+            print("Proceed to A1 (14-vertex graph probe).\n")
+        } else {
+            print("WEAK: spread < 1.5x — fiber structure does not strongly discriminate regime.\n")
+            print("A1 may still show stronger signal via graph-structural diversity.\n")
+        }
+    } else {
+        print("NULL: min fiber mean near zero — formula too easy or EWMA not calibrated.\n")
+        print("Try n_vars=20, n_cls=85 (same ratio but smaller, faster EWMA warmup).\n")
+    }
+}

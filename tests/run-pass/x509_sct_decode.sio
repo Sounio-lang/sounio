@@ -1,0 +1,167 @@
+//@ run-pass
+//@ requires: madaros
+
+// RFC 6962 SS3.2-3.3 SignedCertificateTimestampList decoder test: a
+// hand-built, one-entry SCT list.
+//
+// Wire layout (offsets into the RawBuf, all multi-byte fields big-endian):
+//   [0..2)   total_len            = 53  (= sct_len field's 2 bytes + the
+//                                        51-byte SCT payload that follows)
+//   [2..4)   sct_len              = 51
+//   [4]      version              = 0
+//   [5..37)  log_id               = 0,1,2,...,31 (arbitrary, index-valued bytes)
+//   [37..45) timestamp_ms         = 1700000000000 (big-endian u64)
+//   [45..47) extensions_len       = 0
+//   [47]     hash_alg             = 4  (arbitrary marker, SHA-256-ish)
+//   [48]     sig_alg              = 3  (arbitrary marker, ECDSA-ish)
+//   [49..51) sig_len              = 4
+//   [51..55) signature            = 0xDE, 0xAD, 0xBE, 0xEF
+//
+// Total buffer length: 55 bytes.
+// sct_len = 1 + 32 + 8 + 2 + 1 + 1 + 2 + 4 (signature) = 51, matching the
+// 47-byte fixed-structure minimum from sct.sio plus the 4-byte signature.
+
+use net::socket::*
+use x509::cert::*
+use x509::sct::*
+
+fn main() -> i64 with IO {
+    // rawbuf_set has a documented write-side bug (Finding 20 in
+    // docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md): each
+    // single-byte write clobbers the following 7 bytes with zero. The
+    // workaround is to write in strictly ascending address order (so every
+    // clobber lands on a not-yet-meaningfully-written byte that a later
+    // write then sets correctly), and to allocate at least 7 bytes of
+    // trailing slack past the last write to absorb the final write's
+    // out-of-bounds clobber.
+    let buf = rawbuf_new(64)
+
+    // total_len = 53 (0x00, 0x35)
+    rawbuf_set(&buf, 0, 0)
+    rawbuf_set(&buf, 1, 53)
+    // sct_len = 51 (0x00, 0x33)
+    rawbuf_set(&buf, 2, 0)
+    rawbuf_set(&buf, 3, 51)
+    // version = 0
+    rawbuf_set(&buf, 4, 0)
+    // log_id[0..32) = 0, 1, 2, ..., 31
+    var li: i64 = 0
+    while li < 32 {
+        rawbuf_set(&buf, 5 + li, li)
+        li = li + 1
+    }
+    // timestamp_ms = 1700000000000 = 0x00_00_01_8b_cf_e5_68_00 (big-endian)
+    rawbuf_set(&buf, 37, 0)
+    rawbuf_set(&buf, 38, 0)
+    rawbuf_set(&buf, 39, 1)
+    rawbuf_set(&buf, 40, 139)
+    rawbuf_set(&buf, 41, 207)
+    rawbuf_set(&buf, 42, 229)
+    rawbuf_set(&buf, 43, 104)
+    rawbuf_set(&buf, 44, 0)
+    // extensions_len = 0
+    rawbuf_set(&buf, 45, 0)
+    rawbuf_set(&buf, 46, 0)
+    // hash_alg = 4, sig_alg = 3
+    rawbuf_set(&buf, 47, 4)
+    rawbuf_set(&buf, 48, 3)
+    // sig_len = 4 (0x00, 0x04)
+    rawbuf_set(&buf, 49, 0)
+    rawbuf_set(&buf, 50, 4)
+    // signature = 0xDE, 0xAD, 0xBE, 0xEF
+    rawbuf_set(&buf, 51, 222)
+    rawbuf_set(&buf, 52, 173)
+    rawbuf_set(&buf, 53, 190)
+    rawbuf_set(&buf, 54, 239)
+
+    let (entries, count, status) = sct_list_decode(&buf, 0, 55)
+
+    if status != X509_OK {
+        print_int(1)
+        return 1
+    }
+    assert(status == X509_OK)
+
+    if count != 1 {
+        print_int(2)
+        return 1
+    }
+    assert(count == 1)
+
+    let e = entries[0]
+
+    if e.version != 0 {
+        print_int(3)
+        return 1
+    }
+    assert(e.version == 0)
+
+    if (e.log_id[0] as i64) != 0 {
+        print_int(4)
+        return 1
+    }
+    assert((e.log_id[0] as i64) == 0)
+
+    if (e.log_id[31] as i64) != 31 {
+        print_int(5)
+        return 1
+    }
+    assert((e.log_id[31] as i64) == 31)
+
+    if e.timestamp_ms != 1700000000000 {
+        print_int(6)
+        return 1
+    }
+    assert(e.timestamp_ms == 1700000000000)
+
+    if e.extensions_len != 0 {
+        print_int(7)
+        return 1
+    }
+    assert(e.extensions_len == 0)
+
+    if e.sig_algorithm_hash != 4 {
+        print_int(8)
+        return 1
+    }
+    assert(e.sig_algorithm_hash == 4)
+
+    if e.sig_algorithm_sign != 3 {
+        print_int(9)
+        return 1
+    }
+    assert(e.sig_algorithm_sign == 3)
+
+    if e.signature_len != 4 {
+        print_int(10)
+        return 1
+    }
+    assert(e.signature_len == 4)
+
+    if (e.signature[0] as i64) != 222 {
+        print_int(11)
+        return 1
+    }
+    assert((e.signature[0] as i64) == 222)
+
+    if (e.signature[1] as i64) != 173 {
+        print_int(12)
+        return 1
+    }
+    assert((e.signature[1] as i64) == 173)
+
+    if (e.signature[2] as i64) != 190 {
+        print_int(13)
+        return 1
+    }
+    assert((e.signature[2] as i64) == 190)
+
+    if (e.signature[3] as i64) != 239 {
+        print_int(14)
+        return 1
+    }
+    assert((e.signature[3] as i64) == 239)
+
+    print_int(0)
+    return 0
+}

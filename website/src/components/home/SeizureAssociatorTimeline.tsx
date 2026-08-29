@@ -56,6 +56,9 @@ const COHORT_MSE = [
 ];
 
 const PHASES = ['baseline', 'pre30', 'pre10', 'pre5', 'ictal', 'post'] as const;
+type PhaseKey = (typeof PHASES)[number];
+type MetricRow = (typeof COHORT)[number];
+
 const PHASE_LABELS: Record<string, string> = {
   baseline: 'Baseline', pre30: 'PRE−30s', pre10: 'PRE−10s', pre5: 'PRE−5s', ictal: 'Ictal', post: 'Post',
 };
@@ -115,7 +118,10 @@ export default function SeizureAssociatorTimeline() {
   }
 
   const data = metric === 'assoc' ? COHORT : COHORT_MSE;
-  const barMax = Math.max(...data.flatMap(r => PHASES.map(p => (r as Record<string, number>)[p])));
+  const barMax = Math.max(
+    ...data.flatMap((r: MetricRow) => PHASES.map((p: PhaseKey) => r[p])),
+    0
+  );
 
   return (
     <section className="py-[clamp(3.5rem,7vw,6rem)] bg-[var(--color-bg)]">
@@ -243,7 +249,7 @@ export default function SeizureAssociatorTimeline() {
             </div>
 
             <div className="grid gap-3">
-              {data.map((row, ri) => (
+              {data.map((row) => (
                 <div key={row.patient}>
                   <div className="text-xs font-mono text-[var(--color-text-tertiary)] mb-1.5">
                     {row.patient}
@@ -254,8 +260,7 @@ export default function SeizureAssociatorTimeline() {
                   <div className="flex gap-1 h-6 cursor-pointer"
                     onClick={() => setActivePatient(activePatient === row.patient ? null : row.patient)}>
                     {PHASES.map(phase => {
-                      const val = (row as Record<string, number>)[phase];
-                      const w = (val / barMax) * 100;
+                      const val = row[phase];
                       return (
                         <div key={phase} className="relative group flex-none"
                           style={{ width: `${100 / PHASES.length}%` }}>

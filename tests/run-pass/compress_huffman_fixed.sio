@@ -1,0 +1,135 @@
+//@ run-pass
+// tests/run-pass/compress_huffman_fixed.sio — Fixed Huffman literal-only encode test
+
+use compress::huffman::{
+    huffman_fixed_encode_into,
+    HuffmanResult,
+}
+
+var HUFF_W: HuffmanResult = HuffmanResult { ok: false, written: 0 }
+
+fn emit_hex_digit(d: i64) with IO {
+    if d == 0 {
+        print("0")
+    } else if d == 1 {
+        print("1")
+    } else if d == 2 {
+        print("2")
+    } else if d == 3 {
+        print("3")
+    } else if d == 4 {
+        print("4")
+    } else if d == 5 {
+        print("5")
+    } else if d == 6 {
+        print("6")
+    } else if d == 7 {
+        print("7")
+    } else if d == 8 {
+        print("8")
+    } else if d == 9 {
+        print("9")
+    } else if d == 10 {
+        print("a")
+    } else if d == 11 {
+        print("b")
+    } else if d == 12 {
+        print("c")
+    } else if d == 13 {
+        print("d")
+    } else if d == 14 {
+        print("e")
+    } else if d == 15 {
+        print("f")
+    } else {
+        print("?")
+    }
+}
+
+fn emit_hex_byte(v: i64) with IO {
+    let b = if v < 0 { 0 } else if v > 255 { 255 } else { v }
+    let hi = b / 16
+    let lo = b - (hi * 16)
+    emit_hex_digit(hi)
+    emit_hex_digit(lo)
+}
+
+pub fn main() -> i32 with IO, Mut, Panic {
+    var src: [i64; 32768] = [0; 32768]
+    var dst: [i64; 65536] = [0; 65536]
+
+    src[0] = 0x00
+    src[1] = 0x00
+    src[2] = 0x00
+    src[3] = 0xFF
+
+    huffman_fixed_encode_into(&!HUFF_W, &src, 4, &!dst, 65536)
+
+    if !HUFF_W.ok {
+        print("FAIL: encode failed\n")
+        return 1 as i32
+    }
+
+    let written = HUFF_W.written
+
+    print("Encoded ")
+    print(written)
+    print(" bytes:\n")
+
+    var i: i64 = 0
+    while i < written {
+        emit_hex_byte(dst[i as usize])
+        if i + 1 < written {
+            print(" ")
+        }
+        i = i + 1
+    }
+    print("\n")
+
+    // Verify expected output
+    // Header: BFINAL=1, BTYPE=01 → 3 bits = 0b011
+    // Literal 0: reverse_bits(48, 8) = 12 = 0b00001100
+    // EOB: reverse_bits(0, 7) = 0
+    // Sequence: three literal 0s + EOB
+    // After first literal 0: bits = 0b011 | (12 << 3) = 99 = 0x63, nbits = 11
+    //   → data[0] = 0x63, bits = 0, nbits = 3
+    // After second literal 0: bits = 0 | (12 << 3) = 96 = 0x60, nbits = 11
+    //   → data[1] = 0x60, bits = 0, nbits = 3
+    // After third literal 0: bits = 0 | (12 << 3) = 96 = 0x60, nbits = 11
+    //   → data[2] = 0x60, bits = 0, nbits = 3
+    // After EOB: bits = 0 | (0 << 3) = 0, nbits = 10
+    //   → data[3] = 0, bits = 0, nbits = 2
+    // Pad: data[4] = 0
+    // So for [0x00, 0x00, 0x00] we expect: 63 60 60 00 00
+    //
+    // Now with 0xFF as the 4th byte:
+    // Literal 255: reverse_bits(511, 9) = 511 = 0b111111111
+    // After third literal: data[0]=0x63, data[1]=0x60, data[2]=0x60, bits=0, nbits=3
+    // Append 255: bits = 0 | (511 << 3) = 4088 = 0xFF8, nbits = 12
+    //   → data[3] = 0xF8, bits = 4088 >> 8 = 15 = 0x0F, nbits = 4
+    // Append EOB: bits = 15 | (0 << 4) = 15 = 0x0F, nbits = 11
+    //   → data[4] = 0x0F, bits = 0, nbits = 3
+    // Pad: data[5] = 0
+    // Expected: 63 60 60 f8 0f 00
+
+    var pass = true
+    if written != 6 {
+        pass = false
+        print("FAIL: expected 6 bytes, got ")
+        print(written)
+        print("\n")
+    }
+    if dst[0 as usize] != 0x63 { pass = false; print("FAIL: byte 0\n") }
+    if dst[1 as usize] != 0x60 { pass = false; print("FAIL: byte 1\n") }
+    if dst[2 as usize] != 0x60 { pass = false; print("FAIL: byte 2\n") }
+    if dst[3 as usize] != 0xF8 { pass = false; print("FAIL: byte 3\n") }
+    if dst[4 as usize] != 0x0F { pass = false; print("FAIL: byte 4\n") }
+    if dst[5 as usize] != 0x00 { pass = false; print("FAIL: byte 5\n") }
+
+    if pass {
+        print("VERIFY: all bytes match expected\n")
+        0 as i32
+    } else {
+        1 as i32
+    }
+}

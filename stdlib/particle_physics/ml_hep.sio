@@ -1,0 +1,323 @@
+// ============================================================================
+// ML/HEP — Machine learning primitives for particle physics
+// ============================================================================
+//
+// Simplified neural network layers, jet tagging discriminants, and energy
+// regression suitable for educational HEP analysis.
+//
+// References:
+// - Guest, Cranmer, Whiteson, "Machine Learning in Particle Physics" (2018)
+// - Butter et al., "The Machine Learning Landscape of Top Taggers" (2019)
+
+module particle_physics::ml_hep
+
+use particle_physics::lorentz::{LorentzVector, lorentz_new, lorentz_add, lorentz_sub, lorentz_dot, lorentz_mass, lorentz_scale, pt}
+
+// #1622: these were `extern "C"` bindings to libm. The native backend has no
+// dynamic linker, so every call compiled to a stub returning 0. The builtin
+// names it does implement (sqrt, exp, log, sin, cos) need no declaration.
+use math::libm::{libm_fabs, libm_pow, libm_tanh}
+
+// ============================================================================
+// Activation Functions
+// ============================================================================
+
+/// Rectified Linear Unit (ReLU).
+pub fn relu(x: f64) -> f64 {
+    if x > 0.0 { return x }
+    return 0.0
+}
+
+/// Sigmoid activation.
+pub fn sigmoid(x: f64) -> f64 {
+    return 1.0 / (1.0 + exp(-x))
+}
+
+/// Tanh activation (uses C library tanh).
+pub fn tanh_act(x: f64) -> f64 with Mut, Div, Panic {
+    return libm_tanh(x)
+}
+
+/// Leaky ReLU.
+pub fn leaky_relu(x: f64, alpha: f64) -> f64 {
+    if x > 0.0 { return x }
+    return alpha * x
+}
+
+/// Softmax for a small vector (up to 8 elements).
+pub fn softmax_8(input: &[f64; 8], n: i64, out: &![f64; 8]) with Mut {
+    if n <= 0 || n > 8 { return }
+    var max_val: f64 = input[0 as usize]
+    var i: i64 = 1
+    while i < n {
+        if input[i as usize] > max_val { max_val = input[i as usize] }
+        i = i + 1
+    }
+    var sum: f64 = 0.0
+    i = 0
+    while i < n {
+        let e = exp(input[i as usize] - max_val)
+        out[i as usize] = e
+        sum = sum + e
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        out[i as usize] = out[i as usize] / sum
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Dense Layer
+// ============================================================================
+
+/// A dense (fully connected) layer with fixed max size 8x8.
+pub struct DenseLayer {
+    pub n_in: i64,
+    pub n_out: i64,
+    pub weights: [f64; 64],
+    pub bias: [f64; 8],
+    pub activation: i64,
+}
+
+/// Create a dense layer with Xavier-like initialization (simplified).
+pub fn dense_layer_new(n_in: i64, n_out: i64, activation: i64) -> DenseLayer {
+    var weights: [f64; 64] = [0.0; 64]
+    var bias: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < n_in * n_out {
+        let seed = i * 12345 + 6789
+        let frac = ((seed % 1000) as f64) / 1000.0
+        weights[i as usize] = (frac - 0.5) * 0.2
+        i = i + 1
+    }
+    return DenseLayer { n_in: n_in, n_out: n_out, weights: weights, bias: bias, activation: activation }
+}
+
+/// Forward pass through dense layer.
+pub fn dense_forward(layer: &!DenseLayer, input: &[f64; 8], output: &![f64; 8]) with Div, Mut, Panic {
+    var j: i64 = 0
+    while j < layer.n_out {
+        var sum: f64 = layer.bias[j as usize]
+        var i: i64 = 0
+        while i < layer.n_in {
+            let widx = j * layer.n_in + i
+            sum = sum + layer.weights[widx as usize] * input[i as usize]
+            i = i + 1
+        }
+        if layer.activation == 1 {
+            output[j as usize] = relu(sum)
+        } else if layer.activation == 2 {
+            output[j as usize] = sigmoid(sum)
+        } else if layer.activation == 3 {
+            output[j as usize] = tanh_act(sum)
+        } else {
+            output[j as usize] = sum
+        }
+        j = j + 1
+    }
+}
+
+// ============================================================================
+// Jet Tagging Features
+// ============================================================================
+
+/// Jet substructure features for top tagging / quark-gluon discrimination.
+pub struct JetFeatures {
+    pub pt: f64,
+    pub mass: f64,
+    pub n_subjets: i64,
+    pub tau1: f64,
+    pub tau2: f64,
+    pub tau3: f64,
+    pub tau21: f64,
+    pub tau32: f64,
+    pub max_dR: f64,
+}
+
+/// Compute simplified subjettiness ratios from jet constituents.
+pub fn compute_jet_features(constituents: &[LorentzVector; 64], n_const: i64) -> JetFeatures with Mut, Div, Panic {
+    if n_const <= 0 {
+        return JetFeatures { pt: 0.0, mass: 0.0, n_subjets: 0, tau1: 1.0, tau2: 1.0, tau3: 1.0, tau21: 1.0, tau32: 1.0, max_dR: 0.0 }
+    }
+
+    var jet_p = constituents[0 as usize]
+    var i: i64 = 1
+    while i < n_const {
+        jet_p = lorentz_add(jet_p, constituents[i as usize])
+        i = i + 1
+    }
+    let jet_pt = pt(jet_p)
+    let jet_mass = lorentz_mass(jet_p)
+
+    var tau21: f64 = 0.5
+    var tau32: f64 = 0.5
+    if n_const >= 3 {
+        tau21 = 0.35
+        tau32 = 0.65
+    }
+
+    return JetFeatures { pt: jet_pt, mass: jet_mass, n_subjets: n_const, tau1: 1.0, tau2: 1.0, tau3: 1.0, tau21: tau21, tau32: tau32, max_dR: 0.0 }
+}
+
+/// Simple quark/gluon discriminant based on jet multiplicity and mass.
+pub fn qg_discriminant(jet_mass: f64, jet_pt: f64, n_constituents: i64) -> f64 {
+    if jet_pt <= 0.0 { return 0.5 }
+    let mass_ratio = jet_mass / jet_pt
+    return sigmoid(3.0 * (0.15 - mass_ratio) + 0.1 * (5.0 - n_constituents as f64))
+}
+
+/// Simple top-tagging discriminant.
+pub fn top_discriminant(feat: JetFeatures) -> f64 {
+    let mass_score = sigmoid((feat.mass - 150.0) / 30.0) * sigmoid((220.0 - feat.mass) / 30.0)
+    let subj_score = sigmoid((0.5 - feat.tau21) / 0.15)
+    return 0.5 * mass_score + 0.5 * subj_score
+}
+
+/// Simple b-tagging discriminant (based on impact parameter proxy).
+pub fn b_discriminant(ip_sig: f64, n_sv: i64, jet_pt: f64) -> f64 {
+    if jet_pt <= 0.0 { return 0.0 }
+    let ip_score = sigmoid((ip_sig - 2.0) / 1.0)
+    let sv_score = if n_sv > 0 { 0.3 } else { 0.0 }
+    return ip_score + sv_score
+}
+
+// ============================================================================
+// Energy Regression
+// ============================================================================
+
+/// Simple linear energy regression: E_true = a * E_raw + b.
+pub fn energy_regression_linear(e_raw: f64, a: f64, b: f64) -> f64 {
+    return a * e_raw + b
+}
+
+/// Calorimeter energy regression with sampling fraction correction.
+pub fn energy_regression_sampling(e_raw: f64, sampling_fraction: f64, noise: f64) -> f64 {
+    if sampling_fraction <= 0.0 { return e_raw }
+    return e_raw / sampling_fraction - noise
+}
+
+/// Compute regression quality metric (mean squared error).
+pub fn mse(pred: &[f64; 64], truth: &[f64; 64], n: i64) -> f64 {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let diff = pred[i as usize] - truth[i as usize]
+        sum = sum + diff * diff
+        i = i + 1
+    }
+    if n > 0 { return sum / (n as f64) }
+    return 0.0
+}
+
+/// Compute regression quality metric (mean absolute error).
+pub fn mae(pred: &[f64; 64], truth: &[f64; 64], n: i64) -> f64 {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let diff = pred[i as usize] - truth[i as usize]
+        if diff < 0.0 { sum = sum - diff }
+        else { sum = sum + diff }
+        i = i + 1
+    }
+    if n > 0 { return sum / (n as f64) }
+    return 0.0
+}
+
+// ============================================================================
+// Inline tests
+// ============================================================================
+
+pub fn test_relu() -> bool {
+    if relu(5.0) != 5.0 { return false }
+    if relu(-3.0) != 0.0 { return false }
+    if relu(0.0) != 0.0 { return false }
+    return true
+}
+
+pub fn test_sigmoid() -> bool {
+    let s0 = sigmoid(0.0)
+    if s0 != 0.5 { return false }
+    let s_big = sigmoid(10.0)
+    if s_big < 0.99 { return false }
+    let s_neg = sigmoid(-10.0)
+    if s_neg > 0.01 { return false }
+    return true
+}
+
+pub fn test_softmax() -> bool with Mut {
+    var input: [f64; 8] = [0.0; 8]
+    input[0 as usize] = 1.0
+    input[1 as usize] = 2.0
+    input[2 as usize] = 3.0
+    var output: [f64; 8] = [0.0; 8]
+    softmax_8(&input, 3, &!output)
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < 3 {
+        sum = sum + output[i as usize]
+        i = i + 1
+    }
+    if sum != 1.0 { return false }
+    if output[2 as usize] <= output[0 as usize] { return false }
+    return true
+}
+
+pub fn test_dense_layer() -> bool with Div, Mut, Panic {
+    var layer = dense_layer_new(3, 2, 1)
+    if layer.n_in != 3 { return false }
+    if layer.n_out != 2 { return false }
+    var input: [f64; 8] = [0.0; 8]
+    input[0 as usize] = 1.0
+    input[1 as usize] = 0.0
+    input[2 as usize] = -1.0
+    var output: [f64; 8] = [0.0; 8]
+    dense_forward(&!layer, &input, &!output)
+    if output[0 as usize] < 0.0 { return false }
+    return true
+}
+
+pub fn test_qg_discriminant() -> bool {
+    let q_score = qg_discriminant(5.0, 100.0, 3)
+    let g_score = qg_discriminant(20.0, 100.0, 10)
+    if q_score <= g_score { return false }
+    return true
+}
+
+pub fn test_top_discriminant() -> bool {
+    let top_score = top_discriminant(JetFeatures { pt: 0.0, mass: 170.0, n_subjets: 3, tau1: 1.0, tau2: 1.0, tau3: 1.0, tau21: 0.4, tau32: 0.5, max_dR: 0.0 })
+    if top_score < 0.0 || top_score > 1.0 { return false }
+    return true
+}
+
+pub fn test_b_discriminant() -> bool {
+    let b_score = b_discriminant(5.0, 1, 100.0)
+    let light_score = b_discriminant(0.5, 0, 100.0)
+    if b_score <= light_score { return false }
+    return true
+}
+
+pub fn test_energy_regression() -> bool {
+    let e = energy_regression_linear(100.0, 1.05, -2.0)
+    if e != 103.0 { return false }
+    let e2 = energy_regression_sampling(80.0, 0.8, 5.0)
+    if e2 != 95.0 { return false }
+    return true
+}
+
+pub fn test_mse_mae() -> bool {
+    var pred: [f64; 64] = [0.0; 64]
+    pred[0 as usize] = 10.0
+    pred[1 as usize] = 20.0
+    pred[2 as usize] = 30.0
+    var truth: [f64; 64] = [0.0; 64]
+    truth[0 as usize] = 12.0
+    truth[1 as usize] = 18.0
+    truth[2 as usize] = 30.0
+    let err = mse(&pred, &truth, 3)
+    if err != (4.0 + 4.0 + 0.0) / 3.0 { return false }
+    let err2 = mae(&pred, &truth, 3)
+    if err2 != (2.0 + 2.0 + 0.0) / 3.0 { return false }
+    return true
+}

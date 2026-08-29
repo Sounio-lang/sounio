@@ -1,0 +1,186 @@
+//@ run-pass
+//@ timeout: 120
+//@ known-failure: BLK-20260602-SRET-FORWARDING-IMPORTS — same root cause as test_phonon_quantity.sio; legacy/new phonon Quantity returns miscompile in current compiler.
+// tests/stdlib/physics/test_phonon_quantity_parity.sio
+//
+// Numerical parity check between the legacy stdlib/physics/phonon.sio
+// (flat [f64; 64] params, ng/mL concentration) and the new
+// stdlib/physics/phonon_quantity.sio (PhononParams Quantity, kg/m³).
+//
+// Method:
+//   1. Build a scenario with non-trivial params (rapamycin defaults, then
+//      override concentration to a non-zero portal value to drive flow).
+//   2. Run the legacy `phonon_simulate` on a 64-site lattice over a short
+//      window (10 cardiac cycles) using ng/mL-scale concentrations.
+//   3. Run the new `phonon_simulate_q` with the same physical scenario
+//      expressed in SI (kg/m³ = ng/mL × 1e-6).
+//   4. Compare each lattice site: |new_value - legacy_value * 1e-6| < tol.
+//
+// Tolerance rationale:
+//   - Identical math (same RK4, same CFL, same Bhaskara sin, same linearized
+//     GUM) should give bit-exact agreement after the 1e-6 conversion, since
+//     the integrand is linear in concentration.
+//   - The pulsatile boundary uses the *same* sin_approx_local and same omega
+//     formula, so the time series should align.
+//   - We use 1e-12 relative tolerance to allow for floating-point round-off
+//     in the multiplications and additions.
+
+use physics::phonon::*
+use physics::pbpk_phonon::*
+use physics::phonon_quantity::*
+use units::lib::*
+
+fn assert_close(got: f64, expected: f64, tol: f64) with Panic {
+    let d = got - expected
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    if ad > tol {
+        panic()
+    }
+}
+
+// --- Scenario: pulsatile boundary drives flow into a clean lattice ---
+
+fn build_legacy_params(portal_ng_ml: f64, arterial_ng_ml: f64, tissue_ng_ml: f64) -> [f64; 64] with Mut {
+    var p: [f64; 64] = [0.0; 64]
+    // Rapamycin defaults (SI for non-concentration fields, ng/mL for concs)
+    p[PP_D_EFF]     = 1.0e-9
+    p[PP_DX]        = 3.9e-6
+    p[PP_K_RELEASE] = 0.1
+    p[PP_CL_SITE]   = 0.003
+    p[PP_FU]        = 0.075
+    p[PP_KP]        = 5.0
+    p[PP_C_PORTAL]  = portal_ng_ml
+    p[PP_C_HA]      = arterial_ng_ml
+    p[PP_F_HEART]   = 1.2
+    p[PP_A_PORTAL]  = 0.05
+    p[PP_A_HA]      = 0.30
+    p[PP_PHI_HA]    = 0.785
+    p[PP_C_TISSUE]  = tissue_ng_ml
+    p[PP_V_BLOOD]   = 3.0e-4
+    p[PP_ZONATION]  = 1.0
+    p
+}
+
+fn build_q_params(portal_ng_ml: f64, arterial_ng_ml: f64, tissue_ng_ml: f64) -> PhononParams with Mut {
+    let base = rapamycin_phonon_params_q()
+    PhononParams {
+        d_eff:     base.d_eff,
+        dx:        base.dx,
+        k_release: base.k_release,
+        cl_site:   base.cl_site,
+        fu:        base.fu,
+        kp:        base.kp,
+        c_portal:  q_concentration_mass(portal_ng_ml * 1.0e-6,  0.0),
+        c_ha:      q_concentration_mass(arterial_ng_ml * 1.0e-6, 0.0),
+        f_heart:   base.f_heart,
+        a_portal:  base.a_portal,
+        a_ha:      base.a_ha,
+        phi_ha:    base.phi_ha,
+        c_tissue:  q_concentration_mass(tissue_ng_ml * 1.0e-6,   0.0),
+        v_blood:   base.v_blood,
+        zonation:  base.zonation,
+    }
+}
+
+// --- Parity assertion ---
+// Compare each lattice site after the same physical duration.
+// legacy_value is in ng/mL, new_value is in kg/m³.
+// Conversion: 1 ng/mL = 1e-6 kg/m³, so we multiply legacy by 1e-6.
+
+fn assert_parity(
+    legacy: &PhononState,
+    new_lattice: &Lattice64,
+    tol: f64
+) with Mut, Panic {
+    var i: i64 = 0
+    while i < legacy.n {
+        let legacy_kg_m3 = legacy.values[i] * 1.0e-6
+        let new_v = new_lattice.values[i]
+        let d = new_v - legacy_kg_m3
+        let ad = if d < 0.0 { 0.0 - d } else { d }
+        assert(ad < tol)
+        i = i + 1
+    }
+}
+
+// --- The actual parity test ---
+
+fn test_parity_short_run() with Mut, Div, Panic {
+    // Drive the system for 10 cardiac cycles at 1.2 Hz ≈ 8.33 s.
+    let cycles: i64 = 10
+    let t_end = (cycles as f64) / 1.2  // 8.333 s
+
+    // Non-trivial scenario: portal 10 ng/mL, arterial 8 ng/mL,
+    // tissue 2 ng/mL, zero initial lattice.
+    let portal  = 10.0
+    let arterial = 8.0
+    let tissue  = 2.0
+
+    // --- Legacy run ---
+    let legacy_params = build_legacy_params(portal, arterial, tissue)
+    var legacy_state = phonon_state_zero()
+    phonon_init_uniform(&!legacy_state, 0.0, 0.0)
+    let legacy_steps = phonon_simulate(&!legacy_state, &legacy_params, 0.0, t_end, 1.0e-4)
+    assert(legacy_steps > 0)
+
+    // --- New run ---
+    let q_params = build_q_params(portal, arterial, tissue)
+    var new_state = lattice64_init(0.0, 0.0)
+    let new_steps = phonon_simulate_q(&!new_state, &q_params, 0.0, t_end)
+    assert(new_steps > 0)
+
+    // --- Compare ---
+    // 1e-9 absolute tolerance on kg/m³ = 1e-3 ng/mL tolerance on the
+    // legacy value. That's well within the floating-point round-off of
+    // 64-site RK4 with linearized GUM and a 1.0e-4 s timestep.
+    assert_parity(&legacy_state, &new_state, 1.0e-9)
+}
+
+fn test_parity_with_initial_concentration() with Mut, Div, Panic {
+    // Same physical scenario but start the lattice at 5 ng/mL, so diffusion
+    // and release have to push values around instead of just advecting in.
+    let cycles: i64 = 5
+    let t_end = (cycles as f64) / 1.2
+    let c0 = 5.0
+
+    let legacy_params = build_legacy_params(10.0, 8.0, 2.0)
+    var legacy_state = phonon_state_zero()
+    phonon_init_uniform(&!legacy_state, c0, 0.0)
+    phonon_simulate(&!legacy_state, &legacy_params, 0.0, t_end, 1.0e-4)
+
+    let q_params = build_q_params(10.0, 8.0, 2.0)
+    var new_state = lattice64_init(c0 * 1.0e-6, 0.0)
+    phonon_simulate_q(&!new_state, &q_params, 0.0, t_end)
+
+    assert_parity(&legacy_state, &new_state, 1.0e-9)
+}
+
+fn test_parity_pulsatile_only() with Mut, Div, Panic {
+    // Long enough to see the pulsatile boundary modulate the inlet site.
+    let cycles: i64 = 20
+    let t_end = (cycles as f64) / 1.2  // 16.67 s
+
+    let legacy_params = build_legacy_params(10.0, 8.0, 0.0)
+    var legacy_state = phonon_state_zero()
+    phonon_init_uniform(&!legacy_state, 0.0, 0.0)
+    phonon_simulate(&!legacy_state, &legacy_params, 0.0, t_end, 1.0e-4)
+
+    let q_params = build_q_params(10.0, 8.0, 0.0)
+    var new_state = lattice64_init(0.0, 0.0)
+    phonon_simulate_q(&!new_state, &q_params, 0.0, t_end)
+
+    // First site is most sensitive to the pulsatile boundary.
+    let d0 = new_state.values[0] - legacy_state.values[0] * 1.0e-6
+    let ad0 = if d0 < 0.0 { 0.0 - d0 } else { d0 }
+    assert(ad0 < 1.0e-9)
+
+    // Whole-lattice parity
+    assert_parity(&legacy_state, &new_state, 1.0e-9)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    test_parity_short_run()
+    test_parity_with_initial_concentration()
+    test_parity_pulsatile_only()
+    0
+}

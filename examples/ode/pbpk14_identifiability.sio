@@ -1,0 +1,304 @@
+// ============================================================================
+// PBPK-14 STRUCTURAL IDENTIFIABILITY from plasma observations
+// ----------------------------------------------------------------------------
+// Future-work item "identifiability" + dissertation Contribution #2 motivation.
+//
+// CLAIM (provable, then confirmed numerically): the 14-compartment PBPK is
+// STRUCTURALLY NON-IDENTIFIABLE from a plasma (venous) concentration curve.
+// The unbound fraction `fu` enters the dynamics ONLY through the elimination
+// terms:
+//     hepatic:  cl_int * fu * c_liver        (DY[liver])
+//     renal:    gfr    * fu * c_art          (DY[kidney])
+// so the reparameterisation
+//     fu -> a*fu,   cl_int -> cl_int/a,   gfr -> gfr/a
+// leaves BOTH products (cl_int*fu) and (gfr*fu) -- hence the ENTIRE system
+// matrix A and EVERY trajectory -- invariant. The plasma curve cannot
+// distinguish a family of parameter sets: only the products are identifiable,
+// not fu, cl_int, gfr individually.
+//
+// This is exactly why the dissertation's type-enforced epistemic priors
+// (Knowledge<T>, PBPK28) are MANDATORY, not decorative: identifiability has to
+// come from prior information, because the data alone cannot supply it.
+//
+// We demonstrate three things on the real-flow stiff (backward-Euler) solver:
+//   A. moving along the null direction (a-scaling) leaves the plasma curve
+//      unchanged to machine precision           -> NON-identifiable combo
+//   B. moving along an identifiable direction (cl_int alone) changes it
+//   C. the 3x3 Fisher information for (ln fu, ln cl_int, ln gfr) is rank-
+//      deficient: det(FIM) ~ 0, while the identifiable 2x2 product-block is
+//      well-conditioned.
+//
+// Build:  bin/souc-linux-x86_64 examples/ode/pbpk14_identifiability.sio out && ./out
+// ============================================================================
+
+var S:  [f64; 14]
+var DY: [f64; 14]
+var A:  [f64; 196]
+var M:  [f64; 196]
+var G:  [f64; 196]
+var B:  [f64; 14]
+var Y:  [f64; 14]
+
+var QSCALE: f64
+var KA:     f64
+var FU:     f64
+var CL_INT: f64
+var GFR:    f64
+
+// plasma (venous) concentration samples; 13 samples at t=0,2,..,24h
+var OBS_BASE: [f64; 13]
+var OBS_ALT:  [f64; 13]
+
+fn fabs(x: f64) -> f64 { if x < 0.0 { return 0.0 - x } return x }
+
+fn deriv() with Mut, Div {
+    let v_art=1.0;   let v_ven=3.9;  let v_lung=0.5;   let v_heart=0.33
+    let v_brain=1.4; let v_muscle=28.0; let v_adipose=14.0; let v_skin=2.6
+    let v_bone=4.0;  let v_spleen=0.15; let v_gut=1.0;  let v_liver=1.5; let v_kidney=0.28
+    let q_lung=350.0*QSCALE;   let q_heart=14.0*QSCALE;  let q_brain=42.0*QSCALE
+    let q_muscle=63.0*QSCALE;  let q_adipose=17.5*QSCALE; let q_skin=17.5*QSCALE
+    let q_bone=17.5*QSCALE;    let q_spleen=10.5*QSCALE; let q_gut=63.0*QSCALE
+    let q_liver_art=21.0*QSCALE; let q_kidney=77.0*QSCALE
+    let kp_lung=0.8; let kp_heart=1.0; let kp_brain=0.5; let kp_muscle=0.8
+    let kp_adipose=2.0; let kp_skin=1.0; let kp_bone=0.5; let kp_spleen=1.0
+    let kp_gut=1.0; let kp_liver=1.2; let kp_kidney=1.5
+    let rb=1.0
+    let c_art=S[1]/v_art/rb;     let c_ven=S[2]/v_ven/rb
+    let c_lung=S[3]/v_lung;      let c_heart=S[4]/v_heart
+    let c_brain=S[5]/v_brain;    let c_muscle=S[6]/v_muscle
+    let c_adipose=S[7]/v_adipose; let c_skin=S[8]/v_skin
+    let c_bone=S[9]/v_bone;      let c_spleen=S[10]/v_spleen
+    let c_gut=S[11]/v_gut;       let c_liver=S[12]/v_liver
+    let c_kidney=S[13]/v_kidney
+    let q_portal=q_gut+q_spleen
+    let q_hepatic=q_portal+q_liver_art
+    DY[0] = 0.0 - KA*S[0]
+    DY[1] = q_lung*c_lung/kp_lung - (q_heart+q_brain+q_muscle+q_adipose+q_skin+q_bone+q_gut+q_spleen+q_liver_art+q_kidney)*c_art
+    DY[2] = q_heart*c_heart/kp_heart + q_brain*c_brain/kp_brain + q_muscle*c_muscle/kp_muscle + q_adipose*c_adipose/kp_adipose + q_skin*c_skin/kp_skin + q_bone*c_bone/kp_bone + q_hepatic*c_liver/kp_liver + q_kidney*c_kidney/kp_kidney - q_lung*c_ven
+    DY[3] = q_lung*(c_ven - c_lung/kp_lung)
+    DY[4] = q_heart*(c_art - c_heart/kp_heart)
+    DY[5] = q_brain*(c_art - c_brain/kp_brain)
+    DY[6] = q_muscle*(c_art - c_muscle/kp_muscle)
+    DY[7] = q_adipose*(c_art - c_adipose/kp_adipose)
+    DY[8] = q_skin*(c_art - c_skin/kp_skin)
+    DY[9] = q_bone*(c_art - c_bone/kp_bone)
+    DY[10] = q_spleen*(c_art - c_spleen/kp_spleen)
+    DY[11] = q_gut*(c_art - c_gut/kp_gut) + KA*S[0]
+    let liver_in = q_liver_art*c_art + q_gut*c_gut/kp_gut + q_spleen*c_spleen/kp_spleen
+    DY[12] = liver_in - q_hepatic*c_liver/kp_liver - CL_INT*FU*c_liver
+    DY[13] = q_kidney*(c_art - c_kidney/kp_kidney) - GFR*FU*c_art*rb
+}
+
+fn build_M(dt: f64) with Mut, Div, Panic {
+    var j = 0
+    while j < 14 {
+        var i = 0
+        while i < 14 { S[i] = 0.0; i = i + 1 }
+        S[j] = 1.0
+        deriv()
+        i = 0
+        while i < 14 { A[i*14 + j] = DY[i]; i = i + 1 }
+        j = j + 1
+    }
+    var r = 0
+    while r < 14 {
+        var c = 0
+        while c < 14 {
+            let id = if r == c { 1.0 } else { 0.0 }
+            M[r*14 + c] = id - dt*A[r*14 + c]
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+fn gauss_solve(n: i64) with Mut, Div, Panic {
+    var col = 0
+    while col < n {
+        var piv = col
+        var best = fabs(G[col*14 + col])
+        var r = col + 1
+        while r < n {
+            let v = fabs(G[r*14 + col])
+            if v > best { best = v; piv = r }
+            r = r + 1
+        }
+        if piv != col {
+            var k = 0
+            while k < n {
+                let tmp = G[col*14 + k]; G[col*14 + k] = G[piv*14 + k]; G[piv*14 + k] = tmp
+                k = k + 1
+            }
+            let tb = B[col]; B[col] = B[piv]; B[piv] = tb
+        }
+        let diag = G[col*14 + col]
+        var row = col + 1
+        while row < n {
+            let factor = G[row*14 + col] / diag
+            var c = col
+            while c < n { G[row*14 + c] = G[row*14 + c] - factor*G[col*14 + c]; c = c + 1 }
+            B[row] = B[row] - factor*B[col]
+            row = row + 1
+        }
+        col = col + 1
+    }
+    var i = n - 1
+    while i >= 0 {
+        var s = B[i]
+        var jj = i + 1
+        while jj < n { s = s - G[i*14 + jj]*B[jj]; jj = jj + 1 }
+        B[i] = s / G[i*14 + i]
+        i = i - 1
+    }
+}
+
+fn be_step() with Mut, Div, Panic {
+    var i = 0
+    while i < 196 { G[i] = M[i]; i = i + 1 }
+    i = 0
+    while i < 14 { B[i] = Y[i]; i = i + 1 }
+    gauss_solve(14)
+    i = 0
+    while i < 14 { Y[i] = B[i]; i = i + 1 }
+}
+
+// Run 24h with dt=0.1h, recording venous concentration into `out[13]`
+// at t = 0,2,4,...,24h (every 20 steps). out is selected by `which`:
+//   which==0 -> OBS_BASE, which==1 -> OBS_ALT
+fn simulate(which: i64) with Mut, Div, Panic {
+    let v_ven = 3.9
+    build_M(0.1)
+    var i = 0
+    while i < 14 { Y[i] = 0.0; i = i + 1 }
+    Y[0] = 500.0
+    // record t=0 sample
+    if which == 0 { OBS_BASE[0] = Y[2]/v_ven } else { OBS_ALT[0] = Y[2]/v_ven }
+    var step = 0
+    var sample = 1
+    while step < 240 {
+        be_step()
+        step = step + 1
+        if step % 20 == 0 {
+            if which == 0 { OBS_BASE[sample] = Y[2]/v_ven } else { OBS_ALT[sample] = Y[2]/v_ven }
+            sample = sample + 1
+        }
+    }
+}
+
+// max abs difference between the two recorded plasma curves
+fn obs_maxdiff() -> f64 with Mut {
+    var m = 0.0
+    var i = 0
+    while i < 13 {
+        let d = fabs(OBS_BASE[i] - OBS_ALT[i])
+        if d > m { m = d }
+        i = i + 1
+    }
+    return m
+}
+
+fn set_baseline() with Mut {
+    QSCALE = 1.0
+    KA = 1.0
+    FU = 0.3
+    CL_INT = 50.0
+    GFR = 7.5
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("=== PBPK-14 structural identifiability from plasma ===")
+    println("")
+
+    // baseline plasma curve
+    set_baseline()
+    simulate(0)
+
+    // -----------------------------------------------------------------
+    // A. NULL DIRECTION: fu->a*fu, cl_int->cl_int/a, gfr->gfr/a (a=2).
+    //    Products (cl_int*fu),(gfr*fu) invariant => curve must be identical.
+    // -----------------------------------------------------------------
+    set_baseline()
+    FU = 0.3 * 2.0
+    CL_INT = 50.0 / 2.0
+    GFR = 7.5 / 2.0
+    simulate(1)
+    println("[A] null-direction reparam (fu*2, cl_int/2, gfr/2)")
+    println("    max|plasma_base - plasma_reparam| (expect ~0):")
+    println(obs_maxdiff())
+    println("    => fu, cl_int, gfr are NOT separately identifiable.")
+    println("")
+
+    // -----------------------------------------------------------------
+    // B. IDENTIFIABLE DIRECTION: change cl_int alone (+20%), fu/gfr fixed.
+    //    This changes the product cl_int*fu => plasma curve MUST change.
+    // -----------------------------------------------------------------
+    set_baseline()
+    CL_INT = 50.0 * 1.2
+    simulate(1)
+    println("[B] identifiable direction (cl_int +20%, fu/gfr fixed)")
+    println("    max|plasma_base - plasma_changed| (expect >> 0):")
+    println(obs_maxdiff())
+    println("    => the product (cl_int*fu) IS identifiable.")
+    println("")
+
+    // -----------------------------------------------------------------
+    // C. Fisher information for theta = (ln fu, ln cl_int, ln gfr).
+    //    Sensitivities by central log-differences of the plasma curve;
+    //    FIM = S^T S over the 13 samples. det(FIM) ~ 0 (rank 2), while the
+    //    well-conditioned 2x2 block over the identifiable products is not.
+    // -----------------------------------------------------------------
+    // Build a 13x3 sensitivity matrix SEN.
+    // Reuse OBS_ALT as scratch for perturbed curves; keep baseline in OBS_BASE.
+    set_baseline()
+    simulate(0)                      // OBS_BASE = baseline plasma
+    let eps = 0.0001
+    // sensitivity to ln fu
+    var s_fu:  [f64; 13] = [0.0; 13]
+    var s_cl:  [f64; 13] = [0.0; 13]
+    var s_gfr: [f64; 13] = [0.0; 13]
+    // d/d ln fu  (forward difference: (f(fu*(1+eps)) - f(fu))/eps)
+    set_baseline(); FU = 0.3 * (1.0 + eps); simulate(1)
+    var i = 0
+    while i < 13 { s_fu[i] = (OBS_ALT[i] - OBS_BASE[i]) / eps; i = i + 1 }
+    set_baseline(); CL_INT = 50.0 * (1.0 + eps); simulate(1)
+    i = 0
+    while i < 13 { s_cl[i] = (OBS_ALT[i] - OBS_BASE[i]) / eps; i = i + 1 }
+    set_baseline(); GFR = 7.5 * (1.0 + eps); simulate(1)
+    i = 0
+    while i < 13 { s_gfr[i] = (OBS_ALT[i] - OBS_BASE[i]) / eps; i = i + 1 }
+    // FIM entries (symmetric 3x3): F[fu,fu], F[fu,cl], ...
+    var f00 = 0.0; var f01 = 0.0; var f02 = 0.0
+    var f11 = 0.0; var f12 = 0.0; var f22 = 0.0
+    i = 0
+    while i < 13 {
+        f00 = f00 + s_fu[i]*s_fu[i];  f01 = f01 + s_fu[i]*s_cl[i];  f02 = f02 + s_fu[i]*s_gfr[i]
+        f11 = f11 + s_cl[i]*s_cl[i];  f12 = f12 + s_cl[i]*s_gfr[i]; f22 = f22 + s_gfr[i]*s_gfr[i]
+        i = i + 1
+    }
+    // det of symmetric 3x3
+    let det3 = f00*(f11*f22 - f12*f12) - f01*(f01*f22 - f12*f02) + f02*(f01*f12 - f11*f02)
+    // trace (scale of the matrix) for a relative read of det
+    let tr = f00 + f11 + f22
+    println("[C] Fisher information for (ln fu, ln cl_int, ln gfr)")
+    println("    trace(FIM) (matrix scale):"); println(tr)
+    println("    det(FIM) (expect ~0 relative to trace^3 => rank-deficient):")
+    println(det3)
+    // directional check: F * null, null=(+1 ln fu, -1 ln cl, -1 ln gfr)
+    let fn0 = f00*1.0 + f01*(0.0-1.0) + f02*(0.0-1.0)
+    let fn1 = f01*1.0 + f11*(0.0-1.0) + f12*(0.0-1.0)
+    let fn2 = f02*1.0 + f12*(0.0-1.0) + f22*(0.0-1.0)
+    let nrm = fabs(fn0) + fabs(fn1) + fabs(fn2)
+    println("    |FIM * null_dir|_1 (expect ~0):"); println(nrm)
+    // identifiable 2x2 block over products (ln(cl*fu), ln(gfr*fu)) ~ (cl, gfr)
+    // sensitivity to the products is captured by s_cl, s_gfr; its det:
+    let det2 = f11*f22 - f12*f12
+    println("    det(identifiable 2x2 block) (expect >> 0):"); println(det2)
+    println("")
+    println("Conclusion: the plasma curve fixes the products (cl_int*fu) and")
+    println("(gfr*fu) but NOT fu, cl_int, gfr separately -- the model is")
+    println("structurally non-identifiable along a known 1-D direction. The")
+    println("missing dimension must be supplied by priors: this is the formal")
+    println("justification for the dissertation's type-enforced Knowledge<T>")
+    println("epistemic priors (Contribution #2), not optional decoration.")
+    return 0
+}

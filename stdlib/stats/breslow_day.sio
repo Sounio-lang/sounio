@@ -1,0 +1,268 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/breslow_day.sio — Breslow-Day test for homogeneity of odds ratios
+//
+// The companion test to Mantel-Haenszel: it checks whether the stratum odds
+// ratios are homogeneous enough that a single pooled OR is meaningful. A
+// significant result warns against pooling.
+//
+//   breslow_day(a, b, c, d, k) -> BDResult      (each stratum a 2×2)
+//
+// Under the common OR ψ (= OR_MH) the expected count Aᵢ in cell a solves the
+// quadratic (ψ−1)A² − [ψ(r₁+c₁)+(n−r₁−c₁)]A + ψ·r₁·c₁ = 0; with variance
+//   Vᵢ = (1/Aᵢ + 1/(r₁−Aᵢ) + 1/(c₁−Aᵢ) + 1/(n−r₁−c₁+Aᵢ))⁻¹,
+//   χ²_BD = Σ (aᵢ − Aᵢ)² / Vᵢ,   df = k − 1.
+//
+// Pure Sounio: inline sqrt for the quadratic root; χ² tail via inline Lanczos
+// log-gamma + incomplete gamma. No external dependency, no nested data-array calls.
+//
+// References:
+//   Breslow & Day (1980) "Statistical Methods in Cancer Research", vol.1.
+
+module stats::breslow_day
+
+fn bd_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / bd_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn bd_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn bd_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn bd_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * bd_ln(tt) - tt + bd_ln(a)
+}
+
+fn bd_igamma_p(s: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x < s + 1.0 {
+        var ap = s
+        var sum = 1.0 / s
+        var del = sum
+        var n = 0
+        while n < 300 {
+            ap = ap + 1.0
+            del = del * x / ap
+            sum = sum + del
+            let ad = if del < 0.0 { 0.0 - del } else { del }
+            let asum = if sum < 0.0 { 0.0 - sum } else { sum }
+            if ad < asum * 1.0e-15 { n = 300 } else { n = n + 1 }
+        }
+        return sum * bd_exp(0.0 - x + s * bd_ln(x) - bd_lgamma(s))
+    }
+    var b = x + 1.0 - s
+    var c = 1.0e300
+    var d = 1.0 / b
+    var h = d
+    var i = 1
+    while i < 300 {
+        let an = 0.0 - (i as f64) * ((i as f64) - s)
+        b = b + 2.0
+        d = an * d + b
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = b + an / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-15 { i = 300 } else { i = i + 1 }
+    }
+    let q = bd_exp(0.0 - x + s * bd_ln(x) - bd_lgamma(s)) * h
+    return 1.0 - q
+}
+
+fn bd_chi2_sf(x: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0 }
+    if df <= 0.0 { return 1.0 }
+    return 1.0 - bd_igamma_p(df * 0.5, x * 0.5)
+}
+
+pub struct BDResult {
+    pub chi2: f64,   // Breslow-Day statistic
+    pub df: i64,     // k - 1
+    pub p: f64,      // p-value (large χ² → heterogeneity → do not pool)
+    pub or_mh: f64,  // the common odds ratio used
+}
+
+/// Breslow-Day homogeneity-of-OR test across k 2×2 strata.
+///
+/// Parâmetros: a,b,c,d — per-stratum cell counts; k — strata (2..16).
+/// Retorno: BDResult (chi2, df, p, or_mh).
+/// Referências: Breslow & Day (1980).
+pub fn breslow_day(a: &[f64; 16], b: &[f64; 16], c: &[f64; 16], d: &[f64; 16], k: i32) -> BDResult with Mut, Div, Panic {
+    if k < 2 || k > 16 { return BDResult { chi2: 0.0, df: 0, p: 1.0, or_mh: 0.0 } }
+    // common OR from Mantel-Haenszel
+    var num = 0.0
+    var den = 0.0
+    var s = 0
+    while s < k {
+        let n = a[s as usize] + b[s as usize] + c[s as usize] + d[s as usize]
+        if n > 0.0 {
+            num = num + a[s as usize] * d[s as usize] / n
+            den = den + b[s as usize] * c[s as usize] / n
+        }
+        s = s + 1
+    }
+    if den <= 0.0 { return BDResult { chi2: 0.0, df: (k - 1) as i64, p: 1.0, or_mh: 0.0 } }
+    let psi = num / den
+    var chi2 = 0.0
+    var i = 0
+    while i < k {
+        let ai = a[i as usize]
+        let r1 = a[i as usize] + b[i as usize]
+        let c1 = a[i as usize] + c[i as usize]
+        let n = a[i as usize] + b[i as usize] + c[i as usize] + d[i as usize]
+        // fitted A under common OR psi: (psi-1)A² - [psi(r1+c1)+(n-r1-c1)]A + psi·r1·c1 = 0
+        let qa = psi - 1.0
+        let qb = 0.0 - (psi * (r1 + c1) + (n - r1 - c1))
+        let qc = psi * r1 * c1
+        var A = 0.0
+        if qa > 1.0e-12 || qa < 0.0 - 1.0e-12 {
+            let disc = bd_sqrt(qb * qb - 4.0 * qa * qc)
+            let root1 = (0.0 - qb - disc) / (2.0 * qa)
+            let root2 = (0.0 - qb + disc) / (2.0 * qa)
+            // pick the root inside the feasible range [max(0,r1+c1-n), min(r1,c1)]
+            var lof = 0.0
+            if r1 + c1 - n > 0.0 { lof = r1 + c1 - n }
+            var hif = r1
+            if c1 < r1 { hif = c1 }
+            A = root1
+            if root1 < lof - 1.0e-6 || root1 > hif + 1.0e-6 { A = root2 }
+        } else {
+            // psi = 1: linear, A = r1·c1/n
+            A = r1 * c1 / n
+        }
+        let B = r1 - A
+        let C = c1 - A
+        let D = n - r1 - c1 + A
+        if A > 1.0e-9 && B > 1.0e-9 && C > 1.0e-9 && D > 1.0e-9 {
+            let v = 1.0 / (1.0 / A + 1.0 / B + 1.0 / C + 1.0 / D)
+            chi2 = chi2 + (ai - A) * (ai - A) / v
+        }
+        i = i + 1
+    }
+    let df = k - 1
+    let p = bd_chi2_sf(chi2, df as f64)
+    return BDResult { chi2: chi2, df: df as i64, p: p, or_mh: psi }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// homogeneous: two strata each OR=2 (as in the M-H example). Fitted A equals the
+// observed a in each stratum, so χ²_BD ≈ 0 -> no evidence against pooling.
+fn test_homogeneous() -> bool with IO, Mut, Div, Panic {
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    var c: [f64; 16] = [0.0; 16]
+    var d: [f64; 16] = [0.0; 16]
+    a[0]=20.0; b[0]=10.0; c[0]=10.0; d[0]=10.0
+    a[1]=40.0; b[1]=20.0; c[1]=20.0; d[1]=20.0
+    let r = breslow_day(&a, &b, &c, &d, 2)
+    var ok = true
+    ok = check(1, approx(r.or_mh, 2.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.chi2, 0.0, 1.0e-4)) && ok
+    ok = check(3, r.df == 1) && ok
+    ok = check(4, r.p > 0.9) && ok
+    return ok
+}
+
+// heterogeneous: S1 OR=2, S2 OR=0.5 -> large χ²_BD, small p.
+fn test_heterogeneous() -> bool with IO, Mut, Div, Panic {
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    var c: [f64; 16] = [0.0; 16]
+    var d: [f64; 16] = [0.0; 16]
+    a[0]=40.0; b[0]=20.0; c[0]=20.0; d[0]=40.0     // OR = 4
+    a[1]=20.0; b[1]=40.0; c[1]=40.0; d[1]=20.0     // OR = 0.25
+    let r = breslow_day(&a, &b, &c, &d, 2)
+    var ok = true
+    ok = check(10, r.chi2 > 5.0) && ok
+    ok = check(11, r.p < 0.05) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_homogeneous() && ok
+    ok = test_heterogeneous() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

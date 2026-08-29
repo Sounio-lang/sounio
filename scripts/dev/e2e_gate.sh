@@ -28,6 +28,13 @@ trap 'rm -rf "$OUT_DIR"' EXIT
 echo "[e2e] native build + run"
 sounio_require_souc
 
+if [[ "${SOUNIO_SKIP_MADAROS:-0}" != "1" ]]; then
+  echo "[e2e] Madaros Stage1 full-functioning gate"
+  make -C "$ROOT_DIR" madaros-full-gate
+else
+  echo "[e2e] Madaros skipped (SOUNIO_SKIP_MADAROS=1)"
+fi
+
 # Skip backend-specific build modes when using the native wrapper
 if [[ "$SOUC_BIN" == *"/bin/souc" ]] || [[ "$SOUC_BIN" == *"native-wrapper"* ]]; then
   echo "[e2e] native compiler detected — using compile+run instead of build --backend"

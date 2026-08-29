@@ -5,7 +5,158 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_take_expr_box}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_take_expr_box, parser_advance, parser_assign_op_code, error_expr, mk_expr}
+use parser::types::*
+use parser::exprs::{parse_expr_entry}
+use parser::exprs::*
+use parser::patterns::*
+
+// Lean compiler safety: keep assignment targets out of the local frame while
+// recursively parsing the RHS. Holding both Boxes locally corrupts some nested
+// parenthesized RHS parses in the split compiler path.
+var LAST_ASSIGN_TARGET: Option<Box<Expr>> = None
+
+fn stmt_store_assign_target(target: Box<Expr>) with Mut {
+    LAST_ASSIGN_TARGET = Some(target)
+}
+
+fn stmt_take_assign_target() -> Box<Expr> with Mut, Alloc {
+    match LAST_ASSIGN_TARGET {
+        Some(target) => {
+            LAST_ASSIGN_TARGET = None
+            target
+        },
+        None => {
+            LAST_ASSIGN_TARGET = None
+            Box::new(error_expr(Span { file_id: 0, start: 0, end: 0 }))
+        },
+    }
+}
+
+// ============================================================
+// Tuple-let desugaring side table.
+//
+// `let (a, b) = e` cannot be represented by a single Stmt (which has one `name`
+// field), so the parser desugars it to a primary `let __tupN = e` (returned as
+// the statement) plus per-element `let a = __tupN.0` / `let b = __tupN.1`
+// bindings pushed here and drained by parse_block in source order. This reuses
+// the fully-proven single-name let and tuple-`.N` indexing paths on BOTH the
+// checker and codegen sides — unlike carrying a pattern on Stmt, which would
+// typecheck but never destructure in lowering. Mirrors the LAST_ASSIGN_TARGET
+// idiom (keep the large Stmt nodes off the parse frame).
+//
+// Defined as free helpers before `impl Parser` so callers (parse_let_stmt,
+// parse_block) satisfy the define-before-use rule without depending on
+// stmt_list_append / reverse_stmt_list_opt (which appear later in this file).
+// ============================================================
+var TPLET_PENDING: Option<Box<StmtList>> = None
+var TPLET_COUNTER: i64 = 0
+
+// Name holding the decimal ascii of a non-negative integer (tuple index 0,1,..).
+fn tplet_index_name(n: i64) -> Name with Mut, Panic, Div {
+    var name = empty_name()
+    if n <= 0 {
+        name.buf[0] = 48 as i8
+        name.len = 1
+        return name
+    }
+    var digits: [i8; 24] = [0; 24]
+    var cnt: i64 = 0
+    var v = n
+    while v > 0 {
+        digits[cnt as usize] = (48 + (v % 10)) as i8
+        v = v / 10
+        cnt = cnt + 1
+    }
+    var i: i64 = 0
+    while i < cnt {
+        name.buf[i as usize] = digits[(cnt - 1 - i) as usize]
+        i = i + 1
+    }
+    name.len = cnt
+    name
+}
+
+// Unique temp Name `__tupN` for the desugared tuple value (N = call counter).
+fn tplet_temp_name(ctr: i64) -> Name with Mut, Panic, Div {
+    var name = make_name("__tup")
+    let d = tplet_index_name(ctr)
+    var i: i64 = 0
+    while i < d.len {
+        name.buf[(name.len + i) as usize] = d.buf[i as usize]
+        i = i + 1
+    }
+    name.len = name.len + d.len
+    name
+}
+
+// Push an element binding to the FIFO pending queue. Implemented as a LIFO cons;
+// tplet_emit_elems recurses-before-push so source order ends up FIFO at the head.
+fn tplet_push(s: Stmt) with Mut, Alloc {
+    let prev = TPLET_PENDING
+    TPLET_PENDING = Some(Box::new(StmtList { head: s, tail: prev }))
+}
+
+// Emit `let <binder> = __tup.<idx>` for each sub-pattern of a tuple let.
+// Wildcards / non-binding sub-patterns are skipped (no variable to bind).
+// Recurses on the tail BEFORE pushing the head so that, combined with the LIFO
+// tplet_push, the pending list reads head->tail in source order (FIFO).
+fn tplet_emit_elems(opt: Option<Box<PatternList>>, temp: Name, span: Span, idx: i64) with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            let sub = (*list).head
+            tplet_emit_elems((*list).tail, temp, span, idx + 1)
+            if sub.kind == PatternKind::PatBinding {
+                var ident = mk_expr(ExprKind::ExprIdent, span)
+                ident.name = temp
+                var field = mk_expr(ExprKind::ExprFieldAccess, span)
+                field.name = tplet_index_name(idx)
+                field.left = Some(Box::new(ident))
+                let elem = Stmt {
+                    kind: StmtKind::StmtLet,
+                    span: span,
+                    name: sub.name,
+                    ty: None,
+                    expr: Some(Box::new(field)),
+                    target: None,
+                    assign_op: AssignOp::AssignEq,
+                }
+                tplet_push(elem)
+            }
+        },
+        None => {},
+    }
+}
+
+// Emit `let <binder> = __tup.<field>` for each direct binding in a struct let.
+// This mirrors tuple-let lowering while reusing the field-access path that the
+// checker and HLIR lowering already understand.
+fn tplet_emit_struct_fields(opt: Option<Box<PatFieldList>>, temp: Name, span: Span) with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            let field_pat = (*list).head
+            tplet_emit_struct_fields((*list).tail, temp, span)
+            if field_pat.pattern.kind == PatternKind::PatBinding {
+                var ident = mk_expr(ExprKind::ExprIdent, span)
+                ident.name = temp
+                var field = mk_expr(ExprKind::ExprFieldAccess, span)
+                field.name = field_pat.name
+                field.left = Some(Box::new(ident))
+                let elem = Stmt {
+                    kind: StmtKind::StmtLet,
+                    span: span,
+                    name: field_pat.pattern.name,
+                    ty: None,
+                    expr: Some(Box::new(field)),
+                    target: None,
+                    assign_op: AssignOp::AssignEq,
+                }
+                tplet_push(elem)
+            }
+        },
+        None => {},
+    }
+}
 
 impl Parser {
     // ============================================================
@@ -40,9 +191,50 @@ impl Parser {
         while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             let pair = p.parse_stmt()
             p = pair.0
-            let stmt = pair.1
+            var stmt = pair.1
+
+            var late_assign_code = parser_assign_op_code(p)
+            if late_assign_code < 0 {
+                let late_k = parser_peek(p)
+                if late_k == TokenKind::Eq { late_assign_code = 0 }
+                else if late_k == TokenKind::PlusEq { late_assign_code = 1 }
+                else if late_k == TokenKind::MinusEq { late_assign_code = 2 }
+                else if late_k == TokenKind::StarEq { late_assign_code = 3 }
+                else if late_k == TokenKind::SlashEq { late_assign_code = 4 }
+                else if late_k == TokenKind::PercentEq { late_assign_code = 5 }
+            }
+            if late_assign_code >= 0 {
+                let target_opt = stmt.expr
+                p = parser_advance(p)
+                p = parse_expr_entry(p)
+                let rhs_box = parser_take_expr_box()
+                stmt = Stmt {
+                    kind: StmtKind::StmtAssign,
+                    span: p.span_from(start),
+                    name: empty_name(),
+                    ty: None,
+                    expr: Some(rhs_box),
+                    target: target_opt,
+                    assign_op: assign_op_from_code(late_assign_code),
+                }
+            }
 
             rev_stmts_opt = Some(Box::new(StmtList { head: stmt, tail: rev_stmts_opt }))
+
+            // Drain tuple-let element bindings desugared by parse_let_stmt. The
+            // pending list reads head->tail in source order; consing each onto
+            // the reverse-built rev_stmts_opt keeps them right after their
+            // primary `let __tupN = e` once the block list is reversed.
+            while true {
+                match TPLET_PENDING {
+                    Some(node) => {
+                        let elem = (*node).head
+                        TPLET_PENDING = (*node).tail
+                        rev_stmts_opt = Some(Box::new(StmtList { head: elem, tail: rev_stmts_opt }))
+                    },
+                    None => break,
+                }
+            }
 
             // Skip optional semicolons between statements
             while parser_peek(p) == TokenKind::Semi {
@@ -73,15 +265,34 @@ impl Parser {
     }
 
     // ============================================================
-    // Let binding: let name [: Type] = expr
+    // Let binding: let pattern [: Type] = expr
     // ============================================================
 
     fn parse_let_stmt(self) -> (Parser, Stmt) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
-        var p = self.advance()  // skip 'let'
+        var p = parser_advance(self)  // skip 'let'
 
-        let name = p.current_name()
-        p = p.expect_ident()
+        // E040: Rust `let mut` — Sounio uses `var` for mutable bindings. `mut` is
+        // a dedicated keyword token, so detect it directly and emit a helpful,
+        // coded diagnostic instead of a bare "expected token" parse error. Recover
+        // by consuming `mut` and parsing the rest as an ordinary `let <pat>`.
+        if parser_peek(p) == TokenKind::Mut {
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            if p.error_count <= 20 {
+                print("error[E040]: Sounio uses `var` for mutable bindings, not `let mut`\n")
+                print("  help: change `let mut x = ...` to `var x = ...`\n")
+            }
+            p = parser_advance(p)  // skip `mut`, continue as `let <name>`
+        }
+
+        let pat_pair = p.parse_pattern()
+        p = pat_pair.0
+        let pat = pat_pair.1
+        var name = empty_name()
+        if pat.kind == PatternKind::PatBinding {
+            name = pat.name
+        }
 
         // Optional type annotation
         let pair = p.parse_optional_type()
@@ -89,11 +300,52 @@ impl Parser {
         let ty_opt = pair.1
 
         // = expr
-        p = p.expect(TokenKind::Eq)
+        if parser_assign_op_code(p) == 0 || parser_peek(p) == TokenKind::Eq {
+            p = parser_advance(p)
+        } else {
+            p = p.expect(TokenKind::Eq)
+        }
         p = p.parse_expr()
         let init_box = parser_take_expr_box()
 
         let span = p.span_from(start)
+
+        // Tuple-destructuring let: `let (a, b) = e`. The pattern cannot live on
+        // the single-name Stmt, so desugar to `let __tupN = e` (returned here)
+        // plus `let a = __tupN.0` / `let b = __tupN.1` pushed to TPLET_PENDING
+        // and drained by parse_block. See the tuple-let side table above.
+        if pat.kind == PatternKind::PatTuple {
+            let ctr = TPLET_COUNTER
+            TPLET_COUNTER = TPLET_COUNTER + 1
+            let temp = tplet_temp_name(ctr)
+            tplet_emit_elems(pat.sub_patterns, temp, span, 0)
+            return (p, Stmt {
+                kind: StmtKind::StmtLet,
+                span: span,
+                name: temp,
+                ty: ty_opt,
+                expr: Some(init_box),
+                target: None,
+                assign_op: AssignOp::AssignEq,
+            })
+        }
+
+        if pat.kind == PatternKind::PatStruct {
+            let ctr = TPLET_COUNTER
+            TPLET_COUNTER = TPLET_COUNTER + 1
+            let temp = tplet_temp_name(ctr)
+            tplet_emit_struct_fields(pat.pat_fields, temp, span)
+            return (p, Stmt {
+                kind: StmtKind::StmtLet,
+                span: span,
+                name: temp,
+                ty: ty_opt,
+                expr: Some(init_box),
+                target: None,
+                assign_op: AssignOp::AssignEq,
+            })
+        }
+
         (p, Stmt {
             kind: StmtKind::StmtLet,
             span: span,
@@ -106,12 +358,12 @@ impl Parser {
     }
 
     // ============================================================
-    // Var declaration: var name [: Type] = expr
+    // Var declaration: var name [: Type] [= expr]
     // ============================================================
 
     fn parse_var_stmt(self) -> (Parser, Stmt) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
-        var p = self.advance()  // skip 'var'
+        var p = parser_advance(self)  // skip 'var'
 
         let name = p.current_name()
         p = p.expect_ident()
@@ -121,10 +373,12 @@ impl Parser {
         p = pair.0
         let ty_opt = pair.1
 
-        // = expr
-        p = p.expect(TokenKind::Eq)
-        p = p.parse_expr()
-        let init_box = parser_take_expr_box()
+        var init_opt: Option<Box<Expr>> = None
+        if parser_assign_op_code(p) == 0 || parser_peek(p) == TokenKind::Eq {
+            p = parser_advance(p)
+            p = p.parse_expr()
+            init_opt = Some(parser_take_expr_box())
+        }
 
         let span = p.span_from(start)
         (p, Stmt {
@@ -132,7 +386,7 @@ impl Parser {
             span: span,
             name: name,
             ty: ty_opt,
-            expr: Some(init_box),
+            expr: init_opt,
             target: None,
             assign_op: AssignOp::AssignEq,
         })
@@ -145,16 +399,46 @@ impl Parser {
     fn parse_expr_or_assign_stmt(self) -> (Parser, Stmt) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p1 = self.parse_expr()
-        let lhs_box = parser_take_expr_box()
 
-        let k = parser_peek(p1)
-        if k == TokenKind::Eq || k == TokenKind::PlusEq || k == TokenKind::MinusEq
-            || k == TokenKind::StarEq || k == TokenKind::SlashEq || k == TokenKind::PercentEq {
+        var assign_code = parser_assign_op_code(p1)
+        var assign_p = p1
+        if assign_code < 0 {
+            let ak = parser_peek(p1)
+            if ak == TokenKind::Eq { assign_code = 0 }
+            else if ak == TokenKind::PlusEq { assign_code = 1 }
+            else if ak == TokenKind::MinusEq { assign_code = 2 }
+            else if ak == TokenKind::StarEq { assign_code = 3 }
+            else if ak == TokenKind::SlashEq { assign_code = 4 }
+            else if ak == TokenKind::PercentEq { assign_code = 5 }
+        }
+        // ONE-TOKEN SKIP REMOVED, and the removal is the experiment.
+        //
+        // This block looked one token PAST the end of the expression it had just
+        // parsed and, if THAT token was an assignment operator, advanced over the
+        // token in between and treated the expression as the assignment target.
+        // Nothing verified that the skipped token belonged to the expression. When
+        // a call and an assignment share a line -- `{ print_int(101) fail = fail + 1 }`
+        // -- the skipped token is the next statement's variable: `fail` was
+        // swallowed and the CALL became the target, typed (), surfacing three
+        // layers away as 52x E002 "expected (), found i64" in regalloc.sio and
+        // codegen_plan.sio. The `!p1.had_newline_before()` guard above is why the
+        // same code on separate lines was always fine.
+        //
+        // Its motivating case is not recoverable: the block arrives in the
+        // repository's initial squash commit, so there is no history to read. So
+        // it is removed and the corpus is asked instead -- if it was load-bearing,
+        // something that checks clean today will stop doing so, and that is
+        // exactly the regression gate docs/audit/CHECKER_GUARD_WIRING_DISPATCH
+        // requires. The ordinary path above (an assign operator sitting directly
+        // at the cursor) is untouched, which is what `x = 5`, `x += 1` and
+        // `a.b[i] = v` all take.
+        if assign_code >= 0 {
             // Assignment
-            let op = parse_assign_op(k)
-            var p = p1.advance()  // skip operator
-            p = p.parse_expr()
+            let lhs_box = parser_take_expr_box()
+            var p = parser_advance(assign_p)  // skip operator
+            p = parse_expr_entry(p)
             let rhs_box = parser_take_expr_box()
+            let op = assign_op_from_code(assign_code)
             let span = p.span_from(start)
             (p, Stmt {
                 kind: StmtKind::StmtAssign,
@@ -167,6 +451,7 @@ impl Parser {
             })
         } else {
             // Expression statement
+            let lhs_box = parser_take_expr_box()
             let span = p1.span_from(start)
             (p1, Stmt {
                 kind: StmtKind::StmtExpr,
@@ -195,6 +480,15 @@ fn parse_assign_op(kind: TokenKind) -> AssignOp {
         TokenKind::PercentEq => AssignOp::AssignRem,
         _ => AssignOp::AssignEq,
     }
+}
+
+pub fn assign_op_from_code(code: i64) -> AssignOp {
+    if code == 1 { return AssignOp::AssignAdd }
+    if code == 2 { return AssignOp::AssignSub }
+    if code == 3 { return AssignOp::AssignMul }
+    if code == 4 { return AssignOp::AssignDiv }
+    if code == 5 { return AssignOp::AssignRem }
+    AssignOp::AssignEq
 }
 
 fn stmt_list_append(list: StmtList, node: StmtList) -> StmtList with Mut, Alloc {

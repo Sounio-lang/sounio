@@ -1,0 +1,432 @@
+// darwin_pbpk/population/pop_pbpk_pd.sio — Genotype-Stratified Population PBPK/PD
+//
+// First genotype-stratified virtual trial for haloperidol D2 occupancy
+// and rapamycin↔olanzapine mTOR collision risk quantification.
+//
+// Design:
+//   N=32 virtual patients, seed=42 (reproducible)
+//   Haloperidol 5 mg QD oral, European allele frequencies
+//   Per-patient: sample CYP2D6 pheno + DRD2 TaqI A + lognormal IIV on CL
+//   SS approximation: C_ss = F_oral × dose / (CL_indiv × tau)
+//   BBB SS via bbb_integrate_constant_plasma (constant-plasma integrator)
+//   D2 occ = c_isf_free / (c_isf_free + Kd)
+//
+// Sub-population (patients 24–31): additionally prescribed olanzapine 10 mg QD
+//   Evaluates mTOR collision gate (rapamycin DES Phase 2 vs. olanzapine).
+//
+// 5 validation tests:
+//   T1: ≥ 50% patients in therapeutic window (D2 60–80%)
+//   T2: ≥ 1 patient in EPS-risk zone (D2 > 80%) — PM tail exists
+//   T3: P95/P5 > 1.5 — wide population variability confirmed
+//   T4: ≥ 1/8 co-prescription patients UNCERTAIN or UNPROTECTED (mTOR gate)
+//   T5: all D2 occ values in [0, 1]
+//
+// References:
+//   Gaedigk 2017 (CYP2D6 European frequencies)
+//   Bertilsson 2002 (haloperidol CYP2D6 CL scales)
+//   Farde 1992 (D2 therapeutic window 60–80%)
+//   Bhatt 2014 (olanzapine mTOR EC50)
+
+use darwin_pbpk::bbb::bbb_core::{bbb_integrate_constant_plasma, bbb_c_isf_u}
+use darwin_pbpk::drugs::haloperidol::{haloperidol_bbb_params}
+use darwin_pbpk::pd::d2_occupancy::{d2_occupancy, haloperidol_d2_params, haloperidol_d2_params_pgx}
+use darwin_pbpk::pgx::cyp2d6_haloperidol::{halo_cyp2d6_adjusted_cl, halo_cyp2d6_sample}
+use darwin_pbpk::pgx::abcb1::{abcb1_sample}
+use darwin_pbpk::pgx::drd2_taq1a::{drd2_sample}
+use darwin_pbpk::pd::mtor_collision::{mtor_net_interval, mtor_collision_gate, rapa_hill_params_clinical}
+use darwin_pbpk::drugs::olanzapine::{olanzapine_mtor_act_params}
+
+// ============================================================================
+// LCG PSEUDO-RANDOM NUMBER GENERATOR (copy from pop_sim.sio — not pub there)
+// ============================================================================
+
+struct PPRng {
+    state: i64,
+}
+
+fn pp_rng_new(seed: i64) -> PPRng {
+    PPRng { state: seed }
+}
+
+fn pp_rng_step(rng: PPRng) -> PPRng {
+    let a = 1664525
+    let c = 1013904223
+    let m = 4294967296
+    let next = (a * rng.state + c) % m
+    let pos = if next < 0 { next + m } else { next }
+    PPRng { state: pos }
+}
+
+fn pp_rng_val(rng: PPRng) -> f64 {
+    let s = rng.state as f64
+    s / 4294967296.0
+}
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn pp_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = (y + x / y) * 0.5; i = i + 1 }
+    y
+}
+
+fn pp_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn pp_ln(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 - 999.0 }
+    var sx = x
+    var sc = 0
+    while sx > 2.0 { sx = sx / 2.718281828459045; sc = sc + 1 }
+    while sx < 0.5 { sx = sx * 2.718281828459045; sc = sc - 1 }
+    let u = (sx - 1.0) / (sx + 1.0)
+    let u2 = u * u
+    let r = 2.0 * (u + u * u2 / 3.0 + u * u2 * u2 / 5.0
+                    + u * u2 * u2 * u2 / 7.0 + u * u2 * u2 * u2 * u2 / 9.0)
+    var sf = 0.0
+    var si = 0
+    if sc > 0 { while si < sc { sf = sf + 1.0; si = si + 1 } }
+    if sc < 0 { var si2 = 0; while si2 < (0 - sc) { sf = sf - 1.0; si2 = si2 + 1 } }
+    r + sf
+}
+
+// exp(x) via Taylor series — accurate for |x| < 2.5 (IIV omega range)
+fn pp_exp(x: f64) -> f64 with Mut, Div {
+    if x < 0.0 - 3.0 { return 0.05 }
+    if x > 3.0        { return 20.09 }
+    let x2 = x * x
+    let x3 = x2 * x
+    let x4 = x3 * x
+    let x5 = x4 * x
+    let x6 = x5 * x
+    1.0 + x + x2 / 2.0 + x3 / 6.0 + x4 / 24.0 + x5 / 120.0 + x6 / 720.0
+}
+
+// ============================================================================
+// NORMAL DISTRIBUTION SAMPLING (Marsaglia polar — copy from pop_sim.sio)
+// ============================================================================
+
+struct PPNormal {
+    value: f64,
+    rng:   PPRng,
+}
+
+fn pp_sample_normal(rng: PPRng, mean: f64, sd: f64) -> PPNormal with Mut, Div, Panic {
+    var r = rng
+    var u1 = 0.0
+    var u2 = 0.0
+    var s = 2.0
+    var attempts = 0
+    while s >= 1.0 || s <= 0.0 {
+        r = pp_rng_step(r)
+        u1 = pp_rng_val(r) * 2.0 - 1.0
+        r = pp_rng_step(r)
+        u2 = pp_rng_val(r) * 2.0 - 1.0
+        s = u1 * u1 + u2 * u2
+        attempts = attempts + 1
+        if attempts > 100 { return PPNormal { value: mean, rng: r } }
+    }
+    let z = u1 * pp_sqrt(0.0 - 2.0 * pp_ln(s) / s)
+    PPNormal { value: mean + z * sd, rng: r }
+}
+
+// ============================================================================
+// GENOTYPE SAMPLING
+// ============================================================================
+
+struct PPGeno {
+    geno: i32,
+    rng:  PPRng,
+}
+
+pub fn sample_cyp2d6_pheno(rng: PPRng) -> PPGeno {
+    let r = pp_rng_step(rng)
+    let u = pp_rng_val(r)
+    let pheno = halo_cyp2d6_sample(u)
+    PPGeno { geno: pheno, rng: r }
+}
+
+pub fn sample_abcb1_geno(rng: PPRng) -> PPGeno {
+    let r = pp_rng_step(rng)
+    let u = pp_rng_val(r)
+    let geno = abcb1_sample(u)
+    PPGeno { geno: geno, rng: r }
+}
+
+pub fn sample_drd2_allele(rng: PPRng) -> PPGeno {
+    let r = pp_rng_step(rng)
+    let u = pp_rng_val(r)
+    let allele = drd2_sample(u)
+    PPGeno { geno: allele, rng: r }
+}
+
+// ============================================================================
+// PER-PATIENT D2 OCCUPANCY
+// ============================================================================
+
+// Computes D2 occupancy at SS for one virtual patient.
+// Uses: C_ss = F_oral × dose / (CL_indiv × tau)
+//       CL_indiv = halo_cyp2d6_adjusted_cl(base_cl, pheno) × exp(eta_cl)
+//       BBB SS via bbb_integrate_constant_plasma
+pub fn pop_d2_occupancy(pheno: i32, taq1a: i32, eta_cl: f64,
+                         dose_mg: f64, f_oral: f64, base_cl: f64) -> f64
+    with Div, Panic, Mut
+{
+    let cl_pop   = halo_cyp2d6_adjusted_cl(base_cl, pheno)
+    let cl_indiv = cl_pop * pp_exp(eta_cl)
+    let cl_safe  = if cl_indiv > 0.1 { cl_indiv } else { 0.1 }
+    let c_ss     = f_oral * dose_mg / (cl_safe * 24.0)
+    let bbb      = haloperidol_bbb_params()
+    let st       = bbb_integrate_constant_plasma(c_ss, 500.0, 0.5, bbb)
+    let c_isf_u  = bbb_c_isf_u(st, bbb)
+    let d2p      = haloperidol_d2_params_pgx(taq1a)
+    d2_occupancy(c_isf_u, d2p)
+}
+
+// ============================================================================
+// SELECTION SORT + PERCENTILE (copy from pop_sim.sio — not pub there)
+// ============================================================================
+
+fn pp_sort(arr: [f64; 64], n: i32) -> [f64; 64] with Mut {
+    var s = arr
+    var i = 0
+    while i < n {
+        var mi = i
+        var j = i + 1
+        while j < n {
+            if s[j] < s[mi] { mi = j }
+            j = j + 1
+        }
+        if mi != i {
+            let tmp = s[i]
+            s[i] = s[mi]
+            s[mi] = tmp
+        }
+        i = i + 1
+    }
+    s
+}
+
+fn pp_pct(sorted: [f64; 64], n: i32, pct: f64) -> f64 with Mut, Div {
+    if n <= 0 { return 0.0 }
+    let nf   = n as f64
+    let rank = pct / 100.0 * (nf - 1.0)
+    var lo = 0
+    var rf = rank
+    while rf >= 1.0 && lo < n - 1 { rf = rf - 1.0; lo = lo + 1 }
+    let hi = if lo + 1 < n { lo + 1 } else { lo }
+    let lof = lo as f64
+    let f   = rank - lof
+    sorted[lo] * (1.0 - f) + sorted[hi] * f
+}
+
+// ============================================================================
+// MAIN — VIRTUAL POPULATION SIMULATION (N=32, seed=42)
+// ============================================================================
+
+fn main() with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  Population PBPK/PD — Haloperidol + mTOR Collision Sub-Analysis")
+    println("  N=32 virtual patients, European PGx frequencies, seed=42")
+    println("  Haloperidol 5 mg QD; sub-pop (pts 24-31): + olanzapine 10 mg QD")
+    println("======================================================================")
+    println("")
+
+    let n_patients = 32
+    let dose_mg: f64 = 5.0
+    let f_oral: f64  = 0.65
+    let base_cl: f64 = 40.0    // NM reference CL (Forsman 1977)
+    let eta_sd: f64  = 0.30    // IIV omega for CL (CV~30%)
+
+    var rng = pp_rng_new(42)
+
+    var occ_arr: [f64; 64] = [0.0; 64]
+    var pheno_arr:  [i32; 32] = [0; 32]
+    var abcb1_arr:  [i32; 32] = [0; 32]
+    var taq1a_arr:  [i32; 32] = [0; 32]
+
+    var n_in_window   = 0
+    var n_eps_risk    = 0
+    var n_undertreated = 0
+    var n_valid       = 0
+
+    // -----------------------------------------------------------------------
+    // PHASE 1: Sample genotypes + IIV, compute D2 occupancy per patient
+    // -----------------------------------------------------------------------
+    var p = 0
+    while p < n_patients {
+        // Sample CYP2D6 phenotype
+        let sg = sample_cyp2d6_pheno(rng)
+        rng = sg.rng
+        let pheno = sg.geno
+
+        // Sample ABCB1 genotype (affects BBB kinetics only — stored for demo)
+        let sa = sample_abcb1_geno(rng)
+        rng = sa.rng
+        let abcb1_g = sa.geno
+
+        // Sample DRD2 TaqI A allele (affects D2 Bmax — PGx layer)
+        let sd = sample_drd2_allele(rng)
+        rng = sd.rng
+        let taq1a = sd.geno
+
+        // Sample lognormal IIV on CL: eta_CL ~ N(0, omega^2)
+        let sn = pp_sample_normal(rng, 0.0, eta_sd)
+        rng = sn.rng
+        let eta_cl = sn.value
+
+        pheno_arr[p]  = pheno
+        abcb1_arr[p]  = abcb1_g
+        taq1a_arr[p]  = taq1a
+
+        let occ = pop_d2_occupancy(pheno, taq1a, eta_cl, dose_mg, f_oral, base_cl)
+        occ_arr[p] = occ
+
+        if occ >= 0.60 && occ < 0.80 { n_in_window = n_in_window + 1 }
+        if occ >= 0.80                { n_eps_risk = n_eps_risk + 1 }
+        if occ < 0.60                 { n_undertreated = n_undertreated + 1 }
+        if occ >= 0.0 && occ <= 1.0   { n_valid = n_valid + 1 }
+
+        p = p + 1
+    }
+
+    // Percentiles
+    let sorted = pp_sort(occ_arr, n_patients)
+    let p5  = pp_pct(sorted, n_patients, 5.0)
+    let p50 = pp_pct(sorted, n_patients, 50.0)
+    let p95 = pp_pct(sorted, n_patients, 95.0)
+    let p5_safe = if p5 > 0.001 { p5 } else { 0.001 }
+
+    println("  D2 occupancy distribution (N=32, 5 mg QD halo):")
+    print("    P5  = "); print_f64(p5  * 100.0); println("%")
+    print("    P50 = "); print_f64(p50 * 100.0); println("%")
+    print("    P95 = "); print_f64(p95 * 100.0); println("%")
+    print("    P95/P5 ratio = "); print_f64(p95 / p5_safe); println("")
+    println("")
+    print("    In therapeutic window [60-80%]: "); print(n_in_window); println("/32")
+    print("    EPS risk (D2 > 80%, PM tail):   "); print(n_eps_risk);    println("/32")
+    print("    Undertreated (D2 < 60%, UM tail):"); print(n_undertreated); println("/32")
+    println("")
+
+    // -----------------------------------------------------------------------
+    // PHASE 2: mTOR collision sub-analysis (patients 24-31, 8 co-prescribed)
+    // -----------------------------------------------------------------------
+    println("  mTOR Collision Sub-analysis (patients 24-31: + olanzapine 10 mg QD)")
+    let rapa_p = rapa_hill_params_clinical()
+    let olz_p  = olanzapine_mtor_act_params()
+    let c_rapa_icf: f64 = 1.0    // nM — DES Phase 2 geometric mean
+    let c_rapa_cv:  f64 = 0.50
+
+    // Olanzapine 10 mg QD SS plasma: F=0.60, CL=25 L/h (NM non-smoker)
+    let c_olz_mg_l = 0.60 * 10.0 / (25.0 * 24.0)   // mg/L
+    let c_olz_ng_ml = c_olz_mg_l * 1000.0           // ng/mL
+    let c_olz_cv: f64 = 0.30
+
+    var n_protected   = 0
+    var n_uncertain   = 0
+    var n_unprotected = 0
+
+    var pp = 24
+    while pp < 32 {
+        let ivl = mtor_net_interval(c_rapa_icf, c_rapa_cv, c_olz_ng_ml, c_olz_cv,
+                                    rapa_p, olz_p)
+        let gate = mtor_collision_gate(ivl.0, ivl.1)
+        if gate == 2 { n_protected   = n_protected   + 1 }
+        if gate == 1 { n_uncertain   = n_uncertain   + 1 }
+        if gate == 0 { n_unprotected = n_unprotected + 1 }
+        pp = pp + 1
+    }
+
+    print("    Rapamycin ICF = "); print_f64(c_rapa_icf); println(" nM (Phase 2 DES), CV=50%")
+    print("    Olanzapine SS = "); print_f64(c_olz_ng_ml); println(" ng/mL (10 mg QD NM), CV=30%")
+    print("    PROTECTED (net inhibition maintained):  "); print(n_protected);   println("/8")
+    print("    UNCERTAIN  (interval straddles zero):   "); print(n_uncertain);   println("/8")
+    print("    UNPROTECTED (olanzapine overwhelms):    "); print(n_unprotected); println("/8")
+    println("")
+
+    // -----------------------------------------------------------------------
+    // 5 VALIDATION TESTS
+    // -----------------------------------------------------------------------
+    println("======================================================================")
+    println("  Validation tests")
+    println("======================================================================")
+    var passed = 0
+    var failed  = 0
+
+    // T1: ≥ 50% patients in therapeutic window
+    println("T1: ≥ 50% patients in therapeutic window [60-80%]")
+    let frac_window = n_in_window as f64
+    let n_pf = n_patients as f64
+    let pct_window = frac_window / n_pf
+    print("    n_in_window = "); print(n_in_window); print("/32 = "); print_f64(pct_window * 100.0); println("%")
+    if pct_window >= 0.50 {
+        println("    [PASS]")
+        passed = passed + 1
+    } else {
+        println("    FAIL: expected ≥50% in therapeutic window")
+        failed = failed + 1
+    }
+    println("")
+
+    // T2: ≥ 1 patient in EPS-risk zone (PM tail)
+    println("T2: ≥ 1 patient with D2 > 80% (EPS risk — PM tail)")
+    print("    n_eps_risk = "); print(n_eps_risk); println("")
+    if n_eps_risk >= 1 {
+        println("    [PASS] PM tail confirmed")
+        passed = passed + 1
+    } else {
+        println("    FAIL: expected at least 1 PM-phenotype EPS-risk patient")
+        failed = failed + 1
+    }
+    println("")
+
+    // T3: P95/P5 > 1.5 (wide population variability)
+    println("T3: Population D2 occ P95/P5 > 1.5 (genotype-driven variability)")
+    let ratio = p95 / p5_safe
+    print("    P95/P5 = "); print_f64(ratio); println("")
+    if ratio > 1.5 {
+        println("    [PASS] Wide inter-individual variability confirmed")
+        passed = passed + 1
+    } else {
+        println("    FAIL: expected P95/P5 > 1.5")
+        failed = failed + 1
+    }
+    println("")
+
+    // T4: ≥ 1/8 co-prescription patients UNCERTAIN or UNPROTECTED
+    println("T4: ≥ 1/8 co-prescription patients not fully PROTECTED (mTOR gate)")
+    let n_not_prot = n_uncertain + n_unprotected
+    print("    UNCERTAIN+UNPROTECTED = "); print(n_not_prot); println("/8")
+    if n_not_prot >= 1 {
+        println("    [PASS] mTOR collision risk quantified in stent co-prescription")
+        passed = passed + 1
+    } else {
+        println("    FAIL: expected ≥1/8 not fully protected")
+        failed = failed + 1
+    }
+    println("")
+
+    // T5: All D2 occ values in [0, 1]
+    println("T5: All D2 occupancy values in [0, 1] (physical bounds)")
+    print("    n_valid = "); print(n_valid); println("/32")
+    if n_valid == n_patients {
+        println("    [PASS] All occupancies are physically valid")
+        passed = passed + 1
+    } else {
+        println("    FAIL: some D2 occ outside [0,1]")
+        failed = failed + 1
+    }
+    println("")
+
+    println("======================================================================")
+    print("  Results: "); print(passed); print("/5 passed")
+    if failed > 0 { print(" ("); print(failed); print(" failed)") }
+    println("")
+    println("======================================================================")
+    if failed == 0 {
+        println("ALL PASS")
+    }
+}

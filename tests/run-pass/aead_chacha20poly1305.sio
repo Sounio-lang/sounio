@@ -1,0 +1,106 @@
+//@ run-pass
+//@ requires: madaros
+use crypto::aead::*
+use net::socket::*
+
+// RFC 8439 section 2.8.2's complete worked AEAD example. Independently
+// re-fetched and re-verified 2026-08-25 against the primary source
+// (https://www.rfc-editor.org/rfc/rfc8439.txt) line-by-line -- see
+// stdlib/crypto/aead.sio's header note. That re-fetch caught a real
+// transcription error in this task's own brief: the brief's nonce sketch
+// (40 41 42 43 44 45 46 47 48 49 4a 4b) is WRONG. The RFC's own worked
+// example's 96-bit nonce is built from a 32-bit "fixed-common part"
+// (07 00 00 00) followed by the 8-byte IV (40 41 42 43 44 45 46 47), which
+// is confirmed directly against the RFC's own internal ChaCha20-state dump
+// ("Setup for generating Poly1305 one-time key (sender id=7)": word13 =
+// 00000007, word14 = 43424140, word15 = 47464544 -- each word read out in
+// its own little-endian byte order gives 07 00 00 00 40 41 42 43 44 45 46
+// 47). The plaintext, AAD, key, ciphertext and tag below all matched the
+// brief's transcription exactly; only the nonce needed correction.
+fn main() -> i64 with IO {
+    let key: [u8;32] = [
+        0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8a,0x8b,0x8c,0x8d,0x8e,0x8f,
+        0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9a,0x9b,0x9c,0x9d,0x9e,0x9f
+    ]
+    // Corrected nonce (see header note above): 07 00 00 00 (32-bit
+    // fixed-common part) || 40 41 42 43 44 45 46 47 (8-byte IV).
+    let nonce: [u8;12] = [0x07,0x00,0x00,0x00,0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47]
+    let aad_bytes: [u8;12] = [0x50,0x51,0x52,0x53,0xc0,0xc1,0xc2,0xc3,0xc4,0xc5,0xc6,0xc7]
+
+    // "Ladies and Gentlemen of the class of '99: If I could offer you only
+    // one tip for the future, sunscreen would be it." -- 114 ASCII bytes.
+    // Built from the literal string via the builtin `str_char_at(s: string,
+    // i: i64) -> i64` (confirmed against stdlib/str/lib.sio's own header
+    // comment and its live use in tests/run-pass/hash_sha256_vectors.sio's
+    // `write_str` helper: `rawbuf_set(buf, i, str_char_at(s, i))`) rather
+    // than hand-transcribing 114 integer literals, to eliminate
+    // transcription risk for the plaintext.
+    let plaintext_str: string = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+    let plaintext_len: i64 = str_len(plaintext_str)
+    if plaintext_len != 114 {
+        print_int(100)
+        return 1
+    }
+
+    let expected_ciphertext: [u8;114] = [
+        0xd3,0x1a,0x8d,0x34,0x64,0x8e,0x60,0xdb,0x7b,0x86,0xaf,0xbc,0x53,0xef,0x7e,0xc2,
+        0xa4,0xad,0xed,0x51,0x29,0x6e,0x08,0xfe,0xa9,0xe2,0xb5,0xa7,0x36,0xee,0x62,0xd6,
+        0x3d,0xbe,0xa4,0x5e,0x8c,0xa9,0x67,0x12,0x82,0xfa,0xfb,0x69,0xda,0x92,0x72,0x8b,
+        0x1a,0x71,0xde,0x0a,0x9e,0x06,0x0b,0x29,0x05,0xd6,0xa5,0xb6,0x7e,0xcd,0x3b,0x36,
+        0x92,0xdd,0xbd,0x7f,0x2d,0x77,0x8b,0x8c,0x98,0x03,0xae,0xe3,0x28,0x09,0x1b,0x58,
+        0xfa,0xb3,0x24,0xe4,0xfa,0xd6,0x75,0x94,0x55,0x85,0x80,0x8b,0x48,0x31,0xd7,0xbc,
+        0x3f,0xf4,0xde,0xf0,0x8e,0x4b,0x7a,0x9d,0xe5,0x76,0xd2,0x65,0x86,0xce,0xc6,0x4b,
+        0x61,0x16
+    ]
+    let expected_tag: [u8;16] = [
+        0x1a,0xe1,0x0b,0x59,0x4f,0x09,0xe2,0x6a,0x7e,0x90,0x2e,0xcb,0xd0,0x60,0x06,0x91
+    ]
+
+    let pt_buf = rawbuf_new(plaintext_len + 8)
+    var i: i64 = 0
+    while i < plaintext_len { rawbuf_set(&pt_buf, i, str_char_at(plaintext_str, i)); i = i + 1 }
+    let aad_buf = rawbuf_new(12 + 8)
+    var j: i64 = 0
+    while j < 12 { rawbuf_set(&aad_buf, j, aad_bytes[j as usize] as i64); j = j + 1 }
+
+    let (sealed, sealed_len) = aead_seal(AEAD_CHACHA20_POLY1305, &key, &nonce, &pt_buf, plaintext_len, &aad_buf, 12)
+    if sealed_len != plaintext_len + 16 {
+        print_int(1)
+        return 1
+    }
+    var c: i64 = 0
+    while c < plaintext_len {
+        if rawbuf_get(&sealed, c) != (expected_ciphertext[c as usize] as i64) {
+            print_int(2)
+            return 1
+        }
+        c = c + 1
+    }
+    var t: i64 = 0
+    while t < 16 {
+        if rawbuf_get(&sealed, plaintext_len + t) != (expected_tag[t as usize] as i64) {
+            print_int(3)
+            return 1
+        }
+        t = t + 1
+    }
+
+    // Round-trip: aead_open on our own sealed output must recover the
+    // original plaintext exactly and report ok=true.
+    let (opened, ok) = aead_open(AEAD_CHACHA20_POLY1305, &key, &nonce, &sealed, sealed_len, &aad_buf, 12)
+    if !ok {
+        print_int(4)
+        return 1
+    }
+    var m: i64 = 0
+    while m < plaintext_len {
+        if rawbuf_get(&opened, m) != str_char_at(plaintext_str, m) {
+            print_int(5)
+            return 1
+        }
+        m = m + 1
+    }
+
+    println("aead_chacha20poly1305: matches RFC 8439 section 2.8.2's full worked AEAD example")
+    return 0
+}

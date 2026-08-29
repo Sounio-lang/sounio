@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODE="quick"
+
+usage() {
+  cat <<'EOF'
+usage: ./sounio-whereami [--quick|--deep]
+
+Read-only orientation for agents inside the Sounio workspace.
+
+Options:
+  --quick   print current surface, branch, compiler, Slurm, GPU, and storage state
+  --deep    include extra cluster and compiler detail
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --quick)
+      MODE="quick"
+      shift
+      ;;
+    --deep)
+      MODE="deep"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+section() {
+  echo
+  echo "== $1 =="
+}
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+with_timeout() {
+  local seconds="$1"
+  shift
+  if have_cmd timeout; then
+    timeout "${seconds}" "$@"
+  else
+    "$@"
+  fi
+}
+
+repo_root() {
+  git rev-parse --show-toplevel 2>/dev/null || pwd -P
+}
+
+pod_namespace() {
+  if [[ -f /var/run/secrets/kubernetes.io/serviceaccount/namespace ]]; then
+    cat /var/run/secrets/kubernetes.io/serviceaccount/namespace
+  else
+    echo "${POD_NAMESPACE:-beagle}"
+  fi
+}
+
+k8s_node_name() {
+  if [[ -n "${K8S_NODE_NAME:-}" ]]; then
+    echo "$K8S_NODE_NAME"
+    return 0
+  fi
+  if [[ -n "${NODE_NAME:-}" ]]; then
+    echo "$NODE_NAME"
+    return 0
+  fi
+  if [[ -r /etc/podinfo/nodeName ]]; then
+    cat /etc/podinfo/nodeName
+    return 0
+  fi
+  if have_cmd kubectl; then
+    with_timeout 5s kubectl -n "$(pod_namespace)" get pod "$(hostname)" -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "<unknown>"
+  else
+    echo "<unknown>"
+  fi
+}
+
+classify_pwd() {
+  local path="$1"
+  case "${path}" in
+    /workspace/sounio|/workspace/sounio/*)
+      echo "workspace-repo: active interactive Sounio surface; edits and light checks allowed"
+      ;;
+    /tmp/sounio-*|/tmp/sounio-*/*)
+      echo "isolated-worktree: side lane for scoped repair; keep commits narrow"
+      ;;
+    /tmp/sounio-foundry/*)
+      echo "job-scratch: disposable execution area for one foundry run"
+      ;;
+    /orangefs/training/sounio-foundry/runs/*)
+      echo "foundry-artifacts: read/report only"
+      ;;
+    /home/devsounio/projects/sounio|/home/devsounio/projects/sounio/*)
+      echo "host-project-control: wrappers/runbooks if mounted"
+      ;;
+    /home/devsounio/sounio|/home/devsounio/sounio/*)
+      echo "host-repo: host-side Sounio checkout if mounted"
+      ;;
+    *)
+      echo "unknown-or-noncanonical: inspect before editing"
+      ;;
+  esac
+}
+
+git_branch() {
+  git branch --show-current 2>/dev/null || echo "<not-git>"
+}
+
+git_commit() {
+  git rev-parse --short HEAD 2>/dev/null || echo "<none>"
+}
+
+compiler_summary() {
+  local root="$1"
+  local souc="${root}/bin/souc"
+  local resolver="${root}/scripts/lib/resolve_souc.sh"
+  local incoming_souc_bin="${SOUC_BIN:-}"
+
+  if [[ -f "$resolver" ]]; then
+    # shellcheck disable=SC1090
+    source "$resolver"
+    if [[ -n "${SOUC_BIN:-}" ]]; then
+      souc="$SOUC_BIN"
+    fi
+  fi
+
+  if [[ ! -e "${souc}" ]]; then
+    echo "souc: missing (${souc})"
+    return 0
+  fi
+
+  local target
+  target="$(readlink -f "${souc}" 2>/dev/null || printf '%s' "${souc}")"
+  printf 'launcher: %s\n' "${root}/bin/souc"
+  printf 'selected: %s\n' "${souc}"
+  printf 'target:   %s\n' "${target}"
+  if [[ -n "${incoming_souc_bin}" ]]; then
+    printf 'env:      SOUC_BIN=%s\n' "${incoming_souc_bin}"
+  fi
+
+  if [[ -f "${target}" ]]; then
+    stat -c 'size:     %s bytes' "${target}" 2>/dev/null || true
+    stat -c 'mtime:    %y' "${target}" 2>/dev/null || true
+  fi
+
+  if [[ -x "${souc}" ]]; then
+    with_timeout 3s "${souc}" --version 2>/dev/null | sed -n '1,4p' || true
+    with_timeout 5s "${souc}" info 2>/dev/null | sed -n '1,10p' || true
+  else
+    echo "selected compiler is not executable"
+  fi
+}
+
+docs_summary() {
+  local root="$1"
+  for f in AGENTS.md CLAUDE.md CLAUDE_HANDOFF.md ONBOARDING.md README.md; do
+    if [[ -f "${root}/${f}" ]]; then
+      printf 'present: %s\n' "${f}"
+    else
+      printf 'missing: %s\n' "${f}"
+    fi
+  done
+}
+
+slurm_summary() {
+  if have_cmd sinfo; then
+    if with_timeout 5s sinfo -h -N -p cpu-ops,gpu-orangefs -o '%N %P %T %G %C' 2>/dev/null; then
+      return 0
+    fi
+    echo "direct sinfo timed out or failed from this workspace; trying Slurm login pod"
+  else
+    echo "sinfo unavailable in this workspace"
+  fi
+
+  if have_cmd kubectl; then
+    with_timeout 8s kubectl -n slurm-pilot exec deploy/slurm-pilot-login-slinky -- \
+      sinfo -h -N -p cpu-ops,gpu-orangefs -o '%N %P %T %G %C' 2>/dev/null ||
+      echo "Slurm login pod sinfo unavailable"
+  fi
+}
+
+gpu_owners() {
+  if have_cmd kubectl && have_cmd jq; then
+    with_timeout 8s kubectl get pods -A -o json 2>/dev/null | jq -r '
+      .items[]
+      | . as $p
+      | ([.spec.containers[]?.resources.requests["nvidia.com/gpu"], .spec.containers[]?.resources.limits["nvidia.com/gpu"]]
+         | map(select(. != null))
+         | length) as $g
+      | select($g > 0)
+      | [$p.metadata.namespace, $p.metadata.name, ($p.spec.nodeName // "<pending>"), ($p.status.phase // "?")]
+      | @tsv' || true
+  elif have_cmd nvidia-smi; then
+    with_timeout 3s nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo "nvidia-smi unavailable"
+  else
+    echo "kubectl/jq unavailable; nvidia-smi unavailable"
+  fi
+}
+
+orangefs_summary() {
+  if findmnt -T /orangefs/training >/dev/null 2>&1; then
+    echo "local /orangefs/training mount: present"
+  elif [[ -d /orangefs/training ]]; then
+    echo "local /orangefs/training directory exists, but no mount is visible"
+  else
+    echo "local /orangefs/training mount: absent"
+  fi
+
+  if have_cmd kubectl; then
+    with_timeout 8s kubectl -n slurm-pilot exec deploy/slurm-pilot-login-slinky -- \
+      bash -lc 'test -d /orangefs/training && echo "slurm login /orangefs/training: present" || echo "slurm login /orangefs/training: absent"' 2>/dev/null || true
+  fi
+}
+
+ROOT="$(repo_root)"
+cd "${ROOT}" 2>/dev/null || true
+
+section "Where I Am"
+cat <<EOF
+host:        $(hostname 2>/dev/null || echo "<unknown>")
+user:        $(whoami 2>/dev/null || echo "${USER:-<unknown>}")
+pwd:         $(pwd -P)
+surface:     $(classify_pwd "$(pwd -P)")
+repo:        ${ROOT}
+branch:      $(git_branch)
+commit:      $(git_commit)
+workspace:   ${BEAGLE_WORKSPACE_ID:-<unknown>}
+pod hint:    ${HOSTNAME:-<unknown>}
+k8s node:    $(k8s_node_name)
+EOF
+
+section "Important Truth"
+cat <<'EOF'
+- This is the Kubernetes workspace environment, not the t560 host control plane.
+- The current checked-out branch is the operational truth for this session.
+- Do not switch to main or integration/sounio-dev-ready-base just because older docs mention them.
+- If multiple agents are active, coordinate before editing shared files.
+EOF
+
+section "Repo State"
+git status --short --branch | sed -n '1,80p'
+
+section "Agent Coordination"
+if [[ -x "${ROOT}/bin/sounio-coord" ]]; then
+  with_timeout 8s "${ROOT}/bin/sounio-coord" brief --max-rows 6 ||
+    echo "coordination summary unavailable; run bin/sounio-coord status directly"
+else
+  echo "bin/sounio-coord is unavailable in this checkout"
+fi
+
+section "Compiler"
+compiler_summary "${ROOT}"
+
+section "Docs"
+docs_summary "${ROOT}"
+
+section "Use The Right Lane"
+cat <<'EOF'
+Edit/current task:
+  stay on the current branch
+  inspect git status before touching files
+
+Light compiler check:
+  bin/souc info
+  bash scripts/run_sio_test_suite.sh hello --verbose
+
+Queue visibility:
+  kubectl -n slurm-pilot exec deploy/slurm-pilot-login-slinky -- sinfo
+  kubectl -n slurm-pilot exec deploy/slurm-pilot-login-slinky -- squeue -a
+  direct sinfo/squeue may exist here, but treat timeout as workspace wiring, not cluster failure
+
+Heavy compiler validation:
+  do not run full stress directly in /workspace/sounio
+  use the Sounio Compiler Foundry from the host/control-plane when available
+  if /home/devsounio/projects/sounio is not mounted here, leave a handoff asking a host/control-plane agent to run:
+    /home/devsounio/projects/sounio/sounio-forge submit full-compiler --source wip --gpu auto
+
+Artifacts:
+  write small local notes under the repo only when they belong to the repo
+  use foundry artifact roots for run outputs, not the live workspace
+EOF
+
+section "Slurm Quick View"
+slurm_summary
+
+section "GPU Owners"
+gpu_owners
+
+section "Storage"
+orangefs_summary
+
+section "Hard No"
+cat <<'EOF'
+- do not reset, clean, rebase, or switch branches unless explicitly asked
+- do not run heavy stress in /workspace/sounio
+- do not use /workspace/sounio as batch scratch
+- do not assume /home/devsounio exists inside this pod
+- do not assume BEAGLE_WORKSPACE_BRANCH is the current Git branch
+EOF
+
+if [[ "${MODE}" == "deep" ]]; then
+  section "Deep Detail"
+  if have_cmd kubectl; then
+    echo "-- non-running pods --"
+    with_timeout 8s kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded -o wide 2>/dev/null || true
+    echo
+  fi
+  echo "-- compiler info --"
+  with_timeout 8s bin/souc info 2>/dev/null || true
+fi

@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.delta-epistemic-gradual-compilation-paper
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -392,9 +393,9 @@ We first establish two standard structural lemmas.
 - **[T-Gate-Static]**: The SMT predicate `confidence(e₀) ≥ c_min` is a refinement over the Knowledge type, not over the substituted variable. The SMT proof is preserved under value substitution.
 - All other rules: routine structural induction. ∎
 
-**Theorem 1 (Type Preservation — Subject Reduction).** If `Γ; ε; Σ ⊢ e : τ` and `e →_v e'` under a closed, call-by-value evaluation context, then `Γ; ε; Σ' ⊢ e' : τ` for some `Σ' ⊇ Σ`.
+**Theorem 1 (Type Preservation — Subject Reduction).** If `Γ; ε; Σ ⊢ e : τ` and `e →_v e'` under a closed, call-by-value evaluation context, then `Γ; ε; Σ' ⊢ e' : τ` for some `Σ' ⊇ Σ`. **Machine-checked** as `preservation` in `formal/lean4/EpistemicEffectsV2.lean` (Mathlib-free, no `sorry`; axioms `propext`, `Quot.sound`, `Classical.choice`) — see the Mechanization note after the Corollary.
 
-*Proof.* By structural induction on the derivation of `e → e'`, using Lemma 2.
+*Proof (prose; the mechanized proof is the authority).* By structural induction on the derivation of `e → e'`, using Lemma 2.
 
 - **[E-Add]**: The redex is `(v_a, σ²_a, c_a, w_a, π_a) + (v_b, σ²_b, c_b, w_b, π_b)`. By canonical forms, both operands are Knowledge values and the typing inversion gives `k_a.σ² = σ²_a`, `k_b.σ² = σ²_b`. The result `(v_a + v_b, σ²_a + σ²_b, (c_a·c_b)/1000, w_a∩w_b, merge(π_a,π_b))` satisfies the [T-Add-Ind] output predicate by arithmetic identity. The validity window `w_a∩w_b ⊆ w_a` and `⊆ w_b` by set containment; the interval refinement predicate is preserved under intersection. ∎ (case)
 
@@ -406,7 +407,7 @@ We first establish two standard structural lemmas.
 
 - **[E-Value]** (under [T-Gate-Dynamic]): The runtime check `kv.confidence ≥ gate_threshold` succeeds (otherwise a trap, handled by Theorem 2). On success, the result is `v : T` as above. ∎ (case)
 
-- **[E-Measure]**: Creates a fresh channel `ch` and extends Σ to `Σ' = Σ[ch ↦ u²]`. The resulting `Knowledge<T>` satisfies [T-Measure]. `Σ' ⊇ Σ` by construction. ∎ (case)
+- **[E-Measure]**: `measure(v, u)` reduces to the runtime Knowledge value that **carries the measured value `v` of type `T`** (together with the metadata `u²`), so its type is `Knowledge<T>` by [T-Kraw], creating a fresh channel `ch` with `Σ' = Σ[ch ↦ u²] ⊇ Σ`. *Mechanization caveat (this case is where the soundness subtlety lives): the reduct must retain the base-type value `v`. A representation that dropped it — storing only a scalar real cell — does **not** preserve `T`: `measure(0 : ℕ) : Knowledge<ℕ>` would reduce to a real-valued cell typeable only at `Knowledge<ℝ>`. That unsoundness is itself machine-checked (`preservation_is_false` in `EpistemicPreservationWIP_counterexample.lean`), and the value-carrying mechanization (`EpistemicEffectsV2.lean`) is what restores subject reduction. See the Mechanization note.* ∎ (case)
 
 - **Congruence rules** (evaluation context reduction): By IH on the sub-redex, the inner expression reduces with type preserved; the outer context rebuilds the same type by inversion on the outer rule. ∎
 
@@ -416,6 +417,8 @@ We first establish two standard structural lemmas.
 - (a) `e` is a value,
 - (b) `∃e'. e → e'`, or
 - (c) `e = require_confidence(kv, g)` with `kv.confidence < g` (runtime gate failure — a *defined trap*, not a stuck state).
+
+**Machine-checked** as `effect_progress` in `formal/lean4/EpistemicEffectsV2.lean` (axiom `propext` only).
 
 *Proof.* By induction on the typing derivation. The base case `e = v` (value) gives (a). For compound expressions, the standard PL progress argument applies: if all sub-expressions are values, the expression matches a redex (b). The only novel case is [T-Gate-Dynamic]: the guard `66 90` precedes the `require_confidence` call; at runtime, `kv.confidence` is a concrete `i64` field of the Knowledge value. The comparison `kv.confidence ≥ gate_threshold` terminates in O(1) and branches deterministically: success gives (b), failure gives (c). Neither outcome is stuck. ∎
 
@@ -434,6 +437,14 @@ We first establish two standard structural lemmas.
 **Corollary (No Silent Collapse).** Under any well-typed reduction sequence, a `Knowledge<T>` value cannot be coerced to `T` without `Epistemic ∈ ε`, and the GUM §5 variance budget of the discarded uncertainty is always accounted for in the type.
 
 *Proof.* From Theorem 3: extraction requires `Epistemic`. From Theorem 4: the variance at the extraction point equals the GUM §5 propagation from all upstream `measure` sites. Neither fact changes under reduction (Theorem 1). ∎
+
+**Mechanization (`formal/lean4/EpistemicEffectsV2.lean`).** Theorems 1–2 (the type-safety pair) are machine-checked for a Lean 4 model of the core calculus: `preservation` (subject reduction) and `effect_progress` (progress), Mathlib-free, no `sorry`. We verify the *calculus*, not that the self-hosted compiler binary implements it (standard model-level PL metatheory). Three honest points the mechanization fixes or surfaces:
+
+1. **The Knowledge cell must carry the base-type value.** A first mechanization used a scalar (real-valued) runtime cell and was machine-checked **unsound** — subject reduction fails because `measure(v : T)` cannot reduce to a real cell at `Knowledge<T>` for `T ≠ ℝ` (`preservation_is_false`, `EpistemicPreservationWIP_counterexample.lean`). This matches the `(v, σ², c, w, π)` tuple of §5.3, where `v` is the *typed* value; the mechanization makes that requirement load-bearing and `.value` (Theorem 3, [E-Value]) returns exactly that stored `v : T`.
+
+2. **GUM arithmetic is restricted to numeric Knowledge.** In the mechanized calculus `+`/`*` ([E-Add]/[E-Mul]) are typed only at `Knowledge<ℝ>` — GUM variance propagation is numeric by nature (one cannot GUM-add `Knowledge<bool>`). `measure`, `.value`, `.unc`, `.conf` remain generic in `T`. This restriction is explicit in the model, not a soundness dodge.
+
+3. **Scope.** Theorems 3–4 and the Corollary are not yet mechanized; their prose proofs stand. The mechanized type-safety pair is *table-stakes rigor* for the calculus — the paper's distinctive contribution is the self-application of §6, not §5.4.
 
 ---
 

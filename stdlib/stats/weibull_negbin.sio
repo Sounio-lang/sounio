@@ -1,0 +1,261 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/weibull_negbin.sio — Weibull and negative-binomial laws
+//
+// Two survival / count laws that sit beside the exponential and Poisson in the
+// densities module:
+//
+//   Weibull(shape k, scale λ):
+//     weibull_pdf(x,k,l)  weibull_cdf(x,k,l)  weibull_quantile(p,k,l)
+//     weibull_median(k,l) weibull_hazard(x,k,l) weibull_mean(k,l)
+//   Negative binomial (r successes, success prob p; support = #failures):
+//     negbin_pmf(j,r,p)   negbin_cdf(j,r,p)   negbin_mean(r,p)
+//
+// Weibull:  f(x)=(k/λ)(x/λ)^{k−1} e^{−(x/λ)^k},  F(x)=1−e^{−(x/λ)^k},
+//           Q(p)=λ(−ln(1−p))^{1/k},  median=λ(ln2)^{1/k},
+//           h(x)=(k/λ)(x/λ)^{k−1},  mean=λ·Γ(1+1/k).
+// NegBin:   P(J=j)=C(j+r−1,j) p^r (1−p)^j,  E[J]=r(1−p)/p.
+//
+// Pure Sounio: inline exp/ln/pow/lgamma; no external dependency, no nested
+// data-array calls.
+//
+// References:
+//   Weibull (1951); Johnson, Kotz & Kemp, "Univariate Discrete Distributions".
+
+module stats::weibull_negbin
+
+fn wn_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / wn_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn wn_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 {
+        sum = sum + term / ((2 * n + 1) as f64)
+        term = term * t2
+        n = n + 1
+    }
+    return e + 2.0 * sum
+}
+
+// x^y for x > 0 via exp(y ln x).
+fn wn_pow(x: f64, y: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { if y == 0.0 { return 1.0 } return 0.0 }
+    return wn_exp(y * wn_ln(x))
+}
+
+// Lanczos log-gamma (g=7, n=9), same coefficients as special::gamma.
+fn wn_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    if x < 0.5 {
+        // reflection: lgamma(x) = ln(pi/sin(pi x)) - lgamma(1-x)
+        let PI = 3.141592653589793
+        var s = PI * x
+        // sin via range-reduced Taylor (x in (0,0.5) -> s in (0, pi/2))
+        var t = s
+        var tm = s
+        var k = 1
+        while k < 12 {
+            tm = tm * (0.0 - s * s) / (((2 * k) * (2 * k + 1)) as f64)
+            t = t + tm
+            k = k + 1
+        }
+        return wn_ln(PI / t) - wn_lgamma(1.0 - x)
+    }
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * wn_ln(tt) - tt + wn_ln(a)
+}
+
+// ---- Weibull ---------------------------------------------------------------
+
+/// Weibull pdf f(x) = (k/λ)(x/λ)^{k−1} e^{−(x/λ)^k}.
+pub fn weibull_pdf(x: f64, k: f64, l: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 || k <= 0.0 || l <= 0.0 { return 0.0 }
+    let z = x / l
+    let zk = wn_pow(z, k)
+    return (k / l) * wn_pow(z, k - 1.0) * wn_exp(0.0 - zk)
+}
+
+/// Weibull cdf F(x) = 1 − e^{−(x/λ)^k}.
+pub fn weibull_cdf(x: f64, k: f64, l: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 || k <= 0.0 || l <= 0.0 { return 0.0 }
+    return 1.0 - wn_exp(0.0 - wn_pow(x / l, k))
+}
+
+/// Weibull quantile Q(p) = λ(−ln(1−p))^{1/k}.
+pub fn weibull_quantile(p: f64, k: f64, l: f64) -> f64 with Mut, Div, Panic {
+    if p <= 0.0 { return 0.0 }
+    if p >= 1.0 || k <= 0.0 || l <= 0.0 { return 0.0 }
+    return l * wn_pow(0.0 - wn_ln(1.0 - p), 1.0 / k)
+}
+
+/// Weibull median = λ(ln 2)^{1/k}.
+pub fn weibull_median(k: f64, l: f64) -> f64 with Mut, Div, Panic {
+    if k <= 0.0 || l <= 0.0 { return 0.0 }
+    let LN2 = 0.6931471805599453
+    return l * wn_pow(LN2, 1.0 / k)
+}
+
+/// Weibull hazard h(x) = (k/λ)(x/λ)^{k−1}.
+pub fn weibull_hazard(x: f64, k: f64, l: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 || k <= 0.0 || l <= 0.0 { return 0.0 }
+    return (k / l) * wn_pow(x / l, k - 1.0)
+}
+
+/// Weibull mean = λ·Γ(1 + 1/k).
+pub fn weibull_mean(k: f64, l: f64) -> f64 with Mut, Div, Panic {
+    if k <= 0.0 || l <= 0.0 { return 0.0 }
+    return l * wn_exp(wn_lgamma(1.0 + 1.0 / k))
+}
+
+// ---- Negative binomial (support = number of failures j >= 0) ---------------
+
+/// Negative-binomial pmf P(J=j) = C(j+r−1,j) p^r (1−p)^j via log-gamma.
+///
+/// Parâmetros: j — failure count (>=0); r — successes (>0, real ok); p — (0,1).
+pub fn negbin_pmf(j: i32, r: f64, p: f64) -> f64 with Mut, Div, Panic {
+    if j < 0 || r <= 0.0 || p <= 0.0 || p >= 1.0 { return 0.0 }
+    let jf = j as f64
+    // ln C(j+r-1, j) = lgamma(j+r) - lgamma(r) - lgamma(j+1)
+    let lc = wn_lgamma(jf + r) - wn_lgamma(r) - wn_lgamma(jf + 1.0)
+    let lp = lc + r * wn_ln(p) + jf * wn_ln(1.0 - p)
+    return wn_exp(lp)
+}
+
+/// Negative-binomial cdf P(J<=j) by summation.
+pub fn negbin_cdf(j: i32, r: f64, p: f64) -> f64 with Mut, Div, Panic {
+    if j < 0 || r <= 0.0 || p <= 0.0 || p >= 1.0 { return 0.0 }
+    var s = 0.0
+    var i = 0
+    while i <= j {
+        s = s + negbin_pmf(i, r, p)
+        i = i + 1
+    }
+    if s > 1.0 { return 1.0 }
+    return s
+}
+
+/// Negative-binomial mean E[J] = r(1−p)/p.
+pub fn negbin_mean(r: f64, p: f64) -> f64 with Mut, Div, Panic {
+    if r <= 0.0 || p <= 0.0 || p >= 1.0 { return 0.0 }
+    return r * (1.0 - p) / p
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// Weibull(k=2, λ=1): F(1)=1-e^{-1}=0.632121; pdf(1)=2·1·e^{-1}=0.735759;
+// median=(ln2)^{1/2}=0.832555; hazard(1)=2·1=2; mean=Γ(1.5)=0.886227;
+// Q(0.632121)=1.
+fn test_weibull() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = check(1, approx(weibull_cdf(1.0, 2.0, 1.0), 0.632121, 1.0e-4)) && ok
+    ok = check(2, approx(weibull_pdf(1.0, 2.0, 1.0), 0.735759, 1.0e-4)) && ok
+    ok = check(3, approx(weibull_median(2.0, 1.0), 0.832555, 1.0e-4)) && ok
+    ok = check(4, approx(weibull_hazard(1.0, 2.0, 1.0), 2.0, 1.0e-6)) && ok
+    ok = check(5, approx(weibull_mean(2.0, 1.0), 0.886227, 1.0e-4)) && ok
+    ok = check(6, approx(weibull_quantile(0.632121, 2.0, 1.0), 1.0, 1.0e-4)) && ok
+    return ok
+}
+
+// exponential special case k=1, λ=2: F(2)=1-e^{-1}=0.632121; median=2·ln2=1.386294.
+fn test_weibull_exp() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = check(10, approx(weibull_cdf(2.0, 1.0, 2.0), 0.632121, 1.0e-4)) && ok
+    ok = check(11, approx(weibull_median(1.0, 2.0), 1.386294, 1.0e-4)) && ok
+    return ok
+}
+
+// NegBin r=3, p=0.5. pmf(0)=0.5^3=0.125; pmf(1)=C(3,1)·0.125·0.5=3·0.0625=0.1875;
+// mean=3·0.5/0.5=3; cdf(1)=0.125+0.1875=0.3125.
+fn test_negbin() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = check(20, approx(negbin_pmf(0, 3.0, 0.5), 0.125, 1.0e-5)) && ok
+    ok = check(21, approx(negbin_pmf(1, 3.0, 0.5), 0.1875, 1.0e-5)) && ok
+    ok = check(22, approx(negbin_mean(3.0, 0.5), 3.0, 1.0e-9)) && ok
+    ok = check(23, approx(negbin_cdf(1, 3.0, 0.5), 0.3125, 1.0e-5)) && ok
+    return ok
+}
+
+// geometric case r=1, p=0.25: pmf(j)=0.25·0.75^j. pmf(2)=0.25·0.5625=0.140625;
+// mean=1·0.75/0.25=3.
+fn test_negbin_geom() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = check(30, approx(negbin_pmf(2, 1.0, 0.25), 0.140625, 1.0e-5)) && ok
+    ok = check(31, approx(negbin_mean(1.0, 0.25), 3.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_weibull() && ok
+    ok = test_weibull_exp() && ok
+    ok = test_negbin() && ok
+    ok = test_negbin_geom() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

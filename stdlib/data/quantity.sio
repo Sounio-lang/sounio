@@ -1,0 +1,169 @@
+//! Genuine SI dimensional analysis over the 7 base dimensions — compiler-adjacent unit safety.
+//!
+//! A `Dim` is an integer exponent vector over the SI base dimensions
+//!   [ m (length), kg (mass), s (time), A (electric current), K (temperature),
+//!     mol (amount of substance), cd (luminous intensity) ].
+//! A `Quantity` pairs a numeric `value` with its `Dim`. Multiplication/division add/subtract the
+//! exponent vectors (so length ÷ time yields a velocity whose dimension is CHECKED, not asserted);
+//! addition/subtraction REQUIRE identical dimensions and panic otherwise — adding a length to a time
+//! is a program bug, and this rejects it at runtime rather than silently producing a meaningless
+//! number (the failure mode a bare `f64` column, or pandas, does not guard against).
+//!
+//! This is a real, closed algebra of dimensions: `dim_mul`/`dim_div` are exact integer exponent
+//! arithmetic, `dim_eq` is exact structural equality. It supersedes the opaque single-integer unit
+//! code used by `data::uncertain_frame` (which cannot express that N = kg·m·s⁻² is compatible with a
+//! mass times an acceleration). Runtime checking is the first step; compile-time binding of this `Dim`
+//! system to the compiler's `Knowledge<T>` dimensional types is the goal.
+//!
+//! Self-contained: no imports, no compiler changes. Pure integer/float arithmetic.
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+/// Integer exponent vector over the 7 SI base dimensions.
+pub struct Dim {
+    m:   i64,   // length          (metre)
+    kg:  i64,   // mass            (kilogram)
+    s:   i64,   // time            (second)
+    amp: i64,   // electric current (ampere)
+    k:   i64,   // temperature     (kelvin)
+    mol: i64,   // amount of substance (mole)
+    cd:  i64    // luminous intensity  (candela)
+}
+
+/// A numeric value tagged with its physical dimension.
+pub struct Quantity {
+    value: f64,
+    dim:   Dim
+}
+
+// ============================================================================
+// DIM CONSTRUCTION & ALGEBRA
+// ============================================================================
+
+/// Build a dimension from its 7 base exponents.
+pub fn dim_make(m: i64, kg: i64, s: i64, amp: i64, k: i64, mol: i64, cd: i64) -> Dim {
+    Dim { m: m, kg: kg, s: s, amp: amp, k: k, mol: mol, cd: cd }
+}
+
+/// Exact structural equality of two dimensions (all 7 exponents equal). This is how a units error is
+/// DETECTED without aborting — e.g. `dim_eq(dim_length(), dim_time())` is `false`.
+pub fn dim_eq(a: Dim, b: Dim) -> bool {
+    a.m == b.m && a.kg == b.kg && a.s == b.s && a.amp == b.amp &&
+    a.k == b.k && a.mol == b.mol && a.cd == b.cd
+}
+
+/// Product of two dimensions: exponents ADD (m · m = m², m · s⁻¹ = velocity).
+pub fn dim_mul(a: Dim, b: Dim) -> Dim {
+    Dim {
+        m:   a.m   + b.m,
+        kg:  a.kg  + b.kg,
+        s:   a.s   + b.s,
+        amp: a.amp + b.amp,
+        k:   a.k   + b.k,
+        mol: a.mol + b.mol,
+        cd:  a.cd  + b.cd
+    }
+}
+
+/// Quotient of two dimensions: exponents SUBTRACT (m ÷ s = m·s⁻¹ = velocity).
+pub fn dim_div(a: Dim, b: Dim) -> Dim {
+    Dim {
+        m:   a.m   - b.m,
+        kg:  a.kg  - b.kg,
+        s:   a.s   - b.s,
+        amp: a.amp - b.amp,
+        k:   a.k   - b.k,
+        mol: a.mol - b.mol,
+        cd:  a.cd  - b.cd
+    }
+}
+
+/// Raise a dimension to an integer power (exponents scale). `dim_pow(length, 3)` = volume.
+pub fn dim_pow(a: Dim, n: i64) -> Dim {
+    Dim {
+        m:   a.m   * n,
+        kg:  a.kg  * n,
+        s:   a.s   * n,
+        amp: a.amp * n,
+        k:   a.k   * n,
+        mol: a.mol * n,
+        cd:  a.cd  * n
+    }
+}
+
+// ============================================================================
+// COMMON DIMENSION HELPERS
+// ============================================================================
+
+/// Dimensionless (all exponents zero) — pure numbers, ratios, counts.
+pub fn dim_dimensionless() -> Dim { dim_make(0, 0, 0, 0, 0, 0, 0) }
+pub fn dim_length()       -> Dim { dim_make(1, 0, 0, 0, 0, 0, 0) }   // m
+pub fn dim_mass()         -> Dim { dim_make(0, 1, 0, 0, 0, 0, 0) }   // kg
+pub fn dim_time()         -> Dim { dim_make(0, 0, 1, 0, 0, 0, 0) }   // s
+pub fn dim_current()      -> Dim { dim_make(0, 0, 0, 1, 0, 0, 0) }   // A
+pub fn dim_temperature()  -> Dim { dim_make(0, 0, 0, 0, 1, 0, 0) }   // K
+pub fn dim_amount()       -> Dim { dim_make(0, 0, 0, 0, 0, 1, 0) }   // mol
+pub fn dim_luminous()     -> Dim { dim_make(0, 0, 0, 0, 0, 0, 1) }   // cd
+
+/// Derived dimensions.
+pub fn dim_area()         -> Dim { dim_make(2, 0, 0, 0, 0, 0, 0) }   // m²
+pub fn dim_volume()       -> Dim { dim_make(3, 0, 0, 0, 0, 0, 0) }   // m³
+pub fn dim_velocity()     -> Dim { dim_make(1, 0, -1, 0, 0, 0, 0) }  // m·s⁻¹
+pub fn dim_acceleration() -> Dim { dim_make(1, 0, -2, 0, 0, 0, 0) }  // m·s⁻²
+pub fn dim_force()        -> Dim { dim_make(1, 1, -2, 0, 0, 0, 0) }  // kg·m·s⁻² = N
+pub fn dim_energy()       -> Dim { dim_make(2, 1, -2, 0, 0, 0, 0) }  // kg·m²·s⁻² = J
+pub fn dim_power()        -> Dim { dim_make(2, 1, -3, 0, 0, 0, 0) }  // kg·m²·s⁻³ = W
+pub fn dim_pressure()     -> Dim { dim_make(-1, 1, -2, 0, 0, 0, 0) } // kg·m⁻¹·s⁻² = Pa
+pub fn dim_charge()       -> Dim { dim_make(0, 0, 1, 1, 0, 0, 0) }   // A·s = C
+pub fn dim_frequency()    -> Dim { dim_make(0, 0, -1, 0, 0, 0, 0) }  // s⁻¹ = Hz
+
+// ============================================================================
+// QUANTITY CONSTRUCTION & ARITHMETIC
+// ============================================================================
+
+/// Build a quantity from a value and a dimension.
+pub fn q_of(value: f64, dim: Dim) -> Quantity {
+    Quantity { value: value, dim: dim }
+}
+
+/// The numeric magnitude of a quantity (in its implicit base-unit system).
+pub fn q_value(q: Quantity) -> f64 { q.value }
+
+/// The dimension of a quantity.
+pub fn q_dim(q: Quantity) -> Dim { q.dim }
+
+/// Add two quantities. PANICS on dimension mismatch — adding a length to a time is a bug and is
+/// rejected rather than silently producing a meaningless value. Values add; dimension is preserved.
+pub fn q_add(a: Quantity, b: Quantity) -> Quantity with Panic {
+    if !dim_eq(a.dim, b.dim) {
+        panic("q_add: incompatible dimensions")
+    }
+    Quantity { value: a.value + b.value, dim: a.dim }
+}
+
+/// Subtract two quantities. PANICS on dimension mismatch. Values subtract; dimension is preserved.
+pub fn q_sub(a: Quantity, b: Quantity) -> Quantity with Panic {
+    if !dim_eq(a.dim, b.dim) {
+        panic("q_sub: incompatible dimensions")
+    }
+    Quantity { value: a.value - b.value, dim: a.dim }
+}
+
+/// Multiply two quantities: values multiply, dimensions add (exponent-wise). Always defined — the
+/// result carries a computed, checkable dimension (e.g. force × length = energy).
+pub fn q_mul(a: Quantity, b: Quantity) -> Quantity {
+    Quantity { value: a.value * b.value, dim: dim_mul(a.dim, b.dim) }
+}
+
+/// Divide two quantities: values divide, dimensions subtract (exponent-wise). e.g. length ÷ time
+/// yields a velocity Quantity whose dim is [1,0,-1,0,0,0,0].
+pub fn q_div(a: Quantity, b: Quantity) -> Quantity with Div, Panic {
+    Quantity { value: a.value / b.value, dim: dim_div(a.dim, b.dim) }
+}
+
+/// True if two quantities share a dimension (safe to add/subtract) — the non-aborting test.
+pub fn q_dim_compatible(a: Quantity, b: Quantity) -> bool {
+    dim_eq(a.dim, b.dim)
+}

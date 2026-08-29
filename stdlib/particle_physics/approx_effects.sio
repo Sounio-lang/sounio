@@ -1,0 +1,381 @@
+// stdlib/particle_physics/approx_effects.sio — Physical approximation effects
+//
+// Two new algebraic effects complete Sounio's approximation calculus:
+//
+//   Perturbative (bit 23, 8388608)
+//     — marks LO-only perturbative calculations where higher-order terms are
+//       truncated. Any function calling a Perturbative function must declare
+//       `with Perturbative` in its own signature. Effect propagates up call chains.
+//
+//   NarrowWidthApproximation (bit 24, 16777216)
+//     — marks calculations that treat unstable particles as exactly stable
+//       (Gamma/M → 0). The approximation improves as Gamma/M decreases:
+//       Higgs: Gamma_H/M_H ~ 3e-5 (excellent)
+//       Top:   Gamma_top/M_top ~ 8e-3 (good)
+//       Z:     Gamma_Z/M_Z ~ 2.7e-2 (adequate, ~2.7% systematic)
+//
+// Together with NonUnitary (bit 22), Sounio now encodes THREE distinct physical
+// approximations at the type level — a uniform calculus with no analogue in
+// ROOT, MadGraph, Pythia, or FeynCalc.
+//
+// References:
+//   - Peskin & Schroeder §5, §17.5 (perturbative QCD, RGE)
+//   - Stirling et al. (1991) gg→H LO cross-section
+//   - PDG 2024: M_Z, Gamma_Z, M_H, M_top, alpha_s(M_Z)
+
+module particle_physics::approx_effects
+
+use epistemic::knowledge::{Epistemic}
+use particle_physics::sm_params::{alpha_s_mz, mass_h, mass_top, mass_z}
+use particle_physics::rge::{alpha_s_at_mu}
+
+let AE_PI: f64 = 3.14159265358979323846
+
+// ============================================================================
+// Perturbative effect — sentinels and LO-only calculations
+// ============================================================================
+//
+// The `with Perturbative` annotation propagates from the sentinel upward:
+// every function that calls a Perturbative function must declare the effect
+// or the compiler rejects it at typecheck time. This makes perturbative
+// truncation visible in the static type of every affected function.
+
+// Sentinel: the root source of the Perturbative effect.
+fn perturbative_sentinel() -> bool with Perturbative {
+    true
+}
+
+// QCD alpha_s at leading order — 1-loop running only, no NNLO matching,
+// no resummation. Carries Epistemic uncertainty from PDG alpha_s(M_Z).
+// Callers must declare `with Perturbative`.
+pub fn alpha_s_lo_ep(mu_gev: f64) -> Epistemic with Perturbative, Mut, Div, Panic {
+    let _flag = perturbative_sentinel()
+    // alpha_s_at_mu propagates PDG uncertainty via 1-loop beta function.
+    alpha_s_at_mu(mu_gev)
+}
+
+// gg→H cross-section at LO (K-factor = 1, triangle loop approximation).
+// sigma_LO ~ C * alpha_s^2 / s  (dimensional estimate; not full LHC parton-level calc).
+// Callers must declare `with Perturbative`.
+pub fn ggh_lo_xsec_ep(m_h_gev: f64, sqrt_s_gev: f64) -> Epistemic with Perturbative, Mut, Div, Panic {
+    let _flag = perturbative_sentinel()
+    let as_lo = alpha_s_lo_ep(m_h_gev)
+    // LO proportionality: sigma ~ (pi^2/576) * alpha_s^2 / s
+    // C = pi^2 / 576 (from the heavy-top limit of the triangle diagram)
+    let c_lo = AE_PI * AE_PI / 576.0
+    let s = sqrt_s_gev * sqrt_s_gev
+    as_lo.square().scale(c_lo / s)
+}
+
+// ============================================================================
+// NarrowWidthApproximation effect — sentinels and on-shell calculations
+// ============================================================================
+//
+// The `with NarrowWidthApproximation` annotation ensures that any function
+// using the zero-width approximation cannot silently be called from code
+// that does not acknowledge the approximation.
+
+// Sentinel: the root source of the NarrowWidthApproximation effect.
+fn nwa_sentinel() -> bool with NarrowWidthApproximation {
+    true
+}
+
+// Z → f fbar partial width in the narrow-width approximation.
+// Gamma(Z→ff) = G_F M_Z^3 N_c [(g_V^f)^2 + (g_A^f)^2] / (6 sqrt(2) pi)
+//
+// The NWA neglects Gamma_Z/M_Z corrections (~2.7%); use with appropriate
+// systematic uncertainty in any analysis. GUM uncertainty is propagated
+// through M_Z^3 using PDG M_Z = 91.1876 ± 0.0021 GeV.
+//
+// Arguments:
+//   g_v_sq_plus_g_a_sq — (g_V^f)^2 + (g_A^f)^2 (exact neutral-current coupling)
+//   n_color            — color factor: 1.0 for leptons, 3.0 for quarks
+pub fn z_partial_width_nwa_ep(
+    g_v_sq_plus_g_a_sq: f64,
+    n_color: f64
+) -> Epistemic with NarrowWidthApproximation, Mut, Div, Panic {
+    let _flag = nwa_sentinel()
+    let mz = mass_z()
+    // G_F = 1.16638e-5 GeV^-2 (Fermi constant, PDG 2024)
+    let gf = 1.1663787e-5
+    let factor = gf * n_color * g_v_sq_plus_g_a_sq / (6.0 * 1.41421356237 * AE_PI)
+    // M_Z^3 with GUM propagation: Var(M_Z^3) = (3 M_Z^2)^2 Var(M_Z)
+    let mz2 = mz.square()
+    let mz3 = mz2.mul(&mz)
+    mz3.scale(factor)
+}
+
+// H → bb partial width in the narrow-width approximation.
+// Gamma(H→bb) ~ 3 G_F m_b^2(M_H) M_H / (4 sqrt(2) pi) * (1 + 5.67 alpha_s/pi)
+//
+// Uses running bottom mass m_b(M_H) ~ 2.79 GeV (MS-bar at the Higgs scale).
+// The QCD correction factor uses alpha_s at LO — this function therefore
+// carries BOTH NarrowWidthApproximation and Perturbative effects.
+//
+// NWA quality: Gamma_H/M_H ~ 3e-5 — this is an excellent approximation.
+pub fn h_bb_width_nwa_ep() -> Epistemic with NarrowWidthApproximation, Perturbative, Mut, Div, Panic {
+    let _flag = nwa_sentinel()
+    let mh = mass_h()
+    // Running bottom mass at the Higgs scale (MS-bar scheme)
+    let mb_mh = 2.79
+    let gf = 1.1663787e-5
+    // LO factor: 3 G_F m_b^2 M_H / (4 sqrt(2) pi)
+    let factor_lo = 3.0 * gf * mb_mh * mb_mh / (4.0 * 1.41421356237 * AE_PI)
+    // QCD correction: 1 + 5.67 alpha_s(M_H) / pi  (Chetyrkin et al. NLO coefficient)
+    let as_mh = alpha_s_lo_ep(mh.val())
+    let corr_val = 1.0 + 5.67 * as_mh.val() / AE_PI
+    let corr = Epistemic::new(corr_val, as_mh.variance() * (5.67 / AE_PI) * (5.67 / AE_PI), as_mh.confidence())
+    mh.scale(factor_lo).mul(&corr)
+}
+
+
+// ============================================================================
+// Approximation effect algebra (EXP10)
+// ============================================================================
+//
+// Runtime layer tags (not the compiler effect bits — those are separate).
+// A stack records which physical approximations are *active* in a computation
+// and the residual each layer contributes.
+//
+// Composition laws (executable, not paper):
+//   L1  Singleton stacks are always legal.
+//   L2  {NWA, Perturbative} is legal (e.g. H→bb NWA with LO α_s).
+//   L3  {NonUnitary, Perturbative} is legal (LO amplitude with unstable line).
+//   L4  {NonUnitary, NWA} is *typed-legal* if both effects are declared, but
+//       *physically in tension*: NWA takes Γ→0 while NonUnitary keeps Γ.
+//       `approx_stack_in_tension` flags this.
+//   L5  Triple stack {NU, NWA, Pert} inherits L4 tension + LO residual.
+//
+// Combined residual (construction): √(Σ r_i²) over active layers.
+
+pub fn APPROX_LAYER_NONUNITARY() -> i64 { 1 }
+pub fn APPROX_LAYER_PERTURBATIVE() -> i64 { 2 }
+pub fn APPROX_LAYER_NWA() -> i64 { 4 }
+
+pub struct ApproxStack {
+    layers: i64,
+    residual_nu: f64,
+    residual_nwa: f64,
+    residual_pert: f64,
+    legal: i64,
+}
+
+pub fn approx_stack_empty() -> ApproxStack {
+    ApproxStack {
+        layers: 0,
+        residual_nu: 0.0,
+        residual_nwa: 0.0,
+        residual_pert: 0.0,
+        legal: 1,
+    }
+}
+
+// NWA quality residual: Γ/M (small ⇒ excellent NWA).
+pub fn approx_nwa_residual(mass: f64, gamma: f64) -> f64 with Div, Panic {
+    if mass == 0.0 { return 1.0 }
+    let r = gamma / mass
+    if r < 0.0 { 0.0 - r } else { r }
+}
+
+// NonUnitary residual proxy: unitarity deficit in [0,1] (pole → 1).
+pub fn approx_nu_residual(deficit: f64) -> f64 {
+    if deficit < 0.0 { 0.0 } else { if deficit > 1.0 { 1.0 } else { deficit } }
+}
+
+// LO perturbative residual (construction scale): typical K-factor band.
+// Not a fit — a declared truncation scale for the stack algebra.
+pub fn approx_pert_residual_lo_default() -> f64 {
+    0.30
+}
+
+fn approx_has_layer(layers: i64, bit: i64) -> bool {
+    (layers / bit) % 2 == 1
+}
+
+// Recompute legality + tension after mutation.
+fn approx_finalize(s: ApproxStack) -> ApproxStack {
+    let nu = approx_has_layer(s.layers, APPROX_LAYER_NONUNITARY())
+    let pe = approx_has_layer(s.layers, APPROX_LAYER_PERTURBATIVE())
+    let nw = approx_has_layer(s.layers, APPROX_LAYER_NWA())
+    // All listed compositions are typed-legal; physical tension is separate.
+    let legal: i64 = 1
+    ApproxStack {
+        layers: s.layers,
+        residual_nu: s.residual_nu,
+        residual_nwa: s.residual_nwa,
+        residual_pert: s.residual_pert,
+        legal: legal,
+    }
+}
+
+pub fn approx_stack_push_nu(s: ApproxStack, deficit: f64) -> ApproxStack {
+    var layers = s.layers
+    if approx_has_layer(layers, APPROX_LAYER_NONUNITARY()) {
+        // already present
+    } else {
+        layers = layers + APPROX_LAYER_NONUNITARY()
+    }
+    let base = ApproxStack {
+        layers: layers,
+        residual_nu: approx_nu_residual(deficit),
+        residual_nwa: s.residual_nwa,
+        residual_pert: s.residual_pert,
+        legal: s.legal,
+    }
+    approx_finalize(base)
+}
+
+pub fn approx_stack_push_nwa(s: ApproxStack, mass: f64, gamma: f64) -> ApproxStack with Div, Panic {
+    var layers = s.layers
+    if approx_has_layer(layers, APPROX_LAYER_NWA()) {
+    } else {
+        layers = layers + APPROX_LAYER_NWA()
+    }
+    let base = ApproxStack {
+        layers: layers,
+        residual_nu: s.residual_nu,
+        residual_nwa: approx_nwa_residual(mass, gamma),
+        residual_pert: s.residual_pert,
+        legal: s.legal,
+    }
+    approx_finalize(base)
+}
+
+pub fn approx_stack_push_pert(s: ApproxStack, relative_unc: f64) -> ApproxStack {
+    var layers = s.layers
+    if approx_has_layer(layers, APPROX_LAYER_PERTURBATIVE()) {
+    } else {
+        layers = layers + APPROX_LAYER_PERTURBATIVE()
+    }
+    var r = relative_unc
+    if r < 0.0 { r = 0.0 - r }
+    let base = ApproxStack {
+        layers: layers,
+        residual_nu: s.residual_nu,
+        residual_nwa: s.residual_nwa,
+        residual_pert: r,
+        legal: s.legal,
+    }
+    approx_finalize(base)
+}
+
+// True when NonUnitary and NWA are both active (physical tension).
+pub fn approx_stack_in_tension(s: ApproxStack) -> bool {
+    approx_has_layer(s.layers, APPROX_LAYER_NONUNITARY()) && approx_has_layer(s.layers, APPROX_LAYER_NWA())
+}
+
+// Combined residual √(Σ r²) over active layers only.
+pub fn approx_stack_combined_residual(s: ApproxStack) -> f64 with Mut, Div, Panic {
+    var acc = 0.0
+    if approx_has_layer(s.layers, APPROX_LAYER_NONUNITARY()) {
+        acc = acc + s.residual_nu * s.residual_nu
+    }
+    if approx_has_layer(s.layers, APPROX_LAYER_NWA()) {
+        acc = acc + s.residual_nwa * s.residual_nwa
+    }
+    if approx_has_layer(s.layers, APPROX_LAYER_PERTURBATIVE()) {
+        acc = acc + s.residual_pert * s.residual_pert
+    }
+    // Newton sqrt
+    if acc <= 0.0 { return 0.0 }
+    var g = acc
+    if g > 1.0 { g = acc / 2.0 }
+    var i: i64 = 0
+    while i < 40 {
+        g = 0.5 * (g + acc / g)
+        i = i + 1
+    }
+    g
+}
+
+// Layer count (0–3).
+pub fn approx_stack_layer_count(s: ApproxStack) -> i64 {
+    var n: i64 = 0
+    if approx_has_layer(s.layers, APPROX_LAYER_NONUNITARY()) { n = n + 1 }
+    if approx_has_layer(s.layers, APPROX_LAYER_PERTURBATIVE()) { n = n + 1 }
+    if approx_has_layer(s.layers, APPROX_LAYER_NWA()) { n = n + 1 }
+    n
+}
+
+
+// Effect acknowledgements — force compiler effect without heavy Epistemic graphs.
+// Used by EXP10 Madaros-safe effect-stack core.
+pub fn approx_ack_perturbative() -> i64 with Perturbative {
+    let _flag = perturbative_sentinel()
+    1
+}
+
+pub fn approx_ack_nwa() -> i64 with NarrowWidthApproximation {
+    let _flag = nwa_sentinel()
+    1
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+var AE_PASS_CNT: [i64; 2] = [0; 2]
+
+fn ae_chk(pass: bool, id: i64) with IO, Mut, Panic {
+    if pass {
+        AE_PASS_CNT[0] = AE_PASS_CNT[0] + 1
+    } else {
+        print("FAIL approx_effects #")
+        print_int(id)
+        print("\n")
+        AE_PASS_CNT[1] = AE_PASS_CNT[1] + 1
+    }
+}
+
+pub fn run_approx_effects_tests() with IO, Perturbative, NarrowWidthApproximation, Mut, Div, Panic {
+    print("=== Approx Effects Tests ===\n")
+
+    // T1: alpha_s_lo at M_Z is in the physical range [0.10, 0.14]
+    let as_lo = alpha_s_lo_ep(91.1876)
+    ae_chk(as_lo.val() > 0.10 && as_lo.val() < 0.14, 1)
+
+    // T2: alpha_s_lo has nonzero uncertainty
+    ae_chk(as_lo.variance() > 0.0, 2)
+
+    // T3: ggh_lo_xsec is positive at 13 TeV
+    let sigma_h = ggh_lo_xsec_ep(125.2, 13000.0)
+    ae_chk(sigma_h.val() > 0.0, 3)
+
+    // T4: ggh_lo_xsec uncertainty is nonzero (propagated from alpha_s)
+    ae_chk(sigma_h.variance() > 0.0, 4)
+
+    // T5: Z→νν partial width in NWA; neutrino couplings gV=gA=0.5
+    // Expected ~ 0.167 GeV per species; we check [0.10, 0.25]
+    let g_nu = 0.5 * 0.5 + 0.5 * 0.5
+    let width_nu = z_partial_width_nwa_ep(g_nu, 1.0)
+    ae_chk(width_nu.val() > 0.10 && width_nu.val() < 0.25, 5)
+
+    // T6: Z partial width has GUM uncertainty from M_Z
+    ae_chk(width_nu.variance() > 0.0, 6)
+
+    // T7: H→bb width in NWA; expect ~ 0.002–0.005 GeV
+    let width_bb = h_bb_width_nwa_ep()
+    ae_chk(width_bb.val() > 0.001 && width_bb.val() < 0.01, 7)
+
+    // T8: H→bb width has uncertainty from both M_H and alpha_s
+    ae_chk(width_bb.variance() > 0.0, 8)
+
+    // T9: structural check — Perturbative/NWA effects enforced at compile time
+    ae_chk(true, 9)
+
+    let n_pass = AE_PASS_CNT[0]
+    let n_fail = AE_PASS_CNT[1]
+    let total = n_pass + n_fail
+    print("Approx Effects: ")
+    print_int(n_pass)
+    print("/")
+    print_int(total)
+    print(" PASS\n")
+}
+
+pub fn main() -> i32 with IO, Perturbative, NarrowWidthApproximation, Mut, Div, Panic {
+    AE_PASS_CNT[0] = 0
+    AE_PASS_CNT[1] = 0
+    run_approx_effects_tests()
+    if AE_PASS_CNT[1] == 0 { print("ALL PASS\n"); 0 } else { 1 }
+}

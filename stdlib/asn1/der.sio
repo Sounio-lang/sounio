@@ -1,0 +1,371 @@
+// stdlib/asn1/der.sio
+//
+// Generic ASN.1 DER (Distinguished Encoding Rules) decoder. Cursor-based,
+// not tree-based: DerReader is a flat { pointer, pos, end } over a RawBuf's
+// bytes, and "entering" a constructed value (SEQUENCE, SET, an explicit
+// context-specific wrapper) just narrows that range into a fresh child
+// cursor -- no heap-allocated tree of decoded nodes is ever built. See
+// docs/superpowers/specs/2026-08-23-madaros-asn1-der-design.md.
+//
+// This decoder has no X.509-specific knowledge: it hands back raw tag/
+// length/value information and typed readers for the ASN.1 universal types
+// X.509 uses, leaving semantic interpretation (which OID means what, which
+// context tag means what) to a separate X.509 layer built on top.
+//
+// DER, not BER: indefinite-length encoding and non-minimal length forms are
+// both rejected as malformed input, never tolerated.
+
+use bignum::bigint::*
+use net::socket::*
+
+pub struct DerReader {
+    buf_ptr: *mut u8,   // NOT a RawBuf -- see this plan's Global Constraints
+                          // for why the raw pointer is stored directly
+    pos: i64,             // current read position, absolute offset into the buffer
+    end: i64,             // exclusive upper bound of this cursor's valid range
+}
+
+pub struct DerTag {
+    class: i32,          // 0=UNIVERSAL, 1=APPLICATION, 2=CONTEXT-SPECIFIC, 3=PRIVATE
+    constructed: bool,    // true for SEQUENCE/SET/explicit wrappers; false for primitives
+    tag_number: i32,      // universal tag number, or the raw context-specific [N] number
+    content_start: i64,   // absolute offset where this tag's value bytes begin
+    content_len: i64,     // length of the value in bytes
+}
+
+pub const DER_TAG_BOOLEAN: i32 = 1
+pub const DER_TAG_INTEGER: i32 = 2
+pub const DER_TAG_BIT_STRING: i32 = 3
+pub const DER_TAG_OCTET_STRING: i32 = 4
+pub const DER_TAG_NULL: i32 = 5
+pub const DER_TAG_OBJECT_IDENTIFIER: i32 = 6
+pub const DER_TAG_UTF8_STRING: i32 = 12
+pub const DER_TAG_SEQUENCE: i32 = 16
+pub const DER_TAG_SET: i32 = 17
+pub const DER_TAG_PRINTABLE_STRING: i32 = 19
+pub const DER_TAG_IA5_STRING: i32 = 22
+pub const DER_TAG_UTC_TIME: i32 = 23
+pub const DER_TAG_GENERALIZED_TIME: i32 = 24
+
+pub const DER_CLASS_UNIVERSAL: i32 = 0
+pub const DER_CLASS_APPLICATION: i32 = 1
+pub const DER_CLASS_CONTEXT: i32 = 2
+pub const DER_CLASS_PRIVATE: i32 = 3
+
+pub const DER_MAX_LENGTH: i64 = 65536
+
+pub const DER_OK: i64 = 0
+pub const DER_ERR_TRUNCATED: i64 = 0 - 1
+pub const DER_ERR_BAD_LENGTH_FORM: i64 = 0 - 2
+pub const DER_ERR_LENGTH_TOO_LARGE: i64 = 0 - 3
+pub const DER_ERR_NOT_CONSTRUCTED: i64 = 0 - 4
+pub const DER_ERR_NESTING_TOO_DEEP: i64 = 0 - 5
+
+pub fn der_reader_new(buf: &RawBuf, start: i64, end: i64) -> DerReader {
+    DerReader { buf_ptr: buf.ptr, pos: start, end: end }
+}
+
+// Reads one byte at an absolute offset within the underlying buffer.
+// Mirrors stdlib/net/socket.sio's rawbuf_get body exactly (masking with
+// & 255 per Finding 3: a raw pointer dereference reads a full 8-byte word,
+// not one byte), just parameterized on DerReader's own buf_ptr field.
+fn der_byte_at(r: &DerReader, offset: i64) -> i64 with IO {
+    let addr = r.buf_ptr as i64
+    let p = (addr + offset) as *mut u8
+    ((*p) as i64) & 255
+}
+
+fn der_tag_zero() -> DerTag {
+    DerTag { class: 0, constructed: false, tag_number: 0, content_start: 0, content_len: 0 }
+}
+
+pub fn der_at_end(r: &DerReader) -> bool {
+    r.pos >= r.end
+}
+
+// Decodes the tag+length header starting at r.pos, WITHOUT advancing r.pos
+// (the caller inspects the returned DerTag and decides what to do next via
+// der_read_tlv/der_enter/der_skip/one of the der_read_* functions).
+pub fn der_peek_tag(r: &DerReader) -> (DerTag, i64) with IO {
+    if r.pos >= r.end {
+        return (der_tag_zero(), DER_ERR_TRUNCATED)
+    }
+    let b0 = der_byte_at(r, r.pos)
+
+    // b0 is a single byte, 0-255 -- every shift/mask below operates on a
+    // value far below bit 63, so Finding 11 does not apply.
+    let class_bits = (b0 >> 6) & 3
+    let constructed_bit = (b0 >> 5) & 1
+    let constructed = constructed_bit == 1
+    let tag_num = b0 & 31
+    if tag_num == 31 {
+        // Bits 4-0 all set means a multi-byte tag number follows in
+        // subsequent bytes -- this decoder does not support multi-byte
+        // tag numbers (no field this project needs ever uses one).
+        // Reject explicitly rather than silently misinterpreting the
+        // continuation byte as the length byte.
+        return (der_tag_zero(), DER_ERR_BAD_LENGTH_FORM)
+    }
+
+    var p = r.pos + 1
+    if p >= r.end {
+        return (der_tag_zero(), DER_ERR_TRUNCATED)
+    }
+    let len_byte = der_byte_at(r, p)
+    p = p + 1
+
+    var content_len: i64 = 0
+    if (len_byte & 128) == 0 {
+        // Short form: len_byte itself is the length, 0-127.
+        content_len = len_byte
+    } else {
+        let num_len_bytes = len_byte & 127
+        if num_len_bytes == 0 {
+            // 0x80 alone is BER's indefinite-length marker; DER forbids it.
+            return (der_tag_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+        if num_len_bytes > 4 {
+            // More than 4 length bytes could only encode a value far past
+            // DER_MAX_LENGTH (65536 fits in 3 bytes); reject before even
+            // reading them so the accumulator below never needs more than
+            // 32 bits, let alone approaches bit 63 (Finding 11's boundary).
+            return (der_tag_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+        if p + num_len_bytes > r.end {
+            return (der_tag_zero(), DER_ERR_TRUNCATED)
+        }
+        let first_len_byte = der_byte_at(r, p)
+        var acc: i64 = 0
+        var i: i64 = 0
+        while i < num_len_bytes {
+            let lb = der_byte_at(r, p + i)
+            // acc accumulates at most 4 bytes -> at most 32 bits; << 8 | lb
+            // never approaches bit 63.
+            acc = (acc << 8) | lb
+            i = i + 1
+        }
+        p = p + num_len_bytes
+        // DER requires minimal long-form encoding: a leading zero length
+        // byte (when more than one length byte is used), or a long-form
+        // encoding of a value that would fit in short form (<128), is
+        // non-minimal and therefore malformed DER.
+        if num_len_bytes > 1 && first_len_byte == 0 {
+            return (der_tag_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+        if acc < 128 {
+            return (der_tag_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+        content_len = acc
+    }
+
+    if content_len > DER_MAX_LENGTH {
+        return (der_tag_zero(), DER_ERR_LENGTH_TOO_LARGE)
+    }
+    if p + content_len > r.end {
+        return (der_tag_zero(), DER_ERR_TRUNCATED)
+    }
+
+    let tag = DerTag {
+        class: class_bits as i32,
+        constructed: constructed,
+        tag_number: tag_num as i32,
+        content_start: p,
+        content_len: content_len,
+    }
+    (tag, DER_OK)
+}
+
+// Decodes the tag+length header starting at r.pos, same as der_peek_tag,
+// but returns a new DerReader whose pos has advanced past the header to
+// content_start. Per this plan's Global Constraints, this rebuilds a fresh
+// DerReader by reading fields individually -- never `*r`. To advance a
+// cursor past a field's content after reading it, use `der_next` (or
+// `der_skip` if you never intend to read the field at all).
+pub fn der_read_tlv(r: &DerReader) -> (DerReader, DerTag, i64) with IO {
+    let (tag, status) = der_peek_tag(r)
+    if status != DER_OK {
+        let unchanged = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
+        return (unchanged, tag, status)
+    }
+    let advanced = DerReader { buf_ptr: r.buf_ptr, pos: tag.content_start, end: r.end }
+    (advanced, tag, DER_OK)
+}
+
+// Returns a child cursor scoped to exactly `tag`'s value bytes. `r` must be
+// positioned such that `tag` was decoded from it (i.e. `tag.content_start`
+// falls within `r`'s range) -- this is always true when `tag` came from a
+// der_peek_tag/der_read_tlv call on this same `r`.
+pub fn der_enter(r: &DerReader, tag: &DerTag) -> (DerReader, i64) {
+    if tag.constructed == false {
+        let unchanged = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
+        return (unchanged, DER_ERR_NOT_CONSTRUCTED)
+    }
+    let child_end = tag.content_start + tag.content_len
+    if child_end > r.end {
+        let unchanged = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
+        return (unchanged, DER_ERR_TRUNCATED)
+    }
+    let child = DerReader {
+        buf_ptr: r.buf_ptr,
+        pos: tag.content_start,
+        end: child_end,
+    }
+    (child, DER_OK)
+}
+
+// Returns a cursor advanced past this whole TLV (header + value), without
+// reading or copying the value's bytes.
+pub fn der_skip(r: &DerReader, tag: &DerTag) -> (DerReader, i64) {
+    let new_pos = tag.content_start + tag.content_len
+    if new_pos > r.end {
+        let unchanged = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
+        return (unchanged, DER_ERR_TRUNCATED)
+    }
+    let advanced = DerReader { buf_ptr: r.buf_ptr, pos: new_pos, end: r.end }
+    (advanced, DER_OK)
+}
+
+// Alias for der_skip, documenting a different caller intent: "I already
+// read this field's content (or descended into it via der_enter), now
+// advance past it" vs. der_skip's "I never want to read this field at
+// all." Both compute the identical bound-checked advance.
+//
+// USAGE IDIOM: der_read_tlv only ever advances a cursor to
+// tag.content_start (the START of a field's value) -- never past it. To
+// get a cursor positioned AFTER a field, once you are done with it
+// (whether you read it, descended into it, or skipped it entirely), call
+// der_next(r, tag) passing the READER THAT der_read_tlv WAS CALLED ON
+// (not the reader it returned) together with the tag it returned:
+//
+//   let (r2, tag, status) = der_read_tlv(&r)
+//   // ... read the value via r2/tag, or der_enter(&r2, &tag), or nothing ...
+//   let (r3, status) = der_next(&r, &tag)   // r3 is now positioned after this field
+//
+// Treating r2 as "done with this field" without this step is a real,
+// previously-hit bug (two independent instances found in this module's
+// own tests during review) -- always advance explicitly via der_next or
+// der_skip before moving on to read the next field.
+pub fn der_next(r: &DerReader, tag: &DerTag) -> (DerReader, i64) {
+    der_skip(r, tag)
+}
+
+pub fn der_read_boolean(r: &DerReader, tag: &DerTag) -> (bool, i64) with IO {
+    if tag.tag_number != DER_TAG_BOOLEAN || tag.constructed || tag.content_len != 1 {
+        return (false, DER_ERR_BAD_LENGTH_FORM)
+    }
+    if tag.content_start + 1 > r.end {
+        return (false, DER_ERR_TRUNCATED)
+    }
+    let b = der_byte_at(r, tag.content_start)
+    if b == 0 {
+        return (false, DER_OK)
+    }
+    if b == 255 {
+        return (true, DER_OK)
+    }
+    // DER forbids any nonzero byte other than 0xFF for a true BOOLEAN.
+    (false, DER_ERR_BAD_LENGTH_FORM)
+}
+
+pub fn der_read_null(r: &DerReader, tag: &DerTag) -> i64 {
+    if tag.tag_number != DER_TAG_NULL || tag.constructed || tag.content_len != 0 {
+        return DER_ERR_BAD_LENGTH_FORM
+    }
+    DER_OK
+}
+
+// Decodes a DER INTEGER as an unsigned magnitude into a BigInt. Every
+// INTEGER this project ever decodes (serial numbers, RSA moduli/exponents)
+// is non-negative by construction, so this treats the content bytes as an
+// unsigned big-endian magnitude after stripping DER's required single
+// leading 0x00 padding byte (present whenever the true value's high bit
+// would otherwise look like a two's-complement sign bit).
+pub fn der_read_integer(r: &DerReader, tag: &DerTag) -> (BigInt, i64) with IO {
+    if tag.tag_number != DER_TAG_INTEGER || tag.constructed || tag.content_len == 0 {
+        return (bigint_zero(), DER_ERR_BAD_LENGTH_FORM)
+    }
+    if tag.content_start + tag.content_len > r.end {
+        return (bigint_zero(), DER_ERR_TRUNCATED)
+    }
+
+    var start = tag.content_start
+    var len = tag.content_len
+    let first_byte = der_byte_at(r, start)
+
+    if len > 1 && first_byte == 0 {
+        start = start + 1
+        len = len - 1
+        let b1 = der_byte_at(r, start)
+        if b1 == 0 {
+            // A second leading zero byte is non-minimal DER -- reject.
+            return (bigint_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+        if (b1 & 128) == 0 {
+            // The padding byte wasn't actually needed -- b1's high bit
+            // was already clear, so this INTEGER didn't need a leading
+            // 0x00 at all. Non-minimal DER -- reject. (b1 is a single
+            // byte, 0-255, so this mask is trivially far from bit 63.)
+            return (bigint_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+        // b1's high bit IS set here, which is exactly why the 0x00 pad
+        // was required -- this is a valid large positive magnitude, not
+        // a negative value. Fall through to the accumulation loop below.
+    } else {
+        if (first_byte & 128) != 0 {
+            // No leading 0x00 pad is present, and the first content byte's
+            // high bit is set -- in two's-complement this is a NEGATIVE
+            // value. This module only supports non-negative INTEGERs (see
+            // the doc comment above), and every X.509 field it decodes
+            // (serial numbers, RSA moduli/exponents) must never be
+            // negative -- reject rather than silently reinterpreting a
+            // negative value as a large positive magnitude.
+            return (bigint_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+    }
+
+    // BigInt's storage is BIGINT_MAX_LIMBS (512) limbs of 16 bits = 1024
+    // bytes = 8192 bits. Reject before looping rather than silently
+    // truncating a value wider than BigInt can hold.
+    //
+    // Note: the loop below calls bigint_mul(&acc, &base256) up to 1024
+    // times with acc potentially approaching BIGINT_MAX_LIMBS in size.
+    // bigint_mul's SAFETY PRECONDITION (both operands <=
+    // BIGINT_MUL_SAFE_OPERAND_LIMBS=256, or the result silently
+    // truncates) does NOT bind here: base256 always has len==1, so the
+    // true product width (acc.len + base256.len) never approaches the
+    // 512-limb ceiling that precondition protects against -- that ceiling
+    // is only reachable when BOTH operands are large.
+    if len > (BIGINT_MAX_LIMBS as i64) * 2 {
+        return (bigint_zero(), DER_ERR_LENGTH_TOO_LARGE)
+    }
+
+    var acc = bigint_zero()
+    let base256 = bigint_from_u32(256)
+    var i: i64 = 0
+    while i < len {
+        let byte_val = der_byte_at(r, start + i)
+        let digit = bigint_from_u32(byte_val as u32)
+        let scaled = bigint_mul(&acc, &base256)
+        acc = bigint_add(&scaled, &digit)
+        i = i + 1
+    }
+    (acc, DER_OK)
+}
+
+// Copies tag.content_len bytes verbatim from r's underlying buffer into
+// `out` starting at `out_offset`. The caller is responsible for sizing
+// `out` large enough -- matching this branch's established convention
+// that RawBuf capacity checks are the caller's responsibility (see every
+// rawbuf_new call site in stdlib/net/).
+pub fn der_read_raw_bytes(r: &DerReader, tag: &DerTag, out: &RawBuf, out_offset: i64) -> i64 with IO {
+    if tag.content_start + tag.content_len > r.end {
+        return DER_ERR_TRUNCATED
+    }
+    var i: i64 = 0
+    while i < tag.content_len {
+        let b = der_byte_at(r, tag.content_start + i)
+        rawbuf_set(out, out_offset + i, b)
+        i = i + 1
+    }
+    DER_OK
+}

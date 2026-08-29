@@ -1,0 +1,223 @@
+//@ run-pass
+// scipy.stats-class epistemic E2E vertical (lean_single multi-module).
+//
+// Classical parity (fixed data, derived oracles — not retrofitted):
+//   Welch t-test  drug vs placebo n=8  (same arrays as tests/stats/test_epistemic_stats.py)
+//     hand / SciPy equal_var=False:
+//       t  = 6.657160298051489
+//       df = 10.141137519725348
+//       se = 1.070276165963052
+//       p  ≈ 5.292274974446240e-05  (two-tail via I_{df/(df+t²)}(df/2, 1/2))
+//       d  = 3.328580149025744      (Cohen; Sounio Welch path uses √((s²x+s²y)/2))
+//   Levene (center=mean) W ≈ 5.629049872588284
+//   OLS x=[1..5], y=[2,4,5,4,5]: slope=0.6, intercept=2.2, r²=0.6
+//   Bootstrap mean {1..5} seed 20260715: mean=3 exact, CI brackets 3
+//
+// Structural surpass vs SciPy:
+//   TestResult.as_gum carries statistic ± SE (GUM bridge) — scipy.stats has no analogue.
+//
+// Engine: SOUNIO_SOUC_ENGINE=lean_single (Madaros multi-module not claimed).
+// Gate:   bash scripts/stats_scipy_e2e_gate.sh
+
+use stats::hypothesis::{
+    TestResult,
+    t_test_two_sample,
+    t_test_paired
+}
+use stats::effect_size::{cohens_d, EffectSize}
+use stats::levene::{levene, LeveneResult}
+use stats::normality::{normality, NormalityResult}
+use stats::qq_normal::{qq_normal, QQResult}
+use stats::bootstrap::{bootstrap_mean, BootResult}
+use stats::validation::{
+    mean,
+    variance,
+    linear_regression,
+    r_squared,
+    LinearFit
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn near_f64(a: f64, b: f64, tol: f64) -> bool {
+    return abs_f64(a - b) < tol
+}
+
+fn fail_msg(code: i32, label: i32) -> i32 with IO {
+    print("FAIL case ")
+    print(label)
+    print(" code ")
+    print(code)
+    print("\n")
+    return code
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // -------------------------------------------------------------------------
+    // Dataset 1: drug vs placebo (n=8 each) — Welch + Cohen + Levene + GUM
+    // -------------------------------------------------------------------------
+    var drug: [f64; 256] = [0.0; 256]
+    var placebo: [f64; 256] = [0.0; 256]
+    drug[0] = 15.2; drug[1] = 18.1; drug[2] = 12.5; drug[3] = 20.3
+    drug[4] = 16.8; drug[5] = 14.7; drug[6] = 19.2; drug[7] = 13.9
+    placebo[0] = 8.3; placebo[1] = 10.1; placebo[2] = 7.5; placebo[3] = 11.2
+    placebo[4] = 9.4; placebo[5] = 8.9; placebo[6] = 10.5; placebo[7] = 7.8
+    let n8: i32 = 8
+
+    let welch: TestResult = t_test_two_sample(&drug, n8, &placebo, n8)
+
+    // Derived oracles (Phase 1): closed-form Welch + ibeta two-tail p
+    let exp_t = 6.657160298051489
+    let exp_df = 10.141137519725348
+    let exp_se = 1.070276165963052
+    let exp_p = 0.00005292274974446240
+    let exp_d = 3.328580149025744
+
+    if !near_f64(welch.statistic, exp_t, 1.0e-9) { return fail_msg(1, 1) }
+    if !near_f64(welch.df, exp_df, 1.0e-9) { return fail_msg(2, 1) }
+    if !near_f64(welch.p_value, exp_p, 5.0e-7) { return fail_msg(3, 1) }
+    if !near_f64(welch.effect_size, exp_d, 1.0e-9) { return fail_msg(4, 1) }
+    if welch.reject != 1 { return fail_msg(5, 1) }
+
+    // GUM bridge: value == statistic, u_c == SE of the mean-difference
+    if !near_f64(welch.as_gum.value, welch.statistic, 1.0e-12) { return fail_msg(6, 1) }
+    if !near_f64(welch.as_gum.std_u, exp_se, 1.0e-9) { return fail_msg(7, 1) }
+    if welch.as_gum.std_u <= 0.0 { return fail_msg(8, 1) }
+
+    let es: EffectSize = cohens_d(&drug, n8, &placebo, n8, 0.95)
+    // effect_size.cohens_d uses classical pooled SD; equal-n → same d as Welch path
+    if !near_f64(es.d, exp_d, 1.0e-9) { return fail_msg(9, 1) }
+    if es.magnitude != 3 { return fail_msg(10, 1) }
+
+    // Levene: concatenate groups into values[], sizes[]
+    var lev_vals: [f64; 256] = [0.0; 256]
+    var lev_sizes: [i32; 16] = [0; 16]
+    var i: i32 = 0
+    while i < n8 {
+        lev_vals[i as usize] = drug[i as usize]
+        lev_vals[(i + n8) as usize] = placebo[i as usize]
+        i = i + 1
+    }
+    lev_sizes[0] = n8
+    lev_sizes[1] = n8
+    let lev: LeveneResult = levene(&lev_vals, &lev_sizes, 2, 0)
+    let exp_w = 5.629049872588284
+    if !near_f64(lev.w, exp_w, 1.0e-9) { return fail_msg(11, 1) }
+    if lev.df1 != 1 { return fail_msg(12, 1) }
+    if lev.df2 != 14 { return fail_msg(13, 1) }
+
+    print("SCIPY_E2E t=")
+    print(welch.statistic)
+    print(" df=")
+    print(welch.df)
+    print(" p=")
+    print(welch.p_value)
+    print(" d=")
+    print(welch.effect_size)
+    print(" gum_u=")
+    print(welch.as_gum.std_u)
+    print(" levene_w=")
+    print(lev.w)
+    print("\n")
+
+    // -------------------------------------------------------------------------
+    // Dataset 2: textbook OLS + descriptives (validation module)
+    // -------------------------------------------------------------------------
+    var d5: [f64; 256] = [0.0; 256]
+    d5[0] = 2.0; d5[1] = 4.0; d5[2] = 6.0; d5[3] = 8.0; d5[4] = 10.0
+    let mn = mean(&d5, 5)
+    if !near_f64(mn, 6.0, 1.0e-12) { return fail_msg(20, 2) }
+    let vr = variance(&d5, 5)
+    if !near_f64(vr, 10.0, 1.0e-12) { return fail_msg(21, 2) }
+
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0] = 1.0; x[1] = 2.0; x[2] = 3.0; x[3] = 4.0; x[4] = 5.0
+    y[0] = 2.0; y[1] = 4.0; y[2] = 5.0; y[3] = 4.0; y[4] = 5.0
+    let fit: LinearFit = linear_regression(&x, &y, 5)
+    let r2 = r_squared(&x, &y, 5)
+    if !near_f64(fit.slope, 0.6, 1.0e-12) { return fail_msg(22, 2) }
+    if !near_f64(fit.intercept, 2.2, 1.0e-12) { return fail_msg(23, 2) }
+    if !near_f64(r2, 0.6, 1.0e-12) { return fail_msg(24, 2) }
+
+    print("SCIPY_E2E ols_slope=")
+    print(fit.slope)
+    print(" ols_intercept=")
+    print(fit.intercept)
+    print(" ols_r2=")
+    print(r2)
+    print("\n")
+
+    // -------------------------------------------------------------------------
+    // Dataset 3: seed-locked bootstrap mean
+    // -------------------------------------------------------------------------
+    var boot_x: [f64; 256] = [0.0; 256]
+    boot_x[0] = 1.0; boot_x[1] = 2.0; boot_x[2] = 3.0; boot_x[3] = 4.0; boot_x[4] = 5.0
+    let boot: BootResult = bootstrap_mean(&boot_x, 5, 1000, 0.95, 20260715)
+    if !near_f64(boot.mean, 3.0, 1.0e-12) { return fail_msg(30, 3) }
+    if !near_f64(boot.se, 0.632456, 0.08) { return fail_msg(31, 3) }
+    if !(boot.lo < 3.0 && boot.hi > 3.0) { return fail_msg(32, 3) }
+    if boot.b != 1000 { return fail_msg(33, 3) }
+
+    print("SCIPY_E2E boot_mean=")
+    print(boot.mean)
+    print(" boot_lo=")
+    print(boot.lo)
+    print(" boot_hi=")
+    print(boot.hi)
+    print(" boot_se=")
+    print(boot.se)
+    print("\n")
+
+    // -------------------------------------------------------------------------
+    // Dataset 4: normality (JB) + Q-Q PPCC on trough-like batch (not Shapiro)
+    // -------------------------------------------------------------------------
+    var trough: [f64; 256] = [0.0; 256]
+    trough[0] = 8.1; trough[1] = 9.4; trough[2] = 7.6; trough[3] = 10.2; trough[4] = 8.8
+    trough[5] = 9.9; trough[6] = 7.1; trough[7] = 11.3; trough[8] = 8.5; trough[9] = 9.0
+    let n_t: i32 = 10
+    let jb: NormalityResult = normality(&trough, n_t)
+    if jb.p <= 0.0 || jb.p > 1.0 { return fail_msg(40, 4) }
+
+    var theo: [f64; 256] = [0.0; 256]
+    var samp: [f64; 256] = [0.0; 256]
+    let qq: QQResult = qq_normal(&trough, n_t, &!theo, &!samp)
+    // near-normal sample → PPCC close to 1 (soft floor; demo reported ~0.995)
+    if qq.ppcc < 0.90 { return fail_msg(41, 4) }
+
+    print("SCIPY_E2E jb_p=")
+    print(jb.p)
+    print(" jb=")
+    print(jb.jb)
+    print(" qq_ppcc=")
+    print(qq.ppcc)
+    print("\n")
+
+    // -------------------------------------------------------------------------
+    // Dataset 5: paired t on before/after trough (reject shift)
+    // -------------------------------------------------------------------------
+    var before: [f64; 256] = [0.0; 256]
+    var after: [f64; 256] = [0.0; 256]
+    before[0] = 8.1; before[1] = 9.4; before[2] = 7.6; before[3] = 10.2; before[4] = 8.8
+    before[5] = 9.9; before[6] = 7.1; before[7] = 11.3; before[8] = 8.5; before[9] = 9.0
+    after[0] = 6.4; after[1] = 7.8; after[2] = 6.1; after[3] = 8.9; after[4] = 7.2
+    after[5] = 8.1; after[6] = 5.9; after[7] = 9.6; after[8] = 6.8; after[9] = 7.5
+    let paired: TestResult = t_test_paired(&before, &after, 10)
+    if paired.reject != 1 { return fail_msg(50, 5) }
+    if !near_f64(paired.as_gum.value, paired.statistic, 1.0e-12) { return fail_msg(51, 5) }
+    if paired.as_gum.std_u <= 0.0 { return fail_msg(52, 5) }
+
+    print("SCIPY_E2E paired_t=")
+    print(paired.statistic)
+    print(" paired_p=")
+    print(paired.p_value)
+    print(" paired_gum_u=")
+    print(paired.as_gum.std_u)
+    print("\n")
+
+    print("STATS_SCIPY_E2E_OK\n")
+    return 0
+}

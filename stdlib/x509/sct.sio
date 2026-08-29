@@ -1,0 +1,131 @@
+// stdlib/x509/sct.sio
+//
+// RFC 6962 SS3.2-3.3 SignedCertificateTimestampList decoder. This wire
+// format is length-prefixed binary, NOT ASN.1/DER -- independent of
+// stdlib/asn1/der.sio, which only ever sees this structure as an opaque
+// OCTET STRING (the SCT extension's extnValue, itself wrapping another
+// OCTET STRING containing the bytes this file actually parses).
+
+use x509::cert::*
+use net::socket::*
+
+fn read_u8(buf: &RawBuf, pos: i64) -> i64 with IO {
+    rawbuf_get(buf, pos) & 255
+}
+
+fn read_u16(buf: &RawBuf, pos: i64) -> i64 with IO {
+    let hi = read_u8(buf, pos)
+    let lo = read_u8(buf, pos + 1)
+    (hi << 8) | lo
+}
+
+fn read_u64(buf: &RawBuf, pos: i64) -> i64 with IO {
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < 8 {
+        v = (v << 8) | read_u8(buf, pos + i)
+        i = i + 1
+    }
+    v
+}
+
+pub fn sct_list_decode(buf: &RawBuf, start: i64, len: i64) -> ([SctEntry; 8], i32, i64) with IO {
+    var out: [SctEntry; 8] = [
+        sct_entry_zero(), sct_entry_zero(), sct_entry_zero(), sct_entry_zero(),
+        sct_entry_zero(), sct_entry_zero(), sct_entry_zero(), sct_entry_zero(),
+    ]
+    var count: i32 = 0
+
+    if len < 2 {
+        return (out, 0, X509_ERR_MALFORMED)
+    }
+    let total_len = read_u16(buf, start)
+    if total_len != len - 2 {
+        return (out, 0, X509_ERR_MALFORMED)
+    }
+
+    var pos: i64 = start + 2
+    let end: i64 = start + len
+    while pos < end {
+        if count >= X509_MAX_SCT_ENTRIES {
+            return (out, count, X509_ERR_TOO_MANY_ENTRIES)
+        }
+        if pos + 2 > end {
+            return (out, count, X509_ERR_MALFORMED)
+        }
+        let sct_len = read_u16(buf, pos)
+        pos = pos + 2
+        if pos + sct_len > end {
+            return (out, count, X509_ERR_MALFORMED)
+        }
+        let sct_start = pos
+
+        if sct_len < 47 {
+            // 1 (version) + 32 (log_id) + 8 (timestamp) + 2 (ext_len) + 1
+            // (hash alg) + 1 (sig alg) + 2 (sig_len) = 47 bytes minimum
+            // structure BEFORE any extension/signature bytes.
+            return (out, count, X509_ERR_MALFORMED)
+        }
+
+        let version = read_u8(buf, sct_start)
+        var log_id: [u8; 32] = [0; 32]
+        var li: i64 = 0
+        while li < 32 {
+            log_id[li as usize] = (read_u8(buf, sct_start + 1 + li) as u8)
+            li = li + 1
+        }
+        let timestamp_ms = read_u64(buf, sct_start + 33)
+        let ext_len = read_u16(buf, sct_start + 41)
+        // BUG FOUND during the final whole-plan review (2026-08-24), of
+        // exactly Finding 27's class: ext_len is a 16-bit, fully
+        // attacker-controlled field (up to 65535), and nothing previously
+        // checked it against this entry's own declared sct_len before
+        // using it to compute after_ext and read hash_alg/sig_alg/sig_len
+        // there -- reachable well past this entry's own bytes, and past
+        // the whole entry_buf allocation, for a crafted SCT extension.
+        // Empirically confirmed with a probe: a crafted entry with
+        // ext_len=100 in a 63-byte buffer read at absolute offset 147,
+        // ~92 bytes past the allocation, and still returned X509_OK. This
+        // check requires room for the 4 bytes (hash_alg, sig_alg,
+        // sig_len's 2 bytes) that get read immediately after the
+        // extensions, within this entry's own sct_len.
+        if 43 + ext_len + 4 > sct_len {
+            return (out, count, X509_ERR_MALFORMED)
+        }
+        let after_ext = sct_start + 43 + ext_len
+        let hash_alg = read_u8(buf, after_ext)
+        let sig_alg = read_u8(buf, after_ext + 1)
+        let sig_len = read_u16(buf, after_ext + 2)
+        var signature: [u8; 128] = [0; 128]
+        if sig_len > 128 {
+            return (out, count, X509_ERR_VALUE_TOO_LONG)
+        }
+        // Same class of check for the signature bytes themselves -- the
+        // sig_len > 128 check above only bounds the destination array,
+        // not whether this entry's own sct_len actually has sig_len more
+        // bytes available to read from.
+        if 43 + ext_len + 4 + sig_len > sct_len {
+            return (out, count, X509_ERR_MALFORMED)
+        }
+        var si: i64 = 0
+        while si < sig_len {
+            signature[si as usize] = (read_u8(buf, after_ext + 4 + si) as u8)
+            si = si + 1
+        }
+
+        out[count as usize] = SctEntry {
+            version: version as i32,
+            log_id: log_id,
+            timestamp_ms: timestamp_ms,
+            extensions_len: ext_len as i32,
+            sig_algorithm_hash: hash_alg as i32,
+            sig_algorithm_sign: sig_alg as i32,
+            signature: signature,
+            signature_len: sig_len as i32,
+        }
+        count = count + 1
+        pos = sct_start + sct_len
+    }
+
+    (out, count, X509_OK)
+}

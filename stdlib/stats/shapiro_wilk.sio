@@ -1,0 +1,303 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/shapiro_wilk.sio — Public Shapiro–Wilk W and p
+//
+// Returns classical W and a two-sided normality p-value for fixed sample sizes
+// n ∈ [5, 10] (bounded API). Half-coefficients a₁..a⌊n/2⌋ are the published
+// Shapiro & Wilk (1965) Table-5 values (4 d.p.). p for n ≥ 7 uses Royston
+// (1992) Biometrika log-transform + normal tail (documented approximation;
+// not the full AS R94 table for 3 ≤ n ≤ 11).
+//
+//   shapiro_wilk(x, n) -> ShapiroResult { w, p, n }
+//
+// W = b² / Σ(xᵢ − x̄)²,  b = Σ_{i=1}^{k} aᵢ (x_{(n−i+1)} − x_{(i)})
+// with x_{(·)} the order statistics.
+//
+// Claims NOT made: full scipy.stats.shapiro n-range; AS R94 poly for all n.
+//
+// References:
+//   Shapiro & Wilk (1965) Biometrika 52:591–611.
+//   Royston (1992) "Approximating the Shapiro–Wilk W-test" Stat. Comput. 2:117–119.
+
+module stats::shapiro_wilk
+
+pub struct ShapiroResult {
+    pub w: f64,   // Shapiro–Wilk statistic in (0, 1]
+    pub p: f64,   // normality p-value; -1.0 if n < 7 (p not claimed)
+    pub n: i64,   // sample size used
+}
+
+fn sw_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sw_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    return y
+}
+
+fn sw_exp(x: f64) -> f64 with Mut, Div, Panic {
+    // series e^x for moderate x; clamp extremes
+    if x > 80.0 { return 1.0e30 }
+    if x < 0.0 - 80.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 40 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn sw_ln(x: f64) -> f64 with Mut, Div, Panic {
+    // ln via atanh series on (x-1)/(x+1) for x > 0
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    // range reduce: x = m * 2^e, m in [1,2)
+    var v = x
+    var e = 0.0
+    while v >= 2.0 { v = v * 0.5; e = e + 1.0 }
+    while v < 1.0 { v = v * 2.0; e = e - 1.0 }
+    let y = (v - 1.0) / (v + 1.0)
+    var y2 = y * y
+    var sum = 0.0
+    var term = y
+    var k = 0
+    while k < 40 {
+        sum = sum + term / (2.0 * (k as f64) + 1.0)
+        term = term * y2
+        k = k + 1
+    }
+    // ln(v) = 2*sum; ln(x) = ln(v) + e*ln2
+    return 2.0 * sum + e * 0.6931471805599453
+}
+
+// Φ(z) ≈ 0.5 + 0.5·erf(z/√2); erf via series / Abramowitz 7.1.26 rational
+fn sw_normal_cdf(z: f64) -> f64 with Mut, Div, Panic {
+    // Abramowitz & Stegun 7.1.26
+    let ax = sw_abs(z) / 1.4142135623730951  // |z|/√2
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let a1 = 0.254829592
+    let a2 = 0.0 - 0.284496736
+    let a3 = 1.421413741
+    let a4 = 0.0 - 1.453152027
+    let a5 = 1.061405429
+    let poly = ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t
+    let erf = 1.0 - poly * sw_exp(0.0 - ax * ax)
+    let cdf_pos = 0.5 * (1.0 + erf)
+    if z >= 0.0 { return cdf_pos }
+    return 1.0 - cdf_pos
+}
+
+// Load half-coefficients a₁..a_k for n in 5..10 (Shapiro & Wilk 1965).
+// out[0] = a1 (largest order-statistic weight), etc. Returns k = n/2.
+fn sw_load_a(n: i32, out: &![f64; 8]) -> i32 with Mut {
+    var i = 0
+    while i < 8 { out[i as usize] = 0.0; i = i + 1 }
+    if n == 5 {
+        out[0] = 0.6646; out[1] = 0.2413
+        return 2
+    }
+    if n == 6 {
+        out[0] = 0.6431; out[1] = 0.2806; out[2] = 0.0875
+        return 3
+    }
+    if n == 7 {
+        out[0] = 0.6233; out[1] = 0.3031; out[2] = 0.1401
+        return 3
+    }
+    if n == 8 {
+        out[0] = 0.6052; out[1] = 0.3164; out[2] = 0.1743; out[3] = 0.0561
+        return 4
+    }
+    if n == 9 {
+        out[0] = 0.5888; out[1] = 0.3244; out[2] = 0.1976; out[3] = 0.0947
+        return 4
+    }
+    if n == 10 {
+        out[0] = 0.5739; out[1] = 0.3291; out[2] = 0.2141; out[3] = 0.1224; out[4] = 0.0399
+        return 5
+    }
+    return 0
+}
+
+fn sw_sort(data: &![f64; 256], n: i32) with Mut {
+    var i = 0
+    while i < n {
+        var j = i + 1
+        while j < n {
+            if data[j as usize] < data[i as usize] {
+                let t = data[i as usize]
+                data[i as usize] = data[j as usize]
+                data[j as usize] = t
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+/// Shapiro–Wilk W and (when n ≥ 7) Royston-1992 p-value.
+///
+/// Parâmetros: x — sample; n — size in {5..10}.
+/// Retorno: ShapiroResult; w=0,p=-1 on unsupported n.
+pub fn shapiro_wilk(x: &[f64; 256], n: i32) -> ShapiroResult with Mut, Div, Panic {
+    if n < 5 || n > 10 {
+        return ShapiroResult { w: 0.0, p: 0.0 - 1.0, n: n as i64 }
+    }
+    var a: [f64; 8] = [0.0; 8]
+    let k = sw_load_a(n, &!a)
+    if k <= 0 {
+        return ShapiroResult { w: 0.0, p: 0.0 - 1.0, n: n as i64 }
+    }
+
+    // copy + sort order statistics
+    var ord: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        ord[i as usize] = x[i as usize]
+        i = i + 1
+    }
+    sw_sort(&!ord, n)
+
+    // mean and SS from original (order does not change mean/SS)
+    var sum = 0.0
+    i = 0
+    while i < n {
+        sum = sum + ord[i as usize]
+        i = i + 1
+    }
+    let mean = sum / (n as f64)
+    var ss = 0.0
+    i = 0
+    while i < n {
+        let d = ord[i as usize] - mean
+        ss = ss + d * d
+        i = i + 1
+    }
+    if ss <= 1.0e-300 {
+        return ShapiroResult { w: 1.0, p: 1.0, n: n as i64 }
+    }
+
+    // b = Σ aᵢ (x_(n−i+1) − x_(i))
+    var b = 0.0
+    i = 0
+    while i < k {
+        let hi = ord[(n - 1 - i) as usize]
+        let lo = ord[i as usize]
+        b = b + a[i as usize] * (hi - lo)
+        i = i + 1
+    }
+    let w = (b * b) / ss
+
+    // p via Royston (1992) for n ≥ 7; n=5,6 leave p = -1 (not claimed)
+    var p = 0.0 - 1.0
+    if n >= 7 {
+        if w >= 1.0 {
+            p = 1.0
+        } else {
+            if w <= 0.0 {
+                p = 0.0
+            } else {
+                let y = sw_ln(1.0 - w)
+                let ln = sw_ln(n as f64)
+                let mu = 0.0 - 1.5861 - 0.31082 * ln - 0.083751 * ln * ln + 0.0038915 * ln * ln * ln
+                let lns = 0.0 - 0.4803 - 0.082676 * ln + 0.0030302 * ln * ln
+                let sigma = sw_exp(lns)
+                let z = (y - mu) / sigma
+                // large z (small W) ⇒ evidence of non-normality ⇒ small p
+                p = 1.0 - sw_normal_cdf(z)
+            }
+        }
+    }
+
+    return ShapiroResult { w: w, p: p, n: n as i64 }
+}
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    return ad <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL case ")
+    print(name)
+    print("\n")
+    return false
+}
+
+// n=5 arithmetic progression: W from published a₁=0.6646,a₂=0.2413
+// sorted 1..5; mean=3; SS=10; b=0.6646*4+0.2413*2=3.141; W=b²/10=0.9865881
+fn test_w_n5() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0] = 1.0; x[1] = 2.0; x[2] = 3.0; x[3] = 4.0; x[4] = 5.0
+    let r = shapiro_wilk(&x, 5)
+    var ok = true
+    ok = check(1, approx(r.w, 0.9865881, 1.0e-7)) && ok
+    ok = check(2, r.n == 5) && ok
+    ok = check(3, r.p < 0.0) && ok  // p not claimed for n=5
+    return ok
+}
+
+// n=10 near-linear: W ≈ 0.970158460121212 (published aᵢ)
+fn test_w_n10() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 10 {
+        x[i as usize] = 2.0 + (i as f64)
+        i = i + 1
+    }
+    let r = shapiro_wilk(&x, 10)
+    var ok = true
+    ok = check(10, approx(r.w, 0.970158460121212, 1.0e-9)) && ok
+    ok = check(11, r.p > 0.5) && ok  // high W ⇒ do not reject normality
+    return ok
+}
+
+// n=10 strongly skewed: W ≈ 0.738023544970166; p small
+fn test_w_skew() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0] = 1.0; x[1] = 1.1; x[2] = 1.2; x[3] = 1.3; x[4] = 1.5
+    x[5] = 2.0; x[6] = 3.0; x[7] = 5.0; x[8] = 8.0; x[9] = 13.0
+    let r = shapiro_wilk(&x, 10)
+    var ok = true
+    ok = check(20, approx(r.w, 0.738023544970166, 1.0e-9)) && ok
+    ok = check(21, r.p < 0.05) && ok
+    return ok
+}
+
+// unsupported n
+fn test_bounds() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0] = 1.0; x[1] = 2.0; x[2] = 3.0
+    let r = shapiro_wilk(&x, 3)
+    return check(30, r.p < 0.0 && r.w == 0.0)
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_w_n5() && ok
+    ok = test_w_n10() && ok
+    ok = test_w_skew() && ok
+    ok = test_bounds() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

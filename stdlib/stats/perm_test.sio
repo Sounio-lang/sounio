@@ -1,0 +1,160 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/perm_test.sio — two-sample permutation test (mean difference)
+//
+// A Monte-Carlo permutation test of whether two samples share a distribution,
+// using the difference in means as the statistic — exact-in-spirit, assumption-
+// free inference:
+//
+//   perm_test(x, nx, y, ny, b, seed) -> PermResult
+//
+// The observed statistic is x̄ − ȳ. Pooling the N = nx+ny values and randomly
+// reassigning nx of them to group A `b` times gives the permutation null; the
+// two-sided p-value is (#{ |Δ*| ≥ |Δ_obs| } + 1)/(b + 1).
+//
+// The shuffle uses an inline Park-Miller MINSTD (exact f64), so a run is
+// bit-reproducible from the seed. Pure Sounio: Fisher-Yates over a pooled [256]
+// buffer; no external dependency, no nested data-array calls.
+//
+// References:
+//   Fisher (1935); Ernst (2004) Stat. Sci. 19:676.
+
+module stats::perm_test
+
+fn pt_floor(v: f64) -> f64 {
+    return (v as i64) as f64
+}
+
+pub struct PermResult {
+    pub obs_diff: f64,   // x̄ − ȳ
+    pub p: f64,          // two-sided permutation p-value
+    pub b: i64,          // permutations used
+}
+
+/// Monte-Carlo two-sample permutation test on the difference in means.
+///
+/// Parâmetros: x, y — the two samples; nx, ny — sizes (nx+ny <= 256);
+///             b — permutations (>=1); seed — PRNG seed (>0).
+/// Retorno: PermResult (obs_diff, p, b).
+/// Referências: Fisher (1935); Ernst (2004).
+pub fn perm_test(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, b: i32, seed: i64) -> PermResult with Mut, Div, Panic {
+    if nx < 1 || ny < 1 || b < 1 { return PermResult { obs_diff: 0.0, p: 1.0, b: 0 } }
+    let ntot = nx + ny
+    let nxf = nx as f64
+    let nyf = ny as f64
+    // pooled buffer: first nx from x, rest from y
+    var pool: [f64; 256] = [0.0; 256]
+    var sx = 0.0
+    var i = 0
+    while i < nx { pool[i as usize] = x[i as usize]; sx = sx + x[i as usize]; i = i + 1 }
+    var sy = 0.0
+    var j = 0
+    while j < ny { pool[(nx + j) as usize] = y[j as usize]; sy = sy + y[j as usize]; j = j + 1 }
+    let obs = sx / nxf - sy / nyf
+    let abs_obs = if obs < 0.0 { 0.0 - obs } else { obs }
+    let total = sx + sy
+    // MINSTD state
+    let A = 16807.0
+    let M = 2147483647.0
+    var st = seed as f64
+    if st < 1.0 { st = 1.0 }
+    var count = 0
+    var rep = 0
+    while rep < b {
+        // Fisher-Yates shuffle of the first ntot pooled values
+        var k = ntot - 1
+        while k >= 1 {
+            let prod = A * st
+            st = prod - pt_floor(prod / M) * M
+            let u = st / M
+            var idx = pt_floor(u * ((k + 1) as f64)) as i32
+            if idx > k { idx = k }
+            let tmp = pool[k as usize]
+            pool[k as usize] = pool[idx as usize]
+            pool[idx as usize] = tmp
+            k = k - 1
+        }
+        // group A = first nx, group B = rest
+        var sa = 0.0
+        var m = 0
+        while m < nx { sa = sa + pool[m as usize]; m = m + 1 }
+        let diff = sa / nxf - (total - sa) / nyf
+        let ad = if diff < 0.0 { 0.0 - diff } else { diff }
+        if ad >= abs_obs - 1.0e-12 { count = count + 1 }
+        rep = rep + 1
+    }
+    let p = ((count + 1) as f64) / ((b + 1) as f64)
+    return PermResult { obs_diff: obs, p: p, b: b as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// identical group means -> obs_diff 0 -> every permutation |Δ*| >= 0 -> p = 1.
+fn test_identical() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0
+    y[0]=1.0; y[1]=2.0; y[2]=3.0
+    let r = perm_test(&x, 3, &y, 3, 500, 12345)
+    var ok = true
+    ok = check(1, approx(r.obs_diff, 0.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.p, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+// well separated, 5 vs 5 -> the two extreme splits out of C(10,5)=252 give the
+// exact two-sided p ≈ 2/252 = 0.0079; the MC estimate is < 0.05.
+// (With only 3+3 the minimum attainable p is 2/20 = 0.1 — too coarse to reject.)
+// x={10..14}, y={1..5}. obs_diff = 12 - 3 = 9.
+fn test_separated() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=10.0; x[1]=11.0; x[2]=12.0; x[3]=13.0; x[4]=14.0
+    y[0]=1.0; y[1]=2.0; y[2]=3.0; y[3]=4.0; y[4]=5.0
+    let r = perm_test(&x, 5, &y, 5, 1000, 777)
+    var ok = true
+    ok = check(10, approx(r.obs_diff, 9.0, 1.0e-9)) && ok
+    ok = check(11, r.p < 0.05) && ok
+    return ok
+}
+
+// reproducibility: same seed -> identical p.
+fn test_reproducible() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=4.0; x[1]=5.0; x[2]=7.0; x[3]=8.0
+    y[0]=2.0; y[1]=3.0; y[2]=5.0; y[3]=6.0
+    let r1 = perm_test(&x, 4, &y, 4, 400, 55)
+    let r2 = perm_test(&x, 4, &y, 4, 400, 55)
+    return check(20, approx(r1.p, r2.p, 1.0e-12))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_identical() && ok
+    ok = test_separated() && ok
+    ok = test_reproducible() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

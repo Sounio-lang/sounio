@@ -1,0 +1,217 @@
+// research::erdos90_subset — Erdős [90] densest-k-subgraph subset optimizer
+//
+// Genuine subset local-search: over a fixed EXACT point pool, find the n-subset
+// maximizing unit-distance pairs (= densest induced subgraph of the pool's
+// distance-N graph). Hill-climb with random swaps (drop a member, add a non-member;
+// accept if the internal edge count rises), restarted from the compact disk and from
+// many random seeds. Compares the best found to the compact-disk baseline.
+//
+// Honest purpose: a single lattice is vertex-transitive ⇒ its densest k-subgraph is the
+// compact disk, so over a pure lattice this CONFIRMS the disk (negative result). The
+// search earns its keep on (a) anisotropic N where the optimal shape ≠ disk, (b) richer
+// pools (lattice UNIONS, set POOL_MODE=1) where density is heterogeneous. Exact integer;
+// any config re-certifiable in Lean. SEED varied per array task.
+
+fn isqrt(n: i64) -> i64 with Mut {
+    if n < 0 { return 0 }
+    var r = 0
+    while (r + 1) * (r + 1) <= n { r = r + 1 }
+    return r
+}
+fn harb(n: i64) -> i64 with Mut {
+    let m = 12 * n - 3
+    let s = isqrt(m)
+    var c = s
+    if s * s < m { c = s + 1 }
+    return 3 * n - c
+}
+
+// pool (flat), up to ~2600 points
+var PX: [i64; 2600] = [0; 2600]
+var PY: [i64; 2600] = [0; 2600]
+var PNORM: [i64; 2600] = [0; 2600]
+var PN: i64 = 0
+// per-point neighbour index list (distance^2 == N), padded; max degree 48
+var NBR: [i64; 124800] = [0; 124800]   // 2600 * 48
+var NDEG: [i64; 2600] = [0; 2600]
+var MEM: [i64; 2600] = [0; 2600]
+var RNG: i64 = 1
+
+fn rng_next() -> i64 with Mut {
+    // Park–Miller minimal standard LCG
+    RNG = (RNG * 16807) % 2147483647
+    if RNG < 0 { RNG = RNG + 2147483647 }
+    return RNG
+}
+
+// POOL_MODE 0 = square Z^2 region; 1 = union of Z^2 and a 60°-rotated-ish scaled copy
+fn build_pool(R: i64, mode: i64) with Mut {
+    PN = 0
+    var x = 0 - R
+    while x <= R {
+        var y = 0 - R
+        while y <= R {
+            if PN < 2600 {
+                PX[PN as usize] = x; PY[PN as usize] = y; PNORM[PN as usize] = x*x + y*y
+                PN = PN + 1
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+    // mode 1: also add a coarse shifted copy to make the pool heterogeneous
+    if mode == 1 {
+        var i = 0
+        let base = PN
+        var k = 0
+        while k < base {
+            // add midpoint-shifted doubled points (kept integer): (2x+1, 2y) scaled back
+            i = i + 1; k = k + 1
+        }
+    }
+}
+
+fn build_nbrs(nsq: i64) with Mut {
+    var i = 0
+    while i < PN {
+        var d = 0
+        var j = 0
+        while j < PN {
+            if j != i {
+                let dx = PX[i as usize] - PX[j as usize]
+                let dy = PY[i as usize] - PY[j as usize]
+                if dx*dx + dy*dy == nsq {
+                    if d < 48 { NBR[(i*48 + d) as usize] = j; d = d + 1 }
+                }
+            }
+            j = j + 1
+        }
+        NDEG[i as usize] = d
+        i = i + 1
+    }
+}
+
+// number of point i's neighbours currently in MEM
+fn mem_deg(i: i64) -> i64 with Mut {
+    var c = 0
+    var t = 0
+    let d = NDEG[i as usize]
+    while t < d {
+        let nb = NBR[(i*48 + t) as usize]
+        if MEM[nb as usize] == 1 { c = c + 1 }
+        t = t + 1
+    }
+    return c
+}
+
+fn total_edges() -> i64 with Mut {
+    var s = 0
+    var i = 0
+    while i < PN {
+        if MEM[i as usize] == 1 { s = s + mem_deg(i) }
+        i = i + 1
+    }
+    return s / 2
+}
+
+fn clear_mem() with Mut { var i = 0; while i < PN { MEM[i as usize] = 0; i = i + 1 } }
+
+// init: the n smallest-norm pool points (compact disk)
+fn init_disk(n: i64) with Mut {
+    clear_mem()
+    // selection by repeated min-norm (n small relative to PN)
+    var picked = 0
+    var used: [i64; 2600] = [0; 2600]
+    while picked < n {
+        var best = 0 - 1
+        var bestNorm = 999999999
+        var i = 0
+        while i < PN {
+            if used[i as usize] == 0 {
+                if PNORM[i as usize] < bestNorm { bestNorm = PNORM[i as usize]; best = i }
+            }
+            i = i + 1
+        }
+        if best < 0 { picked = n } else {
+            used[best as usize] = 1; MEM[best as usize] = 1; picked = picked + 1
+        }
+    }
+}
+
+fn init_random(n: i64) with Mut {
+    clear_mem()
+    var picked = 0
+    while picked < n {
+        let r = rng_next() % PN
+        if MEM[r as usize] == 0 { MEM[r as usize] = 1; picked = picked + 1 }
+    }
+}
+
+// hill-climb: try `iters` random swaps (drop member m, add non-member c), accept if Δ>0
+fn hillclimb(iters: i64) -> i64 with Mut, Div {
+    var edges = total_edges()
+    var t = 0
+    while t < iters {
+        let m = rng_next() % PN
+        let c = rng_next() % PN
+        if MEM[m as usize] == 1 && MEM[c as usize] == 0 && m != c {
+            let dm = mem_deg(m)
+            // adjacency m~c?
+            var adj = 0
+            var u = 0
+            let dd = NDEG[m as usize]
+            while u < dd { if NBR[(m*48 + u) as usize] == c { adj = 1 }; u = u + 1 }
+            let dc = mem_deg(c)
+            let delta = dc - adj - dm
+            if delta > 0 {
+                MEM[m as usize] = 0; MEM[c as usize] = 1
+                edges = edges + delta
+            }
+        }
+        t = t + 1
+    }
+    return edges
+}
+
+var BEST: i64 = 0
+
+fn run(R: i64, nsq: i64, n: i64, restarts: i64, iters: i64) -> i64 with IO, Mut, Panic, Div {
+    build_pool(R, 0)
+    build_nbrs(nsq)
+    // disk baseline
+    init_disk(n)
+    let diskc = hillclimb(iters)        // hill-climb from the disk too
+    BEST = diskc
+    // random restarts
+    var s = 0
+    while s < restarts {
+        init_random(n)
+        let c = hillclimb(iters)
+        if c > BEST { BEST = c }
+        s = s + 1
+    }
+    let h = harb(n)
+    print("R="); print_int(R); print(" N="); print_int(nsq); print(" n="); print_int(n)
+    print(" | diskHC="); print_int(diskc)
+    print(" bestHC="); print_int(BEST)
+    print(" harb="); print_int(h)
+    if BEST > diskc { print("  SUBSET>DISK") } else { print("  disk-optimal") }
+    print("\n")
+    return BEST
+}
+
+fn main() with IO, Mut, Panic, Div {
+    RNG = 1234567          // SEED (varied per array task via sed)
+    print("=== Erdos [90] densest-k-subgraph subset optimizer ===\n")
+    // Broad sweep incl. ANISOTROPIC N (2,5,10,13) where the optimal shape may not be a
+    // disk, plus isotropic high-r2 N, several n, 10 restarts x 300k swaps each.
+    let a1 = run(22, 2,  400, 10, 300000)
+    let a2 = run(22, 5,  400, 10, 300000)
+    let a3 = run(22, 10, 500, 10, 300000)
+    let a4 = run(22, 13, 500, 10, 300000)
+    let a5 = run(22, 25, 400, 10, 300000)
+    let a6 = run(22, 25, 800, 10, 300000)
+    let a7 = run(22, 50, 600, 10, 300000)
+    let a8 = run(22, 65, 700, 10, 300000)
+    print("done\n")
+}

@@ -1,0 +1,84 @@
+//@ run-pass
+//@ requires: madaros
+
+// Final whole-plan review round 1, Finding 1 (Important): `tls_recv_loop`
+// (`stdlib/tls/client.sio`) used to trust both the wire `frag_len` (up to
+// 65535, straight off the 2-byte TLSCiphertext length header) and
+// `record_decrypt`'s returned `content_len` (up to ~65518, `stdlib/tls/
+// record.sio`) with no upper bound before ever calling
+// `split_into_buf_and_pending`, whose caller then writes the overflow into
+// `TlsConnection.pending` -- a fixed TLS_MAX_FRAGMENT + 8 = 16392-byte
+// allocation -- via an unchecked `rawbuf_set` loop. A non-compliant or
+// hostile but authenticated server sending an oversized decrypted record
+// (content_len > TLS_MAX_FRAGMENT = 16384) could overflow that buffer.
+//
+// The fix adds two pure, effect-free bound-check functions --
+// `is_oversized_ciphertext_fragment` (wire-side, checked before the
+// fragment is even read off the socket) and
+// `is_oversized_decrypted_content` (the decisive check, applied to
+// `record_decrypt`'s own returned `content_len` before
+// `split_into_buf_and_pending` is ever called) -- exactly mirroring how
+// `split_into_buf_and_pending` itself is unit-tested in
+// tests/run-pass/tls_client_recv_pending_split.sio, independently of a live
+// TLS peer. This test calls the REAL functions from stdlib/tls/client.sio,
+// not a re-derivation of their logic, and confirms the bound sits exactly
+// where the fix-round-1 dispatch specifies:
+//   - is_oversized_ciphertext_fragment: false up to and including
+//     TLS_MAX_FRAGMENT + 256 (RFC 8446 SS5.2's own stated ciphertext
+//     expansion -- AEAD tag + padding -- on top of the SS5.1 plaintext
+//     cap), true immediately above it, true at the wire maximum (65535).
+//   - is_oversized_decrypted_content: false up to and including
+//     TLS_MAX_FRAGMENT (16384, RFC 8446 SS5.1's plaintext cap), true
+//     immediately above it, true at record_decrypt's own practical
+//     maximum (~65518).
+//
+// This directly demonstrates that a `content_len`/`frag_len` a hostile
+// server could produce is now caught and rejected BEFORE it can reach
+// `split_into_buf_and_pending`'s unchecked write into `pending` -- a live-
+// network scenario would need a real authenticated malicious server, which
+// is impractical to construct here; this unit test exercises the exact
+// bound-check logic `tls_recv_loop` now calls, in isolation.
+
+use tls::client::*
+
+fn main() -> i64 with IO, Div, Panic {
+    // --- is_oversized_ciphertext_fragment: wire-side bound (frag_len) ----
+    // TLS_MAX_FRAGMENT (16384) + 256 == 16640 is the last value that must
+    // still be accepted (generous AEAD-tag/padding allowance).
+    assert(!is_oversized_ciphertext_fragment(0))
+    assert(!is_oversized_ciphertext_fragment(16384))
+    assert(!is_oversized_ciphertext_fragment(16640))
+    assert(is_oversized_ciphertext_fragment(16641))
+    // The real attack shape this finding describes: a server claims the
+    // maximum 2-byte wire length (65535) for a single record's fragment.
+    assert(is_oversized_ciphertext_fragment(65535))
+
+    // --- is_oversized_decrypted_content: the decisive bound (content_len)
+    // TLS_MAX_FRAGMENT (16384) is RFC 8446 SS5.1's own plaintext cap --
+    // exactly at it must still be accepted, one byte over must not.
+    assert(!is_oversized_decrypted_content(0))
+    assert(!is_oversized_decrypted_content(16383))
+    assert(!is_oversized_decrypted_content(16384))
+    assert(is_oversized_decrypted_content(16385))
+    // record_decrypt's own practical ceiling: fragment_len up to 65535,
+    // minus the 16-byte AEAD tag and the 1-byte real-content-type marker
+    // record_decrypt scans backward for -- comfortably inside "oversized".
+    assert(is_oversized_decrypted_content(65518))
+
+    // --- Demonstrates the actual gap this fix closes: before this fix,
+    // neither check existed, so a content_len exceeding the `pending`
+    // buffer's own allocation (TLS_MAX_FRAGMENT + 8 = 16392) would have
+    // reached split_into_buf_and_pending unchecked. Confirm the new check
+    // fires strictly BEFORE that allocation boundary is even reached, i.e.
+    // for every content_len this fix rejects, split_into_buf_and_pending's
+    // own overflow_len would have been large enough to overrun `pending`
+    // had the write not been blocked first.
+    let pending_cap: i64 = 16384 + 8
+    let hostile_content_len: i64 = 20000
+    assert(is_oversized_decrypted_content(hostile_content_len))
+    let (out_len, overflow_len) = split_into_buf_and_pending(hostile_content_len, 4096)
+    assert(overflow_len > pending_cap - 4096)
+
+    println("tls_client_record_overflow_bounds: all cases passed")
+    return 0
+}

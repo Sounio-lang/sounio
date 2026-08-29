@@ -4,7 +4,7 @@ import path from 'node:path';
 const root = path.resolve(process.cwd());
 const distDir = path.join(root, 'dist');
 
-const localeSet = new Set(['pt', 'el', 'zh', 'ja', 'es']);
+const localeSet = new Set(['pt', 'el', 'zh', 'ja', 'es', 'zh-hk']);
 
 function normalizeWebPathFromFile(relFile) {
   const clean = relFile.split(path.sep).join('/');

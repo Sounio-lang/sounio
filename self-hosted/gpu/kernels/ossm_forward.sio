@@ -327,81 +327,46 @@ fn ossm_emit_sigmoid_f32(s: OssmPtxState, dst_reg: i64, src_reg: i64, sx2_reg: i
 // Octonion multiply via Fano plane — emits 64 PTX instructions
 // ============================================================================
 
+// Recursive Cayley–Dickson twist sign σ(i,j,bits) ∈ {+1,−1} — canonical Convention X
+// (matches stdlib cd_sigma; see stdlib/algebra/README.md). Migrated from the former Fano-triple
+// table (Convention Y, e1·e2=+e4) so GPU octonion multiplication agrees with the CPU (e1·e2=+e3).
+fn ossm_oct_cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return ossm_oct_cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return ossm_oct_cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return ossm_oct_cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - ossm_oct_cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - ossm_oct_cd_sigma(0, a_lo, bits - 1) }
+    ossm_oct_cd_sigma(b_lo, a_lo, bits - 1)
+}
+
 fn ossm_fano_basis(i: i64, j: i64) -> i64 with Panic {
-    if i == 0 { return j }
-    if j == 0 { return i }
-    if i == j { return 0 }
-    if i == 1 && j == 2 { return 4 }
-    if i == 2 && j == 1 { return 4 }
-    if i == 1 && j == 4 { return 2 }
-    if i == 4 && j == 1 { return 2 }
-    if i == 2 && j == 4 { return 1 }
-    if i == 4 && j == 2 { return 1 }
-    if i == 2 && j == 3 { return 5 }
-    if i == 3 && j == 2 { return 5 }
-    if i == 2 && j == 5 { return 3 }
-    if i == 5 && j == 2 { return 3 }
-    if i == 3 && j == 5 { return 2 }
-    if i == 5 && j == 3 { return 2 }
-    if i == 3 && j == 4 { return 6 }
-    if i == 4 && j == 3 { return 6 }
-    if i == 3 && j == 6 { return 4 }
-    if i == 6 && j == 3 { return 4 }
-    if i == 4 && j == 6 { return 3 }
-    if i == 6 && j == 4 { return 3 }
-    if i == 4 && j == 5 { return 7 }
-    if i == 5 && j == 4 { return 7 }
-    if i == 4 && j == 7 { return 5 }
-    if i == 7 && j == 4 { return 5 }
-    if i == 5 && j == 7 { return 4 }
-    if i == 7 && j == 5 { return 4 }
-    if i == 5 && j == 6 { return 1 }
-    if i == 6 && j == 5 { return 1 }
-    if i == 5 && j == 1 { return 6 }
-    if i == 1 && j == 5 { return 6 }
-    if i == 6 && j == 1 { return 5 }
-    if i == 1 && j == 6 { return 5 }
-    if i == 6 && j == 7 { return 2 }
-    if i == 7 && j == 6 { return 2 }
-    if i == 6 && j == 2 { return 7 }
-    if i == 2 && j == 6 { return 7 }
-    if i == 7 && j == 2 { return 6 }
-    if i == 2 && j == 7 { return 6 }
-    if i == 7 && j == 1 { return 3 }
-    if i == 1 && j == 7 { return 3 }
-    if i == 7 && j == 3 { return 1 }
-    if i == 3 && j == 7 { return 1 }
-    0
+    i ^ j
 }
 
 fn ossm_fano_sign(i: i64, j: i64) -> i64 with Panic {
-    if i == 0 { return 1 }
-    if j == 0 { return 1 }
-    if i == j { return 0 - 1 }
-    if i == 1 && j == 2 { return 1 }
-    if i == 2 && j == 4 { return 1 }
-    if i == 4 && j == 1 { return 1 }
-    if i == 2 && j == 3 { return 1 }
-    if i == 3 && j == 5 { return 1 }
-    if i == 5 && j == 2 { return 1 }
-    if i == 3 && j == 4 { return 1 }
-    if i == 4 && j == 6 { return 1 }
-    if i == 6 && j == 3 { return 1 }
-    if i == 4 && j == 5 { return 1 }
-    if i == 5 && j == 7 { return 1 }
-    if i == 7 && j == 4 { return 1 }
-    if i == 5 && j == 6 { return 1 }
-    if i == 6 && j == 1 { return 1 }
-    if i == 1 && j == 5 { return 1 }
-    if i == 6 && j == 7 { return 1 }
-    if i == 7 && j == 2 { return 1 }
-    if i == 2 && j == 6 { return 1 }
-    if i == 7 && j == 1 { return 1 }
-    if i == 1 && j == 3 { return 1 }
-    if i == 3 && j == 7 { return 1 }
-    0 - 1
+    ossm_oct_cd_sigma(i, j, 3)
 }
 
+// TENSOR-CORE PATH: the per-thread scalar octonion multiply below (ossm_emit_oct_mul_f64) has a
+// batched tensor-core counterpart — hmma_emit_ossm_oct_step_kernel in hmma_signs.sio emits
+// sounio_ossm_oct_step, computing the O-SSM linear step ah=A⊗h_prev; sum=ah+B·x for a 16-wide batch
+// as L(A)·H via one wmma m16n16k16 tile (HW-validated on the DGX Spark GB10). See docs/gpu/ossm_step_tc.cu.
+// COMPILER-LOWERED: the same step now lowers FROM SOURCE — an `ossm_oct_step(pA,pB,px,pH,pout)`
+// intrinsic in a `kernel fn ... with GPU` is recognized by souc (self-hosted/gpu/hlir_to_gpu.sio) and
+// emitted as a GpuOctBatchStage (build L(A)+stage H) + GpuWmmaTile + GpuOctPostAddBx (B·x). GB10:
+// S=A⊗H+B·x, 0/128 mismatch. See tests/gpu/ossm_oct_step_tile.sio.
+// The WHOLE forward cell (this loop: h_t=sigmoid(A⊗h_{t-1}+B·x); y_t=Re(C⊗h_t)) also has a batched
+// tensor-core form — hmma_emit_ossm_oct_cell_kernel emits sounio_ossm_oct_cell with an in-kernel T-step
+// recurrence (two wmma tiles/step + cubic sigmoid, HW-validated GB10). See docs/gpu/ossm_cell_tc.cu.
 fn ossm_emit_oct_mul_f64(s: OssmPtxState, dst: [i64; 8], a: [i64; 8], b: [i64; 8], neg_scratch: i64) -> OssmPtxState with Mut, Panic, Div {
     var out = s
     out = ossm_push_str(out, "    // oct_mul (f64 Fano)\n")

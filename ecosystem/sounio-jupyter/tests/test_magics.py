@@ -125,13 +125,14 @@ def test_sounio_info_magic():
     mock_executor = Mock()
     mock_executor.stdlib_path = "/test/stdlib"
     mock_executor.souc_binary = "/test/souc"
+    mock_executor._declarations = []
     mock_kernel.executor = mock_executor
 
     magics = SounioMagics(mock_kernel)
     result = magics.magic_sounio("info")
 
     assert "Sounio Kernel" in result
-    assert "v0.1.0" in result
+    assert "v0.2.0" in result
     assert "epistemic" in result.lower()
 
 
@@ -191,6 +192,7 @@ def test_sounio_help_magic():
     """Test %sounio with no arguments defaults to info."""
     mock_kernel = Mock()
     mock_executor = Mock()
+    mock_executor._declarations = []
     mock_kernel.executor = mock_executor
 
     magics = SounioMagics(mock_kernel)
@@ -206,6 +208,7 @@ def test_handle_magic_dispatch_valid():
     mock_executor = Mock()
     mock_executor.stdlib_path = "/stdlib"
     mock_executor.souc_binary = "/souc"
+    mock_executor._declarations = []
     mock_kernel.executor = mock_executor
 
     magics = SounioMagics(mock_kernel)
@@ -239,6 +242,21 @@ def test_handle_magic_time():
 
     assert handled is True
     assert "CPU time:" in result
+
+
+def test_reset_magic():
+    """Test %reset magic clears the session."""
+    mock_kernel = Mock()
+    mock_executor = Mock()
+    mock_executor.reset_session = Mock()
+    mock_kernel.executor = mock_executor
+
+    magics = SounioMagics(mock_kernel)
+    handled, result = magics.handle_magic("%reset")
+
+    assert handled is True
+    assert "reset" in result.lower()
+    mock_executor.reset_session.assert_called_once()
 
 
 def test_ontology_search_magic():

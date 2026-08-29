@@ -1,0 +1,62 @@
+// examples/pbpk_viz/rapamycin_therapeutic_window.sio
+// Dose-certification figure: steady-state rapamycin trough vs dose, therapeutic
+// window shaded, 95% expanded-uncertainty per dose, D_min/D_max certified bounds.
+//   souc run examples/pbpk_viz/rapamycin_therapeutic_window.sio -> rapamycin_window.png
+use image::pure::types::{Image, image_new}
+use image::plot::{Area, area_new, plot_background, plot_grid, plot_hband, plot_hline, plot_vline, plot_point, plot_errbar, plot_axes, plot_text_sc}
+use image::pure::png::{png_write}
+use pbpk::rapamycin_params::{rap_ke, rap_bioavailability}
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_dose_cert::{dc_d_min, dc_d_max}
+use stats::student_t::{t_ci_multiplier}
+use pbpk::rapamycin_oral_budget::{ob_ka_var_std, ob_f_var_std, ob_ke_var_std, ob_k12_var_std, ob_k21_var_std}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+fn main() with IO, Mut, Div, Panic {
+    let ke_e = rap_ke(); let ke = ke_e.val()
+    let f_e = rap_bioavailability(); let f = f_e.val()
+    let ka_v = ob_ka_var_std(); let f_v = ob_f_var_std()
+    let ke_v = ob_ke_var_std(); let k12_v = ob_k12_var_std(); let k21_v = ob_k21_var_std()
+    let n = 14
+    let floor_ng = trough_floor_mg_l() * 1000.0
+    let ceil_ng  = trough_ceil_mg_l() * 1000.0
+    let dmin = dc_d_min(5.0, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
+    let dmax = dc_d_max(5.0, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v)
+    // GUM Annex G coverage factor: for finite effective dof the 95% factor is the
+    // Student-t quantile t_0.975(nu), not a flat k=2. Here nu = N - 1 tracks the
+    // N observations behind each steady-state trough estimate.
+    let nu = (n - 1) as f64
+    let k95 = t_ci_multiplier(0.95, nu)   // t_0.975(13) = 2.160  (vs 2.0)
+    let w = 1200; let h = 760
+    var img = image_new(w as i32, h as i32)
+    plot_background(&!img, w as i64, h as i64, 0xFFFFFF)
+    let a = area_new(150, 110, 1150, 660, 0.0, 11.0, 0.0, 28.0)
+    plot_grid(&!img, &a, 11, 7, 0xEEEEEE)
+    plot_hband(&!img, &a, floor_ng, ceil_ng, 0xDDF0E2)
+    plot_hline(&!img, &a, floor_ng, 0x4AA06A); plot_hline(&!img, &a, ceil_ng, 0x4AA06A)
+    plot_vline(&!img, &a, dmin, 0xB8B8B8); plot_vline(&!img, &a, dmax, 0xB8B8B8)
+    plot_axes(&!img, &a, 11, 7, 0x555555, 3)
+    var d = 1
+    while d <= 10 {
+        let dose = d as f64
+        let tr = as_trough_mg_l(dose, n, ke, f) * 1000.0
+        // Expanded uncertainty with the Student-t coverage factor: U95 = t_0.975(nu) * u_c
+        let u_c = eu_u_c(dose, n, ke, f, ka_v, f_v, ke_v, k12_v, k21_v) * 1000.0
+        let u95 = k95 * u_c
+        var lo = tr - u95; if lo < 0.0 { lo = 0.0 }
+        let cert = lo >= floor_ng && (tr + u95) <= ceil_ng
+        let cbar = if cert { 0x3E9B63 } else { 0xCF8A3A }
+        let cpt  = if cert { 0x2E8B57 } else { 0xE07B39 }
+        plot_errbar(&!img, &a, dose, lo, tr + u95, cbar)
+        plot_point(&!img, &a, dose, tr, cpt, 5)
+        d = d + 1
+    }
+    let _t1 = plot_text_sc(&!img, "Rapamycin dose certification", 150, 40, 0x111111, 4)
+    let _t2 = plot_text_sc(&!img, "dose (mg)", 560, 706, 0x333333, 3)
+    let _t3 = plot_text_sc(&!img, "trough (ng/mL)", 150, 78, 0x333333, 3)
+    let _t4 = plot_text_sc(&!img, "95% CI: Student-t coverage k=2.16 (df 13, GUM Annex G)", 610, 80, 0x777777, 2)
+    let ok = png_write("rapamycin_window.png", &img)
+    print("Dmin="); print(dmin); print(" Dmax="); print(dmax)
+    print(" k95_t="); print(k95); print(" (vs k=2.0)")
+    print(" wrote="); print(ok); print("\n")
+}

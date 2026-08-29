@@ -1,0 +1,690 @@
+// self-hosted::compiler::claim_executor
+//
+// Self-falsifying compiler rung: compile-time execution of scientific claims.
+// Spec: docs/research/self_falsifying_compiler_spec_2026-07-25.md
+//
+// claim_executor_verify(source_path) is called from the compile lanes in
+// main.sio when --verify-claims is passed, after type-check and before
+// codegen. It reads claims from the parser claim registry (parser::ast),
+// recovers each field's value text by slicing the source file at the recorded
+// spans (Names returned by current_name() do not survive the parse path for
+// StringLit tokens), executes each non-archived claim's `gate` script in a
+// forked subprocess with a wall-clock timeout, and reports per-claim
+// pass/fail. A non-zero return aborts the compilation before any code is
+// emitted.
+//
+// Sandbox properties: gates run via raw fork/execve/wait4 (never in-process),
+// argv is fixed (bash <gate-path>, no shell string interpolation), and each
+// gate is bounded by CLAIM_GATE_TIMEOUT_MS with SIGKILL + reap on expiry.
+
+module claim_executor
+
+use parser::ast::*
+use module_parse::{load_module_file, file_exists}
+use module_frontend::{preflight_multimodule_frontend, ModuleClosure, module_frontend_collect_ast_closure_into}
+
+// Per-gate wall-clock timeout in milliseconds.
+pub let CLAIM_GATE_TIMEOUT_MS: i64 = 30000
+
+// Decoded gate outcomes.
+pub let CLAIM_GATE_PASS: i64 = 0
+pub let CLAIM_GATE_FAIL: i64 = 1
+pub let CLAIM_GATE_TIMEOUT: i64 = 2
+pub let CLAIM_GATE_SPAWN_ERR: i64 = 3
+// Verdict-token binding: the gate exited 0, but the token it emitted is not
+// the token the claim declares (MISMATCH = 4), or it emitted none at all
+// (ABSENT = 5). Both are failures: a claim that declares a proposition must be
+// checked against a check that states the same proposition, not merely one
+// that exits 0.
+//
+// Written as literals rather than `pub let` module constants. They were module
+// lets first, and during debugging a build that used them reported the generic
+// CLAIM_FAIL for a drifted token; the values were inlined at the same time as
+// the real fix (see ce_token_outcome). NOT a demonstrated defect in module
+// constants: the decisive change was elsewhere, and no build has isolated
+// these two as a cause. Kept as literals because they are now proven working
+// in that form, not because module lets are known bad.
+
+// Fixed argv/envp for fork+execve (one subprocess at a time). Same
+// static-slot pattern as the native-v2 run bridge in main.sio (NV2_RUN_ARGV)
+// and the LSP server.
+var CE_ARGV: [i64; 4] = [0; 4]
+var CE_ENVP: [i64; 1] = [0; 1]
+
+fn ce_wait_exit_code(status: i64) -> i64 {
+    if (status & 127) == 0 {
+        return (status >> 8) & 255
+    }
+    128 + (status & 127)
+}
+
+// Byte-compare a registry Name against a string literal.
+fn ce_name_eq_str(n: Name, s: string) -> bool with Mut, Panic, Div {
+    if n.len != str_len(s) {
+        return false
+    }
+    var i: i64 = 0
+    while i < n.len {
+        if (n.buf[i as usize] as i64) != str_char_at(s, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// True when the source slice [vs, ve) mentions "archived" in either case form
+// used by claims ("archived" string values, Verdict::Archived path values).
+// Scans for the shared substring "rchived".
+fn ce_slice_is_archived(src: string, vs: i64, ve: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = vs
+    while i + 7 <= ve && i + 7 <= str_len(src) {
+        if str_char_at(src, i) == 114
+            && str_char_at(src, i + 1) == 99
+            && str_char_at(src, i + 2) == 104
+            && str_char_at(src, i + 3) == 105
+            && str_char_at(src, i + 4) == 118
+            && str_char_at(src, i + 5) == 101
+            && str_char_at(src, i + 6) == 100 {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Extract a claim value's text from the source span, stripping one
+// surrounding pair of double quotes for string-literal values.
+fn ce_value_text(src: string, vs: i64, ve: i64, kind: i64) -> string with Mut, Panic, Div {
+    let src_len = str_len(src)
+    var start = vs
+    var stop = ve
+    if start < 0 {
+        start = 0
+    }
+    if stop > src_len {
+        stop = src_len
+    }
+    if kind == CLAIM_VALUE_STRING && stop - start >= 2 {
+        if str_char_at(src, start) == 34 && str_char_at(src, stop - 1) == 34 {
+            start = start + 1
+            stop = stop - 1
+        }
+    }
+    if stop <= start {
+        return ""
+    }
+    str_slice(src, start, stop)
+}
+
+fn ce_print_name(n: Name) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < n.len {
+        print_char(n.buf[i as usize] as i64)
+        i = i + 1
+    }
+}
+
+// Capture file for the running gate's stdout+stderr.
+//
+// LIMITATION, deliberate: this is a FIXED path, not a per-process one. The
+// first implementation built "/tmp/sounio_claim_gate_<pid>.out" with getpid +
+// digit-wise string concatenation, and that SIGSEGV'd the compiler before the
+// claim loop emitted anything — runtime string building is not safe on this
+// path inside the executor. A fixed path costs correctness only when two
+// compiles run --verify-claims concurrently in the same container, which CI
+// does not do; a segfaulting compiler costs everything. Recorded in the spec
+// rather than hidden.
+fn ce_capture_path() -> string {
+    "/tmp/sounio_claim_gate_capture.out"
+}
+
+// Index of `needle` in `hay` at or after `from`, or -1.
+fn ce_find_sub(hay: string, needle: string, from: i64) -> i64 with Mut, Panic, Div {
+    let hn = str_len(hay)
+    let nn = str_len(needle)
+    if nn == 0 || nn > hn {
+        return -1
+    }
+    var i = from
+    if i < 0 {
+        i = 0
+    }
+    while i + nn <= hn {
+        var j: i64 = 0
+        var ok = true
+        while j < nn {
+            if str_char_at(hay, i + j) != str_char_at(needle, j) {
+                ok = false
+                j = nn
+            } else {
+                j = j + 1
+            }
+        }
+        if ok {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// Characters admissible inside a verdict token ([A-Za-z0-9_]).
+fn ce_is_token_char(c: i64) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95
+}
+
+// The word following the LAST occurrence of `needle` in a gate's output.
+// Taking the last occurrence means a gate that echoes a sub-contract's line
+// before stating its own is still read correctly. Returns "" when absent.
+//
+// Shared by the token and the witness readers rather than written twice. The
+// duplicate would be the exact failure this line measures — one derivation in
+// two shirts, agreeing because it is the same code, not because two routes
+// concur.
+fn ce_extract_after(out: string, needle: string, needle_len: i64) -> string
+        with Mut, Panic, Div {
+    var at: i64 = -1
+    var scan = ce_find_sub(out, needle, 0)
+    while scan >= 0 {
+        at = scan
+        scan = ce_find_sub(out, needle, scan + 1)
+    }
+    if at < 0 {
+        return ""
+    }
+    let s = at + needle_len
+    var e = s
+    let n = str_len(out)
+    while e < n && ce_is_token_char(str_char_at(out, e)) {
+        e = e + 1
+    }
+    if e <= s {
+        return ""
+    }
+    str_slice(out, s, e)
+}
+
+// The verdict token a gate emitted. Corpus convention: `<PREFIX>_VERDICT <TOK>`.
+fn ce_extract_verdict_token(out: string) -> string with Mut, Panic, Div {
+    ce_extract_after(out, "_VERDICT ", 9)
+}
+
+// The WITNESS a gate emitted. Convention: `<PREFIX>_WITNESS <FINGERPRINT>`.
+//
+// WHY THIS EXISTS, and it is not a second token. A verdict token binds the
+// PROPOSITION a check reports. Its resolution is therefore bounded by the
+// invariance group of that proposition: a claim of the form "there are exactly
+// N classes" is satisfied by ANY state with N classes, so the token cannot see
+// a change that swaps every class for a different one. Measured on this
+// repository's own ZD-fiber contract: a single sign flip replaced all 24 fiber
+// geometries with 24 different ones, left the count at 24, and the token held.
+//
+// A witness binds the EVIDENCE that establishes the proposition — the labelling
+// itself, fingerprinted — so a change that preserves the proposition while
+// replacing its grounds is refused. Same mechanism as the token; strictly finer.
+fn ce_extract_witness(out: string) -> string with Mut, Panic, Div {
+    ce_extract_after(out, "_WITNESS ", 9)
+}
+
+// Final outcome once the declared token is compared with the emitted one.
+//
+// Two things had to change before a drifted token actually blocked a build,
+// and only the second one was the fix — recorded precisely because the first
+// looked like it should have worked:
+//
+//   1. Inline `if/else-if` at the call site assigning to `outcome`: no effect.
+//   2. Hoisting the decision into THIS function, still assigning to `outcome`:
+//      also no effect. So the nesting was not the problem.
+//   3. Assigning into a FRESH variable and only then copying it into `outcome`
+//      at the caller's own level: works. `outcome` is read by the enclosing
+//      condition, and reassigning it there does not stick.
+//
+// The capture and extraction were correct throughout — the emitted token
+// printed correctly while the build still passed. A Madaros codegen hazard,
+// recorded in the R2 spec.
+fn ce_token_outcome(current: i64, want: string, got: string) -> i64 with Mut, Panic, Div {
+    if current != CLAIM_GATE_PASS {
+        return current
+    }
+    if str_len(got) == 0 {
+        return 5  // CLAIM_GATE_TOKEN_ABSENT
+    }
+    if ce_str_eq(want, got) {
+        return CLAIM_GATE_PASS
+    }
+    4  // CLAIM_GATE_TOKEN_MISMATCH
+}
+
+// Same shape as ce_token_outcome, one level finer. Runs only after the token
+// decision, so a claim declaring both must satisfy the proposition first and
+// its grounds second.
+//
+// The fresh-variable discipline in the caller is load-bearing here too: this
+// returns a value, the caller assigns it to a NEW variable rather than back
+// into the one its enclosing condition reads. That hazard cost four builds in
+// R2 and it is the same code path.
+fn ce_witness_outcome(current: i64, want: string, got: string) -> i64
+        with Mut, Panic, Div {
+    if current != CLAIM_GATE_PASS {
+        return current
+    }
+    if str_len(got) == 0 {
+        return 7  // CLAIM_GATE_WITNESS_ABSENT
+    }
+    if ce_str_eq(want, got) {
+        return CLAIM_GATE_PASS
+    }
+    6  // CLAIM_GATE_WITNESS_MISMATCH
+}
+
+// Provenance: the artifact a claim says its derivation rests on must be IN THE
+// TREE. This catches a failure class none of the checks above can reach, because
+// all of them read what the gate emits and none reads what the claim cites.
+//
+// Found by audit, not supposed: `cd_tower_collapse_isomorphism.py` -- the
+// explicit parity-collapse map Phi, cited by two contracts as the UPPER BOUND of
+// the completeness pincer for ZD_FIBER_SPECTRUM_COMPLETE_INVARIANT_N_LE_8 -- was
+// committed to another branch and is absent here. Gate green, token correct,
+// witness matching, derivation unavailable.
+//
+// Existence only. Content drift is the witness's job (a gate that fingerprints
+// its inputs already covers it), and claiming more here would overstate what one
+// stat call establishes.
+fn ce_provenance_outcome(current: i64, path: string) -> i64 with IO, Mut, Panic, Div {
+    if current != CLAIM_GATE_PASS {
+        return current
+    }
+    if str_len(path) == 0 {
+        return CLAIM_GATE_PASS
+    }
+    if file_exists(path) {
+        return CLAIM_GATE_PASS
+    }
+    8  // CLAIM_GATE_PROVENANCE_MISSING
+}
+
+fn ce_str_eq(a: string, b: string) -> bool with Mut, Panic, Div {
+    let n = str_len(a)
+    if n != str_len(b) {
+        return false
+    }
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(a, i) != str_char_at(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Run `bash <gate_path>` in a forked child with a wall-clock timeout, with the
+// child's stdout+stderr redirected into `capture_path` so the parent can read
+// back the verdict token the gate emitted. The redirection is done with
+// open+dup2 in the child rather than a shell redirect, so argv stays fixed and
+// no command string is ever interpolated.
+// Returns CLAIM_GATE_*.
+fn ce_run_gate(gate_path: string, timeout_ms: i64, capture_path: string) -> i64 with IO, Mut, Panic, Div {
+    CE_ARGV[0] = "/bin/bash" as i64
+    CE_ARGV[1] = gate_path as i64
+    CE_ARGV[2] = 0
+    CE_ENVP[0] = 0
+
+    // Create/truncate the capture file in the PARENT so it always exists for
+    // the post-wait read, even if the child's own open fails.
+    // O_WRONLY|O_CREAT|O_TRUNC = 1|64|512 = 577; mode 0644 = 420.
+    let pre_fd = syscall6(2, capture_path as i64, 577, 420, 0, 0, 0)
+    if pre_fd >= 0 {
+        syscall6(3, pre_fd, 0, 0, 0, 0, 0)  // close
+    }
+
+    let pid = syscall6(57, 0, 0, 0, 0, 0, 0)  // fork
+    if pid < 0 {
+        return CLAIM_GATE_SPAWN_ERR
+    }
+    if pid == 0 {
+        // Child: redirect stdout+stderr into the capture file, then
+        // execve("/bin/bash", ["bash", gate_path], []).
+        let fd = syscall6(2, capture_path as i64, 577, 420, 0, 0, 0)
+        if fd >= 0 {
+            syscall6(33, fd, 1, 0, 0, 0, 0)  // dup2 -> stdout
+            syscall6(33, fd, 2, 0, 0, 0, 0)  // dup2 -> stderr
+        }
+        syscall6(59, "/bin/bash" as i64, &! CE_ARGV, &! CE_ENVP, 0, 0, 0)
+        syscall6(60, 127, 0, 0, 0, 0, 0)  // exec failed: _exit(127)
+        return CLAIM_GATE_SPAWN_ERR
+    }
+
+    // Parent: poll wait4(WNOHANG) every 50 ms until exit or timeout.
+    var max_polls = timeout_ms / 50
+    if max_polls < 1 {
+        max_polls = 1
+    }
+    var polls: i64 = 0
+    while polls < max_polls {
+        // Loop-scoped locals: re-borrowing one variable across iterations
+        // trips the exclusive-borrow checker.
+        var poll_status: i64 = 0
+        let done = syscall6(61, pid, &! poll_status, 1, 0, 0, 0)  // wait4 WNOHANG
+        if done == pid {
+            if ce_wait_exit_code(poll_status) == 0 {
+                return CLAIM_GATE_PASS
+            }
+            return CLAIM_GATE_FAIL
+        }
+        var ts: [i64; 2] = [0; 2]
+        ts[0] = 0
+        ts[1] = 50000000  // 50 ms
+        syscall6(35, &! ts, 0, 0, 0, 0, 0)  // nanosleep
+        polls = polls + 1
+    }
+
+    // Timeout: SIGKILL and reap.
+    syscall6(62, pid, 9, 0, 0, 0)  // kill
+    var final_status: i64 = 0
+    syscall6(61, pid, &! final_status, 0, 0, 0, 0)  // wait4 blocking
+    CLAIM_GATE_TIMEOUT
+}
+
+// Verify all claims recorded for `source_path`:
+//   1. type-check the module (parse/resolve/check preflight) — no gate runs
+//      unless the program type-checks;
+//   2. re-parse the main source so the claim registry holds exactly its
+//      claims, and read the source text for value slicing;
+//   3. execute each non-archived claim's gate in a subprocess.
+// Returns 0 on no-op / all-pass, the number of failed gates (>0) when any
+// gate fails or times out, and -1 when the source fails to type-check.
+pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    print("verify-claims: type-check ")
+    print(source_path)
+    print("\n")
+    let frontend = preflight_multimodule_frontend(source_path)
+    if !frontend.ok {
+        print("VERIFY_CLAIMS_TYPECHECK_FAIL\n")
+        return -1
+    }
+
+    // A claim refuted in a module this file imports has to block this file's
+    // build too, or the line only ever falsifies what happens to sit in one
+    // file. Collect the module closure BEFORE loading anything for
+    // verification: the collector reloads every module it walks, and each
+    // load resets the claim registry (ast_reset_claims, parser/mod.sio), so
+    // collection and verification cannot be interleaved.
+    var closure = ModuleClosure {
+        paths: [""; 256],
+        edge_callers: [""; 512],
+        edge_dependencies: [""; 512],
+        unresolved_callers: [""; 256],
+        unresolved_imports: [""; 256],
+        node_count: 0,
+        edge_count: 0,
+        unresolved_count: 0,
+        saturated: false,
+        parse_failed: false,
+        // The struct's field is parse_failed_path; this literal wrote
+        // `failed_path` and `failed_error_count`, neither of which exists on
+        // ModuleClosure. Matches the two literals in compiler/main.sio.
+        parse_failed_path: "",
+    }
+    let closure_complete = module_frontend_collect_ast_closure_into(source_path, &!closure)
+    var scope_count: i64 = closure.node_count
+    if scope_count <= 0 {
+        scope_count = 1
+        closure.paths[0] = source_path
+    }
+    if !closure_complete {
+        // Say the scope was cut rather than printing a total that silently
+        // covers less than the reader will assume it covers.
+        print("VERIFY_CLAIMS_SCOPE_PARTIAL modules=")
+        print_int(scope_count)
+        print("\n")
+    }
+    print("VERIFY_CLAIMS_SCOPE modules=")
+    print_int(scope_count)
+    print("\n")
+
+    var passed: i64 = 0
+    var failed: i64 = 0
+    var skipped: i64 = 0
+    var total_claims: i64 = 0
+    var mod_idx: i64 = 0
+    while mod_idx < scope_count {
+        let module_path = closure.paths[mod_idx]
+        // Repopulate the claim registry with exactly this module's claims,
+        // then read its source so value spans can be sliced out.
+        let main_prog = load_module_file(module_path)
+        let total = ast_claim_count()
+        total_claims = total_claims + total
+        let src = read_file(module_path)
+
+        var slot: i64 = 0
+        while slot < total {
+            let cname = ast_claim_slot_name(slot)
+            let n_fields = ast_claim_slot_field_count(slot)
+
+            var gate_idx: i64 = -1
+            var token_idx: i64 = -1
+            var wit_idx: i64 = -1
+            var prov_idx: i64 = -1
+            var archived = false
+            var fi: i64 = 0
+            while fi < n_fields {
+                let f = ast_claim_slot_field(slot, fi)
+                if ce_name_eq_str(f.name, "gate") {
+                    gate_idx = fi
+                }
+                // Optional: the verdict token this claim asserts its gate emits.
+                // Name-compare is exact (length first), so this never collides
+                // with the `verdict` field's archived scan below.
+                if ce_name_eq_str(f.name, "verdict_token") {
+                    token_idx = fi
+                }
+                // Optional: the fingerprint of the EVIDENCE, not of the claim.
+                // See ce_extract_witness for why a token alone is not enough.
+                if ce_name_eq_str(f.name, "witness") {
+                    wit_idx = fi
+                }
+                // Optional: an artifact the claim's derivation depends on.
+                if ce_name_eq_str(f.name, "provenance") {
+                    prov_idx = fi
+                }
+                if ce_name_eq_str(f.name, "verdict") {
+                    let vs = ast_claim_slot_value_start(slot, fi)
+                    let ve = ast_claim_slot_value_end(slot, fi)
+                    if ce_slice_is_archived(src, vs, ve) {
+                        archived = true
+                    }
+                }
+                fi = fi + 1
+            }
+
+            if archived {
+                print("CLAIM_SKIP ")
+                ce_print_name(cname)
+                print(" (archived)\n")
+                skipped = skipped + 1
+            } else if gate_idx < 0 {
+                print("CLAIM_SKIP ")
+                ce_print_name(cname)
+                print(" (no-gate)\n")
+                skipped = skipped + 1
+            } else {
+                let gate_field = ast_claim_slot_field(slot, gate_idx)
+                let gate_vs = ast_claim_slot_value_start(slot, gate_idx)
+                let gate_ve = ast_claim_slot_value_end(slot, gate_idx)
+                let gate_path = ce_value_text(src, gate_vs, gate_ve, gate_field.kind)
+                let cap_path = ce_capture_path()
+                var outcome = ce_run_gate(gate_path, CLAIM_GATE_TIMEOUT_MS, cap_path)
+
+                // Verdict-token binding. Exit 0 says the check ran; it does not say
+                // the check establishes the proposition the claim declares. When a
+                // claim declares `verdict_token`, the token the gate actually
+                // emitted must equal it, or the claim is falsified.
+                var want_tok = ""
+                var got_tok = ""
+                // Decide into a FRESH variable: reassigning `outcome`, which is
+                // read by the enclosing condition, did not take effect.
+                var decided = outcome
+                if outcome == CLAIM_GATE_PASS && token_idx >= 0 {
+                    let tok_field = ast_claim_slot_field(slot, token_idx)
+                    let tok_vs = ast_claim_slot_value_start(slot, token_idx)
+                    let tok_ve = ast_claim_slot_value_end(slot, token_idx)
+                    want_tok = ce_value_text(src, tok_vs, tok_ve, tok_field.kind)
+                    got_tok = ce_extract_verdict_token(read_file(cap_path))
+                    decided = ce_token_outcome(outcome, want_tok, got_tok)
+                }
+
+                // NOTE: never assign back into `outcome` here. Doing so was tried
+                // and is unreliable on this path — the reporting chain then took
+                // the wrong arm even for a plainly passing gate with no token.
+                // `outcome` stays the raw gate result; `decided` is the verdict.
+
+                // Witness binding, one level finer than the token. Runs only if the
+                // proposition already holds, so a claim declaring both must satisfy
+                // what it asserts AND the grounds it asserts it on.
+                //
+                // Fresh variable again, for the same reason `decided` is fresh:
+                // `decided` is read by the conditions below, so the witness result
+                // goes into `settled` and nothing is written back.
+                var want_wit = ""
+                var got_wit = ""
+                var settled = decided
+                if decided == CLAIM_GATE_PASS && wit_idx >= 0 {
+                    let wit_field = ast_claim_slot_field(slot, wit_idx)
+                    let wit_vs = ast_claim_slot_value_start(slot, wit_idx)
+                    let wit_ve = ast_claim_slot_value_end(slot, wit_idx)
+                    want_wit = ce_value_text(src, wit_vs, wit_ve, wit_field.kind)
+                    got_wit = ce_extract_witness(read_file(cap_path))
+                    settled = ce_witness_outcome(decided, want_wit, got_wit)
+                }
+
+                // Provenance, after the witness. Fresh variable for the third
+                // time, for the reason recorded in ce_token_outcome.
+                var prov_path = ""
+                var final_out = settled
+                if settled == CLAIM_GATE_PASS && prov_idx >= 0 {
+                    let pf = ast_claim_slot_field(slot, prov_idx)
+                    let pvs = ast_claim_slot_value_start(slot, prov_idx)
+                    let pve = ast_claim_slot_value_end(slot, prov_idx)
+                    prov_path = ce_value_text(src, pvs, pve, pf.kind)
+                    final_out = ce_provenance_outcome(settled, prov_path)
+                }
+
+                if final_out == CLAIM_GATE_PASS {
+                    print("CLAIM_PASS ")
+                    ce_print_name(cname)
+                    print(" gate=")
+                    print(gate_path)
+                    if token_idx >= 0 {
+                        print(" verdict_token=")
+                        print(got_tok)
+                    }
+                    if wit_idx >= 0 {
+                        print(" witness=")
+                        print(got_wit)
+                    }
+                    if prov_idx >= 0 {
+                        print(" provenance=")
+                        print(prov_path)
+                    }
+                    print("\n")
+                    passed = passed + 1
+                } else if final_out == 4 {  // CLAIM_GATE_TOKEN_MISMATCH
+                    print("CLAIM_TOKEN_MISMATCH ")
+                    ce_print_name(cname)
+                    print(" gate=")
+                    print(gate_path)
+                    print(" declared=")
+                    print(want_tok)
+                    print(" emitted=")
+                    print(got_tok)
+                    print("\n")
+                    failed = failed + 1
+                } else if final_out == 5 {  // CLAIM_GATE_TOKEN_ABSENT
+                    print("CLAIM_TOKEN_ABSENT ")
+                    ce_print_name(cname)
+                    print(" gate=")
+                    print(gate_path)
+                    print(" declared=")
+                    print(want_tok)
+                    print(" (gate emitted no _VERDICT token)\n")
+                    failed = failed + 1
+                } else if final_out == 6 {  // CLAIM_GATE_WITNESS_MISMATCH
+                    print("CLAIM_WITNESS_MISMATCH ")
+                    ce_print_name(cname)
+                    print(" gate=")
+                    print(gate_path)
+                    print(" declared=")
+                    print(want_wit)
+                    print(" emitted=")
+                    print(got_wit)
+                    print(" (the proposition still holds; its grounds changed)\n")
+                    failed = failed + 1
+                } else if final_out == 7 {  // CLAIM_GATE_WITNESS_ABSENT
+                    print("CLAIM_WITNESS_ABSENT ")
+                    ce_print_name(cname)
+                    print(" gate=")
+                    print(gate_path)
+                    print(" declared=")
+                    print(want_wit)
+                    print(" (gate emitted no _WITNESS fingerprint)\n")
+                    failed = failed + 1
+                } else if final_out == 8 {  // CLAIM_GATE_PROVENANCE_MISSING
+                    print("CLAIM_PROVENANCE_MISSING ")
+                    ce_print_name(cname)
+                    print(" gate=")
+                    print(gate_path)
+                    print(" declared=")
+                    print(prov_path)
+                    print(" (the check passed; the derivation it cites is not in the tree)\n")
+                    failed = failed + 1
+                } else if final_out == CLAIM_GATE_TIMEOUT {
+                    print("CLAIM_TIMEOUT ")
+                    ce_print_name(cname)
+                    print(" gate=")
+                    print(gate_path)
+                    print(" timeout_ms=")
+                    print_int(CLAIM_GATE_TIMEOUT_MS)
+                    print("\n")
+                    failed = failed + 1
+                } else {
+                    print("CLAIM_FAIL ")
+                    ce_print_name(cname)
+                    print(" gate=")
+                    print(gate_path)
+                    if final_out == CLAIM_GATE_SPAWN_ERR {
+                        print(" (spawn error)")
+                    }
+                    print("\n")
+                    failed = failed + 1
+                }
+            }
+            slot = slot + 1
+        }
+        mod_idx = mod_idx + 1
+    }
+
+    if total_claims <= 0 {
+        print("VERIFY_CLAIMS_NOOP\n")
+        return 0
+    }
+
+
+    if failed > 0 {
+        print("VERIFY_CLAIMS_FALSIFIED fail=")
+        print_int(failed)
+        print(" pass=")
+        print_int(passed)
+        print(" skip=")
+        print_int(skipped)
+        print("\n")
+        return failed
+    }
+    print("VERIFY_CLAIMS_OK pass=")
+    print_int(passed)
+    print(" skip=")
+    print_int(skipped)
+    print("\n")
+    0
+}

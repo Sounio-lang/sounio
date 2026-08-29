@@ -1,0 +1,113 @@
+// cyp3a_competitive.sio — Darwin PBPK CYP3A competitive (reversible) DDI module.
+//
+// The suite's first drug–drug interaction primitive. Models a CYP3A victim's oral
+// disposition under a reversible competitive inhibitor (e.g. ketoconazole) using
+// the standard well-stirred oral first-pass formulation.
+//
+// A SINGLE hepatic intrinsic clearance CLint_h yields BOTH:
+//   first-pass survival   FH   = Qh / (Qh + fu·CLint_h)
+//   systemic clearance    CL_h = Qh·fu·CLint_h / (Qh + fu·CLint_h)
+// A separate gut intrinsic clearance CLint_g yields the gut-wall survival
+//   FG = Qg / (Qg + fu_g·CLint_g).
+// Oral bioavailability F = Fa·FG·FH; AUC = F·Dose / CL_h.
+//
+// Competitive inhibition divides the INTRINSIC clearances by (1 + I/Ki) (same
+// enzyme, same factor for gut and liver). Because FH and CL_h derive from one
+// CLint_h, inhibition raises FH and lowers CL_h consistently — NO double-count —
+// so the oral AUC ratio (AUCR) emerges honestly (the iconic midazolam +
+// ketoconazole ~15× — see drugs/midazolam.sio, validation/midazolam_ddi.sio).
+//
+// All concentrations/clearances in mg/L and L/h (NOT ng/mL — unlike the ng/mL
+// tacrolimus_sirolimus_ddi module). `factor` is the inhibition factor in (0,1];
+// factor = 1.0 means no inhibition (baseline).
+//
+// Sources: Rowland & Matin 1973 / Pang & Rowland 1977 (well-stirred first-pass),
+// Ito 1998 (competitive I/Ki), Yang 2007 (Qgut model).
+
+pub struct Cyp3aSubstrate {
+    qh: f64,        // hepatic blood flow (L/h)
+    qg: f64,        // gut (villous) blood flow (L/h) — Qgut model
+    fu: f64,        // fraction unbound in blood
+    fu_gut: f64,    // enterocyte unbound fraction (convention 1.0)
+    fa: f64,        // fraction absorbed across apical membrane
+    clint_h: f64,   // hepatic intrinsic clearance (L/h) -> FH and CL_h
+    clint_g: f64,   // gut intrinsic clearance (L/h) -> FG
+}
+
+pub struct Cyp3aInhibitor {
+    ki: f64,         // competitive inhibition constant (mg/L, unbound)
+    i_unbound: f64,  // steady-state unbound inhibitor concentration (mg/L)
+}
+
+// Competitive inhibition factor 1/(1 + I/Ki) in (0,1].
+pub fn cyp3a_inhibition_factor(i_unbound: f64, ki: f64) -> f64 with Div {
+    return 1.0 / (1.0 + i_unbound / ki)
+}
+
+// Inhibition factor for a given inhibitor (i_unbound = 0 -> factor = 1.0).
+pub fn cyp3a_factor_of(inh: Cyp3aInhibitor) -> f64 with Div {
+    return cyp3a_inhibition_factor(inh.i_unbound, inh.ki)
+}
+
+// Gut-wall survival FG = Qg / (Qg + fu_g·CLint_g·factor).
+pub fn cyp3a_fg(s: Cyp3aSubstrate, factor: f64) -> f64 with Div {
+    let b = s.fu_gut * s.clint_g * factor
+    return s.qg / (s.qg + b)
+}
+
+// Hepatic first-pass survival FH = Qh / (Qh + fu·CLint_h·factor).
+pub fn cyp3a_fh(s: Cyp3aSubstrate, factor: f64) -> f64 with Div {
+    let a = s.fu * s.clint_h * factor
+    return s.qh / (s.qh + a)
+}
+
+// Systemic well-stirred hepatic clearance CL_h = Qh·fu·CLint_h·factor / (Qh + fu·CLint_h·factor).
+pub fn cyp3a_clh(s: Cyp3aSubstrate, factor: f64) -> f64 with Div {
+    let a = s.fu * s.clint_h * factor
+    return s.qh * a / (s.qh + a)
+}
+
+// Oral bioavailability F = Fa·FG·FH.
+pub fn cyp3a_f_oral(s: Cyp3aSubstrate, factor: f64) -> f64 with Div {
+    return s.fa * cyp3a_fg(s, factor) * cyp3a_fh(s, factor)
+}
+
+// Oral AUC ratio vs baseline: AUCR = (F/F0)·(CL_h0/CL_h). Linear-system exact.
+pub fn cyp3a_aucr(s: Cyp3aSubstrate, factor: f64) -> f64 with Div {
+    let f0 = cyp3a_f_oral(s, 1.0)
+    let clh0 = cyp3a_clh(s, 1.0)
+    let f = cyp3a_f_oral(s, factor)
+    let cl = cyp3a_clh(s, factor)
+    return (f / f0) * (clh0 / cl)
+}
+
+// ─── Smoke tests ─────────────────────────────────────────────────────────────
+fn cyp3a_test_substrate() -> Cyp3aSubstrate {
+    Cyp3aSubstrate { qh: 90.0, qg: 18.0, fu: 0.03, fu_gut: 1.0, fa: 0.95, clint_h: 1090.0, clint_g: 14.7 }
+}
+
+// No inhibition -> factor 1, AUCR exactly 1.
+fn test_cyp3a_baseline_aucr_unity() -> bool with Div {
+    let r = cyp3a_aucr(cyp3a_test_substrate(), 1.0)
+    return r > 0.999999 && r < 1.000001
+}
+
+// Strong inhibition (I/Ki = 8 -> factor 1/9) reproduces the oral ~15× AUCR band.
+fn test_cyp3a_strong_inhibition_15x() -> bool with Div {
+    let factor = cyp3a_inhibition_factor(0.064, 0.008)
+    let r = cyp3a_aucr(cyp3a_test_substrate(), factor)
+    return r > 12.0 && r < 18.0
+}
+
+// Gut contributes: full (gut+hepatic) AUCR exceeds the hepatic-only AUCR.
+fn test_cyp3a_gut_contributes() -> bool with Div {
+    let s = cyp3a_test_substrate()
+    let factor = cyp3a_inhibition_factor(0.064, 0.008)
+    let full = cyp3a_aucr(s, factor)
+    // hepatic-only: same Qh/fu/CLint_h, but gut not inhibited (clint_g unchanged).
+    let f0 = cyp3a_f_oral(s, 1.0)
+    let clh0 = cyp3a_clh(s, 1.0)
+    let fh_only = s.fa * cyp3a_fg(s, 1.0) * cyp3a_fh(s, factor)
+    let hep_only = (fh_only / f0) * (clh0 / cyp3a_clh(s, factor))
+    return full > hep_only
+}

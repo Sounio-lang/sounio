@@ -1,0 +1,205 @@
+diff --git a/self-hosted/check/check.sio b/self-hosted/check/check.sio
+index 53ca76650..08c1ea14e 100644
+--- a/self-hosted/check/check.sio
++++ b/self-hosted/check/check.sio
+@@ -2272,25 +2272,24 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) wit
+                 linear_capture_count: 0,
+                 epistemic_epsilon: 0.0 - 1.0,
+             }
+-            // In-place insert mirrors FnSigTable::add — avoids copying the 45KB
+-            // FnSigTable by value (one of the large-aggregate copies the *mut
+-            // conversion eliminates).
+-            let sig_id = (*c).fn_sigs.count
+-            if sig_id < 64 {
+-                (*c).fn_sigs.entries[sig_id as usize] = sig
+-                (*c).fn_sigs.count = sig_id + 1
+-            }
+-            // In-place env bind mirrors TypeEnv::bind (avoids copying the 32KB TypeEnv).
+-            let benv_idx = (*c).env.count
+-            if benv_idx < 128 {
+-                (*c).env.bindings[benv_idx as usize] = TypeBinding {
+-                    name: name,
+-                    ty: ty_fn(sig_id),
+-                    is_mutable: false,
+-                    scope_depth: (*c).env.scope_depth,
+-                }
+-                (*c).env.count = benv_idx + 1
+-            }
++            // Persist via whole-field reassignment, NOT a nested write. The previous
++            // `(*c).fn_sigs.entries[i] = sig; (*c).fn_sigs.count = …` was MISCOMPILED:
++            // `(*c).fn_sigs` materialises a copy of the 45KB FnSigTable, the nested write
++            // lands on the copy, and it is discarded — so fn_sigs stayed EMPTY (count=0,
++            // proven by instrumentation). With no signatures, every signature-dependent
++            // check silently no-ops: return types default to () (spurious E008 on `return`),
++            // calls/args go unchecked. The struct/enum collectors already use this
++            // whole-field pattern (`(*c).structs = (*c).structs.add(info)`) and work; mirror
++            // it. The 45KB table copy is fine — it is not the 8MB Checker.
++            let fn_add_pair = (*c).fn_sigs.add(sig)
++            (*c).fn_sigs = fn_add_pair.0
++            let sig_id = fn_add_pair.1
++            // Persist the fn-name binding via whole-field reassignment — the same
++            // nested-write bug as fn_sigs: `(*c).env.bindings[i] = …; (*c).env.count = …`
++            // lands on a COPY of the 32KB TypeEnv and is discarded, so function names were
++            // never bound → callees resolved to unknown → the call path's effect/arg checks
++            // (which require callee_ty.kind == TyFn) never ran (pervasive call leniency).
++            (*c).env = (*c).env.bind(name, ty_fn(sig_id), false)
+             checker_const_int_bind_unknown_inplace(c, name)
+         }
+         None => {}
+@@ -2526,7 +2525,12 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
+             let body_ty = checker_check_block_inplace(c, (*fd).body)
+             if sig_id >= 0 {
+                 let sig2 = (*c).fn_sigs.get(sig_id)
+-                if !types_compatible(body_ty, sig2.return_type) {
++                // Oracle parity: lean_single collapses every integer width to one type code,
++                // so it accepts any int→int return (e.g. the `fn main() -> i32 { …; 0 }`
++                // exit-code idiom where the i64 tail meets an i32 return). Mirror that in
++                // return position so a width-only difference is not a spurious E008.
++                let bt_int_ok = is_integer_type(body_ty) && is_integer_type(sig2.return_type)
++                if !types_compatible(body_ty, sig2.return_type) && !bt_int_ok {
+                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
+                 }
+             }
+@@ -2619,7 +2623,10 @@ fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> T
+ 
+ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+     let val_ty = checker_check_opt_expr_inplace(c, e.left)
+-    if !types_compatible(val_ty, (*c).current_return_type) {
++    // Oracle parity: any int→int return is accepted (see the body-tail check) — a width-only
++    // difference between the `return <expr>` value and the declared return type is not E008.
++    let ret_int_ok = is_integer_type(val_ty) && is_integer_type((*c).current_return_type)
++    if !types_compatible(val_ty, (*c).current_return_type) && !ret_int_ok {
+         checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
+     }
+     ty_never()
+@@ -3644,8 +3651,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
+         if (*c).studies.count > 0 && multitest_is_stat_test_name(callee_name) {
+             let outcome_name = hypothesis_outcome_name_from_args(e.args)
+             if !name_is_empty(outcome_name) && !active_study_has_hypothesis_outcome((*c).studies, outcome_name) {
+-                let pen = (*c).report_hypothesis_penalty_warning(e.span, outcome_name)
+-                checker_store_from_value(c, pen)
++                checker_report_hypothesis_penalty_warning_inplace(c, e.span, outcome_name)
+             }
+         }
+     }
+@@ -3718,8 +3724,7 @@ fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effe
+         return
+     }
+     let missing_pair = find_missing_effects(callee_effects, callee_effect_count, (*c).current_effects, (*c).current_effect_count)
+-    let t = (*c).report_effect_error(span, missing_pair.0, missing_pair.1)
+-    checker_store_from_value(c, t)
++    checker_report_effect_error_inplace(c, span, missing_pair.0, missing_pair.1)
+ }
+ 
+     fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
+@@ -3986,6 +3991,68 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
+     }
+ }
+ 
++// *mut report helpers (transcriptions of report_unit_call_mismatch@14790 /
++// report_effect_error@8181 / report_hypothesis_penalty_warning@8128). The by-value
++// originals return the 8MB Checker (SRET); holding `let t = (*c).report_*()` forces the
++// CALLER's frame to 8MB even when the error branch is not taken — which trips the
++// large-struct codegen miscompile (smashes the return address on the call). Routing the
++// report via *mut removes the 8MB local entirely. (unit_boundary was the confirmed g(5)
++// crash — instrumentation showed arg_ty/param_ty valid right up to the unit call, fault on
++// its return.)
++fn checker_report_unit_call_mismatch_inplace(c: *mut Checker, span: Span, arg_uid: i64, param_uid: i64) with Mut, Panic, Div, Alloc, IO {
++    (*c).had_error = true
++    (*c).error_count = (*c).error_count + 1
++    print("error[E041]: unit mismatch in call argument\n")
++    print("  argument unit: ")
++    if arg_uid >= 0 {
++        print_unit_dim((*c).units.get_dim(arg_uid))
++    } else {
++        print("(dimensionless)")
++    }
++    print("\n  parameter unit: ")
++    if param_uid >= 0 {
++        print_unit_dim((*c).units.get_dim(param_uid))
++    } else {
++        print("(dimensionless)")
++    }
++    print("\n")
++}
++
++fn checker_report_effect_error_inplace(c: *mut Checker, span: Span, missing: [i64; 8], missing_count: i64) with Mut, IO, Panic, Div {
++    (*c).error_count = (*c).error_count + 1
++    (*c).had_error = true
++    print("error[E035]")
++    if span.start > 0 || span.end > 0 {
++        print(" at ")
++        print_int(span.start)
++        print("..")
++        print_int(span.end)
++    }
++    print(": effect not declared in function signature (missing: ")
++    var i: i64 = 0
++    while i < missing_count {
++        if i > 0 { print(", ") }
++        print_effect_name(missing[i as usize])
++        i = i + 1
++    }
++    print(")\n")
++}
++
++fn checker_report_hypothesis_penalty_warning_inplace(c: *mut Checker, span: Span, outcome_name: Name) with Mut, IO, Panic, Div {
++    (*c).warning_count = (*c).warning_count + 1
++    print("warning[W041]")
++    if span.start > 0 || span.end > 0 {
++        print(" at ")
++        print_int(span.start)
++        print("..")
++        print_int(span.end)
++    }
++    print(": statistical test on unregistered variable '")
++    print_name_value(outcome_name)
++    print("' - confidence penalty applied\n")
++    print("   = note: Hypothesis currently applies this penalty as an advisory warning; automatic Knowledge<T> confidence scaling is pending\n")
++}
++
+ fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+     let expected_ty = call_ref_inner_or_self(param_ty)
+     let provided_ty = call_ref_inner_or_self(arg_ty)
+@@ -3993,15 +4060,37 @@ fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEnt
+         return
+     }
+     if expected_ty.unit_id >= 0 && provided_ty.unit_id >= 0 && expected_ty.unit_id != provided_ty.unit_id {
+-        let t = (*c).report_unit_call_mismatch(call_span, provided_ty.unit_id, expected_ty.unit_id)
+-        checker_store_from_value(c, t)
++        checker_report_unit_call_mismatch_inplace(c, call_span, provided_ty.unit_id, expected_ty.unit_id)
+         return
+     }
+ }
+ 
++// *mut transcription of check_call_arg_ontology_boundary (17679). The by-value form returned
++// the 8MB Checker (SRET) — a latent SRET-smash the moment call resolution actually reached it.
++// The subclass/disjoint queries are pure reads delegating to free fns over `ontology_kernel`,
++// so route them directly; report via *mut. (Real fix, but NOT the g(5) crash — that is an
++// earlier large-by-value-TypeEntry-arg codegen miscompile around the unit boundary call.)
+ fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+-    let t = (*c).check_call_arg_ontology_boundary(arg_ty, param_ty, call_span)
+-    checker_store_from_value(c, t)
++    let expected_ty = call_ref_inner_or_self(param_ty)
++    if expected_ty.ontology_id < 0 || is_error_or_unknown(expected_ty) {
++        return
++    }
++    let provided_ty = call_ref_inner_or_self(arg_ty)
++    if is_error_or_unknown(provided_ty) {
++        return
++    }
++    if provided_ty.ontology_id < 0 {
++        checker_report_error_at_inplace(c, call_span, 150, 0, 0, 0)
++        return
++    }
++    if ontology_kernel_is_subclass((*c).ontology_kernel, provided_ty.ontology_id, expected_ty.ontology_id) {
++        return
++    }
++    if ontology_kernel_is_disjoint((*c).ontology_kernel, provided_ty.ontology_id, expected_ty.ontology_id) {
++        checker_report_error_at_inplace(c, call_span, 151, 0, 0, 0)
++        return
++    }
++    checker_report_error_at_inplace(c, call_span, 152, 0, 0, 0)
+ }
+ 
+ 

@@ -1,0 +1,336 @@
+// stdlib/particle_physics/higgs_production.sio
+//
+// Higgs boson production cross-sections at hadron colliders.
+// Includes gluon fusion (gg→H), vector boson fusion (VBF),
+// and associated production (WH, ZH).
+//
+// References:
+//   - PDG 2024, Higgs Boson Physics
+//   - Djouadi, Phys. Rept. 457 (2008) 1-216
+
+module particle_physics::higgs_production
+
+use particle_physics::sm_params::*;
+use particle_physics::kinematics::*;
+use epistemic::knowledge::{Epistemic}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// GLUON FUSION: gg → H
+// ============================================================================
+
+/// Partonic cross-section for gg → H via top quark loop.
+///
+/// Uses the exact LO formula:
+///   σ̂ = G_F α_s² / (128 √2 π) × |A(τ)|²
+/// where τ = 4m_t²/m_H² and A(τ) = 2τ [1 + (1-τ) f(τ)]
+///
+/// For τ > 1 (m_H < 2m_t): f(τ) = arcsin²(1/√τ)
+/// For τ ≤ 1: f(τ) uses real part of the analytic continuation.
+///
+/// # Parameters
+/// - `m_h`: Higgs mass in GeV.
+/// - `m_t`: Top quark mass in GeV.
+/// - `alpha_s`: Strong coupling at m_H scale.
+///
+/// # Returns
+/// Partonic cross-section in GeV⁻².
+pub fn gg_higgs_partonic_cross_section(m_h: f64, m_t: f64, alpha_s: f64) -> f64 with Mut, Div, Panic {
+    if m_h <= 0.0 || m_t <= 0.0 { return 0.0 }
+    let tau = 4.0 * m_t * m_t / (m_h * m_h)
+    let gf = 1.1663787e-5
+    let pi = 3.141592653589793
+    let prefactor = gf * alpha_s * alpha_s / (128.0 * 1.4142135623730951 * pi)
+
+    var loop_func: f64 = 0.0
+    if tau > 1.0 {
+        let x = 1.0 / sqrt_f64(tau)
+        let arcsin_x = asin_f64(x)
+        let f_tau = arcsin_x * arcsin_x
+        loop_func = 2.0 * tau * (1.0 + (1.0 - tau) * f_tau)
+    } else {
+        let rt = sqrt_f64(tau)
+        let x = (1.0 + sqrt_f64(1.0 - tau)) / (1.0 - sqrt_f64(1.0 - tau))
+        let ln_x = ln_f64(x)
+        loop_func = 2.0 * tau * (1.0 + (1.0 - tau) * (0.0 - 0.25 * (ln_x * ln_x - pi * pi)))
+    }
+
+    prefactor * loop_func * loop_func
+}
+
+/// Approximate hadronic cross-section for gg → H at LHC energies.
+///
+/// Uses a LO scaling normalized to σ(gg→H) ≈ 15 pb at √s = 13 TeV, m_H = 125 GeV.
+/// Scaling: σ ∝ α_s²(m_H) × ln(√s/m_H) / ln(13000/125)
+///
+/// # Parameters
+/// - `m_h`: Higgs mass in GeV.
+/// - `sqrt_s`: Hadron collider center-of-mass energy in GeV.
+/// - `alpha_s`: Strong coupling.
+///
+/// # Returns
+/// Approximate LO hadronic cross-section in pb.
+pub fn gg_higgs_hadronic_cross_section(m_h: f64, sqrt_s: f64, alpha_s: f64) -> f64 with Mut, Div, Panic {
+    if sqrt_s <= m_h { return 0.0 }
+    let ref_sqrt_s = 13000.0
+    let ref_mh = 125.0
+    let ref_alpha_s = 0.118
+    let ref_sigma = 15.0  // pb, approximate LO at 13 TeV
+
+    // Scaling with alpha_s² and logarithmic energy dependence
+    let alpha_s_ratio = alpha_s / ref_alpha_s
+    let log_term = ln_f64(sqrt_s / m_h) / ln_f64(ref_sqrt_s / ref_mh)
+
+    ref_sigma * alpha_s_ratio * alpha_s_ratio * log_term
+}
+
+// ============================================================================
+// ASSOCIATED PRODUCTION: q q̄ → V H (V = W, Z)
+// ============================================================================
+
+/// Tree-level partonic cross-section for q q̄ → V H.
+///
+/// Formula (e.g. from Gunion et al., "The Higgs Hunter's Guide"):
+///   σ = (G_F² m_V⁴ / (12π ŝ)) × √λ × (λ + 12 m_V²/ŝ) / (1 - m_V²/ŝ)²
+/// where λ = λ(1, m_V²/ŝ, m_H²/ŝ) is the Källén function.
+///
+/// # Parameters
+/// - `s`: Partonic center-of-mass energy squared (GeV²).
+/// - `m_v`: Vector boson mass (W or Z) in GeV.
+/// - `m_h`: Higgs mass in GeV.
+///
+/// # Returns
+/// Cross-section in GeV⁻².
+pub fn qqbar_vh_cross_section(s: f64, m_v: f64, m_h: f64) -> f64 with Mut, Div, Panic {
+    if s <= (m_v + m_h) * (m_v + m_h) { return 0.0 }
+    let gf = 1.1663787e-5
+    let pi = 3.141592653589793
+    let mv2 = m_v * m_v
+    let mh2 = m_h * m_h
+    let rv = mv2 / s
+    let rh = mh2 / s
+    let lam = kallen_lambda(1.0, rv, rh)
+    if lam < 0.0 { return 0.0 }
+    let sqrt_lam = sqrt_f64(lam)
+    let denom = (1.0 - rv) * (1.0 - rv)
+    if denom == 0.0 { return 0.0 }
+    let numerator = lam + 12.0 * rv
+    gf * gf * mv2 * mv2 * sqrt_lam * numerator / (12.0 * pi * s * denom)
+}
+
+/// Hadronic WH production cross-section.
+/// Normalized to σ(WH) ≈ 0.4 pb at √s = 13 TeV, m_H = 125 GeV.
+pub fn wh_higgs_cross_section(m_h: f64, sqrt_s: f64) -> f64 with Mut, Div, Panic {
+    if sqrt_s <= m_h + mass_w().val() { return 0.0 }
+    let ref_sqrt_s = 13000.0
+    let ref_sigma = 0.4  // pb, approximate LO
+    let log_term = ln_f64(sqrt_s / (m_h + mass_w().val())) / ln_f64(ref_sqrt_s / (ref_mh_wh()))
+    ref_sigma * log_term
+}
+
+/// Hadronic ZH production cross-section.
+/// Normalized to σ(ZH) ≈ 0.25 pb at √s = 13 TeV, m_H = 125 GeV.
+pub fn zh_higgs_cross_section(m_h: f64, sqrt_s: f64) -> f64 with Mut, Div, Panic {
+    if sqrt_s <= m_h + mass_z().val() { return 0.0 }
+    let ref_sqrt_s = 13000.0
+    let ref_sigma = 0.25  // pb, approximate LO
+    let log_term = ln_f64(sqrt_s / (m_h + mass_z().val())) / ln_f64(ref_sqrt_s / (ref_mh_zh()))
+    ref_sigma * log_term
+}
+
+fn ref_mh_wh() -> f64 with Mut, Div, Panic {
+    125.0 + mass_w().val()
+}
+
+fn ref_mh_zh() -> f64 with Mut, Div, Panic {
+    125.0 + mass_z().val()
+}
+
+// ============================================================================
+// VECTOR BOSON FUSION (APPROXIMATE)
+// ============================================================================
+
+/// Approximate VBF cross-section qq → qqH.
+///
+/// Normalized to σ(VBF) ≈ 1.2 pb at √s = 13 TeV, m_H = 125 GeV.
+/// Scaling: σ_VBF ∝ ln(√s/m_W) / ln(13000/80.4)
+///
+/// # Parameters
+/// - `m_h`: Higgs mass in GeV.
+/// - `sqrt_s`: Hadron collider CM energy in GeV.
+///
+/// # Returns
+/// Approximate cross-section in pb.
+pub fn vbf_higgs_cross_section_approx(m_h: f64, sqrt_s: f64) -> f64 with Mut, Div, Panic {
+    if sqrt_s <= m_h { return 0.0 }
+    let m_w = mass_w().val()
+    let ref_sqrt_s = 13000.0
+    let ref_sigma = 1.2  // pb, approximate LO
+    let log_term = ln_f64(sqrt_s / m_w) / ln_f64(ref_sqrt_s / m_w)
+    // Mild mass dependence: decrease for heavier Higgs
+    let mass_factor = 125.0 / m_h
+    ref_sigma * log_term * mass_factor
+}
+
+// ============================================================================
+// TOTAL PRODUCTION CROSS-SECTION
+// ============================================================================
+
+/// Sum of dominant Higgs production channels at a hadron collider.
+/// Channels: gg→H, VBF, WH, ZH.
+pub fn total_higgs_production_cross_section(m_h: f64, sqrt_s: f64) -> f64 with Mut, Div, Panic {
+    let alpha_s = alpha_s_mz().val()
+    let gg = gg_higgs_hadronic_cross_section(m_h, sqrt_s, alpha_s)
+    let vbf = vbf_higgs_cross_section_approx(m_h, sqrt_s)
+    let wh = wh_higgs_cross_section(m_h, sqrt_s)
+    let zh = zh_higgs_cross_section(m_h, sqrt_s)
+    gg + vbf + wh + zh
+}
+
+// ============================================================================
+// LOCAL HELPERS
+// ============================================================================
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x
+    if x > 1.0 { guess = x * 0.5 }
+    var i: i64 = 0
+    while i < 60 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    guess
+}
+
+fn asin_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= -1.0 { return 0.0 - 1.5707963267948966 }
+    if x >= 1.0 { return 1.5707963267948966 }
+    let x2 = x * x
+    let den = sqrt_f64(1.0 - x2)
+    if den == 0.0 { return 1.5707963267948966 }
+    atan_f64(x / den)
+}
+
+fn atan_f64(x: f64) -> f64 with Mut, Div, Panic {
+    var y = x
+    let pi = 3.141592653589793
+    if x > 1.0 {
+        y = 1.0 / x
+        let result = atan_series(y)
+        return pi / 2.0 - result
+    }
+    if x < 0.0 - 1.0 {
+        y = 1.0 / (0.0 - x)
+        let result = atan_series(y)
+        return 0.0 - (pi / 2.0 - result)
+    }
+    atan_series(y)
+}
+
+fn atan_series(x: f64) -> f64 with Mut {
+    let x2 = x * x
+    let x3 = x2 * x
+    let x5 = x3 * x2
+    let x7 = x5 * x2
+    let x9 = x7 * x2
+    let x11 = x9 * x2
+    x - x3 / 3.0 + x5 / 5.0 - x7 / 7.0 + x9 / 9.0 - x11 / 11.0
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    let ln2 = 0.6931471805599453
+    (e as f64) * ln2 + 2.0 * sum
+}
+
+// ============================================================================
+// EPISTEMIC EXTENSIONS — GUM-exact uncertainty from PDG α_s and masses
+// ============================================================================
+
+/// GUM-exact gg → H hadronic cross-section with α_s(M_Z) uncertainty propagated.
+/// σ(m_H, √s) = ref_σ × (α_s/ref_α_s)² × ln(√s/m_H) / ln(13000/125).
+/// PDG 2024: α_s(M_Z) = 0.1179 ± 0.0009. GUM result: σ(σ_gg)/σ_gg ≈ 1.5%.
+/// This is the dominant PDG-input uncertainty on gg→H (parton uncertainty is larger
+/// but external; this tracks only the α_s input provenance).
+pub fn gg_higgs_hadronic_cross_section_ep(m_h: f64, sqrt_s: f64) -> Epistemic with Mut, Div, Panic {
+    if sqrt_s <= m_h { return Epistemic::certain(0.0) }
+    let ref_as_sq = 0.118 * 0.118
+    let log_num = ln_f64(sqrt_s / m_h)
+    let log_den = ln_f64(13000.0 / 125.0)
+    if log_den == 0.0 { return Epistemic::certain(0.0) }
+    let log_term = log_num / log_den
+    // C = ref_sigma × log_term / ref_as²  so that σ = C × α_s²
+    let C = 15.0 * log_term / ref_as_sq
+    // GUM: Var(σ) = C² Var(α_s²) = C² × 4α_s² Var(α_s) — carried by .square()
+    alpha_s_mz().square().scale(C)
+}
+
+/// GUM-exact total Higgs production cross-section at a hadron collider.
+/// gg→H carries α_s uncertainty (dominates); WH/ZH/VBF treated as exact
+/// (their PDG mass uncertainties are sub-percent and sub-dominant to α_s).
+pub fn total_higgs_production_cross_section_ep(m_h: f64, sqrt_s: f64) -> Epistemic with Mut, Div, Panic {
+    let gg_ep = gg_higgs_hadronic_cross_section_ep(m_h, sqrt_s)
+    let vbf = vbf_higgs_cross_section_approx(m_h, sqrt_s)
+    let wh = wh_higgs_cross_section(m_h, sqrt_s)
+    let zh = zh_higgs_cross_section(m_h, sqrt_s)
+    // shift adds exact constant to val without changing variance
+    gg_ep.shift(vbf + wh + zh)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+var HP_PASS: [i64; 2] = [0, 0]
+
+fn hp_chk(id: i64, ok: bool) with IO {
+    if ok {
+        HP_PASS[0] = HP_PASS[0] + 1
+    } else {
+        HP_PASS[1] = HP_PASS[1] + 1
+        println("FAIL: higgs_production_ep")
+    }
+}
+
+fn hp_near(a: f64, b: f64, rel: f64) -> bool {
+    let diff = if a > b { a - b } else { b - a }
+    let ref_val = if b > 0.0 { b } else { if a > 0.0 { a } else { 1.0 } }
+    diff < rel * ref_val
+}
+
+pub fn run_higgs_ep_tests() with IO, Mut, Div, Panic {
+    HP_PASS[0] = 0
+    HP_PASS[1] = 0
+    // gg→H at LHC 13 TeV, m_H=125 GeV: ~15 pb (LO reference)
+    let gg_ep = gg_higgs_hadronic_cross_section_ep(125.0, 13000.0)
+    hp_chk(1, hp_near(gg_ep.val(), 15.0, 0.05))
+    hp_chk(2, gg_ep.variance() > 0.0)
+    hp_chk(3, gg_ep.confidence() >= 800)
+    // α_s uncertainty → σ(σ_gg)/σ_gg ≈ 1.5% → Var/(σ²) ~ 2e-4
+    // Var should be roughly (0.015 × 15)² ≈ 0.05 pb²
+    hp_chk(4, gg_ep.variance() > 0.001 && gg_ep.variance() < 10.0)
+    // gg→H at 14 TeV: should be larger than 13 TeV
+    let gg_14 = gg_higgs_hadronic_cross_section_ep(125.0, 14000.0)
+    hp_chk(5, gg_14.val() > gg_ep.val())
+    // Total production: gg + VBF + WH + ZH ≈ 15+1.2+0.4+0.25 = 16.85 pb
+    let total_ep = total_higgs_production_cross_section_ep(125.0, 13000.0)
+    hp_chk(6, total_ep.val() > gg_ep.val())
+    hp_chk(7, total_ep.variance() > 0.0)
+    // Total should be within 20% of ~17 pb
+    hp_chk(8, hp_near(total_ep.val(), 17.0, 0.20))
+}

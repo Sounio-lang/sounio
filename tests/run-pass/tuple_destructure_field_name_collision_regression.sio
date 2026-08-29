@@ -1,0 +1,78 @@
+//@ run-pass
+// D11 regression -- see docs/audit/D11_ARENA_SCRATCH_RESET_CROSS_MODULE_CORRUPTION_DISPATCH_2026-08-26.md
+// RESOLVED: lower.sio now recovers a tuple element's struct type at the
+// desugared `let x = __tupN.k` binding. This file is the guard.
+//
+// A tuple-destructured let (`let (r, status) = make_reader()`) does not record
+// `r`'s struct type in the Lowerer's local struct-type table (the parser
+// desugars it to `let __tup0 = make_reader()` + `let r = __tup0.0`, and
+// lower_let_stmt_ref has no binding rule for a tuple-index field-access
+// initialiser). `r.pos` therefore falls through field_idx_for_base_ref to
+// field_idx_from_name_simple -- a GLOBAL, name-only, FIRST-REGISTERED-match
+// scan over every struct layout in the linked program -- and resolves to
+// `Decoy.pos` (field index 3) instead of `Reader.pos` (field index 1).
+//
+// Everything else about the same value is correct: the struct's own memory is
+// intact (reader_pos(&r), which reads `pos` through a typed `&Reader`
+// parameter, returns 222), the non-colliding field `end` reads correctly, and
+// the non-destructured binding `direct.pos` reads correctly. Only the
+// collided field name, read through the type-less local, is wrong.
+//
+// Before the fix, on Madaros v0.80.0: exit 1 -- r.pos read 0 (Decoy's index 3,
+// i.e. 8 bytes past the end of the 24-byte Reader) instead of 222.
+//
+// Swapping the two struct declarations (Reader first) makes this pass, which
+// is the proof that the resolution is first-registered-match order, not a
+// size/allocation effect.
+
+struct Decoy {
+    d0: i64,
+    d1: i64,
+    d2: i64,
+    pos: i64,
+}
+
+struct Reader {
+    base: i64,
+    pos: i64,
+    end: i64,
+}
+
+fn decoy_touch() -> i64 {
+    let d = Decoy { d0: 10, d1: 20, d2: 30, pos: 40 }
+    d.pos
+}
+
+fn make_reader() -> (Reader, i64) {
+    (Reader { base: 111, pos: 222, end: 333 }, 0)
+}
+
+fn reader_pos(r: &Reader) -> i64 {
+    r.pos
+}
+
+fn main() -> i64 with IO {
+    let touched = decoy_touch()
+    let direct = Reader { base: 111, pos: 222, end: 333 }
+    let (r, status) = make_reader()
+
+    print("touched=")
+    print_int(touched)
+    print(" direct.pos=")
+    print_int(direct.pos)
+    print(" helper_pos=")
+    print_int(reader_pos(&r))
+    print(" r.pos=")
+    print_int(r.pos)
+    print(" r.end=")
+    print_int(r.end)
+    print(" status=")
+    print_int(status)
+    print("\n")
+
+    if touched == 40 && direct.pos == 222 && reader_pos(&r) == 222 && r.pos == 222 && r.end == 333 && status == 0 {
+        0
+    } else {
+        1
+    }
+}

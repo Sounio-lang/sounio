@@ -1,0 +1,156 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/gk_tau.sio — Goodman-Kruskal tau (nominal association)
+//
+// A proportional-reduction-in-error measure like lambda, but predicting with the
+// full category *distribution* (proportional prediction) rather than only the
+// mode — so it is non-zero whenever the variables are dependent:
+//
+//   gk_tau(table, nr, nc) -> TauResult      (row-major nr × nc counts)
+//
+//   τ(R|C) = ( Σ_c Σ_r n_rc²/n_+c − Σ_r n_r+²/N ) / ( N − Σ_r n_r+²/N ),
+//   τ(C|R) analogously.  τ = 0 under independence, 1 under perfect prediction.
+//
+// Pure Sounio: row/column marginals then the conditional error terms. No
+// external dependency, no nested data-array calls.
+//
+// References:
+//   Goodman & Kruskal (1954) JASA 49:732.
+
+module stats::gk_tau
+
+pub struct TauResult {
+    pub tau_rc: f64,   // τ(R|C): predict row from column
+    pub tau_cr: f64,   // τ(C|R): predict column from row
+}
+
+/// Goodman-Kruskal tau for a nominal contingency table.
+///
+/// Parâmetros: table — row-major nr×nc counts; nr — rows (2..16); nc — cols (2..16).
+/// Retorno: TauResult (tau_rc, tau_cr).
+/// Referências: Goodman & Kruskal (1954).
+pub fn gk_tau(table: &[f64; 256], nr: i32, nc: i32) -> TauResult with Mut, Div, Panic {
+    if nr < 2 || nr > 16 || nc < 2 || nc > 16 {
+        return TauResult { tau_rc: 0.0, tau_cr: 0.0 }
+    }
+    var total = 0.0
+    var rowm: [f64; 16] = [0.0; 16]
+    var colm: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < nr {
+        var j = 0
+        while j < nc {
+            let v = table[(i * nc + j) as usize]
+            total = total + v
+            rowm[i as usize] = rowm[i as usize] + v
+            colm[j as usize] = colm[j as usize] + v
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if total <= 0.0 { return TauResult { tau_rc: 0.0, tau_cr: 0.0 } }
+    // Σ_r n_r+²/N  and  Σ_c n_+c²/N
+    var srow2 = 0.0
+    var a = 0
+    while a < nr { srow2 = srow2 + rowm[a as usize] * rowm[a as usize] / total; a = a + 1 }
+    var scol2 = 0.0
+    var b = 0
+    while b < nc { scol2 = scol2 + colm[b as usize] * colm[b as usize] / total; b = b + 1 }
+    // τ(R|C): Σ_c Σ_r n_rc²/n_+c
+    var cond_rc = 0.0
+    var c = 0
+    while c < nc {
+        if colm[c as usize] > 0.0 {
+            var r = 0
+            while r < nr {
+                let v = table[(r * nc + c) as usize]
+                cond_rc = cond_rc + v * v / colm[c as usize]
+                r = r + 1
+            }
+        }
+        c = c + 1
+    }
+    // τ(C|R): Σ_r Σ_c n_rc²/n_r+
+    var cond_cr = 0.0
+    var rr = 0
+    while rr < nr {
+        if rowm[rr as usize] > 0.0 {
+            var k = 0
+            while k < nc {
+                let v = table[(rr * nc + k) as usize]
+                cond_cr = cond_cr + v * v / rowm[rr as usize]
+                k = k + 1
+            }
+        }
+        rr = rr + 1
+    }
+    var trc = 0.0
+    let den_rc = total - srow2
+    if den_rc > 1.0e-300 { trc = (cond_rc - srow2) / den_rc }
+    var tcr = 0.0
+    let den_cr = total - scol2
+    if den_cr > 1.0e-300 { tcr = (cond_cr - scol2) / den_cr }
+    return TauResult { tau_rc: trc, tau_cr: tcr }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// [[40,10],[5,45]]: N=100, rows (50,50), cols (45,55).
+// Σr²/N=(2500+2500)/100=50. Σc²/N=(2025+3025)/100=50.5.
+// cond_rc = (40²+5²)/45 + (10²+45²)/55 = 1625/45 + 2125/55 = 36.111111+38.636364=74.747475.
+// τ(R|C)=(74.747475-50)/(100-50)=0.494949.
+fn test_tau() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=40.0; t[1]=10.0
+    t[2]=5.0;  t[3]=45.0
+    let r = gk_tau(&t, 2, 2)
+    return check(1, approx(r.tau_rc, 0.494949, 1.0e-5))
+}
+
+// independence: rows proportional -> τ ≈ 0. [[10,20],[20,40]] (rank-1).
+fn test_independent() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=10.0; t[1]=20.0
+    t[2]=20.0; t[3]=40.0
+    let r = gk_tau(&t, 2, 2)
+    return check(10, approx(r.tau_rc, 0.0, 1.0e-9))
+}
+
+// perfect association (diagonal) -> τ = 1.
+fn test_perfect() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=50.0; t[1]=0.0
+    t[2]=0.0;  t[3]=50.0
+    let r = gk_tau(&t, 2, 2)
+    return check(20, approx(r.tau_rc, 1.0, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_tau() && ok
+    ok = test_independent() && ok
+    ok = test_perfect() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

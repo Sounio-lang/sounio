@@ -1,0 +1,130 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/grouped_stats.sio — statistics from grouped frequency data
+//
+// The mean, variance and modal class of data given only as a frequency table
+// (bin midpoints and counts) rather than raw observations:
+//
+//   grouped_stats(midpoint, freq, k) -> GroupedResult
+//
+//   mean = Σfᵢmᵢ / Σfᵢ,
+//   population variance = Σfᵢ(mᵢ−mean)² / Σfᵢ,
+//   sample variance = Σfᵢ(mᵢ−mean)² / (Σfᵢ − 1).
+//
+// Pure Sounio: two passes over the bins; inline sqrt. No external dependency, no
+// nested data-array calls.
+//
+// References:
+//   Kenney & Keeping, "Mathematics of Statistics" 3e, §4 (grouped data).
+
+module stats::grouped_stats
+
+fn gs_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct GroupedResult {
+    pub mean: f64,
+    pub var_pop: f64,     // population variance (÷ Σf)
+    pub var_sample: f64,  // sample variance (÷ (Σf−1))
+    pub sd: f64,          // √var_sample
+    pub modal_class: f64, // midpoint of the highest-frequency bin
+    pub total: f64,       // Σf
+}
+
+/// Statistics from grouped frequency data.
+///
+/// Parâmetros: midpoint — bin midpoints; freq — bin frequencies; k — bins (>=2, <=64).
+/// Retorno: GroupedResult (mean, var_pop, var_sample, sd, modal_class, total).
+/// Referências: Kenney & Keeping.
+pub fn grouped_stats(midpoint: &[f64; 64], freq: &[f64; 64], k: i32) -> GroupedResult with Mut, Div, Panic {
+    if k < 2 || k > 64 { return GroupedResult { mean: 0.0, var_pop: 0.0, var_sample: 0.0, sd: 0.0, modal_class: 0.0, total: 0.0 } }
+    var total = 0.0
+    var sfm = 0.0
+    var maxf = 0.0 - 1.0
+    var modal = 0.0
+    var i = 0
+    while i < k {
+        let f = freq[i as usize]
+        let m = midpoint[i as usize]
+        total = total + f
+        sfm = sfm + f * m
+        if f > maxf { maxf = f; modal = m }
+        i = i + 1
+    }
+    if total <= 0.0 { return GroupedResult { mean: 0.0, var_pop: 0.0, var_sample: 0.0, sd: 0.0, modal_class: modal, total: 0.0 } }
+    let mean = sfm / total
+    var ss = 0.0
+    var j = 0
+    while j < k { let d = midpoint[j as usize] - mean; ss = ss + freq[j as usize] * d * d; j = j + 1 }
+    let var_pop = ss / total
+    var var_s = 0.0
+    if total > 1.0 { var_s = ss / (total - 1.0) }
+    let sd = gs_sqrt(var_s)
+    return GroupedResult { mean: mean, var_pop: var_pop, var_sample: var_s, sd: sd, modal_class: modal, total: total }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// midpoints {5,15,25}, freqs {10,20,10}. Σf=40. mean=600/40=15.
+// SS=10·100+20·0+10·100=2000. var_pop=2000/40=50. modal class = 15 (freq 20).
+fn test_grouped() -> bool with IO, Mut, Div, Panic {
+    var m: [f64; 64] = [0.0; 64]
+    var f: [f64; 64] = [0.0; 64]
+    m[0]=5.0; m[1]=15.0; m[2]=25.0
+    f[0]=10.0; f[1]=20.0; f[2]=10.0
+    let r = grouped_stats(&m, &f, 3)
+    var ok = true
+    ok = check(1, approx(r.mean, 15.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.var_pop, 50.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.modal_class, 15.0, 1.0e-9)) && ok
+    ok = check(4, approx(r.total, 40.0, 1.0e-9)) && ok
+    return ok
+}
+
+// sample variance uses Σf-1: var_sample=2000/39=51.282051.
+fn test_sample_var() -> bool with IO, Mut, Div, Panic {
+    var m: [f64; 64] = [0.0; 64]
+    var f: [f64; 64] = [0.0; 64]
+    m[0]=5.0; m[1]=15.0; m[2]=25.0
+    f[0]=10.0; f[1]=20.0; f[2]=10.0
+    let r = grouped_stats(&m, &f, 3)
+    return check(10, approx(r.var_sample, 51.282051, 1.0e-4))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_grouped() && ok
+    ok = test_sample_var() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

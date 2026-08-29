@@ -125,14 +125,23 @@ fn first_fn_first_param_is_mut_slice(prog: Program) -> bool with Alloc {
 }
 
 fn parse_program_from_ascii(input: [i8; 256], len: i64) -> Program with Mut, IO, Panic, Div, Alloc {
-    var source: [i8; 1048576] = [0; 1048576]
     var i: i64 = 0
     while i < len {
-        source[i as usize] = input[i as usize]
+        CURSOR_SOURCE[i as usize] = input[i as usize]
         i = i + 1
     }
-    let state = lex(source, len, 0)
-    parse_program(state.tokens, state.token_count)
+    CURSOR_SOURCE_LEN = len
+    let token_count = lex_source_to_globals(len)
+    parse_program_preloaded(token_count)
+}
+
+fn parse_program_small(tokens: [Token; 65536], token_count: i64) -> Program with Mut, IO, Panic, Div, Alloc {
+    var i: i64 = 0
+    while i < token_count && i < 65536 {
+        parser_set_token_at(i, tokens[i as usize])
+        i = i + 1
+    }
+    parse_program_preloaded(token_count)
 }
 
 fn parser_name_is_knowledge_kaxi_publish(n: Name) -> bool {
@@ -262,6 +271,34 @@ fn call_second_arg_is_fma_code_args(args: ExprList) -> bool with Alloc {
     }
 }
 
+fn first_stmt_float_less_than(prog: Program, limit: f64) -> bool with Alloc {
+    match prog.items {
+        Some(list) => first_stmt_float_less_than_item((*list).head, limit),
+        None => false,
+    }
+}
+
+fn first_stmt_float_less_than_item(item: Item, limit: f64) -> bool with Alloc {
+    match item.fn_def {
+        Some(fd) => first_stmt_float_less_than_block((*fd).body, limit),
+        None => false,
+    }
+}
+
+fn first_stmt_float_less_than_block(block: Block, limit: f64) -> bool with Alloc {
+    match block.stmts {
+        Some(stmts) => first_stmt_float_less_than_stmt((*stmts).head, limit),
+        None => false,
+    }
+}
+
+fn first_stmt_float_less_than_stmt(stmt: Stmt, limit: f64) -> bool with Alloc {
+    match stmt.expr {
+        Some(expr) => (*expr).kind == ExprKind::ExprFloatLit && (*expr).float_val > 0.0 && (*expr).float_val < limit,
+        None => false,
+    }
+}
+
 // ============================================================================
 // SINGLE-LEVEL AST INSPECTION HELPERS
 // ============================================================================
@@ -353,6 +390,45 @@ fn second_item_kind(prog: Program) -> ItemKind with Alloc {
     }
 }
 
+fn method_tail_is_empty(tail: Option<Box<ItemList>>) -> bool with Alloc {
+    match tail {
+        Some(_) => false,
+        None => true,
+    }
+}
+
+fn method_tail_is_single_private(tail: Option<Box<ItemList>>) -> bool with Alloc {
+    match tail {
+        Some(rest) => !visibility_to_bool((*rest).head.visibility) && method_tail_is_empty((*rest).tail),
+        None => false,
+    }
+}
+
+fn method_list_is_public_then_private(methods: ItemList) -> bool with Alloc {
+    visibility_is_pub(methods.head.visibility) && method_tail_is_single_private(methods.tail)
+}
+
+fn impl_def_methods_are_public_then_private(impl_def: ImplDef) -> bool with Alloc {
+    match impl_def.methods {
+        Some(methods) => method_list_is_public_then_private(*methods),
+        None => false,
+    }
+}
+
+fn item_methods_are_public_then_private(item: Item) -> bool with Alloc {
+    match item.impl_def {
+        Some(impl_def) => impl_def_methods_are_public_then_private(*impl_def),
+        None => false,
+    }
+}
+
+fn first_impl_methods_are_public_then_private(prog: Program) -> bool with Alloc {
+    match prog.items {
+        Some(items) => item_methods_are_public_then_private((*items).head),
+        None => false,
+    }
+}
+
 fn first_fn_has_ret(prog: Program) -> bool with Alloc {
     match prog.items {
         Some(list) => fndef_opt_has_ret((*list).head.fn_def),
@@ -389,7 +465,7 @@ fn first_fn_body_has_stmts(prog: Program) -> bool with Alloc {
 fn test_empty_program() -> bool with Mut, IO, Panic, Div, Alloc {
     var tokens: [Token; 65536] = [Token::new(); 65536]
     tokens[0] = ptok_eof()
-    let prog = parse_program(tokens, 1)
+    let prog = parse_program_small(tokens, 1)
     count_items(prog) == 0
 }
 
@@ -403,7 +479,7 @@ fn test_single_fn() -> bool with Mut, IO, Panic, Div, Alloc {
     tokens[4] = ptok(TokenKind::LBrace)
     tokens[5] = ptok(TokenKind::RBrace)
     tokens[6] = ptok_eof()
-    let prog = parse_program(tokens, 7)
+    let prog = parse_program_small(tokens, 7)
     count_items(prog) == 1 && first_item_kind(prog) == ItemKind::ItemFn
 }
 
@@ -418,7 +494,7 @@ fn test_struct_item() -> bool with Mut, IO, Panic, Div, Alloc {
     tokens[5] = ptok_id3(105, 54, 52)  // "i64"
     tokens[6] = ptok(TokenKind::RBrace)
     tokens[7] = ptok_eof()
-    let prog = parse_program(tokens, 8)
+    let prog = parse_program_small(tokens, 8)
     count_items(prog) == 1 && first_item_kind(prog) == ItemKind::ItemStruct
 }
 
@@ -433,7 +509,7 @@ fn test_enum_item() -> bool with Mut, IO, Panic, Div, Alloc {
     tokens[5] = ptok_id1(66)   // 'B'
     tokens[6] = ptok(TokenKind::RBrace)
     tokens[7] = ptok_eof()
-    let prog = parse_program(tokens, 8)
+    let prog = parse_program_small(tokens, 8)
     count_items(prog) == 1 && first_item_kind(prog) == ItemKind::ItemEnum
 }
 
@@ -453,7 +529,7 @@ fn test_two_items() -> bool with Mut, IO, Panic, Div, Alloc {
     tokens[8] = ptok(TokenKind::LBrace)
     tokens[9] = ptok(TokenKind::RBrace)
     tokens[10] = ptok_eof()
-    let prog = parse_program(tokens, 11)
+    let prog = parse_program_small(tokens, 11)
     count_items(prog) == 2
         && first_item_kind(prog) == ItemKind::ItemStruct
         && second_item_kind(prog) == ItemKind::ItemFn
@@ -472,7 +548,7 @@ fn test_fn_with_return_type() -> bool with Mut, IO, Panic, Div, Alloc {
     tokens[7] = ptok_int(42)
     tokens[8] = ptok(TokenKind::RBrace)
     tokens[9] = ptok_eof()
-    let prog = parse_program(tokens, 10)
+    let prog = parse_program_small(tokens, 10)
     count_items(prog) == 1 && first_fn_has_ret(prog)
 }
 
@@ -488,7 +564,7 @@ fn test_fn_with_effects() -> bool with Mut, IO, Panic, Div, Alloc {
     tokens[6] = ptok(TokenKind::LBrace)
     tokens[7] = ptok(TokenKind::RBrace)
     tokens[8] = ptok_eof()
-    let prog = parse_program(tokens, 9)
+    let prog = parse_program_small(tokens, 9)
     count_items(prog) == 1 && first_fn_has_effects(prog)
 }
 
@@ -505,7 +581,7 @@ fn test_fn_with_param() -> bool with Mut, IO, Panic, Div, Alloc {
     tokens[7] = ptok(TokenKind::LBrace)
     tokens[8] = ptok(TokenKind::RBrace)
     tokens[9] = ptok_eof()
-    let prog = parse_program(tokens, 10)
+    let prog = parse_program_small(tokens, 10)
     count_items(prog) == 1 && first_fn_has_params(prog)
 }
 
@@ -523,7 +599,7 @@ fn test_fn_with_let() -> bool with Mut, IO, Panic, Div, Alloc {
     tokens[8] = ptok_int(5)
     tokens[9] = ptok(TokenKind::RBrace)
     tokens[10] = ptok_eof()
-    let prog = parse_program(tokens, 11)
+    let prog = parse_program_small(tokens, 11)
     count_items(prog) == 1 && first_fn_body_has_stmts(prog)
 }
 
@@ -540,7 +616,7 @@ fn test_fn_with_binop() -> bool with Mut, IO, Panic, Div, Alloc {
     tokens[7] = ptok_int(2)
     tokens[8] = ptok(TokenKind::RBrace)
     tokens[9] = ptok_eof()
-    let prog = parse_program(tokens, 10)
+    let prog = parse_program_small(tokens, 10)
     count_items(prog) == 1 && first_fn_body_has_stmts(prog)
 }
 
@@ -614,7 +690,7 @@ fn test_fn_with_shared_slice_param() -> bool with Mut, IO, Panic, Div, Alloc {
     tokens[10] = ptok(TokenKind::LBrace)
     tokens[11] = ptok(TokenKind::RBrace)
     tokens[12] = ptok_eof()
-    let prog = parse_program(tokens, 13)
+    let prog = parse_program_small(tokens, 13)
     count_items(prog) == 1 && first_fn_first_param_is_shared_slice(prog)
 }
 
@@ -634,8 +710,365 @@ fn test_fn_with_mut_slice_param() -> bool with Mut, IO, Panic, Div, Alloc {
     tokens[10] = ptok(TokenKind::LBrace)
     tokens[11] = ptok(TokenKind::RBrace)
     tokens[12] = ptok_eof()
-    let prog = parse_program(tokens, 13)
+    let prog = parse_program_small(tokens, 13)
     count_items(prog) == 1 && first_fn_first_param_is_mut_slice(prog)
+}
+
+// T14: ASCII lex+parse covers Card A parser forms.
+fn test_card_a_ascii_forms() -> bool with Mut, IO, Panic, Div, Alloc {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 116 as i8  // t
+    input[1] = 121 as i8  // y
+    input[2] = 112 as i8  // p
+    input[3] = 101 as i8  // e
+    input[4] = 32 as i8
+    input[5] = 65 as i8  // A
+    input[6] = 32 as i8
+    input[7] = 61 as i8  // =
+    input[8] = 32 as i8
+    input[9] = 105 as i8  // i
+    input[10] = 54 as i8  // 6
+    input[11] = 52 as i8  // 4
+    input[12] = 59 as i8  // ;
+    input[13] = 32 as i8
+    input[14] = 99 as i8  // c
+    input[15] = 111 as i8  // o
+    input[16] = 110 as i8  // n
+    input[17] = 115 as i8  // s
+    input[18] = 116 as i8  // t
+    input[19] = 32 as i8
+    input[20] = 78 as i8  // N
+    input[21] = 58 as i8  // :
+    input[22] = 32 as i8
+    input[23] = 105 as i8  // i
+    input[24] = 54 as i8  // 6
+    input[25] = 52 as i8  // 4
+    input[26] = 32 as i8
+    input[27] = 61 as i8  // =
+    input[28] = 32 as i8
+    input[29] = 52 as i8  // 4
+    input[30] = 59 as i8  // ;
+    input[31] = 32 as i8
+    input[32] = 102 as i8  // f
+    input[33] = 110 as i8  // n
+    input[34] = 32 as i8
+    input[35] = 102 as i8  // f
+    input[36] = 40 as i8  // (
+    input[37] = 41 as i8  // )
+    input[38] = 32 as i8
+    input[39] = 123 as i8  // {
+    input[40] = 32 as i8
+    input[41] = 118 as i8  // v
+    input[42] = 97 as i8  // a
+    input[43] = 114 as i8  // r
+    input[44] = 32 as i8
+    input[45] = 120 as i8  // x
+    input[46] = 58 as i8  // :
+    input[47] = 32 as i8
+    input[48] = 65 as i8  // A
+    input[49] = 59 as i8  // ;
+    input[50] = 32 as i8
+    input[51] = 118 as i8  // v
+    input[52] = 97 as i8  // a
+    input[53] = 114 as i8  // r
+    input[54] = 32 as i8
+    input[55] = 120 as i8  // x
+    input[56] = 115 as i8  // s
+    input[57] = 58 as i8  // :
+    input[58] = 32 as i8
+    input[59] = 91 as i8  // [
+    input[60] = 105 as i8  // i
+    input[61] = 54 as i8  // 6
+    input[62] = 52 as i8  // 4
+    input[63] = 59 as i8  // ;
+    input[64] = 32 as i8
+    input[65] = 78 as i8  // N
+    input[66] = 93 as i8  // ]
+    input[67] = 32 as i8
+    input[68] = 61 as i8  // =
+    input[69] = 32 as i8
+    input[70] = 91 as i8  // [
+    input[71] = 48 as i8  // 0
+    input[72] = 59 as i8  // ;
+    input[73] = 32 as i8
+    input[74] = 78 as i8  // N
+    input[75] = 93 as i8  // ]
+    input[76] = 59 as i8  // ;
+    input[77] = 32 as i8
+    input[78] = 108 as i8  // l
+    input[79] = 101 as i8  // e
+    input[80] = 116 as i8  // t
+    input[81] = 32 as i8
+    input[82] = 121 as i8  // y
+    input[83] = 58 as i8  // :
+    input[84] = 32 as i8
+    input[85] = 102 as i8  // f
+    input[86] = 54 as i8  // 6
+    input[87] = 52 as i8  // 4
+    input[88] = 32 as i8
+    input[89] = 61 as i8  // =
+    input[90] = 32 as i8
+    input[91] = 49 as i8  // 1
+    input[92] = 46 as i8
+    input[93] = 48 as i8  // 0
+    input[94] = 101 as i8  // e
+    input[95] = 45 as i8
+    input[96] = 51 as i8  // 3
+    input[97] = 59 as i8  // ;
+    input[98] = 32 as i8
+    input[99] = 105 as i8  // i
+    input[100] = 102 as i8  // f
+    input[101] = 32 as i8
+    input[102] = 121 as i8  // y
+    input[103] = 32 as i8
+    input[104] = 60 as i8  // <
+    input[105] = 32 as i8
+    input[106] = 49 as i8  // 1
+    input[107] = 46 as i8
+    input[108] = 48 as i8  // 0
+    input[109] = 32 as i8
+    input[110] = 123 as i8  // {
+    input[111] = 32 as i8
+    input[112] = 108 as i8  // l
+    input[113] = 111 as i8  // o
+    input[114] = 111 as i8  // o
+    input[115] = 112 as i8  // p
+    input[116] = 32 as i8
+    input[117] = 123 as i8  // {
+    input[118] = 32 as i8
+    input[119] = 98 as i8  // b
+    input[120] = 114 as i8  // r
+    input[121] = 101 as i8  // e
+    input[122] = 97 as i8  // a
+    input[123] = 107 as i8  // k
+    input[124] = 32 as i8
+    input[125] = 125 as i8  // }
+    input[126] = 32 as i8
+    input[127] = 125 as i8  // }
+    input[128] = 32 as i8
+    input[129] = 108 as i8  // l
+    input[130] = 101 as i8  // e
+    input[131] = 116 as i8  // t
+    input[132] = 32 as i8
+    input[133] = 122 as i8  // z
+    input[134] = 32 as i8
+    input[135] = 61 as i8  // =
+    input[136] = 32 as i8
+    input[137] = 126 as i8  // ~
+    input[138] = 120 as i8  // x
+    input[139] = 59 as i8  // ;
+    input[140] = 32 as i8
+    input[141] = 125 as i8  // }
+    input[142] = 32 as i8
+    input[143] = 107 as i8  // k
+    input[144] = 101 as i8  // e
+    input[145] = 114 as i8  // r
+    input[146] = 110 as i8  // n
+    input[147] = 101 as i8  // e
+    input[148] = 108 as i8  // l
+    input[149] = 32 as i8
+    input[150] = 102 as i8  // f
+    input[151] = 110 as i8  // n
+    input[152] = 32 as i8
+    input[153] = 103 as i8  // g
+    input[154] = 40 as i8  // (
+    input[155] = 41 as i8  // )
+    input[156] = 32 as i8
+    input[157] = 123 as i8  // {
+    input[158] = 32 as i8
+    input[159] = 125 as i8  // }
+
+    let prog = parse_program_from_ascii(input, 160)
+    count_items(prog) == 4 && parser_last_error_count() == 0
+}
+
+// T15: exponent-bearing float literal immediately before an if-block brace.
+fn test_card_a_float_exponent_if_block() -> bool with Mut, IO, Panic, Div, Alloc {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 102 as i8  // f
+    input[1] = 110 as i8  // n
+    input[2] = 32 as i8
+    input[3] = 102 as i8  // f
+    input[4] = 40 as i8  // (
+    input[5] = 41 as i8  // )
+    input[6] = 123 as i8  // {
+    input[7] = 108 as i8  // l
+    input[8] = 101 as i8  // e
+    input[9] = 116 as i8  // t
+    input[10] = 32 as i8
+    input[11] = 97 as i8  // a
+    input[12] = 58 as i8  // :
+    input[13] = 102 as i8  // f
+    input[14] = 54 as i8  // 6
+    input[15] = 52 as i8  // 4
+    input[16] = 61 as i8  // =
+    input[17] = 49 as i8  // 1
+    input[18] = 46 as i8  // .
+    input[19] = 48 as i8  // 0
+    input[20] = 101 as i8  // e
+    input[21] = 45 as i8  // -
+    input[22] = 49 as i8  // 1
+    input[23] = 53 as i8  // 5
+    input[24] = 59 as i8  // ;
+    input[25] = 105 as i8  // i
+    input[26] = 102 as i8  // f
+    input[27] = 32 as i8
+    input[28] = 97 as i8  // a
+    input[29] = 60 as i8  // <
+    input[30] = 49 as i8  // 1
+    input[31] = 46 as i8  // .
+    input[32] = 48 as i8  // 0
+    input[33] = 101 as i8  // e
+    input[34] = 45 as i8  // -
+    input[35] = 51 as i8  // 3
+    input[36] = 48 as i8  // 0
+    input[37] = 123 as i8  // {
+    input[38] = 114 as i8  // r
+    input[39] = 101 as i8  // e
+    input[40] = 116 as i8  // t
+    input[41] = 117 as i8  // u
+    input[42] = 114 as i8  // r
+    input[43] = 110 as i8  // n
+    input[44] = 32 as i8
+    input[45] = 49 as i8  // 1
+    input[46] = 125 as i8  // }
+    input[47] = 114 as i8  // r
+    input[48] = 101 as i8  // e
+    input[49] = 116 as i8  // t
+    input[50] = 117 as i8  // u
+    input[51] = 114 as i8  // r
+    input[52] = 110 as i8  // n
+    input[53] = 32 as i8
+    input[54] = 48 as i8  // 0
+    input[55] = 125 as i8  // }
+
+    let prog = parse_program_from_ascii(input, 56)
+    count_items(prog) == 1 &&
+    parser_last_error_count() == 0 &&
+    first_stmt_float_less_than(prog, 0.001)
+}
+
+fn test_card_a_raw_pointer_types() -> bool with Mut, IO, Panic, Div, Alloc {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 102 as i8  // f
+    input[1] = 110 as i8  // n
+    input[2] = 32 as i8
+    input[3] = 102 as i8  // f
+    input[4] = 40 as i8  // (
+    input[5] = 97 as i8  // a
+    input[6] = 58 as i8  // :
+    input[7] = 42 as i8  // *
+    input[8] = 109 as i8  // m
+    input[9] = 117 as i8  // u
+    input[10] = 116 as i8  // t
+    input[11] = 32 as i8
+    input[12] = 105 as i8  // i
+    input[13] = 54 as i8  // 6
+    input[14] = 52 as i8  // 4
+    input[15] = 44 as i8  // ,
+    input[16] = 98 as i8  // b
+    input[17] = 58 as i8  // :
+    input[18] = 42 as i8  // *
+    input[19] = 99 as i8  // c
+    input[20] = 111 as i8  // o
+    input[21] = 110 as i8  // n
+    input[22] = 115 as i8  // s
+    input[23] = 116 as i8  // t
+    input[24] = 32 as i8
+    input[25] = 102 as i8  // f
+    input[26] = 54 as i8  // 6
+    input[27] = 52 as i8  // 4
+    input[28] = 41 as i8  // )
+    input[29] = 123 as i8  // {
+    input[30] = 118 as i8  // v
+    input[31] = 97 as i8  // a
+    input[32] = 114 as i8  // r
+    input[33] = 32 as i8
+    input[34] = 120 as i8  // x
+    input[35] = 58 as i8  // :
+    input[36] = 42 as i8  // *
+    input[37] = 109 as i8  // m
+    input[38] = 117 as i8  // u
+    input[39] = 116 as i8  // t
+    input[40] = 32 as i8
+    input[41] = 105 as i8  // i
+    input[42] = 54 as i8  // 6
+    input[43] = 52 as i8  // 4
+    input[44] = 59 as i8  // ;
+    input[45] = 125 as i8  // }
+
+    let prog = parse_program_from_ascii(input, 46)
+    count_items(prog) == 1 &&
+    parser_last_error_count() == 0
+}
+
+// T17: impl S { pub fn a() {} fn b() {} } preserves method visibility in the AST.
+fn test_impl_method_visibility() -> bool with Mut, IO, Panic, Div, Alloc {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 105 as i8  // i
+    input[1] = 109 as i8  // m
+    input[2] = 112 as i8  // p
+    input[3] = 108 as i8  // l
+    input[4] = 32 as i8
+    input[5] = 83 as i8   // S
+    input[6] = 123 as i8  // {
+    input[7] = 112 as i8  // p
+    input[8] = 117 as i8  // u
+    input[9] = 98 as i8   // b
+    input[10] = 32 as i8
+    input[11] = 102 as i8 // f
+    input[12] = 110 as i8 // n
+    input[13] = 32 as i8
+    input[14] = 97 as i8  // a
+    input[15] = 40 as i8  // (
+    input[16] = 41 as i8  // )
+    input[17] = 123 as i8 // {
+    input[18] = 125 as i8 // }
+    input[19] = 102 as i8 // f
+    input[20] = 110 as i8 // n
+    input[21] = 32 as i8
+    input[22] = 98 as i8  // b
+    input[23] = 40 as i8  // (
+    input[24] = 41 as i8  // )
+    input[25] = 123 as i8 // {
+    input[26] = 125 as i8 // }
+    input[27] = 125 as i8 // }
+
+    let prog = parse_program_from_ascii(input, 28)
+    count_items(prog) == 1 &&
+    first_item_kind(prog) == ItemKind::ItemImpl &&
+    parser_last_error_count() == 0 &&
+    first_impl_methods_are_public_then_private(prog)
+}
+
+// T18: an incomplete pub method must not consume the impl's closing brace.
+fn test_incomplete_pub_impl_recovers_next_fn() -> bool with Mut, IO, Panic, Div, Alloc {
+    var input: [i8; 256] = [0; 256]
+    input[0] = 105 as i8  // i
+    input[1] = 109 as i8  // m
+    input[2] = 112 as i8  // p
+    input[3] = 108 as i8  // l
+    input[4] = 32 as i8
+    input[5] = 83 as i8   // S
+    input[6] = 123 as i8  // {
+    input[7] = 112 as i8  // p
+    input[8] = 117 as i8  // u
+    input[9] = 98 as i8   // b
+    input[10] = 125 as i8 // }
+    input[11] = 102 as i8 // f
+    input[12] = 110 as i8 // n
+    input[13] = 32 as i8
+    input[14] = 102 as i8 // f
+    input[15] = 40 as i8  // (
+    input[16] = 41 as i8  // )
+    input[17] = 123 as i8 // {
+    input[18] = 125 as i8 // }
+
+    let prog = parse_program_from_ascii(input, 19)
+    count_items(prog) == 2 &&
+    first_item_kind(prog) == ItemKind::ItemImpl &&
+    second_item_kind(prog) == ItemKind::ItemFn &&
+    parser_last_error_count() == 1
 }
 
 // ============================================================================
@@ -685,10 +1118,45 @@ fn run_parser_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     total = total + 1
     if test_fn_with_mut_slice_param() { passed = passed + 1 } else { print("FAIL: T13 fn_with_mut_slice_param\n") }
 
+    total = total + 1
+    if test_card_a_ascii_forms() { passed = passed + 1 } else { print("FAIL: T14 card_a_ascii_forms\n") }
+
+    total = total + 1
+    if test_card_a_float_exponent_if_block() { passed = passed + 1 } else { print("FAIL: T15 card_a_float_exponent_if_block\n") }
+
+    total = total + 1
+    if test_card_a_raw_pointer_types() { passed = passed + 1 } else { print("FAIL: T16 card_a_raw_pointer_types\n") }
+
+    total = total + 1
+    if test_impl_method_visibility() { passed = passed + 1 } else { print("FAIL: T17 impl_method_visibility\n") }
+
+    total = total + 1
+    if test_incomplete_pub_impl_recovers_next_fn() { passed = passed + 1 } else { print("FAIL: T18 incomplete_pub_impl_recovers_next_fn\n") }
+
     if passed == total {
         print("ALL PARSER TESTS PASSED\n")
     }
     print("Parser tests: ")
+
+    if passed == total { 0 } else { 1 }
+}
+
+fn run_parser_card_a_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var passed = 0
+    var total = 0
+
+    total = total + 1
+    if test_card_a_ascii_forms() { passed = passed + 1 } else { print("FAIL: card_a_ascii_forms\n") }
+
+    total = total + 1
+    if test_card_a_float_exponent_if_block() { passed = passed + 1 } else { print("FAIL: card_a_float_exponent_if_block\n") }
+
+    total = total + 1
+    if test_card_a_raw_pointer_types() { passed = passed + 1 } else { print("FAIL: card_a_raw_pointer_types\n") }
+
+    if passed == total {
+        print("ALL CARD A PARSER TESTS PASSED\n")
+    }
 
     if passed == total { 0 } else { 1 }
 }

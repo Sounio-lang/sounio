@@ -1,0 +1,406 @@
+// examples/epistemic/affine_nonassoc_n4_demo.sio
+//
+// N=4 AFFINE NOISE-SYMBOL PENTAGON CLAIM
+//
+// At N=3 (proven in affine_nonassoc_demo.sio), the ε0-coefficient spread
+// between the 2 parenthesizations equals [a1, b0, c0] — one associator
+// captures the full ambiguity (Claim 3 there). That is the N≤3 order-safety
+// claim.
+//
+// At N=4, Catalan C₃ = 5 parenthesizations. No single pairwise vertex
+// difference captures the full spread: picking any two of the 5 vertices
+// gives a norm² that differs from pentagon_variance (the 5-vertex population
+// variance). This is the genuine N=3→N=4 distinction.
+//
+// Claims here:
+//  4. Leibniz/implementation check: ε0-coefficient of P_k(w,x,y,z) equals
+//     P_k(w1,x0,y0,z0) machine-exactly (forced by first-order linearity when
+//     ε0 sits on exactly one factor). Confirms aff_mul correctness.
+//  5. Vanishing case: all-real quad → pentagon_variance = 0.
+//  6. No single pairwise edge recovers the 5-vertex variance for the
+//     non-Fano quad — demonstrating that N=4 requires pentagon_variance (all 5
+//     vertices) while N=3 needed only one associator.
+//
+// Self-contained. No imports. Build and run:
+//   cd /workspace/sounio-affine && \
+//   bin/souc examples/epistemic/affine_nonassoc_n4_demo.sio /tmp/affine_n4_out \
+//     && chmod +x /tmp/affine_n4_out && /tmp/affine_n4_out
+
+// ── octonion primitives (inlined from affine_nonassoc_demo.sio) ──────────────
+
+fn oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    var r0 = a[0] * b[0]
+    r0 = r0 - a[1] * b[1] - a[2] * b[2] - a[3] * b[3]
+    r0 = r0 - a[4] * b[4] - a[5] * b[5] - a[6] * b[6] - a[7] * b[7]
+    out[0] = r0
+    var r1 = a[0] * b[1] + a[1] * b[0]
+    r1 = r1 + a[2] * b[3] - a[3] * b[2]
+    r1 = r1 + a[4] * b[5] - a[5] * b[4]
+    r1 = r1 - a[6] * b[7] + a[7] * b[6]
+    out[1] = r1
+    var r2 = a[0] * b[2] + a[2] * b[0]
+    r2 = r2 - a[1] * b[3] + a[3] * b[1]
+    r2 = r2 + a[4] * b[6] - a[6] * b[4]
+    r2 = r2 + a[5] * b[7] - a[7] * b[5]
+    out[2] = r2
+    var r3 = a[0] * b[3] + a[3] * b[0]
+    r3 = r3 + a[1] * b[2] - a[2] * b[1]
+    r3 = r3 + a[4] * b[7] - a[7] * b[4]
+    r3 = r3 - a[5] * b[6] + a[6] * b[5]
+    out[3] = r3
+    var r4 = a[0] * b[4] + a[4] * b[0]
+    r4 = r4 - a[1] * b[5] + a[5] * b[1]
+    r4 = r4 - a[2] * b[6] + a[6] * b[2]
+    r4 = r4 - a[3] * b[7] + a[7] * b[3]
+    out[4] = r4
+    var r5 = a[0] * b[5] + a[5] * b[0]
+    r5 = r5 + a[1] * b[4] - a[4] * b[1]
+    r5 = r5 - a[2] * b[7] + a[7] * b[2]
+    r5 = r5 + a[3] * b[6] - a[6] * b[3]
+    out[5] = r5
+    var r6 = a[0] * b[6] + a[6] * b[0]
+    r6 = r6 + a[1] * b[7] - a[7] * b[1]
+    r6 = r6 + a[2] * b[4] - a[4] * b[2]
+    r6 = r6 - a[3] * b[5] + a[5] * b[3]
+    out[6] = r6
+    var r7 = a[0] * b[7] + a[7] * b[0]
+    r7 = r7 - a[1] * b[6] + a[6] * b[1]
+    r7 = r7 + a[2] * b[5] - a[5] * b[2]
+    r7 = r7 + a[3] * b[4] - a[4] * b[3]
+    out[7] = r7
+}
+
+fn oct_norm_sq(a: &[f64; 8]) -> f64 with Mut {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 { sum = sum + a[i] * a[i]; i = i + 1 }
+    sum
+}
+
+fn af_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+fn f_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn scaled(x: f64) -> i64 { (x * 1000000.0) as i64 }
+
+// ── affine octonion form (same as N=3 demo, NSYM=4 symbols) ─────────────────
+
+struct AffOct {
+    c0: [f64; 8],    // central value
+    co: [f64; 32],   // 4 symbols × 8 components
+}
+
+fn aff_zero() -> AffOct {
+    AffOct { c0: [0.0; 8], co: [0.0; 32] }
+}
+
+fn aff_set_central(a: &!AffOct, v: &[f64; 8]) with Mut {
+    var c: i64 = 0
+    while c < 8 { a.c0[c] = v[c]; c = c + 1 }
+}
+
+fn aff_set_sym(a: &!AffOct, k: i64, coeff: &[f64; 8]) with Mut {
+    var c: i64 = 0
+    while c < 8 { a.co[k * 8 + c] = coeff[c]; c = c + 1 }
+}
+
+fn aff_get_sym(a: &AffOct, k: i64, out: &![f64; 8]) with Mut {
+    var c: i64 = 0
+    while c < 8 { out[c] = a.co[k * 8 + c]; c = c + 1 }
+}
+
+fn aff_leaf(v: &[f64; 8], k: i64, coeff: &[f64; 8]) -> AffOct with Mut {
+    var a = aff_zero()
+    aff_set_central(&!a, v)
+    aff_set_sym(&!a, k, coeff)
+    a
+}
+
+fn aff_mul(a: &AffOct, b: &AffOct, out: &!AffOct) with Mut, Div, NonAssoc {
+    var a0: [f64; 8] = [0.0; 8]
+    var b0: [f64; 8] = [0.0; 8]
+    var c: i64 = 0
+    while c < 8 { a0[c] = a.c0[c]; b0[c] = b.c0[c]; c = c + 1 }
+    var prod: [f64; 8] = [0.0; 8]
+    oct_mul(&a0, &b0, &!prod)
+    aff_set_central(out, &prod)
+    var k: i64 = 0
+    while k < 4 {
+        var da: [f64; 8] = [0.0; 8]
+        aff_get_sym(a, k, &!da)
+        var db: [f64; 8] = [0.0; 8]
+        aff_get_sym(b, k, &!db)
+        var t1: [f64; 8] = [0.0; 8]
+        oct_mul(&a0, &db, &!t1)
+        var t2: [f64; 8] = [0.0; 8]
+        oct_mul(&da, &b0, &!t2)
+        var sum: [f64; 8] = [0.0; 8]
+        var c2: i64 = 0
+        while c2 < 8 { sum[c2] = t1[c2] + t2[c2]; c2 = c2 + 1 }
+        aff_set_sym(out, k, &sum)
+        k = k + 1
+    }
+}
+
+// ── pentagon on plain octonions (inlined from associator_field.sio) ──────────
+// P0=((wx)y)z  P1=(w(xy))z  P2=(wx)(yz)  P3=w((xy)z)  P4=w(x(yz))
+fn pentagon_products(
+    w: &[f64; 8], x: &[f64; 8], y: &[f64; 8], z: &[f64; 8], ps: &![f64; 40]
+) with Mut, Div, NonAssoc {
+    var t1: [f64; 8] = [0.0; 8]
+    var t2: [f64; 8] = [0.0; 8]
+    var p0: [f64; 8] = [0.0; 8]
+    var p1: [f64; 8] = [0.0; 8]
+    var p2: [f64; 8] = [0.0; 8]
+    var p3: [f64; 8] = [0.0; 8]
+    var p4: [f64; 8] = [0.0; 8]
+    oct_mul(w, x, &!t1);  oct_mul(&t1, y, &!t2);  oct_mul(&t2, z, &!p0)
+    oct_mul(x, y, &!t1);  oct_mul(w, &t1, &!t2);  oct_mul(&t2, z, &!p1)
+    oct_mul(w, x, &!t1);  oct_mul(y, z, &!t2);    oct_mul(&t1, &t2, &!p2)
+    oct_mul(x, y, &!t1);  oct_mul(&t1, z, &!t2);  oct_mul(w, &t2, &!p3)
+    oct_mul(y, z, &!t1);  oct_mul(x, &t1, &!t2);  oct_mul(w, &t2, &!p4)
+    var c: i64 = 0
+    while c < 8 {
+        ps[c] = p0[c]; ps[8 + c] = p1[c]; ps[16 + c] = p2[c]
+        ps[24 + c] = p3[c]; ps[32 + c] = p4[c]
+        c = c + 1
+    }
+}
+
+// norm² of the difference between two rows k and j in the 5×8 pentagon array.
+fn pentagon_edge_normsq(ps: &[f64; 40], k: i64, j: i64) -> f64 with Mut {
+    var sum: f64 = 0.0
+    var c: i64 = 0
+    while c < 8 {
+        let d = ps[k * 8 + c] - ps[j * 8 + c]
+        sum = sum + d * d
+        c = c + 1
+    }
+    sum
+}
+
+fn pentagon_variance(ps: &[f64; 40]) -> f64 with Mut, Div {
+    var mean: [f64; 8] = [0.0; 8]
+    var c: i64 = 0
+    while c < 8 {
+        var s: f64 = 0.0
+        var k: i64 = 0
+        while k < 5 { s = s + ps[k * 8 + c]; k = k + 1 }
+        mean[c] = s / 5.0
+        c = c + 1
+    }
+    var v: f64 = 0.0
+    var k: i64 = 0
+    while k < 5 {
+        var d2: f64 = 0.0
+        var cc: i64 = 0
+        while cc < 8 {
+            let d = ps[k * 8 + cc] - mean[cc]
+            d2 = d2 + d * d
+            cc = cc + 1
+        }
+        v = v + d2
+        k = k + 1
+    }
+    v / 5.0
+}
+
+// ── main: N=4 claims ─────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
+    var fails: i64 = 0
+
+    // Setup: w = w0 + w1·ε0 ; x, y, z = exact (no symbols).
+    // Use the non-Fano basis triple that gave assoc≠0 in N=3:
+    //   w1=e1, x0=e2, y0=e4  → nonzero triple associator.
+    // For z0 we pick e1 (mirrors associator_field_pentagon.sio's verified test).
+    var w0: [f64; 8] = [0.0; 8]; w0[0] = 1.0  // w central = 1 (real part)
+    var w1: [f64; 8] = [0.0; 8]; w1[1] = 1.0  // w noise direction = e1
+    var x0: [f64; 8] = [0.0; 8]; x0[2] = 1.0  // x = e2
+    var y0: [f64; 8] = [0.0; 8]; y0[4] = 1.0  // y = e4
+    var z0: [f64; 8] = [0.0; 8]; z0[1] = 1.0  // z = e1
+
+    // Build affine forms: w carries ε0; x,y,z are exact (zero co).
+    let aw = aff_leaf(&w0, 0, &w1)
+    var ax = aff_zero(); aff_set_central(&!ax, &x0)
+    var ay = aff_zero(); aff_set_central(&!ay, &y0)
+    var az = aff_zero(); aff_set_central(&!az, &z0)
+
+    // ── Claim 4: N=4 ε0-coefficients == P(w1, x0, y0, z0) ──────────────────
+    // Compute all 5 affine parenthesizations and extract the ε0-coefficient row.
+    // P0 = ((aw·ax)·ay)·az
+    var t1 = aff_zero()
+    var t2 = aff_zero()
+    var ap0 = aff_zero()
+    aff_mul(&aw, &ax, &!t1); aff_mul(&t1, &ay, &!t2); aff_mul(&t2, &az, &!ap0)
+
+    // P1 = (aw·(ax·ay))·az
+    var s1 = aff_zero()
+    var s2 = aff_zero()
+    var ap1 = aff_zero()
+    aff_mul(&ax, &ay, &!s1); aff_mul(&aw, &s1, &!s2); aff_mul(&s2, &az, &!ap1)
+
+    // P2 = (aw·ax)·(ay·az)
+    var u1 = aff_zero()
+    var u2 = aff_zero()
+    var ap2 = aff_zero()
+    aff_mul(&aw, &ax, &!u1); aff_mul(&ay, &az, &!u2); aff_mul(&u1, &u2, &!ap2)
+
+    // P3 = aw·((ax·ay)·az)
+    var q1 = aff_zero()
+    var q2 = aff_zero()
+    var ap3 = aff_zero()
+    aff_mul(&ax, &ay, &!q1); aff_mul(&q1, &az, &!q2); aff_mul(&aw, &q2, &!ap3)
+
+    // P4 = aw·(ax·(ay·az))
+    var r1 = aff_zero()
+    var r2 = aff_zero()
+    var ap4 = aff_zero()
+    aff_mul(&ay, &az, &!r1); aff_mul(&ax, &r1, &!r2); aff_mul(&aw, &r2, &!ap4)
+
+    // Extract ε0-coefficient from each affine parenthesization → aff_coeffs[k*8+c]
+    var aff_coeffs: [f64; 40] = [0.0; 40]
+    var c0: [f64; 8] = [0.0; 8]; aff_get_sym(&ap0, 0, &!c0)
+    var c1: [f64; 8] = [0.0; 8]; aff_get_sym(&ap1, 0, &!c1)
+    var c2: [f64; 8] = [0.0; 8]; aff_get_sym(&ap2, 0, &!c2)
+    var c3: [f64; 8] = [0.0; 8]; aff_get_sym(&ap3, 0, &!c3)
+    var c4: [f64; 8] = [0.0; 8]; aff_get_sym(&ap4, 0, &!c4)
+    var ci: i64 = 0
+    while ci < 8 {
+        aff_coeffs[ci]      = c0[ci]
+        aff_coeffs[8  + ci] = c1[ci]
+        aff_coeffs[16 + ci] = c2[ci]
+        aff_coeffs[24 + ci] = c3[ci]
+        aff_coeffs[32 + ci] = c4[ci]
+        ci = ci + 1
+    }
+
+    // Direct pentagon products on (w1, x0, y0, z0) — the claimed identity.
+    var plain_ps: [f64; 40] = [0.0; 40]
+    pentagon_products(&w1, &x0, &y0, &z0, &!plain_ps)
+
+    // Compare: max component-wise absolute difference should be zero.
+    var max_diff: f64 = 0.0
+    var j: i64 = 0
+    while j < 40 {
+        let dd = f_abs(aff_coeffs[j] - plain_ps[j])
+        if dd > max_diff { max_diff = dd }
+        j = j + 1
+    }
+
+    let var_aff   = pentagon_variance(&aff_coeffs)
+    let var_plain = pentagon_variance(&plain_ps)
+
+    println("── Claim 4: N=4 noise-symbol coefficients == P(w1,x0,y0,z0) ──")
+    print(scaled(max_diff));  println("   = max component-wise |aff_coeff - plain| (→0)")
+    print(scaled(var_aff));   println("   = pentagon_variance of affine ε0-coeff row (×1e6)")
+    print(scaled(var_plain)); println("   = pentagon_variance of plain pentagon     (×1e6)")
+    if max_diff < 0.000000001 {
+        println("  PASS: ε0-coefficient row of all 5 affine products == P(w1,x0,y0,z0)")
+        println("        order-ambiguity rides the noise symbol exactly at N=4")
+    } else { println("  FAIL: coefficient mismatch"); fails = fails + 1 }
+    if var_aff > 0.0000001 {
+        println("  PASS: pentagon_variance > 0 (genuinely non-associative N=4 quad)")
+    } else { println("  FAIL: variance zero — associative case leaked in"); fails = fails + 1 }
+
+    // ── Claim 5: vanishing case — all-real quad collapses pentagon variance ─
+    var rw0: [f64; 8] = [0.0; 8]; rw0[0] = 2.0
+    var rw1: [f64; 8] = [0.0; 8]; rw1[0] = 0.1   // small real perturbation on ε0
+    var rx0: [f64; 8] = [0.0; 8]; rx0[0] = 3.0
+    var ry0: [f64; 8] = [0.0; 8]; ry0[0] = 5.0
+    var rz0: [f64; 8] = [0.0; 8]; rz0[0] = 7.0
+
+    let arw = aff_leaf(&rw0, 0, &rw1)
+    var arx = aff_zero(); aff_set_central(&!arx, &rx0)
+    var ary = aff_zero(); aff_set_central(&!ary, &ry0)
+    var arz = aff_zero(); aff_set_central(&!arz, &rz0)
+
+    var rt1 = aff_zero(); var rt2 = aff_zero(); var rap0 = aff_zero()
+    aff_mul(&arw, &arx, &!rt1); aff_mul(&rt1, &ary, &!rt2); aff_mul(&rt2, &arz, &!rap0)
+    var rs1 = aff_zero(); var rs2 = aff_zero(); var rap1 = aff_zero()
+    aff_mul(&arx, &ary, &!rs1); aff_mul(&arw, &rs1, &!rs2); aff_mul(&rs2, &arz, &!rap1)
+    var ru1 = aff_zero(); var ru2 = aff_zero(); var rap2 = aff_zero()
+    aff_mul(&arw, &arx, &!ru1); aff_mul(&ary, &arz, &!ru2); aff_mul(&ru1, &ru2, &!rap2)
+    var rq1 = aff_zero(); var rq2 = aff_zero(); var rap3 = aff_zero()
+    aff_mul(&arx, &ary, &!rq1); aff_mul(&rq1, &arz, &!rq2); aff_mul(&arw, &rq2, &!rap3)
+    var rr1 = aff_zero(); var rr2 = aff_zero(); var rap4 = aff_zero()
+    aff_mul(&ary, &arz, &!rr1); aff_mul(&arx, &rr1, &!rr2); aff_mul(&arw, &rr2, &!rap4)
+
+    var raff: [f64; 40] = [0.0; 40]
+    var rc0: [f64; 8] = [0.0; 8]; aff_get_sym(&rap0, 0, &!rc0)
+    var rc1: [f64; 8] = [0.0; 8]; aff_get_sym(&rap1, 0, &!rc1)
+    var rc2: [f64; 8] = [0.0; 8]; aff_get_sym(&rap2, 0, &!rc2)
+    var rc3: [f64; 8] = [0.0; 8]; aff_get_sym(&rap3, 0, &!rc3)
+    var rc4: [f64; 8] = [0.0; 8]; aff_get_sym(&rap4, 0, &!rc4)
+    var rci: i64 = 0
+    while rci < 8 {
+        raff[rci]      = rc0[rci]
+        raff[8  + rci] = rc1[rci]
+        raff[16 + rci] = rc2[rci]
+        raff[24 + rci] = rc3[rci]
+        raff[32 + rci] = rc4[rci]
+        rci = rci + 1
+    }
+    let var_real = pentagon_variance(&raff)
+
+    println("")
+    println("── Claim 5: all-real quad → pentagon variance == 0 (associative) ──")
+    print(scaled(var_real)); println("   = pentagon_variance of ε0-coeff row for real quad (→0 ×1e6)")
+    if f_abs(var_real) < 0.000000001 {
+        println("  PASS: real numbers associate → zero spread across 5 parenthesizations")
+    } else { println("  FAIL"); fails = fails + 1 }
+
+    // ── Claim 6: no single pairwise edge recovers the 5-vertex variance ─────
+    // At N=3, one pairwise difference (left minus right bracket) exactly equals
+    // the associator — a single edge captures the full spread. At N=4 the
+    // pentagon has 5 vertices; the "edge variance" (norm²/2 of two vertices,
+    // which is what a single pairwise check measures) differs from the 5-vertex
+    // population variance for every choice of pair.
+    //
+    // We check all C(5,2)=10 pairs against pentagon_variance.  If ANY pair
+    // gives edge_normsq/2 == var_aff (within tolerance), a single pairwise
+    // diff would be sufficient — that would mean N=4 reduces to N=3. The
+    // claim is that NONE do.
+    //
+    // (edge_normsq/2 is the "two-point variance" of the two vertices,
+    // which is how a pairwise Δ maps to a variance budget.)
+    let pvar = pentagon_variance(&plain_ps)
+    var any_pair_matches: i64 = 0
+    var i6: i64 = 0
+    while i6 < 5 {
+        var j6: i64 = i6 + 1
+        while j6 < 5 {
+            let en = pentagon_edge_normsq(&plain_ps, i6, j6)
+            let pair_var = en / 2.0   // two-point population variance
+            if f_abs(pair_var - pvar) < 0.000001 { any_pair_matches = any_pair_matches + 1 }
+            j6 = j6 + 1
+        }
+        i6 = i6 + 1
+    }
+    println("")
+    println("── Claim 6: no pairwise edge recovers the 5-vertex pentagon_variance ──")
+    print(scaled(pvar)); println("   = pentagon_variance (×1e6)")
+    print(any_pair_matches); println("   = #pairs whose two-point variance matches pentagon_variance (→0)")
+    if any_pair_matches == 0 {
+        println("  PASS: N=4 needs all 5 vertices — no single pairwise diff suffices")
+        println("        (this is the genuine N=3→N=4 distinction)")
+    } else { println("  FAIL: a single pair recovered the full variance — N=4 reduces to N=3"); fails = fails + 1 }
+
+    println("")
+    if fails == 0 { println("ALL CLAIMS VERIFIED"); return 0 }
+    print(fails); println(" claim(s) FAILED")
+    return 1
+}

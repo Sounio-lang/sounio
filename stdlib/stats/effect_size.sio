@@ -1,0 +1,205 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/effect_size.sio — standardised effect sizes with intervals
+//
+// Effect sizes answer "how big", not just "is it significant" — the companion to
+// every t-test / ANOVA in the suite:
+//
+//   cohens_d(x, nx, y, ny, conf) -> EffectSize   (two-group standardised mean diff)
+//   eta_squared_from_f(f, df1, df2) -> f64        (ANOVA variance explained)
+//
+// Cohen's d = (x̄ − ȳ) / s_pooled,  s_pooled = sqrt(((nx−1)sx² + (ny−1)sy²)/(nx+ny−2)).
+// Hedges' g = J·d with the small-sample bias correction J = 1 − 3/(4(nx+ny)−9).
+// SE(d) = sqrt((nx+ny)/(nx·ny) + d²/(2(nx+ny))); CI = d ± z·SE(d).
+// eta² = df1·F / (df1·F + df2).
+//
+// The `magnitude` code follows Cohen (1988): 0 negligible (<0.2), 1 small (<0.5),
+// 2 medium (<0.8), 3 large.
+//
+// Pure Sounio; the only dependency is the normal quantile (special::erf).
+//
+// References:
+//   Cohen (1988) "Statistical Power Analysis for the Behavioral Sciences" 2nd ed.
+//   Hedges (1981) "Distribution theory for Glass's estimator of effect size"
+//   Lakens (2013) "Calculating and reporting effect sizes", Front. Psychol.
+
+module stats::effect_size
+
+use special::erf::{normal_quantile}
+
+// ============================================================================
+// INTERNAL
+// ============================================================================
+
+fn es_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 { y = 0.5 * (y + scaled / y); i = i + 1 }
+    return y / scale_back
+}
+
+fn es_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn es_mean(a: &[f64; 256], off: i64, m: i64) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < m { s = s + a[(off + i) as usize]; i = i + 1 }
+    return s / (m as f64)
+}
+
+fn es_var(a: &[f64; 256], off: i64, m: i64) -> f64 with Mut, Div, Panic {
+    let mu = es_mean(a, off, m)
+    var ss = 0.0
+    var i = 0
+    while i < m {
+        let d = a[(off + i) as usize] - mu
+        ss = ss + d * d
+        i = i + 1
+    }
+    return ss / ((m - 1) as f64)
+}
+
+// ============================================================================
+// RESULT TYPE
+// ============================================================================
+
+pub struct EffectSize {
+    pub d: f64,          // Cohen's d
+    pub hedges_g: f64,   // bias-corrected (Hedges' g)
+    pub se: f64,         // standard error of d
+    pub ci_lo: f64,      // CI on d, lower
+    pub ci_hi: f64,      // CI on d, upper
+    pub magnitude: i64,  // 0 negligible, 1 small, 2 medium, 3 large (|d|)
+}
+
+// ============================================================================
+// COHEN'S D
+// ============================================================================
+
+/// Cohen's d and Hedges' g for two independent groups laid out consecutively:
+/// group X is x[0..nx], group Y is x[nx..nx+ny] — no, they are separate arrays.
+///
+/// Parâmetros: x — group 1; y — group 2; nx, ny — sizes (>= 2); conf — CI level.
+/// Retorno: EffectSize (d, Hedges' g, SE, CI on d, magnitude code).
+/// Referências: Cohen (1988); Hedges (1981).
+pub fn cohens_d(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, conf: f64) -> EffectSize with Mut, Div, Panic {
+    if nx < 2 || ny < 2 {
+        return EffectSize { d: 0.0, hedges_g: 0.0, se: 0.0, ci_lo: 0.0, ci_hi: 0.0, magnitude: 0 }
+    }
+    let nxf = nx as f64
+    let nyf = ny as f64
+    let mx = es_mean(x, 0, nx as i64)
+    let my = es_mean(y, 0, ny as i64)
+    let vx = es_var(x, 0, nx as i64)
+    let vy = es_var(y, 0, ny as i64)
+
+    let sp2 = ((nxf - 1.0) * vx + (nyf - 1.0) * vy) / (nxf + nyf - 2.0)
+    let sp = es_sqrt(sp2)
+    var d = 0.0
+    if sp > 1.0e-300 { d = (mx - my) / sp }
+
+    // Hedges' g bias correction
+    let jc = 1.0 - 3.0 / (4.0 * (nxf + nyf) - 9.0)
+    let g = jc * d
+
+    // SE(d) and CI (normal approximation)
+    let se = es_sqrt((nxf + nyf) / (nxf * nyf) + d * d / (2.0 * (nxf + nyf)))
+    let zc = normal_quantile(0.5 + conf / 2.0)
+    let ci_lo = d - zc * se
+    let ci_hi = d + zc * se
+
+    let ad = es_abs(d)
+    var mag = 3
+    if ad < 0.2 { mag = 0 } else if ad < 0.5 { mag = 1 } else if ad < 0.8 { mag = 2 }
+
+    return EffectSize { d: d, hedges_g: g, se: se, ci_lo: ci_lo, ci_hi: ci_hi, magnitude: mag as i64 }
+}
+
+/// Eta-squared (proportion of variance explained) from an ANOVA F and its dfs.
+/// eta² = df1·F / (df1·F + df2).
+pub fn eta_squared_from_f(f: f64, df1: f64, df2: f64) -> f64 {
+    let num = df1 * f
+    let den = df1 * f + df2
+    if den <= 0.0 { return 0.0 }
+    return num / den
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x=1..5 (mean 3, var 2.5), y=3..7 (mean 5, var 2.5).
+// s_pooled=sqrt((4·2.5+4·2.5)/8)=sqrt(2.5)=1.581139. d=(3-5)/1.581139=-1.264911.
+// J=1-3/31=0.903226. g=-1.142631.
+// SE=sqrt(10/25 + d²/20)=sqrt(0.4+0.08)=sqrt(0.48)=0.692820.
+// 95% CI: -1.264911 ± 1.959964·0.692820 = -1.264911 ± 1.357903 -> [-2.622814, 0.092992]
+fn test_d() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    y[0]=3.0; y[1]=4.0; y[2]=5.0; y[3]=6.0; y[4]=7.0
+    let e = cohens_d(&x, 5, &y, 5, 0.95)
+    var ok = true
+    ok = check(1, approx(e.d, 0.0 - 1.264911, 1.0e-5)) && ok
+    ok = check(2, approx(e.hedges_g, 0.0 - 1.142500, 1.0e-5)) && ok
+    ok = check(3, approx(e.se, 0.692820, 1.0e-5)) && ok
+    ok = check(4, approx(e.ci_lo, 0.0 - 2.622814, 1.0e-4)) && ok
+    ok = check(5, approx(e.ci_hi, 0.092992, 1.0e-4)) && ok
+    ok = check(6, e.magnitude == 3) && ok   // |d|=1.26 -> large
+    return ok
+}
+
+// Magnitude codes: d≈0.3 (small=1), d≈0.65 (medium=2).
+fn test_magnitude() -> bool with IO, Mut, Div, Panic {
+    // identical means -> d=0, negligible
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 5 { x[i as usize] = i as f64; y[i as usize] = i as f64; i = i + 1 }
+    let e = cohens_d(&x, 5, &y, 5, 0.95)
+    var ok = true
+    ok = check(10, approx(e.d, 0.0, 1.0e-9)) && ok
+    ok = check(11, e.magnitude == 0) && ok
+    return ok
+}
+
+// eta² from F: F=2, df1=2, df2=12 -> 2·2/(2·2+12)=4/16=0.25.
+fn test_eta() -> bool with IO, Mut, Div, Panic {
+    return check(20, approx(eta_squared_from_f(2.0, 2.0, 12.0), 0.25, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_d() && ok
+    ok = test_magnitude() && ok
+    ok = test_eta() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

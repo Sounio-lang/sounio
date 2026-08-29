@@ -1,0 +1,234 @@
+//! stdlib/crypto/aead.sio — unified AEAD dispatch interface.
+//!
+//! Combines Task 3 (`crypto::chacha20`) + Task 4 (`crypto::poly1305`) into
+//! the RFC 8439 section 2.8 AEAD_CHACHA20_POLY1305 construction, and
+//! dispatches the two AES variants straight through to Task 2's
+//! `crypto::gcm::gcm_seal`/`gcm_open`. This is the interface a future TLS
+//! handshake sub-project calls directly: `aead_seal`/`aead_open` plus the
+//! three `AEAD_*` algorithm constants.
+//!
+//! RFC 8439 section 2.8's own padding/length-encoding rules (mac_data =
+//! aad || pad16(aad) || ciphertext || pad16(ciphertext) ||
+//! len(aad) as u64-LE || len(ciphertext) as u64-LE) are DISTINCT from
+//! GCM's ghash (big-endian BIT counts, single combined AAD/ciphertext
+//! length block) already implemented in gcm.sio -- deliberately NOT
+//! shared code with it, per this task's own brief.
+//!
+//! RFC 8439 section 2.8.2's worked AEAD test vector was independently
+//! re-fetched from the primary source
+//! (https://www.rfc-editor.org/rfc/rfc8439.txt, section "2.8.2. Example
+//! and Test Vector for AEAD_CHACHA20_POLY1305") on 2026-08-25 and
+//! confirmed byte-for-byte against tests/run-pass/aead_chacha20poly1305.sio.
+//! That re-fetch caught a real transcription error in this task's own
+//! brief: the brief's Step-1 test sketch used nonce =
+//! 40 41 42 43 44 45 46 47 48 49 4a 4b (12 bytes), which is wrong. The
+//! RFC's own worked example builds its 96-bit nonce from a separate
+//! 32-bit "fixed-common part" (07 00 00 00) followed by an 8-byte IV
+//! (40 41 42 43 44 45 46 47) -- confirmed directly from the RFC's own
+//! internal ChaCha20-state dump ("Setup for generating Poly1305 one-time
+//! key (sender id=7)": word12=00000000, word13=00000007,
+//! word14=43424140, word15=47464544 -- word13..15 read out in per-word
+//! little-endian byte order give exactly 07 00 00 00 40 41 42 43 44 45
+//! 46 47). The correct 12-byte nonce is therefore
+//! [0x07,0x00,0x00,0x00,0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47], used in
+//! this task's own test file.
+//!
+//! CONSTANT-TIME SCOPE (final whole-plan review, Finding 8): tag
+//! comparison in `chacha20poly1305_open` (below) and in `gcm.sio`'s
+//! `gcm_open` is constant-time (accumulate an OR of byte differences,
+//! branch once), as required. That is the ONLY constant-time guarantee
+//! this module makes. Two data-dependent-timing surfaces remain
+//! elsewhere in the dependency chain, inherent to non-bitsliced software
+//! crypto rather than a defect, and a future TLS consumer should not
+//! assume full constant-time behaviour beyond tag comparison:
+//!   - `crypto::aes`'s S-box substitution step is a plain table lookup
+//!     (`sbox[byte]`), whose memory-access pattern depends on the
+//!     secret byte value (classic AES cache-timing surface).
+//!   - `crypto::poly1305`'s final reduction takes a data-dependent
+//!     `overflow` branch (`if overflow == 1 { ... }`, selecting between
+//!     the reduced and unreduced limb set) -- see that file's own
+//!     header, which already documents this as an explicit, accepted
+//!     non-goal.
+//! Making either of these constant-time (bitslicing AES, or a
+//! branchless mask-select in Poly1305) is out of scope for this plan.
+
+use net::socket::*
+use crypto::aes::*
+use crypto::gcm::*
+use crypto::chacha20::*
+use crypto::poly1305::*
+
+pub const AEAD_AES_128_GCM: i32 = 0
+pub const AEAD_AES_256_GCM: i32 = 1
+pub const AEAD_CHACHA20_POLY1305: i32 = 2
+
+// RFC 8439 section 2.8's AEAD_CHACHA20_POLY1305 construction. Distinct
+// padding/length-encoding from GCM's ghash (little-endian lengths, pad-to-
+// 16 -- see this file's own header note) -- deliberately NOT shared code
+// with gcm.sio's ghash.
+fn chacha20poly1305_seal(key: &[u8;32], nonce: &[u8;12], plaintext: &RawBuf, plaintext_len: i64, aad: &RawBuf, aad_len: i64) -> (RawBuf, i64) with IO {
+    let poly_key_block = chacha20_block(key, 0, nonce)
+    var poly_key: [u8;32] = [(0 as u8);32]
+    var i: i64 = 0
+    while i < 32 { poly_key[i as usize] = poly_key_block[i as usize]; i = i + 1 }
+
+    let ciphertext = chacha20_encrypt(key, 1, nonce, plaintext, plaintext_len)
+
+    // mac_data = aad || pad16(aad) || ciphertext || pad16(ciphertext) ||
+    //            len(aad) as u64-LE || len(ciphertext) as u64-LE
+    let aad_pad = (16 - (aad_len % 16)) % 16
+    let ct_pad = (16 - (plaintext_len % 16)) % 16
+    let mac_data_len = aad_len + aad_pad + plaintext_len + ct_pad + 8 + 8
+    let mac_data = rawbuf_new(mac_data_len + 8)
+    var pos: i64 = 0
+    var a: i64 = 0
+    while a < aad_len { rawbuf_set(&mac_data, pos, rawbuf_get(aad, a)); pos = pos + 1; a = a + 1 }
+    var ap: i64 = 0
+    while ap < aad_pad { rawbuf_set(&mac_data, pos, 0); pos = pos + 1; ap = ap + 1 }
+    var c: i64 = 0
+    while c < plaintext_len { rawbuf_set(&mac_data, pos, rawbuf_get(&ciphertext, c)); pos = pos + 1; c = c + 1 }
+    var cp: i64 = 0
+    while cp < ct_pad { rawbuf_set(&mac_data, pos, 0); pos = pos + 1; cp = cp + 1 }
+    var lb: i64 = 0
+    while lb < 8 { rawbuf_set(&mac_data, pos, (aad_len >> (lb * 8)) & 255); pos = pos + 1; lb = lb + 1 }
+    var lc: i64 = 0
+    while lc < 8 { rawbuf_set(&mac_data, pos, (plaintext_len >> (lc * 8)) & 255); pos = pos + 1; lc = lc + 1 }
+
+    let tag = poly1305_mac(&poly_key, &mac_data, mac_data_len)
+
+    let out = rawbuf_new(plaintext_len + 16 + 8)
+    var oc: i64 = 0
+    while oc < plaintext_len { rawbuf_set(&out, oc, rawbuf_get(&ciphertext, oc)); oc = oc + 1 }
+    var ot: i64 = 0
+    while ot < 16 { rawbuf_set(&out, plaintext_len + ot, (tag[ot as usize] as i64) & 255); ot = ot + 1 }
+
+    (out, plaintext_len + 16)
+}
+
+fn chacha20poly1305_open(key: &[u8;32], nonce: &[u8;12], ciphertext_with_tag: &RawBuf, ciphertext_with_tag_len: i64, aad: &RawBuf, aad_len: i64) -> (RawBuf, bool) with IO {
+    if ciphertext_with_tag_len < 16 {
+        return (rawbuf_new(8), false)
+    }
+    let plaintext_len = ciphertext_with_tag_len - 16
+
+    let ciphertext_only = rawbuf_new(plaintext_len + 8)
+    var c: i64 = 0
+    while c < plaintext_len { rawbuf_set(&ciphertext_only, c, rawbuf_get(ciphertext_with_tag, c)); c = c + 1 }
+
+    let poly_key_block = chacha20_block(key, 0, nonce)
+    var poly_key: [u8;32] = [(0 as u8);32]
+    var i: i64 = 0
+    while i < 32 { poly_key[i as usize] = poly_key_block[i as usize]; i = i + 1 }
+
+    let aad_pad = (16 - (aad_len % 16)) % 16
+    let ct_pad = (16 - (plaintext_len % 16)) % 16
+    let mac_data_len = aad_len + aad_pad + plaintext_len + ct_pad + 8 + 8
+    let mac_data = rawbuf_new(mac_data_len + 8)
+    var pos: i64 = 0
+    var a: i64 = 0
+    while a < aad_len { rawbuf_set(&mac_data, pos, rawbuf_get(aad, a)); pos = pos + 1; a = a + 1 }
+    var ap: i64 = 0
+    while ap < aad_pad { rawbuf_set(&mac_data, pos, 0); pos = pos + 1; ap = ap + 1 }
+    var c2: i64 = 0
+    while c2 < plaintext_len { rawbuf_set(&mac_data, pos, rawbuf_get(&ciphertext_only, c2)); pos = pos + 1; c2 = c2 + 1 }
+    var cp: i64 = 0
+    while cp < ct_pad { rawbuf_set(&mac_data, pos, 0); pos = pos + 1; cp = cp + 1 }
+    var lb: i64 = 0
+    while lb < 8 { rawbuf_set(&mac_data, pos, (aad_len >> (lb * 8)) & 255); pos = pos + 1; lb = lb + 1 }
+    var lc: i64 = 0
+    while lc < 8 { rawbuf_set(&mac_data, pos, (plaintext_len >> (lc * 8)) & 255); pos = pos + 1; lc = lc + 1 }
+
+    let expected_tag = poly1305_mac(&poly_key, &mac_data, mac_data_len)
+
+    // Constant-time comparison: OR all byte differences together, branch
+    // on the accumulator exactly once -- never a short-circuiting per-byte
+    // if/== comparison, per this plan's fail-closed / no-timing-leak
+    // discipline (matches gcm.sio's gcm_open).
+    var diff: i64 = 0
+    var d: i64 = 0
+    while d < 16 {
+        let received = rawbuf_get(ciphertext_with_tag, plaintext_len + d) & 255
+        let expected = (expected_tag[d as usize] as i64) & 255
+        diff = diff | (received ^ expected)
+        d = d + 1
+    }
+
+    // Always run the decryption regardless of tag outcome (uniform work),
+    // but only ever return it when the tag matched -- on mismatch return
+    // an explicit all-zero buffer, never the real (possibly forged)
+    // plaintext.
+    let plaintext = chacha20_encrypt(key, 1, nonce, &ciphertext_only, plaintext_len)
+    if diff != 0 {
+        let zeroed = rawbuf_new(plaintext_len + 8)
+        var z: i64 = 0
+        while z < plaintext_len { rawbuf_set(&zeroed, z, 0); z = z + 1 }
+        return (zeroed, false)
+    }
+    (plaintext, true)
+}
+
+pub fn aead_seal(
+    algo: i32,
+    key: &[u8;32],
+    nonce: &[u8;12],
+    plaintext: &RawBuf,
+    plaintext_len: i64,
+    aad: &RawBuf,
+    aad_len: i64,
+) -> (RawBuf, i64) with IO {
+    if algo == AEAD_AES_128_GCM {
+        var key16: [u8;16] = [(0 as u8);16]
+        var i: i64 = 0
+        while i < 16 { key16[i as usize] = key[i as usize]; i = i + 1 }
+        let round_keys = aes128_key_schedule(&key16)
+        gcm_seal(&round_keys, nonce, plaintext, plaintext_len, aad, aad_len)
+    } else if algo == AEAD_AES_256_GCM {
+        let round_keys = aes256_key_schedule(key)
+        gcm_seal(&round_keys, nonce, plaintext, plaintext_len, aad, aad_len)
+    } else if algo == AEAD_CHACHA20_POLY1305 {
+        chacha20poly1305_seal(key, nonce, plaintext, plaintext_len, aad, aad_len)
+    } else {
+        // Final whole-plan review, Finding 2: an unrecognized `algo`
+        // value reaches here (not just AEAD_CHACHA20_POLY1305 -- the
+        // previous unconditional `else` treated ANY unknown value as
+        // ChaCha20-Poly1305, silently). `aead_seal`'s signature
+        // (`-> (RawBuf, i64)`) has no failure channel to report an
+        // invalid algorithm through, unlike `aead_open`'s `(RawBuf,
+        // bool)`, so this branch cannot fail closed the way
+        // `aead_open`'s final `else` below does. Passing an
+        // unrecognized `algo` to `aead_seal` is therefore a caller
+        // programming error with undefined behaviour in this function
+        // -- do not change the signature to "fix" this; callers must
+        // validate `algo` against the three `AEAD_*` constants before
+        // calling.
+        chacha20poly1305_seal(key, nonce, plaintext, plaintext_len, aad, aad_len)
+    }
+}
+
+pub fn aead_open(
+    algo: i32,
+    key: &[u8;32],
+    nonce: &[u8;12],
+    ciphertext_with_tag: &RawBuf,
+    ciphertext_with_tag_len: i64,
+    aad: &RawBuf,
+    aad_len: i64,
+) -> (RawBuf, bool) with IO {
+    if algo == AEAD_AES_128_GCM {
+        var key16: [u8;16] = [(0 as u8);16]
+        var i: i64 = 0
+        while i < 16 { key16[i as usize] = key[i as usize]; i = i + 1 }
+        let round_keys = aes128_key_schedule(&key16)
+        gcm_open(&round_keys, nonce, ciphertext_with_tag, ciphertext_with_tag_len, aad, aad_len)
+    } else if algo == AEAD_AES_256_GCM {
+        let round_keys = aes256_key_schedule(key)
+        gcm_open(&round_keys, nonce, ciphertext_with_tag, ciphertext_with_tag_len, aad, aad_len)
+    } else if algo == AEAD_CHACHA20_POLY1305 {
+        chacha20poly1305_open(key, nonce, ciphertext_with_tag, ciphertext_with_tag_len, aad, aad_len)
+    } else {
+        // Final whole-plan review, Finding 2: fail closed on a truly
+        // unrecognized `algo` rather than silently treating it as
+        // ChaCha20-Poly1305 (the previous unconditional `else` bug).
+        (rawbuf_new(8), false)
+    }
+}

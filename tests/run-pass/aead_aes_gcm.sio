@@ -1,0 +1,71 @@
+//@ run-pass
+//@ requires: madaros
+use crypto::aead::*
+use net::socket::*
+
+// Re-runs Task 2's own AES-128-GCM NIST vector (GCM Test Case 2: McGrew &
+// Viega, "The Galois/Counter Mode of Operation (GCM)" -- all-zero key, one
+// all-zero 16-byte plaintext block, empty AAD, all-zero 12-byte IV) through
+// the aead_seal/aead_open dispatch layer instead of calling gcm_seal/
+// gcm_open directly. Key/nonce/plaintext/expected-ciphertext/expected-tag
+// are copied verbatim from tests/run-pass/gcm_seal_open.sio, not
+// regenerated -- this proves the dispatch layer's key-slicing (`key16`
+// extraction from the 32-byte `key` param) doesn't corrupt what gcm.sio
+// already got right.
+fn main() -> i64 with IO {
+    let key: [u8;32] = [0;32]
+    let plaintext_bytes: [u8;16] = [0;16]
+    let nonce: [u8;12] = [0;12]
+    let expected_ciphertext: [u8;16] = [
+        0x03,0x88,0xda,0xce,0x60,0xb6,0xa3,0x92,
+        0xf3,0x28,0xc2,0xb9,0x71,0xb2,0xfe,0x78
+    ]
+    let expected_tag: [u8;16] = [
+        0xab,0x6e,0x47,0xd4,0x2c,0xec,0x13,0xbd,
+        0xf5,0x3a,0x67,0xb2,0x12,0x57,0xbd,0xdf
+    ]
+
+    let pt_buf = rawbuf_new(16 + 8)
+    var i: i64 = 0
+    while i < 16 { rawbuf_set(&pt_buf, i, plaintext_bytes[i as usize] as i64); i = i + 1 }
+    let empty_aad = rawbuf_new(1)
+
+    let (sealed, sealed_len) = aead_seal(AEAD_AES_128_GCM, &key, &nonce, &pt_buf, 16, &empty_aad, 0)
+    if sealed_len != 32 {
+        print_int(1)
+        return 1
+    }
+    var j: i64 = 0
+    while j < 16 {
+        if rawbuf_get(&sealed, j) != (expected_ciphertext[j as usize] as i64) {
+            print_int(2)
+            return 1
+        }
+        j = j + 1
+    }
+    var k: i64 = 0
+    while k < 16 {
+        if rawbuf_get(&sealed, 16 + k) != (expected_tag[k as usize] as i64) {
+            print_int(3)
+            return 1
+        }
+        k = k + 1
+    }
+
+    let (opened, ok) = aead_open(AEAD_AES_128_GCM, &key, &nonce, &sealed, sealed_len, &empty_aad, 0)
+    if !ok {
+        print_int(4)
+        return 1
+    }
+    var m: i64 = 0
+    while m < 16 {
+        if rawbuf_get(&opened, m) != (plaintext_bytes[m as usize] as i64) {
+            print_int(5)
+            return 1
+        }
+        m = m + 1
+    }
+
+    println("aead_aes_gcm: AEAD_AES_128_GCM dispatch matches gcm.sio's own NIST test vector and round-trips")
+    return 0
+}

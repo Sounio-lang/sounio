@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ACTIVE_FILE="${ACTIVE_FILE:-${ROOT_DIR}/artifacts/research/abide/ACTIVE_CAMPAIGNS.tsv}"
 DEST_ROOT="${DEST_ROOT:-${ROOT_DIR}/artifacts/research/abide}"
-FETCH_HELPER="${ROOT_DIR}/scripts/gpu/fetch_abide_campaign_from_orangefs.sh"
+FETCH_HELPER="${ROOT_DIR}/scripts/gpu/fetch_abide_campaign_auto.sh"
 SLURM_NS="${SLURM_NS:-slurm-pilot}"
 LOGIN_SELECTOR="${LOGIN_SELECTOR:-app.kubernetes.io/instance=slurm-pilot-login-slinky,app.kubernetes.io/name=login}"
 
@@ -70,11 +70,12 @@ append_note_once() {
 
 fetch_if_needed() {
   local run_id="$1"
+  local node_name="${2:-r770-proxmox}"
   local dest_dir="${DEST_ROOT}/${run_id}"
   if [[ -d "${dest_dir}/results" || -f "${dest_dir}/results/campaign/leaderboard.tsv" ]]; then
     return 0
   fi
-  "${FETCH_HELPER}" --run-id "${run_id}" --dest-dir "${dest_dir}" >/dev/null
+  "${FETCH_HELPER}" --run-id "${run_id}" --node "${node_name}" --dest-dir "${dest_dir}" >/dev/null
 }
 
 {
@@ -89,7 +90,7 @@ fetch_if_needed() {
       IFS='|' read -r _ raw_state exit_code start_ts end_ts node_list <<<"${snapshot}"
       status="$(normalize_status "${raw_state}")"
       if [[ "${status}" == "completed" ]]; then
-        fetch_if_needed "${run_id}" || status="completed_unfetched"
+        fetch_if_needed "${run_id}" "${node}" || status="completed_unfetched"
       elif [[ "${status}" == "failed" ]]; then
         note="$(append_note_once "${note}" "(sacct=${raw_state}, exit=${exit_code})")"
       fi

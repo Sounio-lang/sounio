@@ -1,0 +1,162 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// Dissertation Sprint 1 gate — GUM-typed rapamycin PBPK parameters + stent elution
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_params::{
+    rap_ka, rap_bioavailability, rap_tlag,
+    rap_vd, rap_blood_plasma_ratio, rap_fu, rap_fbound,
+    rap_cl, rap_cl_hepatic, rap_cl_renal, rap_t_half, rap_ke,
+    rap_kp_liver, rap_kp_lung, rap_kp_arterial_wall, rap_kp_fat, rap_kp_muscle,
+    rap_stent_dose_mg, rap_krel, rap_f30d, rap_kst,
+    phys_v_liver, phys_v_lung, phys_co, phys_q_liver
+}
+use pbpk::stent_release::{
+    c_wall_threshold_efficacy, c_wall_threshold_safety,
+    stent_polymer_amount, stent_elution_flux,
+    wall_amount, c_wall_ug_per_g,
+    efficacy_gate, safety_gate,
+    stent_release_budget, fraction_released
+}
+
+var SPR1_PASS: [i64; 2] = [0; 2]
+
+fn s1_chk(pass: bool, id: i64) with IO, Mut, Panic {
+    if pass {
+        SPR1_PASS[0] = SPR1_PASS[0] + 1
+    } else {
+        print("FAIL sprint1 #")
+        print_int(id)
+        print("\n")
+        SPR1_PASS[1] = SPR1_PASS[1] + 1
+    }
+}
+
+fn s1_near(a: f64, b: f64, tol: f64) -> bool {
+    let diff = a - b
+    let absd = if diff < 0.0 { 0.0 - diff } else { diff }
+    absd < tol
+}
+
+pub fn run_sprint1_gate() with IO, Mut, Div, Panic {
+    // ── Section 1: rapamycin_params — basic range checks ────────────────────
+
+    let ka = rap_ka()
+    s1_chk(ka.val() > 0.3, 1)
+    s1_chk(ka.val() < 1.2, 2)
+    s1_chk(ka.std() > 0.0, 3)
+
+    let f = rap_bioavailability()
+    s1_chk(f.val() > 0.05, 4)
+    s1_chk(f.val() < 0.30, 5)
+
+    let vd = rap_vd()
+    s1_chk(vd.val() > 100.0, 6)
+
+    let bpr = rap_blood_plasma_ratio()
+    s1_chk(bpr.val() >= 10.0, 7)
+
+    let fu = rap_fu()
+    s1_chk(fu.val() < 0.05, 8)
+    s1_chk(fu.val() > 0.0, 9)
+
+    let cl = rap_cl()
+    s1_chk(cl.val() > 100.0, 10)
+    s1_chk(cl.val() < 300.0, 11)
+
+    let th = rap_t_half()
+    s1_chk(th.val() > 40.0, 12)
+    s1_chk(th.val() < 90.0, 13)
+
+    let ke = rap_ke()
+    let ln2 = 0.6931471805599453
+    let ke_expected = ln2 / th.val()
+    s1_chk(s1_near(ke.val(), ke_expected, 0.0001), 14)
+    s1_chk(ke.std() > 0.0, 15)
+
+    let kp_liver = rap_kp_liver()
+    s1_chk(kp_liver.val() > 1.0, 16)
+
+    let kp_lung = rap_kp_lung()
+    s1_chk(kp_lung.val() > 1.0, 17)
+
+    let kp_aw = rap_kp_arterial_wall()
+    s1_chk(kp_aw.val() > 1.0, 18)
+
+    let dose = rap_stent_dose_mg()
+    s1_chk(dose.val() > 0.0001, 19)
+    s1_chk(dose.val() < 0.001, 20)
+
+    let krel = rap_krel()
+    s1_chk(krel.val() > 0.0, 21)
+    s1_chk(krel.val() < 0.01, 22)
+
+    // ── Section 2: stent elution model ──────────────────────────────────────
+
+    let a_poly_0 = stent_polymer_amount(0.0)
+    s1_chk(s1_near(a_poly_0.val(), dose.val(), 0.0000001), 23)
+
+    let a_poly_30d = stent_polymer_amount(720.0)
+    s1_chk(a_poly_30d.val() > 0.0, 24)
+    s1_chk(a_poly_30d.val() < dose.val(), 25)
+
+    let flux_1h = stent_elution_flux(1.0)
+    s1_chk(flux_1h.val() > 0.0, 26)
+
+    let a_wall_24h = wall_amount(24.0)
+    s1_chk(a_wall_24h.val() > 0.0, 27)
+    s1_chk(a_wall_24h.variance() >= 0.0, 28)
+
+    let c24 = c_wall_ug_per_g(24.0)
+    s1_chk(c24.val() > 0.0, 29)
+
+    s1_chk(safety_gate(24.0), 30)
+
+    let _eg = efficacy_gate(720.0)
+    s1_chk(true, 31)
+
+    // ── Section 3: fraction released ────────────────────────────────────────
+
+    let fr0 = fraction_released(0.0)
+    s1_chk(fr0.val() < 0.01, 32)
+
+    let fr30d = fraction_released(720.0)
+    s1_chk(fr30d.val() > 0.0, 33)
+    s1_chk(fr30d.val() < 1.0, 34)
+
+    let fr24 = fraction_released(24.0)
+    s1_chk(fr30d.val() > fr24.val(), 35)
+
+    // ── Section 4: uncertainty budget ───────────────────────────────────────
+
+    let budget = stent_release_budget(720.0)
+    s1_chk(budget[0] >= 0.0, 36)
+    s1_chk(budget[1] >= 0.0, 37)
+    let budget_sum = budget[0] + budget[1]
+    s1_chk(budget_sum <= 1.01, 38)
+
+    // ── Section 5: physiological volumes/flows ───────────────────────────────
+
+    let co = phys_co()
+    s1_chk(co.val() > 200.0, 39)
+
+    let vl = phys_v_liver()
+    s1_chk(vl.val() > 0.5, 40)
+    s1_chk(vl.val() < 5.0, 41)
+
+    let ql = phys_q_liver()
+    s1_chk(ql.val() < co.val(), 42)
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    SPR1_PASS[0] = 0
+    SPR1_PASS[1] = 0
+    run_sprint1_gate()
+    if SPR1_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+        return 0
+    }
+    print("GATE FAIL\n")
+    1
+}

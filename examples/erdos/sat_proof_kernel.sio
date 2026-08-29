@@ -1,0 +1,412 @@
+// examples/erdos/sat_proof_kernel.sio
+//
+// "Sounio computes" -> "Sounio PROVES".
+//
+// A self-contained UNSAT *certificate* pipeline, entirely in Sounio:
+//
+//   (1) a DPLL refutation engine that EMITS a DRUP proof
+//       (a DPLL search tree IS a tree-resolution refutation; at every refuted
+//        node we emit the clause  ¬(decision literals on the path), which is
+//        RUP — derivable by reverse unit propagation. The root emits the EMPTY
+//        clause). Emission is post-order, so each lemma is RUP w.r.t. the
+//        formula plus the lemmas emitted before it.
+//
+//   (2) an INDEPENDENT RUP proof checker (our own trust kernel): it replays the
+//       proof against the original CNF, verifying each lemma is RUP and that the
+//       proof ends by deriving the empty clause. It shares NO state with the
+//       solver's heuristics — it only does unit propagation on clauses.
+//
+// Why this matters: an UNSAT result from a solver is "trust me". A RUP/DRUP
+// certificate is "verify me" — independently checkable (here by our own checker,
+// and the same proof format is consumable by external tools like drat-trim).
+// This is the trust kernel that makes a native χ ≥ k certificate a PROOF, not a
+// computation. The compiler — and now the proof checker — is ours.
+//
+// Demo instance: K_4 (complete graph on 4 vertices) is NOT 3-colorable
+//   => the chromatic number of K_4 is ≥ 4. Variables x[v,c] = "vertex v has
+//   color c". ALO clauses (each vertex ≥ 1 color) + edge clauses (adjacent
+//   vertices differ) form an UNSAT CNF; the engine refutes it and the checker
+//   certifies the refutation.
+//
+// All integer arithmetic; no floats. Literals are DIMACS-style signed ints
+// (variable v in 1..N, positive = v true, negative = v false).
+
+struct Db {
+    n_vars: i32,
+    n_clauses: i32,
+    cstart: [i32; 512],
+    clen: [i32; 512],
+    lits: [i64; 4096],
+    assign: [i32; 256],
+}
+
+struct Proof {
+    n: i32,
+    pstart: [i32; 1024],
+    plen: [i32; 1024],
+    plits: [i64; 4096],
+}
+
+fn lit_var(l: i64) -> i32 with Panic {
+    if l < 0 { return (0 - l) as i32 }
+    return l as i32
+}
+
+fn db_add_clause(db: &!Db, arr: &[i64; 16], n: i32) with Mut, Panic {
+    let idx = db.n_clauses
+    var start: i32 = 0
+    if idx > 0 { start = db.cstart[idx - 1] + db.clen[idx - 1] }
+    db.cstart[idx] = start
+    db.clen[idx] = n
+    var i: i32 = 0
+    while i < n {
+        db.lits[start + i] = arr[i]
+        let v = lit_var(arr[i])
+        if v > db.n_vars { db.n_vars = v }
+        i = i + 1
+    }
+    db.n_clauses = idx + 1
+}
+
+// Unit propagation over ALL clauses currently in db, mutating db.assign with
+// forced units. Returns 1 if a clause is falsified (conflict), 0 at fixpoint.
+fn propagate(db: &!Db) -> i32 with Mut, Panic {
+    var changed: i32 = 1
+    while changed == 1 {
+        changed = 0
+        var c: i32 = 0
+        while c < db.n_clauses {
+            let st = db.cstart[c]
+            let ln = db.clen[c]
+            var sat: i32 = 0
+            var unassigned: i32 = 0
+            var last_lit: i64 = 0
+            var k: i32 = 0
+            while k < ln {
+                let l = db.lits[st + k]
+                let v = lit_var(l)
+                var a = db.assign[v]
+                if l < 0 { a = 0 - a }
+                if a == 1 { sat = 1 }
+                if a == 0 { unassigned = unassigned + 1  last_lit = l }
+                k = k + 1
+            }
+            if sat == 0 {
+                if unassigned == 0 { return 1 }
+                if unassigned == 1 {
+                    let v = lit_var(last_lit)
+                    if last_lit < 0 { db.assign[v] = 0 - 1 } else { db.assign[v] = 1 }
+                    changed = 1
+                }
+            }
+            c = c + 1
+        }
+    }
+    return 0
+}
+
+fn reset_assign(db: &!Db) with Mut, Panic {
+    var i: i32 = 0
+    while i <= db.n_vars { db.assign[i] = 0  i = i + 1 }
+}
+
+// Emit the lemma ¬(dec[0..dec_len]) into the proof (negate each decision literal).
+fn emit_neg(proof: &!Proof, dec: &[i64; 64], dec_len: i32) with Mut, Panic {
+    let idx = proof.n
+    var start: i32 = 0
+    if idx > 0 { start = proof.pstart[idx - 1] + proof.plen[idx - 1] }
+    proof.pstart[idx] = start
+    proof.plen[idx] = dec_len
+    var i: i32 = 0
+    while i < dec_len {
+        proof.plits[start + i] = 0 - dec[i]
+        i = i + 1
+    }
+    proof.n = idx + 1
+}
+
+// DPLL refutation with DRUP emission. db.assign reflects ancestor decisions and
+// their unit-propagation closure on entry. Returns 1=SAT, 0=UNSAT (refuted).
+fn solve_rec(db: &!Db, proof: &!Proof, dec: &![i64; 64], dec_len: i32) -> i32 with Mut, Panic {
+    let cf = propagate(db)
+    if cf == 1 {
+        emit_neg(proof, dec, dec_len)
+        return 0
+    }
+    var x: i32 = 0
+    var i: i32 = 1
+    while i <= db.n_vars {
+        if db.assign[i] == 0 { x = i  i = db.n_vars + 1 } else { i = i + 1 }
+    }
+    if x == 0 { return 1 }
+
+    var snap: [i32; 256] = [0; 256]
+    var s: i32 = 0
+    while s <= db.n_vars { snap[s] = db.assign[s]  s = s + 1 }
+
+    db.assign[x] = 1
+    dec[dec_len] = x as i64
+    let r1 = solve_rec(db, proof, dec, dec_len + 1)
+    if r1 == 1 { return 1 }
+
+    s = 0
+    while s <= db.n_vars { db.assign[s] = snap[s]  s = s + 1 }
+
+    db.assign[x] = 0 - 1
+    dec[dec_len] = 0 - (x as i64)
+    let r2 = solve_rec(db, proof, dec, dec_len + 1)
+    if r2 == 1 { return 1 }
+
+    s = 0
+    while s <= db.n_vars { db.assign[s] = snap[s]  s = s + 1 }
+
+    emit_neg(proof, dec, dec_len)
+    return 0
+}
+
+fn add_lits_as_clause(db: &!Db, proof: &Proof, pst: i32, pln: i32) with Mut, Panic {
+    let idx = db.n_clauses
+    var start: i32 = 0
+    if idx > 0 { start = db.cstart[idx - 1] + db.clen[idx - 1] }
+    db.cstart[idx] = start
+    db.clen[idx] = pln
+    var i: i32 = 0
+    while i < pln { db.lits[start + i] = proof.plits[pst + i]  i = i + 1 }
+    db.n_clauses = idx + 1
+}
+
+// Independent RUP checker. db holds the ORIGINAL CNF on entry; lemmas are
+// appended as each is verified. Returns 1 = VERIFIED UNSAT (empty clause derived
+// and RUP), -1 = a lemma failed its RUP check (proof invalid), 0 = proof ended
+// without deriving the empty clause.
+fn verify(db: &!Db, proof: &Proof) -> i32 with Mut, Panic {
+    var pi: i32 = 0
+    while pi < proof.n {
+        let pst = proof.pstart[pi]
+        let pln = proof.plen[pi]
+        reset_assign(db)
+        var taut: i32 = 0
+        var k: i32 = 0
+        while k < pln {
+            let l = proof.plits[pst + k]
+            let v = lit_var(l)
+            var want: i32 = 0 - 1
+            if l < 0 { want = 1 }
+            if db.assign[v] != 0 {
+                if db.assign[v] != want { taut = 1 }
+            }
+            db.assign[v] = want
+            k = k + 1
+        }
+        var ok: i32 = 0
+        if taut == 1 {
+            ok = 1
+        } else {
+            let cf = propagate(db)
+            if cf == 1 { ok = 1 }
+        }
+        if ok == 0 { return 0 - 1 }
+        if pln == 0 { return 1 }
+        add_lits_as_clause(db, proof, pst, pln)
+        pi = pi + 1
+    }
+    return 0
+}
+
+// Re-run the checker on a fresh copy of the ORIGINAL formula (drop any lemmas a
+// previous verify() appended, clear the assignment), then verify `proof`.
+fn verify_fresh(db: &!Db, proof: &Proof, orig_nc: i32) -> i32 with Mut, Panic {
+    db.n_clauses = orig_nc
+    reset_assign(db)
+    return verify(db, proof)
+}
+
+fn vc(v: i32, c: i32) -> i64 {
+    return (v * 3 + c + 1) as i64
+}
+
+// Inline decimal print (the builtin print_int appends a newline, which breaks
+// single-line DIMACS/DRAT format). Built from single-character print only.
+fn print_digit(d: i64) with IO {
+    if d == 0 { print("0") }
+    else if d == 1 { print("1") }
+    else if d == 2 { print("2") }
+    else if d == 3 { print("3") }
+    else if d == 4 { print("4") }
+    else if d == 5 { print("5") }
+    else if d == 6 { print("6") }
+    else if d == 7 { print("7") }
+    else if d == 8 { print("8") }
+    else { print("9") }
+}
+
+fn print_dec(n: i64) with IO, Mut, Div, Panic {
+    if n == 0 { print("0") return }
+    var x = n
+    if x < 0 { print("-") x = 0 - x }
+    var buf: [i64; 24] = [0; 24]
+    var len: i32 = 0
+    while x > 0 { buf[len] = x % 10  x = x / 10  len = len + 1 }
+    var i: i32 = len - 1
+    while i >= 0 { print_digit(buf[i])  i = i - 1 }
+}
+
+// Standard DIMACS CNF for the original clauses [0, orig_nc).
+fn emit_dimacs(db: &Db, orig_nc: i32) with IO, Mut, Div, Panic {
+    print("p cnf ")
+    print_dec(db.n_vars as i64)
+    print(" ")
+    print_dec(orig_nc as i64)
+    print("\n")
+    var c: i32 = 0
+    while c < orig_nc {
+        let st = db.cstart[c]
+        let ln = db.clen[c]
+        var k: i32 = 0
+        while k < ln { print_dec(db.lits[st + k])  print(" ")  k = k + 1 }
+        print("0\n")
+        c = c + 1
+    }
+}
+
+// Standard DRAT (here pure-addition DRUP) proof: each lemma's literals then 0.
+fn emit_drat(proof: &Proof) with IO, Mut, Div, Panic {
+    var pi: i32 = 0
+    while pi < proof.n {
+        let pst = proof.pstart[pi]
+        let pln = proof.plen[pi]
+        var k: i32 = 0
+        while k < pln { print_dec(proof.plits[pst + k])  print(" ")  k = k + 1 }
+        print("0\n")
+        pi = pi + 1
+    }
+}
+
+fn run() -> i32 with IO, Mut, Div, Panic {
+    print("=== Sounio native UNSAT certificate: K_4 is not 3-colorable (chi(K_4) >= 4) ===\n\n")
+
+    var db: Db = Db {
+        n_vars: 0,
+        n_clauses: 0,
+        cstart: [0; 512],
+        clen: [0; 512],
+        lits: [0; 4096],
+        assign: [0; 256],
+    }
+
+    // ALO: each of the 4 vertices gets at least one of 3 colors.
+    var arr: [i64; 16] = [0; 16]
+    var v: i32 = 0
+    while v < 4 {
+        arr[0] = vc(v, 0)
+        arr[1] = vc(v, 1)
+        arr[2] = vc(v, 2)
+        db_add_clause(&!db, &arr, 3)
+        v = v + 1
+    }
+    // Edges of K_4: every pair (u<w) adjacent; adjacent vertices differ per color.
+    var u: i32 = 0
+    while u < 4 {
+        var w: i32 = u + 1
+        while w < 4 {
+            var c: i32 = 0
+            while c < 3 {
+                arr[0] = 0 - vc(u, c)
+                arr[1] = 0 - vc(w, c)
+                db_add_clause(&!db, &arr, 2)
+                c = c + 1
+            }
+            w = w + 1
+        }
+        u = u + 1
+    }
+
+    print("CNF built:  vars=")
+    print_int(db.n_vars)
+    print("  clauses=")
+    print_int(db.n_clauses)
+    print("\n")
+    let orig_nc = db.n_clauses
+
+    var proof: Proof = Proof {
+        n: 0,
+        pstart: [0; 1024],
+        plen: [0; 1024],
+        plits: [0; 4096],
+    }
+    var dec: [i64; 64] = [0; 64]
+
+    let sat = solve_rec(&!db, &!proof, &!dec, 0)
+    if sat == 1 {
+        print("SOLVER: SAT  (unexpected — K_4 should NOT be 3-colorable)\n")
+        return 1
+    }
+    print("SOLVER: UNSAT.  DRUP proof emitted: lemmas=")
+    print_int(proof.n)
+    print("  (last lemma must be the empty clause)\n")
+    print("Last lemma length = ")
+    print_int(proof.plen[proof.n - 1])
+    print("  (0 = empty clause)\n\n")
+
+    // Reset assignment dirt; db still holds the original CNF (solver added nothing to db).
+    reset_assign(&!db)
+    let v_result = verify(&!db, &proof)
+    if v_result != 1 {
+        if v_result == 0 - 1 { print("CHECKER: a lemma FAILED its RUP check — proof invalid.\n") }
+        else { print("CHECKER: proof ended without deriving the empty clause.\n") }
+        return 1
+    }
+    print("CHECKER: every lemma is RUP and the empty clause was derived.\n")
+    print(">>> VERIFIED UNSAT.  chi(K_4) >= 4, independently certified in Sounio.\n\n")
+
+    // ---- Non-vacuity controls: the checker must REJECT invalid proofs. ----
+    print("=== Soundness controls (checker must REJECT these) ===\n")
+
+    // N1: claiming UNSAT with an empty proof = just the empty clause. The original
+    // CNF has no unit clauses, so unit propagation alone derives no conflict.
+    var bad1: Proof = Proof { n: 0, pstart: [0; 1024], plen: [0; 1024], plits: [0; 4096] }
+    bad1.n = 1
+    bad1.pstart[0] = 0
+    bad1.plen[0] = 0
+    let r1c = verify_fresh(&!db, &bad1, orig_nc)
+    print("N1 (empty proof):           result=")
+    print_int(r1c)
+    if r1c == 0 - 1 { print("  REJECTED [OK]\n") } else { print("  ACCEPTED [BUG]\n") }
+
+    // N2: a non-implied unit lemma {x1} then the empty clause. {x1} is not RUP
+    // (the formula does not force x1), so the checker must fail at lemma 0.
+    var bad2: Proof = Proof { n: 0, pstart: [0; 1024], plen: [0; 1024], plits: [0; 4096] }
+    bad2.n = 2
+    bad2.pstart[0] = 0
+    bad2.plen[0] = 1
+    bad2.plits[0] = 1
+    bad2.pstart[1] = 1
+    bad2.plen[1] = 0
+    let r2c = verify_fresh(&!db, &bad2, orig_nc)
+    print("N2 (bogus unit {x1}+empty): result=")
+    print_int(r2c)
+    if r2c == 0 - 1 { print("  REJECTED [OK]\n") } else { print("  ACCEPTED [BUG]\n") }
+
+    var controls_ok = 0
+    if r1c == 0 - 1 {
+        if r2c == 0 - 1 {
+            print("\nChecker rejects invalid proofs AND certifies the real one: it is non-vacuous.\n")
+            controls_ok = 1
+        }
+    }
+
+    // ---- Portable certificate: standard DIMACS CNF + DRAT proof on stdout. ----
+    // These sections are emitted verbatim so the same certificate is consumable by
+    // any external DRAT checker (e.g. drat-trim). The native checker above already
+    // verified it independently of the solver heuristics.
+    db.n_clauses = orig_nc
+    print("\n%%DIMACS%%\n")
+    emit_dimacs(&db, orig_nc)
+    print("%%DRAT%%\n")
+    emit_drat(&proof)
+    print("%%END%%\n")
+
+    if controls_ok == 1 { return 0 }
+    return 1
+}
+fn main() -> i32 with IO, Mut, Div, Panic { return run() }

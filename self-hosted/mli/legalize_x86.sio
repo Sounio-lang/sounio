@@ -1,0 +1,862 @@
+// MLI S3/S3b — legalize_x86: emitter MIMICRY for the golden surface (design
+// §6.4, pin O5), extended in S3b to the measured multi-arg, integer and
+// BRANCH encodings so the expanded Knowledge lanes can reach machine code.
+//
+// Every encoding below was measured by disassembling session compiles of
+// probe functions under the pinned Madaros native-v2 emitter (2026-08-17,
+// this lane): add1 (f64 + movabs constants), poly (2 f64 args, fsub/fmul),
+// six (6-arg register order rdi/rsi/rdx/rcx/r8/r9, small-int `mov $imm32`),
+// imin (cmp via push/pop with SWAPPED setcc, test+je rel32, jmp rel32,
+// per-ret epilogues), qd (idiv via rcx/cqto). Mimicry facts:
+//
+//   - args arrive in rdi, rsi, rdx, rcx, r8, r9 as RAW BITS regardless of
+//     kind (f64 too — not SysV xmm); spilled to [rbp-8k] in order;
+//   - f64 constants: movabs rax, <ieee-bits>; small ints: mov $imm32, rax;
+//   - float arith: slot -> rax -> movq xmm0/xmm1, op, movq back, store;
+//   - int arith: lhs -> push; rhs -> rax; pop rbx; op %rbx,%rax (so the
+//     machine op sees flags/results of (rhs OP lhs) — compares therefore
+//     use the SWAPPED setcc: lt -> setg, gt -> setl, le -> setge, ...);
+//   - idiv: rhs -> rcx, lhs -> rax, cqto, idiv %rcx;
+//   - branches: cond slot -> rax; test %rax,%rax; je rel32 to the false
+//     edge; unconditional jmp is e9 rel32; every RET emits its own
+//     epilogue (mov %rbp,%rsp; pop %rbp; ret) exactly like the pinned
+//     emitter's early returns;
+//   - prologue: push rbp; mov rbp,rsp; sub rsp,frame(16-aligned);
+//     0x1000-page stack-probe loop.
+//
+// THE COMMITMENT GUARD is unchanged: a Knowledge/CD/QD operand reaching
+// this stage UNEXPANDED refuses with MLI_L_KNOWLEDGE_UNEXPANDED (checked
+// before any shape check so it cannot be shadowed). The sanctioned route is
+// mli::expand_k first; with S3b the expanded conf diamonds LEGALIZE, so all
+// three Min3 lanes now reach bytes.
+//
+// Still refused, fail-closed and named: fcmp (unmeasured ucomisd matrix),
+// rem/bit-ops (unmeasured), calls, memory ops, f32/f128/f256 values,
+// NaN/inf/subnormal constants, >6 args, capacity walls.
+
+module mli::legalize_x86
+
+use mli::ir::*
+
+pub let MLI_L_OK: i64 = 0
+pub let MLI_L_KNOWLEDGE_UNEXPANDED: i64 = 1
+pub let MLI_L_BRANCH_UNSUPPORTED: i64 = 2
+pub let MLI_L_UNSUPPORTED_OP: i64 = 3
+pub let MLI_L_UNSUPPORTED_SHAPE: i64 = 4
+pub let MLI_L_CONST_UNSUPPORTED: i64 = 5
+pub let MLI_L_CAPACITY: i64 = 6
+pub let MLI_L_OPERAND: i64 = 7
+
+pub let MLI_L_MAX_BYTES: i64 = 4096
+pub let MLI_L_MAX_FIXUPS: i64 = 64
+
+pub struct MliCodeBuf {
+    pub bytes: [i64; 4096],
+    pub len: i64,
+    pub ok: bool,
+    pub code: i64,
+    pub at_block: i64,
+    pub at_index: i64,
+    // rel32 fixups: patch site (offset of the 4 displacement bytes) and the
+    // target MLI block id; resolved once all block offsets are known.
+    pub fix_site: [i64; 64],
+    pub fix_block: [i64; 64],
+    pub fix_count: i64,
+    pub block_off: [i64; 16],
+}
+
+pub fn mli_codebuf_empty() -> MliCodeBuf {
+    MliCodeBuf {
+        bytes: [0; 4096],
+        len: 0,
+        ok: true,
+        code: MLI_L_OK,
+        at_block: 0 - 1,
+        at_index: 0 - 1,
+        fix_site: [0; 64],
+        fix_block: [0; 64],
+        fix_count: 0,
+        block_off: [0; 16],
+    }
+}
+
+fn cb_fail(cb: &!MliCodeBuf, code: i64, b: i64, i: i64) with Mut, Panic {
+    if cb.ok {
+        cb.ok = false
+        cb.code = code
+        cb.at_block = b
+        cb.at_index = i
+    }
+}
+
+fn cb_u8(cb: &!MliCodeBuf, v: i64) with Mut, Panic {
+    if !cb.ok { return }
+    if cb.len >= MLI_L_MAX_BYTES {
+        cb_fail(cb, MLI_L_CAPACITY, 0 - 1, 0 - 1)
+        return
+    }
+    cb.bytes[cb.len] = v % 256
+    cb.len = cb.len + 1
+}
+
+// Little-endian 32-bit immediate (two's complement for negatives).
+fn cb_i32le(cb: &!MliCodeBuf, v: i64) with Mut, Panic {
+    var u = v
+    if u < 0 { u = u + 4294967296 }
+    cb_u8(cb, u % 256)
+    cb_u8(cb, (u / 256) % 256)
+    cb_u8(cb, (u / 65536) % 256)
+    cb_u8(cb, (u / 16777216) % 256)
+}
+
+// Little-endian 64-bit immediate from a bit pattern held in i64.
+fn cb_i64le(cb: &!MliCodeBuf, v: i64) with Mut, Panic {
+    var u = v
+    var k: i64 = 0
+    while k < 8 {
+        var byte = u % 256
+        if byte < 0 { byte = byte + 256 }
+        cb_u8(cb, byte)
+        u = (u - (u % 256)) / 256
+        k = k + 1
+    }
+}
+
+// Patch a previously-emitted 4-byte site with a rel32 value.
+fn cb_patch_i32le(cb: &!MliCodeBuf, site: i64, v: i64) with Mut, Panic {
+    var u = v
+    if u < 0 { u = u + 4294967296 }
+    cb.bytes[site] = u % 256
+    cb.bytes[site + 1] = (u / 256) % 256
+    cb.bytes[site + 2] = (u / 65536) % 256
+    cb.bytes[site + 3] = (u / 16777216) % 256
+}
+
+// ---------------------------------------------------------------------------
+// f64 -> IEEE-754 bits by arithmetic decomposition. Exact for finite normal
+// doubles; refuses NaN/inf/subnormal and -0.0 rather than guessing.
+// ---------------------------------------------------------------------------
+
+pub struct F64Bits {
+    pub ok: bool,
+    pub bits: i64,
+}
+
+pub fn mli_f64_bits(v: f64) -> F64Bits with Mut, Panic, Div {
+    let two52: i64 = 4503599627370496
+    let min_i64 = (0 - 9223372036854775807) - 1
+
+    if v == 0.0 {
+        return F64Bits { ok: true, bits: 0 }
+    }
+    if v != v {
+        return F64Bits { ok: false, bits: 0 }
+    }
+
+    var m = v
+    var neg = false
+    if m < 0.0 {
+        neg = true
+        m = 0.0 - m
+    }
+    if m > 8.98846567431158e307 {
+        return F64Bits { ok: false, bits: 0 }
+    }
+
+    var e: i64 = 0
+    while m >= 2.0 {
+        m = m / 2.0
+        e = e + 1
+    }
+    while m < 1.0 {
+        m = m * 2.0
+        e = e - 1
+    }
+    let biased = e + 1023
+    if biased <= 0 || biased >= 2047 {
+        return F64Bits { ok: false, bits: 0 }
+    }
+
+    var frac = m - 1.0
+    var mant: i64 = 0
+    var k: i64 = 0
+    while k < 52 {
+        frac = frac * 2.0
+        mant = mant * 2
+        if frac >= 1.0 {
+            mant = mant + 1
+            frac = frac - 1.0
+        }
+        k = k + 1
+    }
+
+    var bits = mant + biased * two52
+    if neg {
+        bits = bits + min_i64
+    }
+    F64Bits { ok: true, bits: bits }
+}
+
+// ---------------------------------------------------------------------------
+// Slot allocation (mimicry): slot k lives at [rbp - 8k]. Args claim slots
+// first in order; thereafter in EMISSION order (imm at materialisation, dst
+// on first definition) — reproduces the pinned layout.
+// ---------------------------------------------------------------------------
+
+pub struct MliSlotMap {
+    pub slot_of_vreg: [i64; 128],
+    pub next_slot: i64,
+}
+
+fn slots_empty() -> MliSlotMap {
+    MliSlotMap {
+        slot_of_vreg: [0; 128],
+        next_slot: 1,
+    }
+}
+
+fn slot_disp(slot: i64) -> i64 {
+    0 - (slot * 8)
+}
+
+fn slot_for_def(sm: &!MliSlotMap, vreg: i64) -> i64 with Mut, Panic {
+    if sm.slot_of_vreg[vreg] != 0 { return sm.slot_of_vreg[vreg] }
+    let s = sm.next_slot
+    sm.slot_of_vreg[vreg] = s
+    sm.next_slot = s + 1
+    s
+}
+
+fn slot_alloc_anon(sm: &!MliSlotMap) -> i64 with Mut, Panic {
+    let s = sm.next_slot
+    sm.next_slot = s + 1
+    s
+}
+
+// ---------------------------------------------------------------------------
+// Instruction encodings (bytes exactly as measured).
+// ---------------------------------------------------------------------------
+
+// mov [rbp+disp32], <argreg k>   (measured order rdi,rsi,rdx,rcx,r8,r9)
+fn emit_store_argreg(cb: &!MliCodeBuf, k: i64, disp: i64) with Mut, Panic {
+    if k <= 3 {
+        cb_u8(cb, 72)
+    } else {
+        cb_u8(cb, 76)
+    }
+    cb_u8(cb, 137)
+    if k == 0 { cb_u8(cb, 189) }
+    if k == 1 { cb_u8(cb, 181) }
+    if k == 2 { cb_u8(cb, 149) }
+    if k == 3 { cb_u8(cb, 141) }
+    if k == 4 { cb_u8(cb, 133) }
+    if k == 5 { cb_u8(cb, 141) }
+    cb_i32le(cb, disp)
+}
+
+// movabs rax, imm64          48 b8 <imm64>
+fn emit_movabs_rax(cb: &!MliCodeBuf, bits: i64) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 184)
+    cb_i64le(cb, bits)
+}
+
+// mov rax, imm32 (sign-extended)   48 c7 c0 <imm32>   (small ints, measured)
+fn emit_mov_rax_imm32(cb: &!MliCodeBuf, v: i64) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 199)
+    cb_u8(cb, 192)
+    cb_i32le(cb, v)
+}
+
+// mov [rbp+disp32], rax      48 89 85 <disp32>
+fn emit_store_rax(cb: &!MliCodeBuf, disp: i64) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 137)
+    cb_u8(cb, 133)
+    cb_i32le(cb, disp)
+}
+
+// mov rax, [rbp+disp32]      48 8b 85 <disp32>
+fn emit_load_rax(cb: &!MliCodeBuf, disp: i64) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 139)
+    cb_u8(cb, 133)
+    cb_i32le(cb, disp)
+}
+
+// push rax / pop rbx
+fn emit_push_rax(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 80)
+}
+
+fn emit_pop_rbx(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 91)
+}
+
+// movq xmm0/xmm1, rax and back
+fn emit_movq_xmm0_rax(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 102)
+    cb_u8(cb, 72)
+    cb_u8(cb, 15)
+    cb_u8(cb, 110)
+    cb_u8(cb, 192)
+}
+
+fn emit_movq_xmm1_rax(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 102)
+    cb_u8(cb, 72)
+    cb_u8(cb, 15)
+    cb_u8(cb, 110)
+    cb_u8(cb, 200)
+}
+
+fn emit_movq_rax_xmm0(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 102)
+    cb_u8(cb, 72)
+    cb_u8(cb, 15)
+    cb_u8(cb, 126)
+    cb_u8(cb, 192)
+}
+
+// addsd/subsd/mulsd/divsd xmm0, xmm1:  f2 0f <op> c1
+fn emit_f64_binop_xmm(cb: &!MliCodeBuf, opbyte: i64) with Mut, Panic {
+    cb_u8(cb, 242)
+    cb_u8(cb, 15)
+    cb_u8(cb, opbyte)
+    cb_u8(cb, 193)
+}
+
+// add %rbx,%rax (48 01 d8) / imul %rbx,%rax (48 0f af c3)
+fn emit_add_rbx_rax(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 1)
+    cb_u8(cb, 216)
+}
+
+fn emit_imul_rbx_rax(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 15)
+    cb_u8(cb, 175)
+    cb_u8(cb, 195)
+}
+
+// mov rcx,rax; (reload lhs); cqto; idiv rcx  — the measured idiv shape.
+fn emit_mov_rcx_rax(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 137)
+    cb_u8(cb, 193)
+}
+
+fn emit_cqto_idiv_rcx(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 153)
+    cb_u8(cb, 72)
+    cb_u8(cb, 247)
+    cb_u8(cb, 249)
+}
+
+// cmp %rbx,%rax (48 39 d8) + setcc %al + movzbq %al,%rax
+fn emit_cmp_rbx_rax(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 57)
+    cb_u8(cb, 216)
+}
+
+fn emit_setcc_movzbq(cb: &!MliCodeBuf, setcc_byte: i64) with Mut, Panic {
+    cb_u8(cb, 15)
+    cb_u8(cb, setcc_byte)
+    cb_u8(cb, 192)
+    cb_u8(cb, 72)
+    cb_u8(cb, 15)
+    cb_u8(cb, 182)
+    cb_u8(cb, 192)
+}
+
+// test %rax,%rax (48 85 c0)
+fn emit_test_rax(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 133)
+    cb_u8(cb, 192)
+}
+
+// je rel32 (0f 84 <rel32 placeholder>) — records a fixup to `block`.
+fn emit_je_block(cb: &!MliCodeBuf, block: i64) with Mut, Panic {
+    cb_u8(cb, 15)
+    cb_u8(cb, 132)
+    if cb.fix_count >= MLI_L_MAX_FIXUPS {
+        cb_fail(cb, MLI_L_CAPACITY, 0 - 1, 0 - 1)
+        return
+    }
+    cb.fix_site[cb.fix_count] = cb.len
+    cb.fix_block[cb.fix_count] = block
+    cb.fix_count = cb.fix_count + 1
+    cb_i32le(cb, 0)
+}
+
+// jmp rel32 (e9 <rel32 placeholder>) — records a fixup to `block`.
+fn emit_jmp_block(cb: &!MliCodeBuf, block: i64) with Mut, Panic {
+    cb_u8(cb, 233)
+    if cb.fix_count >= MLI_L_MAX_FIXUPS {
+        cb_fail(cb, MLI_L_CAPACITY, 0 - 1, 0 - 1)
+        return
+    }
+    cb.fix_site[cb.fix_count] = cb.len
+    cb.fix_block[cb.fix_count] = block
+    cb.fix_count = cb.fix_count + 1
+    cb_i32le(cb, 0)
+}
+
+// Prologue exactly as measured (frame + stack-probe loop).
+fn emit_prologue(cb: &!MliCodeBuf, frame: i64) with Mut, Panic {
+    cb_u8(cb, 85)
+    cb_u8(cb, 72)
+    cb_u8(cb, 137)
+    cb_u8(cb, 229)
+    cb_u8(cb, 72)
+    cb_u8(cb, 129)
+    cb_u8(cb, 236)
+    cb_i32le(cb, frame)
+    cb_u8(cb, 72)
+    cb_u8(cb, 137)
+    cb_u8(cb, 232)
+    cb_u8(cb, 72)
+    cb_u8(cb, 45)
+    cb_i32le(cb, 4096)
+    cb_u8(cb, 72)
+    cb_u8(cb, 57)
+    cb_u8(cb, 224)
+    cb_u8(cb, 118)
+    cb_u8(cb, 5)
+    cb_u8(cb, 128)
+    cb_u8(cb, 8)
+    cb_u8(cb, 0)
+    cb_u8(cb, 235)
+    cb_u8(cb, 240)
+}
+
+// Epilogue: mov rsp,rbp; pop rbp; ret — emitted per RET (measured).
+fn emit_epilogue(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 137)
+    cb_u8(cb, 236)
+    cb_u8(cb, 93)
+    cb_u8(cb, 195)
+}
+
+fn kind_is_scalar_f64(k: MliKind) -> bool {
+    k.tag == MLI_KIND_FLOAT && k.bits == 64
+}
+
+fn kind_is_scalar_int(k: MliKind) -> bool {
+    if k.tag == MLI_KIND_BOOL { return true }
+    k.tag == MLI_KIND_INT && k.bits == 64
+}
+
+fn kind_is_unexpanded_structure(k: MliKind) -> bool {
+    k.tag == MLI_KIND_KNOWLEDGE || k.tag == MLI_KIND_CD || k.tag == MLI_KIND_QD128
+        || k.tag == MLI_KIND_VECF64 || k.tag == MLI_KIND_BUNDLE
+}
+
+fn kind_is_emittable(k: MliKind) -> bool {
+    kind_is_scalar_f64(k) || kind_is_scalar_int(k)
+}
+
+fn fadd_family_opbyte(op: i64) -> i64 {
+    if op == MLI_OP_FADD { return 88 }
+    if op == MLI_OP_FSUB { return 92 }
+    if op == MLI_OP_FMUL { return 89 }
+    if op == MLI_OP_FDIV { return 94 }
+    0 - 1
+}
+
+// SWAPPED setcc mapping (measured): int compares run with rbx=lhs, rax=rhs,
+// cmp %rbx,%rax => flags of (rhs - lhs).
+fn icmp_setcc_byte(cc: i64) -> i64 {
+    if cc == MLI_CC_EQ { return 148 }
+    if cc == MLI_CC_NE { return 149 }
+    if cc == MLI_CC_LT { return 159 }
+    if cc == MLI_CC_LE { return 157 }
+    if cc == MLI_CC_GT { return 156 }
+    if cc == MLI_CC_GE { return 158 }
+    0 - 1
+}
+
+// Materialise an integer immediate into rax (small ints via mov $imm32 as
+// measured; wide via movabs).
+fn emit_int_imm_to_rax(cb: &!MliCodeBuf, v: i64) with Mut, Panic {
+    if v >= 0 && v < 2147483648 {
+        emit_mov_rax_imm32(cb, v)
+    } else {
+        emit_movabs_rax(cb, v)
+    }
+}
+
+// Ensure a source operand is in a slot, materialising immediates exactly as
+// the pinned emitter does. Returns the slot, or 0-1 with the buffer failed.
+fn ensure_src_slot(cb: &!MliCodeBuf, sm: &!MliSlotMap, o: MliOperand, b: i64, i: i64) -> i64 with Mut, Panic, Div {
+    if o.tag == MLI_OPD_VREG {
+        if kind_is_unexpanded_structure(o.kind) {
+            cb_fail(cb, MLI_L_KNOWLEDGE_UNEXPANDED, b, i)
+            return 0 - 1
+        }
+        if !kind_is_emittable(o.kind) {
+            cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, b, i)
+            return 0 - 1
+        }
+        let s = sm.slot_of_vreg[o.id]
+        if s == 0 {
+            cb_fail(cb, MLI_L_OPERAND, b, i)
+            return 0 - 1
+        }
+        return s
+    }
+    if o.tag == MLI_OPD_IMM {
+        if kind_is_unexpanded_structure(o.kind) {
+            cb_fail(cb, MLI_L_KNOWLEDGE_UNEXPANDED, b, i)
+            return 0 - 1
+        }
+        if kind_is_scalar_f64(o.kind) {
+            let fb = mli_f64_bits(o.fimm)
+            if !fb.ok {
+                cb_fail(cb, MLI_L_CONST_UNSUPPORTED, b, i)
+                return 0 - 1
+            }
+            let s = slot_alloc_anon(sm)
+            emit_movabs_rax(cb, fb.bits)
+            emit_store_rax(cb, slot_disp(s))
+            return s
+        }
+        if kind_is_scalar_int(o.kind) {
+            let s = slot_alloc_anon(sm)
+            emit_int_imm_to_rax(cb, o.aux)
+            emit_store_rax(cb, slot_disp(s))
+            return s
+        }
+        cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, b, i)
+        return 0 - 1
+    }
+    cb_fail(cb, MLI_L_OPERAND, b, i)
+    0 - 1
+}
+
+// ---------------------------------------------------------------------------
+// Slot-count pre-pass over ALL blocks (mirrors emission order so the frame
+// matches). Kind refusals fire here first — the commitment check outranks
+// every shape check.
+// ---------------------------------------------------------------------------
+
+fn count_slots(f: &MliFunction, cb: &!MliCodeBuf) -> i64 with Mut, Panic {
+    var ai: i64 = 0
+    while ai < f.arg_count {
+        if kind_is_unexpanded_structure(f.arg_kinds[ai]) {
+            cb_fail(cb, MLI_L_KNOWLEDGE_UNEXPANDED, 0 - 1, ai)
+            return 0
+        }
+        if !kind_is_emittable(f.arg_kinds[ai]) {
+            cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, 0 - 1, ai)
+            return 0
+        }
+        ai = ai + 1
+    }
+    if f.arg_count < 1 || f.arg_count > 6 {
+        cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, 0 - 1, 0 - 1)
+        return 0
+    }
+
+    var n = f.arg_count
+    var seen: [i64; 128] = [0; 128]
+    var s: i64 = 0
+    while s < f.arg_count {
+        seen[s] = 1
+        s = s + 1
+    }
+
+    var b: i64 = 0
+    while b < f.block_count {
+        var j: i64 = 0
+        while j < f.blk_instr_count[b] {
+            let slot = mli_slot(b, j)
+            let op = mli_slot_opcode(f, slot)
+            let d = mli_slot_dst(f, slot)
+            let s1 = mli_slot_src1(f, slot)
+            let s2 = mli_slot_src2(f, slot)
+
+            if kind_is_unexpanded_structure(d.kind) || kind_is_unexpanded_structure(s1.kind) || kind_is_unexpanded_structure(s2.kind) {
+                cb_fail(cb, MLI_L_KNOWLEDGE_UNEXPANDED, b, j)
+                return 0
+            }
+
+            if op == MLI_OP_NOP || op == MLI_OP_KEEP_ALIVE {
+                j = j + 1
+                continue
+            }
+
+            var known = false
+            if op == MLI_OP_MOV || op == MLI_OP_COPY { known = true }
+            if fadd_family_opbyte(op) > 0 { known = true }
+            if op == MLI_OP_ADD || op == MLI_OP_MUL || op == MLI_OP_DIV { known = true }
+            if op == MLI_OP_ICMP { known = true }
+            if !known {
+                cb_fail(cb, MLI_L_UNSUPPORTED_OP, b, j)
+                return 0
+            }
+
+            if s1.tag == MLI_OPD_IMM { n = n + 1 }
+            if s2.tag == MLI_OPD_IMM && !(op == MLI_OP_MOV || op == MLI_OP_COPY) { n = n + 1 }
+            if d.tag == MLI_OPD_VREG && seen[d.id] == 0 {
+                seen[d.id] = 1
+                n = n + 1
+            }
+            j = j + 1
+        }
+        b = b + 1
+    }
+    n
+}
+
+// Emit one int binop through the measured push/pop shape. lhs slot pushed,
+// rhs loaded to rax, pop rbx, op.
+fn emit_int_binop(cb: &!MliCodeBuf, op: i64, cc: i64, lhs_slot: i64, rhs_slot: i64, b: i64, j: i64) with Mut, Panic {
+    if op == MLI_OP_DIV {
+        // Measured idiv shape: rhs -> rcx, lhs -> rax, cqto, idiv rcx.
+        emit_load_rax(cb, slot_disp(rhs_slot))
+        emit_mov_rcx_rax(cb)
+        emit_load_rax(cb, slot_disp(lhs_slot))
+        emit_cqto_idiv_rcx(cb)
+        return
+    }
+    emit_load_rax(cb, slot_disp(lhs_slot))
+    emit_push_rax(cb)
+    emit_load_rax(cb, slot_disp(rhs_slot))
+    emit_pop_rbx(cb)
+    if op == MLI_OP_ADD {
+        emit_add_rbx_rax(cb)
+        return
+    }
+    if op == MLI_OP_MUL {
+        emit_imul_rbx_rax(cb)
+        return
+    }
+    if op == MLI_OP_ICMP {
+        let scb = icmp_setcc_byte(cc)
+        if scb < 0 {
+            cb_fail(cb, MLI_L_UNSUPPORTED_OP, b, j)
+            return
+        }
+        emit_cmp_rbx_rax(cb)
+        emit_setcc_movzbq(cb, scb)
+        return
+    }
+    cb_fail(cb, MLI_L_UNSUPPORTED_OP, b, j)
+}
+
+// ---------------------------------------------------------------------------
+// Entry point: legalize + encode one MLI function (full CFG) into x86-64
+// bytes, mimicking the pinned emitter. Blocks are laid out in id order;
+// br emits test+je(false edge) with fallthrough or jmp for the true edge.
+// ---------------------------------------------------------------------------
+
+pub fn mli_legalize_x86(f: &MliFunction, cb: &!MliCodeBuf) -> bool with Mut, Panic, Div {
+    if f.block_count < 1 || f.block_count > MLI_MAX_BLOCKS {
+        cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, 0 - 1, 0 - 1)
+        return false
+    }
+    if !kind_is_emittable(f.ret) {
+        if kind_is_unexpanded_structure(f.ret) {
+            cb_fail(cb, MLI_L_KNOWLEDGE_UNEXPANDED, 0 - 1, 0 - 1)
+        } else {
+            cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, 0 - 1, 0 - 1)
+        }
+        return false
+    }
+
+    let nslots = count_slots(f, cb)
+    if !cb.ok { return false }
+
+    var frame = nslots * 8
+    if frame % 16 != 0 { frame = frame + (16 - frame % 16) }
+
+    var sm = slots_empty()
+
+    emit_prologue(cb, frame)
+
+    var a: i64 = 0
+    while a < f.arg_count {
+        let s = slot_for_def(&!sm, a)
+        emit_store_argreg(cb, a, slot_disp(s))
+        a = a + 1
+    }
+
+    var b: i64 = 0
+    while b < f.block_count {
+        if f.blk_has_term[b] != 1 {
+            cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, b, 0 - 1)
+            return false
+        }
+        cb.block_off[b] = cb.len
+
+        var j: i64 = 0
+        while j < f.blk_instr_count[b] {
+            let slot = mli_slot(b, j)
+            let op = mli_slot_opcode(f, slot)
+            let d = mli_slot_dst(f, slot)
+            let s1 = mli_slot_src1(f, slot)
+            let s2 = mli_slot_src2(f, slot)
+
+            if op == MLI_OP_NOP || op == MLI_OP_KEEP_ALIVE {
+                j = j + 1
+                continue
+            }
+
+            if d.tag != MLI_OPD_VREG {
+                cb_fail(cb, MLI_L_OPERAND, b, j)
+                return false
+            }
+
+            if op == MLI_OP_MOV || op == MLI_OP_COPY {
+                if s1.tag == MLI_OPD_IMM {
+                    if kind_is_scalar_f64(s1.kind) {
+                        let fb = mli_f64_bits(s1.fimm)
+                        if !fb.ok {
+                            cb_fail(cb, MLI_L_CONST_UNSUPPORTED, b, j)
+                            return false
+                        }
+                        let ds = slot_for_def(&!sm, d.id)
+                        emit_movabs_rax(cb, fb.bits)
+                        emit_store_rax(cb, slot_disp(ds))
+                        j = j + 1
+                        continue
+                    }
+                    if kind_is_scalar_int(s1.kind) {
+                        let ds = slot_for_def(&!sm, d.id)
+                        emit_int_imm_to_rax(cb, s1.aux)
+                        emit_store_rax(cb, slot_disp(ds))
+                        j = j + 1
+                        continue
+                    }
+                    cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, b, j)
+                    return false
+                }
+                let ss = ensure_src_slot(cb, &!sm, s1, b, j)
+                if !cb.ok { return false }
+                let ds = slot_for_def(&!sm, d.id)
+                emit_load_rax(cb, slot_disp(ss))
+                emit_store_rax(cb, slot_disp(ds))
+                j = j + 1
+                continue
+            }
+
+            let opbyte = fadd_family_opbyte(op)
+            if opbyte > 0 {
+                let s1s = ensure_src_slot(cb, &!sm, s1, b, j)
+                if !cb.ok { return false }
+                let s2s = ensure_src_slot(cb, &!sm, s2, b, j)
+                if !cb.ok { return false }
+                emit_load_rax(cb, slot_disp(s1s))
+                emit_movq_xmm0_rax(cb)
+                emit_load_rax(cb, slot_disp(s2s))
+                emit_movq_xmm1_rax(cb)
+                emit_f64_binop_xmm(cb, opbyte)
+                emit_movq_rax_xmm0(cb)
+                let ds = slot_for_def(&!sm, d.id)
+                emit_store_rax(cb, slot_disp(ds))
+                j = j + 1
+                continue
+            }
+
+            if op == MLI_OP_ADD || op == MLI_OP_MUL || op == MLI_OP_DIV || op == MLI_OP_ICMP {
+                let s1s = ensure_src_slot(cb, &!sm, s1, b, j)
+                if !cb.ok { return false }
+                let s2s = ensure_src_slot(cb, &!sm, s2, b, j)
+                if !cb.ok { return false }
+                emit_int_binop(cb, op, mli_slot_cc(f, slot), s1s, s2s, b, j)
+                if !cb.ok { return false }
+                let ds = slot_for_def(&!sm, d.id)
+                emit_store_rax(cb, slot_disp(ds))
+                j = j + 1
+                continue
+            }
+
+            cb_fail(cb, MLI_L_UNSUPPORTED_OP, b, j)
+            return false
+        }
+
+        // Terminator.
+        let ts = mli_term_slot(b)
+        let top = mli_slot_opcode(f, ts)
+
+        if top == MLI_OP_RET {
+            let rv = mli_slot_src1(f, ts)
+            if f.ret.tag == MLI_KIND_VOID {
+                cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, b, 0 - 1)
+                return false
+            }
+            if rv.tag != MLI_OPD_VREG {
+                cb_fail(cb, MLI_L_OPERAND, b, 0 - 1)
+                return false
+            }
+            let rs = sm.slot_of_vreg[rv.id]
+            if rs == 0 {
+                cb_fail(cb, MLI_L_OPERAND, b, 0 - 1)
+                return false
+            }
+            emit_load_rax(cb, slot_disp(rs))
+            emit_epilogue(cb)
+            b = b + 1
+            continue
+        }
+
+        if top == MLI_OP_JMP {
+            let tgt = mli_slot_src1(f, ts)
+            if tgt.id != b + 1 {
+                emit_jmp_block(cb, tgt.id)
+            }
+            // Fallthrough elision when the target is the next block.
+            b = b + 1
+            continue
+        }
+
+        if top == MLI_OP_BR {
+            let c = mli_slot_src1(f, ts)
+            let tthen = mli_slot_src2(f, ts)
+            let telse = mli_slot_src3(f, ts)
+            if c.tag != MLI_OPD_VREG {
+                cb_fail(cb, MLI_L_OPERAND, b, 0 - 1)
+                return false
+            }
+            let cs = sm.slot_of_vreg[c.id]
+            if cs == 0 {
+                cb_fail(cb, MLI_L_OPERAND, b, 0 - 1)
+                return false
+            }
+            emit_load_rax(cb, slot_disp(cs))
+            emit_test_rax(cb)
+            emit_je_block(cb, telse.id)
+            if tthen.id != b + 1 {
+                emit_jmp_block(cb, tthen.id)
+            }
+            b = b + 1
+            continue
+        }
+
+        cb_fail(cb, MLI_L_UNSUPPORTED_OP, b, 0 - 1)
+        return false
+    }
+
+    if !cb.ok { return false }
+
+    // Resolve rel32 fixups now that all block offsets are known.
+    var k: i64 = 0
+    while k < cb.fix_count {
+        let site = cb.fix_site[k]
+        let tb = cb.fix_block[k]
+        if tb < 0 || tb >= f.block_count {
+            cb_fail(cb, MLI_L_OPERAND, tb, 0 - 1)
+            return false
+        }
+        cb_patch_i32le(cb, site, cb.block_off[tb] - (site + 4))
+        k = k + 1
+    }
+    cb.ok
+}

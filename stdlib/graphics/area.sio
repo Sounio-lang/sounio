@@ -1,0 +1,307 @@
+// Graphics Area — Filled area charts
+//
+// Raster area chart rendering: fills the region between a data line and a baseline.
+
+use graphics::drawing::{Color, color_white}
+use graphics::surface::{Surface, surface_new, surface_clear, surface_draw_rect, surface_draw_line}
+use graphics::tile::{TiledSurface, tiled_surface_new, tiled_clear, tiled_draw_rect, tiled_draw_line, tiled_export_png}
+use graphics::png::{png_encode_surface}
+
+// Draw a filled area between the data line and baseline_y onto a Surface.
+// xs and ys are in data coordinates and are auto-scaled to the full surface.
+// baseline_y is in pixel coordinates.
+pub fn plot_area_raster(s: Surface, xs: &[f64; 256], ys: &[f64; 256], n: i64, baseline_y: i64, fill_color: Color) -> Surface with Mut, Panic, Div {
+    if n <= 0 { return s }
+    var out = s
+
+    var xmin = xs[0]
+    var xmax = xs[0]
+    var ymin = ys[0]
+    var ymax = ys[0]
+    var i: i64 = 1
+    while i < n {
+        if xs[i] < xmin { xmin = xs[i] }
+        if xs[i] > xmax { xmax = xs[i] }
+        if ys[i] < ymin { ymin = ys[i] }
+        if ys[i] > ymax { ymax = ys[i] }
+        i = i + 1
+    }
+
+    let x_range = xmax - xmin
+    let y_range = ymax - ymin
+
+    let dark_color = Color {
+        r: fill_color.r / 2,
+        g: fill_color.g / 2,
+        b: fill_color.b / 2,
+        a: fill_color.a
+    }
+
+    // Column-by-column fill
+    var px: i64 = 0
+    while px < out.width {
+        let x_frac = if out.width <= 0 { 0.0 } else { (px as f64) / (out.width as f64) }
+        let x_data = xmin + x_frac * x_range
+        let y_data = interp_area_y(xs, ys, n, x_data)
+        let y_frac = if y_range == 0.0 { 0.0 } else { (y_data - ymin) / y_range }
+        var py = out.height - 1 - (y_frac * (out.height as f64)) as i64
+        if py < 0 { py = 0 }
+        if py >= out.height { py = out.height - 1 }
+
+        let y0 = if py < baseline_y { py } else { baseline_y }
+        let y1 = if py > baseline_y { py } else { baseline_y }
+        let h = y1 - y0 + 1
+
+        if h > 0 && px >= 0 && px < out.width {
+            out = surface_draw_rect(out, px, y0, 1, h, fill_color)
+        }
+        px = px + 1
+    }
+
+    // Top line outline
+    var j: i64 = 0
+    while j < n - 1 {
+        let x0f = if x_range == 0.0 { 0.0 } else { (xs[j] - xmin) / x_range }
+        let y0f = if y_range == 0.0 { 0.0 } else { (ys[j] - ymin) / y_range }
+        let x1f = if x_range == 0.0 { 0.0 } else { (xs[j + 1] - xmin) / x_range }
+        let y1f = if y_range == 0.0 { 0.0 } else { (ys[j + 1] - ymin) / y_range }
+
+        let px0 = (x0f * (out.width as f64)) as i64
+        let py0 = out.height - 1 - (y0f * (out.height as f64)) as i64
+        let px1 = (x1f * (out.width as f64)) as i64
+        let py1 = out.height - 1 - (y1f * (out.height as f64)) as i64
+
+        out = surface_draw_line(out, px0, py0, px1, py1, dark_color)
+        j = j + 1
+    }
+
+    out
+}
+
+fn interp_area_y(xs: &[f64; 256], ys: &[f64; 256], n: i64, x_target: f64) -> f64 with Mut, Div, Panic {
+    if n <= 0 { return 0.0 }
+    if x_target <= xs[0] { return ys[0] }
+    if x_target >= xs[n - 1] { return ys[n - 1] }
+    var i: i64 = 0
+    while i < n - 1 {
+        if x_target >= xs[i] && x_target <= xs[i + 1] {
+            let dx = xs[i + 1] - xs[i]
+            let t = if dx == 0.0 { 0.0 } else { (x_target - xs[i]) / dx }
+            return ys[i] + t * (ys[i + 1] - ys[i])
+        }
+        i = i + 1
+    }
+    ys[n - 1]
+}
+
+pub fn tiled_plot_area_raster(ts: TiledSurface, xs: &[f64; 256], ys: &[f64; 256], n: i64, baseline_y: i64, fill_color: Color) -> TiledSurface with Mut, Panic, Div {
+    if n <= 0 { return ts }
+    var out = ts
+
+    var xmin = xs[0]
+    var xmax = xs[0]
+    var ymin = ys[0]
+    var ymax = ys[0]
+    var i: i64 = 1
+    while i < n {
+        if xs[i] < xmin { xmin = xs[i] }
+        if xs[i] > xmax { xmax = xs[i] }
+        if ys[i] < ymin { ymin = ys[i] }
+        if ys[i] > ymax { ymax = ys[i] }
+        i = i + 1
+    }
+
+    let x_range = xmax - xmin
+    let y_range = ymax - ymin
+
+    let dark_color = Color {
+        r: fill_color.r / 2,
+        g: fill_color.g / 2,
+        b: fill_color.b / 2,
+        a: fill_color.a
+    }
+
+    var px: i64 = 0
+    while px < out.width {
+        let x_frac = if out.width <= 0 { 0.0 } else { (px as f64) / (out.width as f64) }
+        let x_data = xmin + x_frac * x_range
+        let y_data = interp_area_y(xs, ys, n, x_data)
+        let y_frac = if y_range == 0.0 { 0.0 } else { (y_data - ymin) / y_range }
+        var py = out.height - 1 - (y_frac * (out.height as f64)) as i64
+        if py < 0 { py = 0 }
+        if py >= out.height { py = out.height - 1 }
+
+        let y0 = if py < baseline_y { py } else { baseline_y }
+        let y1 = if py > baseline_y { py } else { baseline_y }
+        let h = y1 - y0 + 1
+
+        if h > 0 && px >= 0 && px < out.width {
+            out = tiled_draw_rect(out, px, y0, 1, h, fill_color)
+        }
+        px = px + 1
+    }
+
+    var j: i64 = 0
+    while j < n - 1 {
+        let x0f = if x_range == 0.0 { 0.0 } else { (xs[j] - xmin) / x_range }
+        let y0f = if y_range == 0.0 { 0.0 } else { (ys[j] - ymin) / y_range }
+        let x1f = if x_range == 0.0 { 0.0 } else { (xs[j + 1] - xmin) / x_range }
+        let y1f = if y_range == 0.0 { 0.0 } else { (ys[j + 1] - ymin) / y_range }
+
+        let px0 = (x0f * (out.width as f64)) as i64
+        let py0 = out.height - 1 - (y0f * (out.height as f64)) as i64
+        let px1 = (x1f * (out.width as f64)) as i64
+        let py1 = out.height - 1 - (y1f * (out.height as f64)) as i64
+
+        out = tiled_draw_line(out, px0, py0, px1, py1, dark_color)
+        j = j + 1
+    }
+
+    out
+}
+
+pub fn plot_area_png(xs: &[f64; 256], ys: &[f64; 256], n: i64, width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {
+    if n <= 0 || width <= 0 || height <= 0 { return false }
+    let margin = 20
+    let plot_w = width - margin * 2
+    let plot_h = height - margin * 2
+    if plot_w <= 0 || plot_h <= 0 { return false }
+
+    var s = surface_new(width, height)
+    s = surface_clear(s, color_white())
+
+    var xmin = xs[0]
+    var xmax = xs[0]
+    var ymin = ys[0]
+    var ymax = ys[0]
+    var i: i64 = 1
+    while i < n {
+        if xs[i] < xmin { xmin = xs[i] }
+        if xs[i] > xmax { xmax = xs[i] }
+        if ys[i] < ymin { ymin = ys[i] }
+        if ys[i] > ymax { ymax = ys[i] }
+        i = i + 1
+    }
+
+    let x_range = xmax - xmin
+    let y_range = ymax - ymin
+    let baseline_y = height - margin - 1
+    let fill_color = Color { r: 173, g: 216, b: 230, a: 255 }
+    let dark_color = Color { r: 86, g: 108, b: 115, a: 255 }
+
+    var px: i64 = 0
+    while px < plot_w {
+        let x_frac = (px as f64) / (plot_w as f64)
+        let x_data = xmin + x_frac * x_range
+        let y_data = interp_area_y(xs, ys, n, x_data)
+        let y_frac = if y_range == 0.0 { 0.0 } else { (y_data - ymin) / y_range }
+        var py = height - margin - 1 - (y_frac * (plot_h as f64)) as i64
+        if py < 0 { py = 0 }
+        if py >= height { py = height - 1 }
+
+        let y0 = if py < baseline_y { py } else { baseline_y }
+        let y1 = if py > baseline_y { py } else { baseline_y }
+        let h = y1 - y0 + 1
+
+        if h > 0 {
+            s = surface_draw_rect(s, margin + px, y0, 1, h, fill_color)
+        }
+        px = px + 1
+    }
+
+    var j: i64 = 0
+    while j < n - 1 {
+        let x0f = if x_range == 0.0 { 0.0 } else { (xs[j] - xmin) / x_range }
+        let y0f = if y_range == 0.0 { 0.0 } else { (ys[j] - ymin) / y_range }
+        let x1f = if x_range == 0.0 { 0.0 } else { (xs[j + 1] - xmin) / x_range }
+        let y1f = if y_range == 0.0 { 0.0 } else { (ys[j + 1] - ymin) / y_range }
+
+        let px0 = margin + (x0f * (plot_w as f64)) as i64
+        let py0 = height - margin - 1 - (y0f * (plot_h as f64)) as i64
+        let px1 = margin + (x1f * (plot_w as f64)) as i64
+        let py1 = height - margin - 1 - (y1f * (plot_h as f64)) as i64
+
+        s = surface_draw_line(s, px0, py0, px1, py1, dark_color)
+        j = j + 1
+    }
+
+    let black = Color { r: 0, g: 0, b: 0, a: 255 }
+    s = surface_draw_rect(s, margin, margin, 1, plot_h, black)
+    s = surface_draw_rect(s, margin, height - margin - 1, plot_w, 1, black)
+
+    png_encode_surface(&s, filename)
+}
+
+pub fn tiled_plot_area_png(xs: &[f64; 256], ys: &[f64; 256], n: i64, width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {
+    if n <= 0 || width <= 0 || height <= 0 { return false }
+    let margin = 20
+    let plot_w = width - margin * 2
+    let plot_h = height - margin * 2
+    if plot_w <= 0 || plot_h <= 0 { return false }
+
+    var ts = tiled_surface_new(width, height, 256, 256)
+    ts = tiled_clear(ts, color_white())
+
+    var xmin = xs[0]
+    var xmax = xs[0]
+    var ymin = ys[0]
+    var ymax = ys[0]
+    var i: i64 = 1
+    while i < n {
+        if xs[i] < xmin { xmin = xs[i] }
+        if xs[i] > xmax { xmax = xs[i] }
+        if ys[i] < ymin { ymin = ys[i] }
+        if ys[i] > ymax { ymax = ys[i] }
+        i = i + 1
+    }
+
+    let x_range = xmax - xmin
+    let y_range = ymax - ymin
+    let baseline_y = height - margin - 1
+    let fill_color = Color { r: 173, g: 216, b: 230, a: 255 }
+    let dark_color = Color { r: 86, g: 108, b: 115, a: 255 }
+
+    var px: i64 = 0
+    while px < plot_w {
+        let x_frac = (px as f64) / (plot_w as f64)
+        let x_data = xmin + x_frac * x_range
+        let y_data = interp_area_y(xs, ys, n, x_data)
+        let y_frac = if y_range == 0.0 { 0.0 } else { (y_data - ymin) / y_range }
+        var py = height - margin - 1 - (y_frac * (plot_h as f64)) as i64
+        if py < 0 { py = 0 }
+        if py >= height { py = height - 1 }
+
+        let y0 = if py < baseline_y { py } else { baseline_y }
+        let y1 = if py > baseline_y { py } else { baseline_y }
+        let h = y1 - y0 + 1
+
+        if h > 0 {
+            ts = tiled_draw_rect(ts, margin + px, y0, 1, h, fill_color)
+        }
+        px = px + 1
+    }
+
+    var j: i64 = 0
+    while j < n - 1 {
+        let x0f = if x_range == 0.0 { 0.0 } else { (xs[j] - xmin) / x_range }
+        let y0f = if y_range == 0.0 { 0.0 } else { (ys[j] - ymin) / y_range }
+        let x1f = if x_range == 0.0 { 0.0 } else { (xs[j + 1] - xmin) / x_range }
+        let y1f = if y_range == 0.0 { 0.0 } else { (ys[j + 1] - ymin) / y_range }
+
+        let px0 = margin + (x0f * (plot_w as f64)) as i64
+        let py0 = height - margin - 1 - (y0f * (plot_h as f64)) as i64
+        let px1 = margin + (x1f * (plot_w as f64)) as i64
+        let py1 = height - margin - 1 - (y1f * (plot_h as f64)) as i64
+
+        ts = tiled_draw_line(ts, px0, py0, px1, py1, dark_color)
+        j = j + 1
+    }
+
+    let black = Color { r: 0, g: 0, b: 0, a: 255 }
+    ts = tiled_draw_rect(ts, margin, margin, 1, plot_h, black)
+    ts = tiled_draw_rect(ts, margin, height - margin - 1, plot_w, 1, black)
+
+    tiled_export_png(&ts, filename)
+}
+
+fn main() -> i32 with IO { 0 }

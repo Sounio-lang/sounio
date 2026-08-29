@@ -1,0 +1,80 @@
+//@ run-pass
+//! KEC-alpha CORE — semantic-coherence-of-egocentric-distance, metric C.
+//!
+//! Setup: a fixed semantic graph over N words (edges (i,j) with cosine weight w_ij), and a
+//! per-subject binary field s in {-1,+1} = the proximal/distal demonstrative choice per word.
+//!
+//! Primary metric (graph-signal smoothness / weighted partition cut):
+//!     C = ( sum_{(i,j) in E} w_ij (s_i - s_j)^2 ) / ( sum_i s_i^2 )
+//! Since s in {-1,+1}: (s_i - s_j)^2 = 0 if equal, 4 if different, and sum_i s_i^2 = N. Hence
+//!     C = 4 * (weight of semantic edges cut by the proximal/distal partition) / N.
+//! Low C  = the proximal/distal boundary respects semantic clusters (COHERENT assignment).
+//! High C = the boundary slices through semantically-similar words (FRAGMENTED assignment).
+//!
+//! The field is bit-packed: bit v (in word v>>6, position v&63) is 1 for "that"(distal) else
+//! 0 for "this"(proximal). A graph edge is "cut" iff its two endpoint bits differ. Sign of the
+//! ±1 coding is irrelevant to C (squared difference), so the bit convention is free.
+//!
+//! This file is the hand-checkable core; the full two-wave fixtures splice their data into the
+//! generated dct_kec_wave{1,2}.sio and reuse compute_C / field_bit verbatim.
+
+fn et_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// bit of node v from a packed field array (stride: words of 64 bits).
+fn field_bit(field: &[i64; 64], v: i64) -> i64 {
+    let word = field[v >> 6]
+    (word >> (v & 63)) & 1
+}
+
+// C = 4 * (cut weight) / n_words, over the shared edge list.
+fn compute_C(ei: &[i64; 16], ej: &[i64; 16], ew: &[f64; 16], n_edges: i64,
+             field: &[i64; 64], n_words: i64) -> f64 with Mut, Div, Panic {
+    var cut = 0.0
+    var e: i64 = 0
+    while e < n_edges {
+        let bi = field_bit(field, ei[e])
+        let bj = field_bit(field, ej[e])
+        if bi != bj { cut = cut + ew[e] }
+        e = e + 1
+    }
+    (4.0 * cut) / (n_words as f64)
+}
+
+fn approx(a: f64, b: f64, tol: f64) -> bool { et_abs(a - b) <= tol }
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    // Path graph on 4 nodes: edges (0,1),(1,2),(2,3), all weight 1.0.
+    var ei: [i64; 16] = [0; 16]
+    var ej: [i64; 16] = [0; 16]
+    var ew: [f64; 16] = [0.0; 16]
+    ei[0] = 0; ej[0] = 1; ew[0] = 1.0
+    ei[1] = 1; ej[1] = 2; ew[1] = 1.0
+    ei[2] = 2; ej[2] = 3; ew[2] = 1.0
+    let n_edges: i64 = 3
+    let n_words: i64 = 4
+
+    // field A: all 0 (all proximal) -> no cut -> C = 0.
+    var fa: [i64; 64] = [0; 64]
+    let ca = compute_C(&ei, &ej, &ew, n_edges, &fa, n_words)
+    print("C_all_same="); print(ca); println("")
+
+    // field B: 0,1,0,1 (checkerboard) -> all 3 edges cut -> C = 4*3/4 = 3.0.
+    var fb: [i64; 64] = [0; 64]
+    fb[0] = 10            // binary ...1010 : bit0=0, bit1=1, bit2=0, bit3=1
+    let cb = compute_C(&ei, &ej, &ew, n_edges, &fb, n_words)
+    print("C_checker="); print(cb); println("")
+
+    // field C: 0,0,1,1 -> only edge (1,2) cut -> C = 4*1/4 = 1.0.
+    var fc: [i64; 64] = [0; 64]
+    fc[0] = 12           // binary ...1100 : bit0=0, bit1=0, bit2=1, bit3=1
+    let cc = compute_C(&ei, &ej, &ew, n_edges, &fc, n_words)
+    print("C_block="); print(cc); println("")
+
+    if approx(ca, 0.0, 1e-9) && approx(cb, 3.0, 1e-9) && approx(cc, 1.0, 1e-9) {
+        println("KEC_CORE_PASS")
+        0
+    } else {
+        println("KEC_CORE_FAIL")
+        1
+    }
+}

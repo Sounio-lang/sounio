@@ -1,0 +1,173 @@
+// stdlib/viz/inspector.sio - native Canvas inspector for Visual IR identity/state
+
+use display::canvas::{Canvas, canvas_fill_rect, canvas_draw_rect, canvas_draw_text}
+use viz::ir::{VizScene, VIZ_NODE_CONTROL, VIZ_CONTROL_SLIDER, VIZ_CONTROL_TOGGLE, VIZ_CONTROL_TABS}
+
+fn vi_write_char(buf: &![i8; 256], idx: i64, ch: i64) with Mut {
+    if idx >= 0 && idx < 256 {
+        buf[idx as usize] = ch as i8
+    }
+}
+
+fn vi_write_text(buf: &![i8; 256], idx: i64, text: &[i8; 64], len: i64) -> i64 with Mut {
+    var out = idx
+    var i: i64 = 0
+    while i < len && i < 64 && out < 255 {
+        buf[out as usize] = text[i as usize]
+        out = out + 1
+        i = i + 1
+    }
+    out
+}
+
+fn vi_write_lit(buf: &![i8; 256], idx: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 with Mut {
+    var out = idx
+    let chars = [a, b, c, d, e, f, g, h]
+    var i: i64 = 0
+    while i < 8 && out < 255 {
+        if chars[i as usize] != 0 {
+            vi_write_char(buf, out, chars[i as usize])
+            out = out + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn vi_write_int(buf: &![i8; 256], idx: i64, value: i64) -> i64 with Mut {
+    var out = idx
+    var v = value
+    if v < 0 {
+        vi_write_char(buf, out, 45)
+        out = out + 1
+        v = 0 - v
+    }
+    var div: i64 = 1000000
+    var started = false
+    while div > 0 && out < 255 {
+        let digit = v / div
+        if digit > 0 || started || div == 1 {
+            vi_write_char(buf, out, 48 + digit)
+            out = out + 1
+            started = true
+        }
+        v = v - digit * div
+        div = div / 10
+    }
+    out
+}
+
+fn vi_draw_line(c: &!Canvas, x: i64, y: i64, text: &[i8; 256], len: i64, r: i64, g: i64, b: i64) with Mut {
+    canvas_draw_text(c, text, len, x, y, r, g, b)
+}
+
+fn vi_kind_short(kind: i64, control: i64, buf: &![i8; 256], idx: i64) -> i64 with Mut {
+    if kind == VIZ_NODE_CONTROL {
+        if control == VIZ_CONTROL_SLIDER {
+            return vi_write_lit(buf, idx, 115, 108, 105, 100, 101, 114, 0, 0)
+        } else if control == VIZ_CONTROL_TOGGLE {
+            return vi_write_lit(buf, idx, 116, 111, 103, 103, 108, 101, 0, 0)
+        } else if control == VIZ_CONTROL_TABS {
+            return vi_write_lit(buf, idx, 116, 97, 98, 115, 0, 0, 0, 0)
+        }
+        return vi_write_lit(buf, idx, 99, 116, 114, 108, 0, 0, 0, 0)
+    }
+    vi_write_lit(buf, idx, 107, 105, 110, 100, 0, 0, 0, 0)
+}
+
+fn vi_write_state_label(buf: &![i8; 256], idx: i64, label_kind: i64) -> i64 with Mut {
+    if label_kind == 0 {
+        return vi_write_lit(buf, idx, 110, 111, 100, 101, 115, 0, 0, 0)
+    } else if label_kind == 1 {
+        return vi_write_lit(buf, idx, 115, 101, 108, 101, 99, 116, 101, 100)
+    } else if label_kind == 2 {
+        return vi_write_lit(buf, idx, 104, 111, 118, 101, 114, 101, 100, 0)
+    }
+    vi_write_lit(buf, idx, 102, 111, 99, 117, 115, 101, 100, 0)
+}
+
+fn vi_draw_state_row(c: &!Canvas, x: i64, y: i64, label_kind: i64, value: i64, hot: bool) with Mut {
+    var buf: [i8; 256] = [0; 256]
+    var out = vi_write_state_label(&!buf, 0, label_kind)
+    out = vi_write_lit(&!buf, out, 58, 32, 0, 0, 0, 0, 0, 0)
+    out = vi_write_int(&!buf, out, value)
+    let rr = if hot { 255 } else { 170 }
+    let gg = if hot { 230 } else { 190 }
+    let bb = if hot { 120 } else { 210 }
+    vi_draw_line(c, x, y, &buf, out, rr, gg, bb)
+}
+
+pub fn viz_inspector_draw(scene: &VizScene, c: &!Canvas, x: i64, y: i64, w: i64, h: i64) with Mut {
+    canvas_fill_rect(c, x, y, w, h, 14, 18, 24)
+    canvas_draw_rect(c, x, y, w, h, 92, 118, 145)
+
+    var title_buf: [i8; 256] = [0; 256]
+    let title_len = vi_write_lit(&!title_buf, 0, 86, 105, 122, 32, 73, 82, 32, 0)
+    let title_len2 = vi_write_lit(&!title_buf, title_len, 73, 110, 115, 112, 101, 99, 116, 111)
+    let title_len3 = vi_write_lit(&!title_buf, title_len2, 114, 0, 0, 0, 0, 0, 0, 0)
+    vi_draw_line(c, x + 8, y + 7, &title_buf, title_len3, 230, 238, 245)
+
+    vi_draw_state_row(c, x + 8, y + 23, 0, scene.node_count, false)
+    vi_draw_state_row(c, x + 8, y + 34, 1, scene.selected_node, scene.selected_node >= 0)
+    vi_draw_state_row(c, x + 8, y + 45, 2, scene.hovered_node, scene.hovered_node >= 0)
+    vi_draw_state_row(c, x + 8, y + 56, 3, scene.focused_node, scene.focused_node >= 0)
+
+    var row: i64 = 0
+    var idx: i64 = 0
+    while idx < scene.node_count && row < 6 {
+        let n = scene.nodes[idx as usize]
+        var buf: [i8; 256] = [0; 256]
+        var out = vi_write_lit(&!buf, 0, 35, 0, 0, 0, 0, 0, 0, 0)
+        out = vi_write_int(&!buf, out, idx)
+        out = vi_write_lit(&!buf, out, 32, 105, 100, 61, 0, 0, 0, 0)
+        out = vi_write_int(&!buf, out, n.id)
+        out = vi_write_lit(&!buf, out, 32, 116, 61, 0, 0, 0, 0, 0)
+        out = vi_write_int(&!buf, out, n.tag)
+        out = vi_write_lit(&!buf, out, 32, 0, 0, 0, 0, 0, 0, 0)
+        out = vi_kind_short(n.kind, n.data_slot, &!buf, out)
+        let hot = idx == scene.selected_node || idx == scene.hovered_node || idx == scene.focused_node
+        let rr = if hot { 255 } else { 156 }
+        let gg = if hot { 235 } else { 178 }
+        let bb = if hot { 150 } else { 195 }
+        vi_draw_line(c, x + 8, y + 74 + row * 11, &buf, out, rr, gg, bb)
+        row = row + 1
+        idx = idx + 1
+    }
+}
+
+pub fn viz_inspector_hit_node(scene: &VizScene, x: i64, y: i64, w: i64, h: i64, px: i64, py: i64) -> i64 {
+    if px < x || px >= x + w || py < y || py >= y + h { return 0 - 1 }
+    let row_y = y + 74
+    if py < row_y { return 0 - 1 }
+    let row = (py - row_y) / 11
+    if row < 0 || row >= 6 { return 0 - 1 }
+    if row >= scene.node_count { return 0 - 1 }
+    row
+}
+
+pub fn viz_inspector_select(scene: &!VizScene, x: i64, y: i64, w: i64, h: i64, px: i64, py: i64) -> i64 with Mut {
+    let idx = viz_inspector_hit_node(scene, x, y, w, h, px, py)
+    if idx < 0 || idx >= scene.node_count { return idx }
+    scene.selected_node = idx
+    scene.focused_node = idx
+    scene.hovered_node = idx
+    var i: i64 = 0
+    while i < scene.node_count {
+        scene.nodes[i as usize].selected = i == idx
+        i = i + 1
+    }
+    idx
+}
+
+pub fn viz_inspector_draw_node_highlights(scene: &VizScene, c: &!Canvas) with Mut {
+    var i: i64 = 0
+    while i < scene.node_count {
+        let n = scene.nodes[i as usize]
+        let hot = i == scene.selected_node || i == scene.hovered_node || i == scene.focused_node
+        if hot {
+            canvas_draw_rect(c, n.layout.x - 2, n.layout.y - 2, n.layout.w + 4, n.layout.h + 4, 255, 235, 120)
+            canvas_draw_rect(c, n.layout.x - 3, n.layout.y - 3, n.layout.w + 6, n.layout.h + 6, 80, 210, 255)
+        }
+        i = i + 1
+    }
+}

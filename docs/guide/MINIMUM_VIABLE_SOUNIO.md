@@ -30,7 +30,7 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 Current checked-artifact status:
 
-- version `1.0.0-beta.5`
+- version `Madaros v0.80.0`
 - checked host lanes:
   - Linux `x86_64`
   - macOS `arm64`
@@ -57,13 +57,13 @@ backend contract:
 
 Source: `artifacts/stdlib/stdlib_reliability_status.v1.json`
 
-- totals: `pass=81 fail=0 skip=1 total=82`
+- totals: `pass=251 fail=0 skip=0 total=251`
 - gate status: `status_summary=pass`
 - inventory:
-  - `604` `.sio` files
-  - `111` disabled files
-  - `44` stub module files
-  - `92` active module entrypoints
+  - `927` `.sio` files
+  - `0` disabled files
+  - `0` stub module files
+  - `119` active module entrypoints
 
 ### 3. STDLIB science pipeline
 
@@ -77,7 +77,7 @@ Additional reliability detail from `artifacts/stdlib/stdlib_reliability_status.v
 
 - runtime regression enforcement is `soft` locally
 - runtime regression summary currently shows `fail`
-- recorded runtime regression failures: `4`
+- recorded runtime regression failures: `0`
 - strict enforcement should still be treated as release-blocking when enabled
 
 ### 4. STDLIB hyper execution lane
@@ -231,7 +231,7 @@ export SOUC_BIN="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 "$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+"$SOUC_BIN" compile examples/hello.sio -o /tmp/souc-next
 "$SOUC_BIN" run self-hosted/compiler/native_print_f64_smoke.sio
 "$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
 
@@ -241,6 +241,8 @@ bash scripts/stdlib_reliability_gate.sh
 bash scripts/ci/native_v2_epistemic_science_spine_gate.sh
 bash scripts/ci/native_v2_f64_ladder_gate.sh
 ```
+
+To explicitly exercise the legacy bootstrap compiler, set `SOUNIO_SOUC_ENGINE=lean_single` when invoking `bin/souc`.
 
 Then read:
 

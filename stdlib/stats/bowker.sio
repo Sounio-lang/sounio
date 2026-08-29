@@ -1,0 +1,227 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/bowker.sio — Bowker's test of symmetry
+//
+// The generalisation of McNemar's test to a k×k matched table: it tests whether
+// the off-diagonal cell counts are symmetric (nᵢⱼ = nⱼᵢ), i.e. whether category
+// changes are as likely in one direction as the other:
+//
+//   bowker(table, k) -> BowkerResult      (k×k matched-pair counts)
+//
+//   χ² = Σ_{i<j} (nᵢⱼ − nⱼᵢ)² / (nᵢⱼ + nⱼᵢ),   df = k(k−1)/2.
+// For k = 2 this reduces exactly to McNemar's test.
+//
+// Pure Sounio: an off-diagonal pair scan; χ² tail via inline Lanczos log-gamma +
+// incomplete gamma. No external dependency, no nested data-array calls.
+//
+// References:
+//   Bowker (1948) JASA 43:572.
+
+module stats::bowker
+
+fn bw_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / bw_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn bw_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn bw_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * bw_ln(tt) - tt + bw_ln(a)
+}
+
+fn bw_igamma_p(s: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x < s + 1.0 {
+        var ap = s
+        var sum = 1.0 / s
+        var del = sum
+        var n = 0
+        while n < 300 {
+            ap = ap + 1.0
+            del = del * x / ap
+            sum = sum + del
+            let ad = if del < 0.0 { 0.0 - del } else { del }
+            let asum = if sum < 0.0 { 0.0 - sum } else { sum }
+            if ad < asum * 1.0e-15 { n = 300 } else { n = n + 1 }
+        }
+        return sum * bw_exp(0.0 - x + s * bw_ln(x) - bw_lgamma(s))
+    }
+    var b = x + 1.0 - s
+    var c = 1.0e300
+    var d = 1.0 / b
+    var h = d
+    var i = 1
+    while i < 300 {
+        let an = 0.0 - (i as f64) * ((i as f64) - s)
+        b = b + 2.0
+        d = an * d + b
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = b + an / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-15 { i = 300 } else { i = i + 1 }
+    }
+    let q = bw_exp(0.0 - x + s * bw_ln(x) - bw_lgamma(s)) * h
+    return 1.0 - q
+}
+
+fn bw_chi2_sf(x: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0 }
+    if df <= 0.0 { return 1.0 }
+    return 1.0 - bw_igamma_p(df * 0.5, x * 0.5)
+}
+
+pub struct BowkerResult {
+    pub chi2: f64,
+    pub df: i64,      // k(k-1)/2
+    pub p: f64,
+}
+
+/// Bowker's test of symmetry for a k×k matched table.
+///
+/// Parâmetros: table — row-major k×k matched-pair counts; k — categories (2..16).
+/// Retorno: BowkerResult (chi2, df, p).
+/// Referências: Bowker (1948).
+pub fn bowker(table: &[f64; 256], k: i32) -> BowkerResult with Mut, Div, Panic {
+    if k < 2 || k > 16 { return BowkerResult { chi2: 0.0, df: 0, p: 1.0 } }
+    var chi2 = 0.0
+    var i = 0
+    while i < k {
+        var j = i + 1
+        while j < k {
+            let nij = table[(i * k + j) as usize]
+            let nji = table[(j * k + i) as usize]
+            let sum = nij + nji
+            if sum > 0.0 {
+                let diff = nij - nji
+                chi2 = chi2 + diff * diff / sum
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let df = k * (k - 1) / 2
+    let p = bw_chi2_sf(chi2, df as f64)
+    return BowkerResult { chi2: chi2, df: df as i64, p: p }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// 3×3 table, off-diagonal pairs: (n01,n10)=(10,20), (n02,n20)=(5,5), (n12,n21)=(8,4).
+// χ² = (10-20)²/30 + 0 + (8-4)²/12 = 100/30 + 16/12 = 3.333333+1.333333 = 4.666667.
+// df = 3.
+fn test_bowker() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=50.0; t[1]=10.0; t[2]=5.0
+    t[3]=20.0; t[4]=60.0; t[5]=8.0
+    t[6]=5.0;  t[7]=4.0;  t[8]=70.0
+    let r = bowker(&t, 3)
+    var ok = true
+    ok = check(1, approx(r.chi2, 4.666667, 1.0e-5)) && ok
+    ok = check(2, r.df == 3) && ok
+    return ok
+}
+
+// symmetric table -> χ² = 0.
+fn test_symmetric() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=50.0; t[1]=10.0; t[2]=5.0
+    t[3]=10.0; t[4]=60.0; t[5]=8.0
+    t[6]=5.0;  t[7]=8.0;  t[8]=70.0
+    let r = bowker(&t, 3)
+    var ok = true
+    ok = check(10, approx(r.chi2, 0.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.p, 1.0, 1.0e-6)) && ok
+    return ok
+}
+
+// k=2 reduces to McNemar: (n01-n10)²/(n01+n10). [[30,6],[16,48]] -> (6-16)²/22=4.545455.
+fn test_mcnemar_reduction() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    t[0]=30.0; t[1]=6.0
+    t[2]=16.0; t[3]=48.0
+    let r = bowker(&t, 2)
+    var ok = true
+    ok = check(20, approx(r.chi2, 4.545455, 1.0e-5)) && ok
+    ok = check(21, r.df == 1) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_bowker() && ok
+    ok = test_symmetric() && ok
+    ok = test_mcnemar_reduction() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

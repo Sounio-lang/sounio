@@ -1,0 +1,128 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/conditional_survival.sio — conditional survival probability
+//
+// The probability of surviving to a later time given survival to an earlier one
+// — the clinically meaningful "given you have made it this far" statement:
+//
+//   conditional_survival(time, event, n, t0, t1) -> f64
+//
+//   S(t₁ | t₀) = Ŝ(t₁) / Ŝ(t₀),   t₁ ≥ t₀,
+// with Ŝ the Kaplan-Meier estimator. Unlike Ŝ(t₁) itself, this rises over time
+// for many diseases (prognosis improves the longer a patient survives).
+//
+// Pure Sounio: a single sort-free walk over the distinct death times,
+// accumulating Ŝ at both t₀ and t₁. No external dependency, no nested
+// data-array calls.
+//
+// References:
+//   Henson & Ries (1995); Zabor et al. (2013).
+
+module stats::conditional_survival
+
+/// Conditional Kaplan-Meier survival S(t1 | t0) = Ŝ(t1)/Ŝ(t0).
+///
+/// Parâmetros: time — follow-up; event — 1 death / 0 censored; n — size;
+///             t0 — conditioning time; t1 — target time (>= t0).
+/// Retorno: conditional survival probability.
+pub fn conditional_survival(time: &[f64; 256], event: &[i64; 256], n: i32, t0: f64, t1: f64) -> f64 with Mut, Div, Panic {
+    if n < 1 || t1 < t0 { return 1.0 }
+    var surv = 1.0
+    var s_t0 = 1.0
+    var s_t1 = 1.0
+    var prev = 0.0 - 1.0e300
+    var have_prev = false
+    var guard = 0
+    while guard <= n {
+        var found = false
+        var tau = 0.0
+        var i = 0
+        while i < n {
+            if event[i as usize] == 1 {
+                let ti = time[i as usize]
+                let after = if have_prev { ti > prev } else { true }
+                if after { if found == false || ti < tau { tau = ti; found = true } }
+            }
+            i = i + 1
+        }
+        if found == false { guard = n + 1 }
+        else {
+            var d = 0
+            var at_risk = 0
+            var j = 0
+            while j < n {
+                let tj = time[j as usize]
+                if tj >= tau { at_risk = at_risk + 1 }
+                if tj == tau && event[j as usize] == 1 { d = d + 1 }
+                j = j + 1
+            }
+            if at_risk > 0 { surv = surv * (1.0 - (d as f64) / (at_risk as f64)) }
+            if tau <= t0 { s_t0 = surv }
+            if tau <= t1 { s_t1 = surv }
+            prev = tau
+            have_prev = true
+            guard = guard + 1
+        }
+    }
+    if s_t0 <= 1.0e-300 { return 0.0 }
+    return s_t1 / s_t0
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// times 1..5 all deaths. S(2)=0.6, S(4)=0.2. S(4|2)=0.2/0.6=0.333333.
+fn test_conditional() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=1; e[4]=1
+    return check(1, approx(conditional_survival(&t, &e, 5, 2.0, 4.0), 0.333333, 1.0e-5))
+}
+
+// S(t | t) = 1 (conditioning on the same time).
+fn test_same_time() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=1; e[4]=1
+    return check(10, approx(conditional_survival(&t, &e, 5, 3.0, 3.0), 1.0, 1.0e-9))
+}
+
+// t0=0 gives the unconditional survival S(t1). S(3)=0.4.
+fn test_unconditional() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=1; e[4]=1
+    return check(20, approx(conditional_survival(&t, &e, 5, 0.0, 3.0), 0.4, 1.0e-9))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_conditional() && ok
+    ok = test_same_time() && ok
+    ok = test_unconditional() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

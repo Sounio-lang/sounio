@@ -1,0 +1,51 @@
+// Example: a real group-by + join analytics workflow on CSV files, showing all three join kinds.
+//   load sales.csv  ->  total amount per dept  ->  inner / left / full-outer join with budgets.
+// sales.csv columns: (dept, month, amount), dept encoded 1/2/3.
+// Run: SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile examples/data/dataframe_groupby_workflow.sio -o out && ./out
+use data::dataframe::*
+use data::dataframe_io::*
+use data::dataframe_relational::*
+
+fn print_report(title: string, rep: &DataFrame) with IO, Mut, Div, Panic {
+    print(title); print("  [dept, total, budget]\n")
+    var r: i64 = 0
+    while r < df_nrows(rep) {
+        print("  dept "); print(df_get(rep, r, 0) as i64)
+        print(": total="); print(df_get(rep, r, 1) as i64)
+        print(", budget="); print(df_get(rep, r, 2) as i64)
+        if df_get(rep, r, 1) > df_get(rep, r, 2) { print("  (OVER)") }
+        print("\n")
+        r = r + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // 1. load sales and total the amount per department
+    var sales = df_read_csv("tests/stdlib/data/fixtures/sales.csv", 44 as u8)
+    print("loaded "); print(df_nrows(&sales)); print(" sales rows\n")
+    let totals = df_groupby_sum(&sales, 0, 2)   // [dept, total] for depts 1,2,3 -> 900,600,400
+
+    // 2. a budget table that deliberately mismatches: dept 3 has NO budget, dept 4 has a budget
+    //    but no sales. This makes the three join kinds give visibly different reports.
+    var budgets = df_new(2)
+    var b1: [f64; 64] = [0.0; 64]; b1[0]=1.0; b1[1]=1000.0; df_add_row(&!budgets, &b1)   // dept 1
+    var b2: [f64; 64] = [0.0; 64]; b2[0]=2.0; b2[1]=800.0;  df_add_row(&!budgets, &b2)   // dept 2
+    var b4: [f64; 64] = [0.0; 64]; b4[0]=4.0; b4[1]=300.0;  df_add_row(&!budgets, &b4)   // dept 4 (no sales)
+
+    // 3. INNER: only departments that have both sales and a budget (1 and 2)
+    let inner = df_join_inner(&totals, &budgets, 0, 0)
+    print("\n"); print_report("INNER  (depts with sales AND budget):", &inner)
+
+    // 4. LEFT: every department with sales; dept 3 has no budget -> budget shows 0
+    let left = df_join_left(&totals, &budgets, 0, 0)
+    print("\n"); print_report("LEFT   (all depts with sales; missing budget = 0):", &left)
+
+    // 5. FULL OUTER: every department from either side; dept 4 has no sales -> total 0
+    let outer = df_join_outer(&totals, &budgets, 0, 0)
+    print("\n"); print_report("OUTER  (all depts from either side):", &outer)
+
+    // 6. save the full-outer report
+    let n = df_write_csv(&outer, "tests/stdlib/data/fixtures/dept_report.tmp", 44 as u8)
+    print("\nwrote outer report ("); print(n); print(" bytes)\n")
+    return 0
+}

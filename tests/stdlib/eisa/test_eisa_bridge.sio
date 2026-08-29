@@ -1,0 +1,125 @@
+// validated_lane: lean_single
+
+use eisa::backend::*
+use eisa::format::*
+use eisa::bridge_x86::*
+use str::lib::*
+
+fn nl() -> Str with Mut, Div, Panic {
+    var b: [i8; 256] = [0; 256]
+    b[0] = 10 as i8
+    str_from_bytes_buf(&b, 1)
+}
+
+fn add_line(dst: &Str, txt: string, n: &Str) -> Str with Mut, Div, Panic {
+    let line = str_from_literal(txt)
+    let t = str_cat(dst, &line)
+    str_cat(&t, n)
+}
+
+fn golden_mul_src() -> Str with Mut, Div, Panic {
+    let n = nl()
+    var s = str_new()
+    s = add_line(&s, "epistemic fn golden_mul() {", &n)
+    s = add_line(&s, "let a = 0.5", &n)
+    s = add_line(&s, "let b = 7.25", &n)
+    s = add_line(&s, "let c = a * b", &n)
+    s = add_line(&s, "gate c", &n)
+    s = add_line(&s, "store [dose] <- c", &n)
+    s = add_line(&s, "}", &n)
+    s
+}
+
+fn golden_add_src() -> Str with Mut, Div, Panic {
+    let n = nl()
+    var s = str_new()
+    s = add_line(&s, "epistemic fn golden_add() {", &n)
+    s = add_line(&s, "let a = 0.5", &n)
+    s = add_line(&s, "let b = 7.25", &n)
+    s = add_line(&s, "let c = a + b", &n)
+    s = add_line(&s, "gate c", &n)
+    s = add_line(&s, "store [dose] <- c", &n)
+    s = add_line(&s, "}", &n)
+    s
+}
+
+// Rolling polynomial checksum over the first n bytes — lets us compare two
+// translations without keeping two 64 KiB buffers live simultaneously (which
+// would overflow the lean_single value stack).
+fn cksum(buf: &[i8; 131072], n: i64) -> i64 with Mut, Panic, Div {
+    // bounded rolling hash (h stays < 2^31, so h*31 < 2^36, no i64 overflow)
+    var h = 2166136261
+    var i = 0
+    while i < n {
+        let byte = (*buf)[i as usize] as i64 & 255
+        h = (h * 31 + byte + 1) % 2147483647
+        i = i + 1
+    }
+    h
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+    var buf: [i8; 131072] = [0; 131072]
+
+    // X1 — golden-mul translates to a well-formed ELF64 executable image.
+    let b1 = eisa_compile(golden_mul_src())
+    if b1.status != 0 { fails = fails + 1 }
+    let img1 = eisax_encode(b1.build)
+    let m1 = bridge_translate(img1, &!buf)
+    if m1.status != 0 { fails = fails + 1 }
+    if m1.len <= 128 { fails = fails + 1 }
+    if buf[0] != 0x7f as i8 { fails = fails + 1 }
+    if buf[1] != 0x45 as i8 { fails = fails + 1 }
+    if buf[2] != 0x4c as i8 { fails = fails + 1 }
+    if buf[3] != 0x46 as i8 { fails = fails + 1 }
+    if buf[54] != 56 as i8 { fails = fails + 1 }
+    if buf[56] != 1 as i8 { fails = fails + 1 }
+    let mul_len = m1.len
+    let mul_ck = cksum(&buf, m1.len)
+
+    // X2 — translation is deterministic: same image, identical bytes.
+    let m2 = bridge_translate(img1, &!buf)
+    if m2.status != 0 { fails = fails + 1 }
+    if m2.len != mul_len { fails = fails + 1 }
+    if cksum(&buf, m2.len) != mul_ck { fails = fails + 1 }
+
+    // X3 — a different program (golden-add) yields a different image + ELF.
+    let b3 = eisa_compile(golden_add_src())
+    if b3.status != 0 { fails = fails + 1 }
+    let img3 = eisax_encode(b3.build)
+    let m3 = bridge_translate(img3, &!buf)
+    if m3.status != 0 { fails = fails + 1 }
+    if eisax_prog_hash(img1) == eisax_prog_hash(img3) { fails = fails + 1 }
+    if m3.len == mul_len && cksum(&buf, m3.len) == mul_ck { fails = fails + 1 }
+
+    // X4 — invalid image is rejected, length zero.
+    var bad = img1
+    bad.w[0] = 0
+    let m4 = bridge_translate(bad, &!buf)
+    if m4.status == 0 { fails = fails + 1 }
+    if m4.len != 0 { fails = fails + 1 }
+
+    // X5 — tamper sensitivity: flipping a constant (0.5 -> 0.6) changes the
+    //      emitted bytes; the same image twice stays byte-identical.
+    let bt = eisa_compile(golden_mul_src())
+    var tb = bt.build
+    tb.consts[0 as usize] = 0.6
+    let img5 = eisax_encode(tb)
+    let m5 = bridge_translate(img5, &!buf)
+    if m5.status != 0 { fails = fails + 1 }
+    let tamp_ck = cksum(&buf, m5.len)
+    if m5.len == mul_len && tamp_ck == mul_ck { fails = fails + 1 }
+    // re-translate the original: must reproduce the original checksum
+    let m1r = bridge_translate(img1, &!buf)
+    if m1r.len != mul_len { fails = fails + 1 }
+    if cksum(&buf, m1r.len) != mul_ck { fails = fails + 1 }
+    // re-translate the tampered image: must reproduce the tampered checksum
+    let m5r = bridge_translate(img5, &!buf)
+    if m5r.len != m5.len { fails = fails + 1 }
+    if cksum(&buf, m5r.len) != tamp_ck { fails = fails + 1 }
+
+    assert(fails == 0)
+    println("ALL PASS: eisa bridge X1 X2 X3 X4 X5")
+    0
+}

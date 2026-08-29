@@ -1,4 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import gsap from 'gsap';
+import { ScrollTrigger } from 'gsap/ScrollTrigger';
+gsap.registerPlugin(ScrollTrigger);
 
 type ActId = 1 | 2 | 3 | 4;
 
@@ -9,7 +12,7 @@ interface ActData {
   subtitle: string;
   image: string;
   imageAlt: string;
-  blendMode?: React.CSSProperties['mixBlendMode'];
+  blendMode?: CSSProperties['mixBlendMode'];
   paragraphs: string[];
 }
 
@@ -255,6 +258,7 @@ export function VisionScroll() {
   const [activeAct, setActiveAct] = useState<ActId>(1);
   const isReduced = usePrefersReducedMotion();
   const theme = THEMES[activeAct];
+  const ctaRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const sentinels = document.querySelectorAll<HTMLElement>('[data-act-id]');
@@ -273,6 +277,20 @@ export function VisionScroll() {
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    const el = ctaRef.current;
+    if (!el) return;
+    const mm = gsap.matchMedia();
+    mm.add('(prefers-reduced-motion: no-preference)', () => {
+      const children = el.querySelectorAll('.vision-quote, .vision-quote-cite, .vision-cta-heading, .vision-cta-btn');
+      gsap.from(children, {
+        y: 28, opacity: 0, stagger: 0.14, duration: 0.75, ease: 'power2.out',
+        scrollTrigger: { trigger: el, start: 'top 78%', once: true },
+      });
+    });
+    return () => mm.revert();
+  }, []);
+
   return (
     <div
       className="vision-scroll-root"
@@ -287,6 +305,7 @@ export function VisionScroll() {
       ))}
 
       <div
+        ref={ctaRef}
         className="vision-cta-section"
         style={{
           borderTop: `1px solid ${THEMES[4].border}`,

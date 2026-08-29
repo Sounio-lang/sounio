@@ -1,0 +1,102 @@
+// examples/stats/full_analysis_report.sio
+// Capstone: a full statistical analysis of a two-group dataset, driving many
+// modules of the epistemic-statistics suite from one script and printing a
+// formatted report — descriptives + Student-t CI, effect size, normality (Q-Q),
+// non-parametric test, correlation, densities, and a Bayesian posterior.
+//   souc run examples/stats/full_analysis_report.sio
+use stats::student_t::{t_mean_ci, TCI}
+use stats::effect_size::{cohens_d, EffectSize}
+use stats::qq_normal::{qq_normal, QQResult}
+use stats::wilcoxon::{wilcoxon_signed_rank, WilcoxonResult}
+use stats::correlation::{pearson, CorrResult}
+use stats::densities::{normal_pdf}
+use stats::bayes_conjugate::{beta_binomial, BetaPosterior}
+
+fn mean_of(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    return s / (n as f64)
+}
+
+fn sd_of(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    let m = mean_of(x, n)
+    var ss = 0.0
+    var i = 0
+    while i < n { let d = x[i as usize] - m; ss = ss + d * d; i = i + 1 }
+    let v = ss / ((n - 1) as f64)
+    if v <= 0.0 { return 0.0 }
+    var y = v
+    var k = 0
+    while k < 24 { y = 0.5 * (y + v / y); k = k + 1 }
+    return y
+}
+
+fn line() with IO { print("--------------------------------------------------\n") }
+
+fn main() with IO, Mut, Div, Panic {
+    // Two paired batches of trough measurements (ng/mL): before / after a change.
+    var before: [f64; 256] = [0.0; 256]
+    var after:  [f64; 256] = [0.0; 256]
+    before[0]=8.1; before[1]=9.4; before[2]=7.6; before[3]=10.2; before[4]=8.8
+    before[5]=9.9; before[6]=7.1; before[7]=11.3; before[8]=8.5; before[9]=9.0
+    after[0]=6.4;  after[1]=7.8;  after[2]=6.1;  after[3]=8.9;   after[4]=7.2
+    after[5]=8.1;  after[6]=5.9;  after[7]=9.6;   after[8]=6.8;  after[9]=7.5
+    let n = 10
+
+    print("\n=== Statistical analysis report — trough before/after ===\n\n")
+
+    // 1. Descriptives + Student-t 95% CI of each mean
+    let mb = mean_of(&before, n); let sb = sd_of(&before, n)
+    let ma = mean_of(&after, n);  let sa = sd_of(&after, n)
+    let cib: TCI = t_mean_ci(mb, sb, n as i64, 0.95)
+    let cia: TCI = t_mean_ci(ma, sa, n as i64, 0.95)
+    print("[descriptives]\n")
+    print("  before: mean="); print(mb); print(" sd="); print(sb)
+    print("  95% CI ["); print(cib.lo); print(", "); print(cib.hi); print("]\n")
+    print("  after:  mean="); print(ma); print(" sd="); print(sa)
+    print("  95% CI ["); print(cia.lo); print(", "); print(cia.hi); print("]\n")
+    line()
+
+    // 2. Effect size (Cohen's d) of the difference
+    let es: EffectSize = cohens_d(&before, n, &after, n, 0.95)
+    print("[effect size]  Cohen's d="); print(es.d)
+    print(" (Hedges g="); print(es.hedges_g); print(", magnitude code "); print(es.magnitude); print(")\n")
+    line()
+
+    // 3. Non-parametric paired test (Wilcoxon signed-rank)
+    let wr: WilcoxonResult = wilcoxon_signed_rank(&before, &after, n)
+    print("[wilcoxon signed-rank]  W+="); print(wr.w_plus)
+    print(" z="); print(wr.z); print(" p="); print(wr.p_value); print("\n")
+    line()
+
+    // 4. Normality of the 'before' batch (Q-Q PPCC)
+    var theo: [f64; 256] = [0.0; 256]
+    var samp: [f64; 256] = [0.0; 256]
+    let qq: QQResult = qq_normal(&before, n as i32, &!theo, &!samp)
+    print("[normality]  Q-Q PPCC="); print(qq.ppcc)
+    print("  (~1 = normal)\n")
+    line()
+
+    // 5. Correlation between before and after
+    let co: CorrResult = pearson(&before, &after, n as i32, 0.95)
+    print("[correlation]  Pearson r="); print(co.r)
+    print(" 95% CI ["); print(co.ci_lo); print(", "); print(co.ci_hi); print("]\n")
+    line()
+
+    // 6. Density readout: N(mean_before, sd_before) at the observed mean_after
+    let dens = normal_pdf(ma, mb, sb)
+    print("[density]  N(mean_before, sd_before) evaluated at mean_after = "); print(dens); print("\n")
+    line()
+
+    // 7. Bayesian: of the 10 subjects, how many dropped below 8 ng/mL after?
+    var below = 0
+    var i = 0
+    while i < n { if after[i as usize] < 8.0 { below = below + 1 }; i = i + 1 }
+    let post: BetaPosterior = beta_binomial(1.0, 1.0, below as i64, n as i64, 0.95)
+    print("[bayesian]  P(trough<8 after): "); print(below); print("/"); print(n)
+    print(" -> posterior mean="); print(post.mean)
+    print(" 95% credible ["); print(post.cred_lo); print(", "); print(post.cred_hi); print("]\n")
+
+    print("\nReport complete — 7 sections across the epistemic-statistics suite.\n")
+}

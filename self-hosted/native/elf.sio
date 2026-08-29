@@ -5,6 +5,7 @@
 module native::elf
 
 use native::encode::*
+use ir::ir::{IR_MAX_FUNCS}
 
 // PT_GNU_STACK type constant (marks stack non-executable)
 pub fn elf_pt_gnu_stack() -> i64 { 0x6474e551 }
@@ -109,7 +110,7 @@ pub fn elf_binary_new() -> Elf64Binary {
 pub struct SymbolData {
     pub strtab: [i8; 65536],         // null-terminated function name strings
     pub strtab_len: i64,              // current length (index 0 is always \0)
-    pub name_offsets: [i64; 2048],   // strtab byte offset for each function's name
+    pub name_offsets: [i64; 16384],   // strtab byte offset for each function's name
 }
 
 pub fn symbol_data_new() -> SymbolData {
@@ -122,7 +123,11 @@ pub fn symbol_data_new() -> SymbolData {
 // Record a function's name in the symbol table's strtab
 pub fn symbol_data_add_name(sym: SymbolData, fn_idx: i64, name_buf: [i8; 128], name_len: i64) -> SymbolData with Mut, Panic, Div {
     var s = sym
-    if fn_idx >= 0 && fn_idx < 1024 {
+    // Bound by the IR constant, not a literal. This guard read `< 2048` while
+    // name_offsets grew with IR_MAX_FUNCS, so past the literal a function's
+    // symbol name was DROPPED and nothing said so — measured as a program that
+    // exits 0 and prints nothing at exactly 2046 functions.
+    if fn_idx >= 0 && fn_idx < IR_MAX_FUNCS {
         s.name_offsets[fn_idx as usize] = s.strtab_len
         var ni = 0
         while ni < name_len && s.strtab_len < 32767 {
@@ -130,7 +135,7 @@ pub fn symbol_data_add_name(sym: SymbolData, fn_idx: i64, name_buf: [i8; 128], n
             s.strtab_len = s.strtab_len + 1
             ni = ni + 1
         }
-        if s.strtab_len < 2048 {
+        if s.strtab_len < 32767 {
             s.strtab[s.strtab_len as usize] = 0
             s.strtab_len = s.strtab_len + 1
         }
@@ -199,7 +204,9 @@ pub fn elf_builder_emit_program_headers_ref(
     rodata_len: i64,
     rodata_offset: i64,
     data_len: i64,
-    data_offset: i64
+    data_offset: i64,
+    bss_size: i64,
+    bss_vaddr: i64
 ) -> () with Mut, Panic, Div {
     emit_elf_header_ref(bin, entry_offset, base_addr, phnum, machine_id)
     emit_program_header_text_ref(bin, code_len, 4096, base_addr)
@@ -208,6 +215,9 @@ pub fn elf_builder_emit_program_headers_ref(
     }
     if data_len > 0 {
         emit_program_header_data_ref(bin, data_len, data_offset, base_addr)
+    }
+    if bss_size > 0 {
+        emit_program_header_bss_ref(bin, bss_size, bss_vaddr)
     }
     emit_program_header_gnu_stack_ref(bin)
 }
@@ -256,7 +266,7 @@ pub fn elf_builder_emit_payload_ref(
 pub fn elf_builder_emit_strtab_symtab_ref(
     bin: &! Elf64Binary,
     symbols: SymbolData,
-    fn_offsets: [i64; 2048],
+    fn_offsets: [i64; 16384],
     fn_count: i64,
     text_va_base: i64,
     strtab_offset: &! i64,
@@ -451,8 +461,10 @@ pub fn finalize_elf64_for_machine(
     base_addr: i64,
     machine_id: i64,
     symbols: SymbolData,
-    fn_offsets: [i64; 2048],
-    fn_count: i64
+    fn_offsets: [i64; 16384],
+    fn_count: i64,
+    bss_size: i64,
+    bss_vaddr: i64
 ) -> Elf64Binary with Mut, Panic, Div {
     var bin = elf_binary_new()
 
@@ -463,6 +475,7 @@ pub fn finalize_elf64_for_machine(
     var phnum = 2
     if rodata.len > 0 { phnum = phnum + 1 }
     if data.len > 0 { phnum = phnum + 1 }
+    if bss_size > 0 { phnum = phnum + 1 }
 
     let text_va_base = base_addr + text_offset
     var strtab_offset: i64 = 0
@@ -477,7 +490,7 @@ pub fn finalize_elf64_for_machine(
     var shnum: i64 = 0
     var shstrndx: i64 = 0
 
-    elf_builder_emit_program_headers_ref(&! bin, entry_offset, base_addr, phnum, machine_id, code.len, rodata.len, rodata_offset, data.len, data_offset)
+    elf_builder_emit_program_headers_ref(&! bin, entry_offset, base_addr, phnum, machine_id, code.len, rodata.len, rodata_offset, data.len, data_offset, bss_size, bss_vaddr)
     elf_builder_emit_payload_ref(&! bin, code, rodata, data, text_offset, rodata_offset, data_offset)
     elf_builder_emit_strtab_symtab_ref(&! bin, symbols, fn_offsets, fn_count, text_va_base, &! strtab_offset, &! strtab_size, &! symtab_offset, &! symtab_size)
     elf_builder_emit_note_and_shstrtab_ref(&! bin, machine_id, &! noteprop_offset, &! noteprop_size, &! shstrtab_offset, &! shstrtab_size)
@@ -494,8 +507,10 @@ pub fn finalize_elf64(
     entry_offset: i64,
     base_addr: i64,
     symbols: SymbolData,
-    fn_offsets: [i64; 2048],
-    fn_count: i64
+    fn_offsets: [i64; 16384],
+    fn_count: i64,
+    bss_size: i64,
+    bss_vaddr: i64
 ) -> Elf64Binary with Mut, Panic, Div {
     finalize_elf64_for_machine(
         code,
@@ -506,7 +521,9 @@ pub fn finalize_elf64(
         elf_machine_x86_64(),
         symbols,
         fn_offsets,
-        fn_count
+        fn_count,
+        bss_size,
+        bss_vaddr
     )
 }
 
@@ -600,6 +617,17 @@ pub fn emit_program_header_data_ref(bin: &! Elf64Binary, data_len: i64, data_off
     elf_emit_u64_ref(bin, data_va)
     elf_emit_u64_ref(bin, data_len)
     elf_emit_u64_ref(bin, data_len)
+    elf_emit_u64_ref(bin, 4096)
+}
+
+pub fn emit_program_header_bss_ref(bin: &! Elf64Binary, bss_memsz: i64, bss_vaddr: i64) -> () with Mut, Panic, Div {
+    elf_emit_u32_ref(bin, elf_pt_load())
+    elf_emit_u32_ref(bin, elf_pf_r() + 2)
+    elf_emit_u64_ref(bin, 0)
+    elf_emit_u64_ref(bin, bss_vaddr)
+    elf_emit_u64_ref(bin, bss_vaddr)
+    elf_emit_u64_ref(bin, 0)
+    elf_emit_u64_ref(bin, bss_memsz)
     elf_emit_u64_ref(bin, 4096)
 }
 

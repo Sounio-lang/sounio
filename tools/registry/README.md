@@ -1,15 +1,24 @@
-# Sounio Package Registry
+# Sounio Package Registry Design
 
-The official package registry for Sounio packages.
+This directory is a registry design/reference scaffold, not a launched official public registry.
 
 ## Overview
 
-The Sounio Package Registry is the central repository for discovering, publishing, and managing Sounio packages. It provides:
+The proposed Sounio Package Registry would provide:
 
 - **Package Discovery**: Search and browse packages by name, keywords, or category
 - **Version Management**: Semantic versioning with dependency resolution
 - **Authentication**: Secure API tokens for publishing
 - **Statistics**: Download counts and usage metrics
+
+## Executable Local Attestation Contract
+
+R2.6 defines a deterministic `unsigned-local-policy-evaluation` for verified
+R2.5 release bundles. See
+`docs/ecosystem/REGISTRY_ATTESTATION_SPEC.md` and
+`tools/science_boundary/registry_attestation.py`. This local contract keeps
+`publication-status = "disabled"`; it does not launch this registry scaffold
+or enable its publishing examples.
 
 ## API Documentation
 
@@ -17,32 +26,32 @@ The registry API is documented using OpenAPI 3.1. See `openapi.yaml` for the com
 
 ### Base URL
 
-- Production: `https://registry.sounio-lang.org/api/v1`
-- Staging: `https://staging-registry.sounio-lang.org/api/v1`
+No hosted production base URL is part of the current support contract. Use a
+local development server when experimenting with this scaffold.
 
 ### Quick Start
 
 #### Search for packages
 
 ```bash
-curl "https://registry.sounio-lang.org/api/v1/search?q=json"
+curl "http://localhost:3000/api/v1/search?q=json"
 ```
 
 #### Get package details
 
 ```bash
-curl "https://registry.sounio-lang.org/api/v1/packages/json"
+curl "http://localhost:3000/api/v1/packages/json"
 ```
 
 #### Download a package
 
 ```bash
-curl -O "https://registry.sounio-lang.org/api/v1/packages/json/versions/1.0.0/download"
+curl -O "http://localhost:3000/api/v1/packages/json/versions/1.0.0/download"
 ```
 
 ### Authentication
 
-Most write operations require authentication. Create an API token at https://registry.sounio-lang.org/settings/tokens
+Authentication is design-only until a hosted registry exists.
 
 ```bash
 # Using the sounio CLI
@@ -50,7 +59,7 @@ sounio login
 
 # Using curl
 curl -H "Authorization: Bearer YOUR_TOKEN" \
-  https://registry.sounio-lang.org/api/v1/me
+  http://localhost:3000/api/v1/me
 ```
 
 ## Publishing Packages
@@ -81,7 +90,7 @@ sounio login
 ### 3. Publish
 
 ```bash
-sounio publish
+# Future design only; not a supported release command.
 ```
 
 ### Publishing Guidelines

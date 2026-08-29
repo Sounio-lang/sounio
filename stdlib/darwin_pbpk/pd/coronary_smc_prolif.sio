@@ -1,0 +1,102 @@
+// stdlib/darwin_pbpk/pd/coronary_smc_prolif.sio — Rapamycin PD: mTORC1 + neointima
+//
+// Pharmacodynamic readout for the rapamycin / Cypher-stent dissertation arc.
+// Two coupled scalar ODEs:
+//
+//   dA / dt = k_a · (target - A)                      mTORC1 active fraction
+//   dN / dt = k_prolif · A - k_apo · (1 - A) · N      neointimal index
+//
+// where target = R_free / R_total_0 is the fraction of free FKBP12 (drug-
+// unbound receptor) at the coronary smooth-muscle proxy organ. A approaches
+// `target` exponentially with rate k_a; N grows when A is high (rapamycin
+// failing to inhibit mTORC1 → smooth-muscle proliferation continues) and
+// shrinks via apoptosis when A is low (mTORC1 inhibited).
+//
+// Stepping strategy: implicit Crank-Nicolson on A first (1-state linear),
+// then implicit CN on N at the fixed A_new (1-state quasi-linear).
+// Identical math to parity-ref `pd_step_organ`
+// (`tests/run-pass/dissertation_pbpk28_parity_ref_rapamycin.sio:441-458`) —
+// extracted here as a pure pair-of-scalars step for stdlib reuse.
+//
+// Stage G-ε-13. gap-report claim `pd_rapamycin_path`.
+
+// ─── Literature parameters per dissertation §4.6.2 ──────────────────────────
+//   k_a       = 1.0 /h     — mTORC1 signaling rate (Sehgal 1995 +
+//                            Sabatini 2017 review; tight signaling band)
+//   k_prolif  = 5.0e-4 /h  — coronary SMC neointimal growth rate under no
+//                            inhibition (Cordis 2003 IFU regress: ~36%
+//                            late-loss over 6 months without DES)
+//   k_apo     = 3.0e-3 /h  — apoptosis rate under sustained mTORC1
+//                            inhibition (Marx 2001, Roque 2000 vessel
+//                            culture data)
+
+pub fn coronary_pd_ka() -> f64      { return 1.0 }
+pub fn coronary_pd_kprolif() -> f64 { return 5.0e-4 }
+pub fn coronary_pd_kapo() -> f64    { return 3.0e-3 }
+
+// ─── State + parameter records ──────────────────────────────────────────────
+pub struct PdState {
+    a: f64,    // mTORC1 active fraction, 0..1
+    n: f64,    // neointimal index (unitless; maps to clinical late-lumen
+               // loss via α conversion — gap-report claim
+               // `rapamycin_pd_alpha`, not yet implemented in code)
+}
+
+pub struct PdRapamycinParams {
+    k_a:       f64,
+    k_prolif:  f64,
+    k_apo:     f64,
+}
+
+pub fn coronary_pd_params() -> PdRapamycinParams {
+    PdRapamycinParams {
+        k_a:       coronary_pd_ka(),
+        k_prolif:  coronary_pd_kprolif(),
+        k_apo:     coronary_pd_kapo(),
+    }
+}
+
+// Initial PD state — A starts at 1.0 (fully active mTORC1, no drug bound),
+// N starts at 0.0 (no neointima at t=0). Same initial values as parity ref.
+pub fn pd_state_init() -> PdState {
+    PdState { a: 1.0, n: 0.0 }
+}
+
+// ─── Step kernel ────────────────────────────────────────────────────────────
+// One implicit-CN half-step on (A, N). target_a is the upstream-supplied
+// `R_free / R_total_0` for the coronary_smc proxy organ — caller computes
+// it from the TMDD layer's R_free output. Pure function.
+pub fn pd_step_rapamycin(s: PdState, target_a: f64, p: PdRapamycinParams, dt: f64)
+    -> PdState with Mut, Div
+{
+    let h = 0.5 * dt
+
+    // CN on dA/dt = k_a · (target_a - A):
+    //   (1 + h·k_a) · A_new = (1 - h·k_a) · A_old + dt · k_a · target_a
+    let a_num = (1.0 - h * p.k_a) * s.a + dt * p.k_a * target_a
+    let a_new = a_num / (1.0 + h * p.k_a)
+    let a_clamped = if a_new < 0.0 { 0.0 }
+                    else { if a_new > 1.0 { 1.0 } else { a_new } }
+
+    // CN on dN/dt = k_prolif · A - k_apo · (1-A) · N at fixed A_new:
+    //   (1 + h·γ_N) · N_new = (1 - h·γ_N) · N_old + dt · k_prolif · A_new
+    //   with γ_N = k_apo · (1 - A_new)
+    let one_minus_a = 1.0 - a_clamped
+    let gamma_n = p.k_apo * one_minus_a
+    let n_num = (1.0 - h * gamma_n) * s.n + dt * p.k_prolif * a_clamped
+    let n_new = n_num / (1.0 + h * gamma_n)
+    let n_clamped = if n_new < 0.0 { 0.0 } else { n_new }
+
+    PdState { a: a_clamped, n: n_clamped }
+}
+
+// ─── Clinical-endpoint stub ─────────────────────────────────────────────────
+// Late-lumen-loss conversion N → mm. The dissertation §4.6.2.4 plans
+// α = 1.00 mm / unit-N — currently a free parameter to be calibrated against
+// the Cypher RAVEL trial endpoint (Cordis 2003 IFU). Returns N · α directly;
+// flagged in the gap report as `rapamycin_pd_alpha` (NOT_AUTHORED) so this
+// stub keeps the call site honest until α is published.
+pub fn pd_late_lumen_loss_mm(n: f64) -> f64 {
+    let alpha = 1.0      // mm per unit-N — placeholder; calibrate vs RAVEL
+    return n * alpha
+}

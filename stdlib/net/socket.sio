@@ -1,0 +1,213 @@
+// stdlib/net/socket.sio — Raw TCP socket support via direct syscalls (Madaros v0.80.0)
+//
+// This file exists because local `[u8;N]` arrays are boxed GC handles on this
+// compiler (see docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md,
+// Finding 2): casting a local array to a raw pointer exposes handle/metadata
+// bytes, not the contiguous byte buffer a syscall needs. Every buffer that
+// touches a syscall in this file is therefore a heap-allocated `RawBuf`
+// (via `heap_alloc`), never a local array.
+//
+// CONFIRMED rawbuf_get dereference-read syntax (Step 1 spike, run against
+// /tmp/rawbuf_spike.sio and /tmp/rawbuf_spike2.sio before this file was
+// written):
+//
+//   `with IO` alone is sufficient on a read — no `Mut` is required for
+//   `(*p) as i64`; the compiler does not raise E035.
+//
+//   IMPORTANT DEVIATION FROM THE BRIEF'S DRAFT: a bare `(*p) as i64` where
+//   `p: *mut u8` does NOT read a single byte. It reads a full 8-byte word
+//   starting at the pointee address (little-endian), zero-filled past the
+//   end of whatever is actually allocated/mapped there. Empirically:
+//   heap_alloc(4); *p = 88 ('X'); *(p+1) = 89 ('Y'); (*p) as i64 == 22872
+//   (0x5958 = byte1<<8 | byte0 folded into a wider read), NOT 88. The fix,
+//   verified working: mask the wide read down to the low byte with `& 255`:
+//   `((*p) as i64) & 255` correctly yields 88, and `((*(p+1)) as i64) & 255`
+//   correctly yields 89. `rawbuf_get` below applies this mask. Tasks 3 and 4
+//   MUST use the identical masked-read pattern for any single-byte read
+//   through a raw pointer on this compiler — an unmasked `(*p) as i64` is
+//   silently wrong, not just imprecise.
+//
+//   Also confirmed: `*p = v` where `v: i64` requires an explicit `v as u8`
+//   cast (`error[E002]: cannot assign this value to the target, expected
+//   u8, found i64` otherwise) — a bare integer literal like `*p = 88`
+//   infers as u8 and compiles, but a typed i64 value does not auto-narrow.
+//   `rawbuf_set` below casts explicitly.
+//
+// SECOND DEVIATION FROM THE BRIEF'S DRAFT — linear-value single-use is
+// stricter than expected: this compiler's linear checker treats ANY use of
+// a linear-typed local binding — even a shared borrow (`&h`), even a second
+// `&h` borrow of the exact same binding with no intervening move — as fully
+// consuming it. `peek(&h); peek(&h)` on the same `h: Handle` (linear struct)
+// fails with `error[E039]: linear value has already been used` on the
+// SECOND borrow, not just on a second move. This means the brief's draft
+// signatures (`tcp_send(sock: &TcpSocket, ...)`, `tcp_recv(sock: &TcpSocket,
+// ...)` alongside a later `tcp_close(sock: TcpSocket)` consuming the same
+// binding) cannot compile for realistic usage — any socket used for more
+// than one operation (send then close; accept then close the listener)
+// hits E039 on this compiler. Verified with /tmp/linear_borrow_spike*.sio
+// and /tmp/linear_thread_spike*.sio during this task.
+//
+// The working pattern (matches the pre-existing state-threading style in
+// self-hosted/llvm/context.sio: "each operation consumes ... and returns a
+// new one"): every function that touches a `TcpSocket` takes it BY VALUE,
+// destructures it (`let TcpSocket { fd } = sock`) to extract the one field
+// it needs, and returns a FRESH `TcpSocket { fd: fd }` value alongside its
+// result — never reusing the original binding. `tcp_accept`, `tcp_send`,
+// and `tcp_recv` below all follow this: they take `TcpSocket` by value and
+// return `(TcpSocket, ...)` (or `(TcpSocket, TcpSocket, i64)` for accept,
+// since the listener must be threaded back too) instead of the brief's
+// draft `(sock: &TcpSocket) -> i64`. `tcp_close` is the only true sink.
+// Tasks 2/3/4 call-sites must rebind the returned socket after every
+// tcp_send/tcp_recv/tcp_accept call, not just borrow-and-discard.
+
+extern "C" {
+    fn heap_alloc(n: i64) -> *mut u8;
+}
+
+pub struct RawBuf {
+    ptr: *mut u8,
+    cap: i64,
+}
+
+pub fn rawbuf_new(cap: i64) -> RawBuf with IO {
+    RawBuf { ptr: heap_alloc(cap), cap: cap }
+}
+
+pub fn rawbuf_set(buf: &RawBuf, i: i64, v: i64) with IO {
+    let addr = buf.ptr as i64
+    let p = (addr + i) as *mut u8
+    *p = v as u8
+}
+
+pub fn rawbuf_get(buf: &RawBuf, i: i64) -> i64 with IO {
+    let addr = buf.ptr as i64
+    let p = (addr + i) as *mut u8
+    ((*p) as i64) & 255
+}
+
+pub const ERR_SOCKET_CREATE: i64 = 0 - 1
+pub const ERR_CONNECT: i64 = 0 - 2
+pub const ERR_BIND: i64 = 0 - 3
+pub const ERR_LISTEN: i64 = 0 - 4
+pub const ERR_ACCEPT: i64 = 0 - 5
+
+const AF_INET: i64 = 2
+const SOCK_STREAM: i64 = 1
+
+pub linear struct TcpSocket { fd: i64 }
+
+// Builds a 16-byte sockaddr_in into a fresh RawBuf: bytes 0-1 = AF_INET,
+// bytes 2-3 = port (network byte order), bytes 4-7 = IPv4 address bytes
+// (already in the right order from the caller's dotted-decimal parse),
+// bytes 8-15 = zero padding.
+fn build_sockaddr(ip: &RawBuf, port: u16) -> RawBuf with IO {
+    let addr = rawbuf_new(16)
+    rawbuf_set(&addr, 0, 2)   // AF_INET low byte
+    rawbuf_set(&addr, 1, 0)   // AF_INET high byte
+    rawbuf_set(&addr, 2, (port >> 8) as i64)
+    rawbuf_set(&addr, 3, (port & 255) as i64)
+    rawbuf_set(&addr, 4, rawbuf_get(ip, 0))
+    rawbuf_set(&addr, 5, rawbuf_get(ip, 1))
+    rawbuf_set(&addr, 6, rawbuf_get(ip, 2))
+    rawbuf_set(&addr, 7, rawbuf_get(ip, 3))
+    rawbuf_set(&addr, 8, 0)
+    rawbuf_set(&addr, 9, 0)
+    rawbuf_set(&addr, 10, 0)
+    rawbuf_set(&addr, 11, 0)
+    rawbuf_set(&addr, 12, 0)
+    rawbuf_set(&addr, 13, 0)
+    rawbuf_set(&addr, 14, 0)
+    rawbuf_set(&addr, 15, 0)
+    addr
+}
+
+pub fn tcp_connect(ip: &RawBuf, port: u16) -> (TcpSocket, i64) with IO {
+    let fd = syscall6(41, AF_INET, SOCK_STREAM, 0, 0, 0, 0)
+    if fd < 0 {
+        return (TcpSocket { fd: 0 - 1 }, ERR_SOCKET_CREATE)
+    }
+    let addr = build_sockaddr(ip, port)
+    let result = syscall6(42, fd, addr.ptr as i64, 16, 0, 0, 0)
+    if result != 0 {
+        syscall6(3, fd, 0, 0, 0, 0, 0)
+        return (TcpSocket { fd: 0 - 1 }, ERR_CONNECT)
+    }
+    (TcpSocket { fd: fd }, 0)
+}
+
+pub fn tcp_listen(ip: &RawBuf, port: u16, backlog: i64) -> (TcpSocket, i64) with IO {
+    let fd = syscall6(41, AF_INET, SOCK_STREAM, 0, 0, 0, 0)
+    if fd < 0 {
+        return (TcpSocket { fd: 0 - 1 }, ERR_SOCKET_CREATE)
+    }
+    // Set SO_REUSEADDR to avoid TIME_WAIT flakiness on repeated bind attempts.
+    // setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, 4); syscall 54.
+    // Failure is not fatal — some environments may restrict this call.
+    let optval_buf = rawbuf_new(4)
+    rawbuf_set(&optval_buf, 0, 1)
+    syscall6(54, fd, 1, 2, optval_buf.ptr as i64, 4, 0)
+
+    let addr = build_sockaddr(ip, port)
+    let bind_result = syscall6(49, fd, addr.ptr as i64, 16, 0, 0, 0)
+    if bind_result != 0 {
+        syscall6(3, fd, 0, 0, 0, 0, 0)
+        return (TcpSocket { fd: 0 - 1 }, ERR_BIND)
+    }
+    let listen_result = syscall6(50, fd, backlog, 0, 0, 0, 0)
+    if listen_result != 0 {
+        syscall6(3, fd, 0, 0, 0, 0, 0)
+        return (TcpSocket { fd: 0 - 1 }, ERR_LISTEN)
+    }
+    (TcpSocket { fd: fd }, 0)
+}
+
+// `accept`'s syscall (43) normally takes (sockfd, addr*, addrlen*). Passing
+// 0, 0 for the address-output pointers (confirmed working during this task's
+// spike, /tmp/socket_spike2.sio: bind=0, listen=0, connect=0, conn_fd=5 on a
+// real loopback round trip) tells the kernel we don't want the peer's
+// address — no non-null scratch buffer was needed.
+//
+// Takes `listener` BY VALUE and threads it back as the first tuple element
+// (see the linear-single-use note above) rather than the brief's draft
+// `(listener: &TcpSocket) -> (TcpSocket, i64)` — a `&TcpSocket` borrow here
+// would fully consume `listener`, leaving nothing to `tcp_close` later.
+pub fn tcp_accept(listener: TcpSocket) -> (TcpSocket, TcpSocket, i64) with IO {
+    let TcpSocket { fd } = listener
+    let conn_fd = syscall6(43, fd, 0, 0, 0, 0, 0)
+    if conn_fd < 0 {
+        return (TcpSocket { fd: fd }, TcpSocket { fd: 0 - 1 }, ERR_ACCEPT)
+    }
+    (TcpSocket { fd: fd }, TcpSocket { fd: conn_fd }, 0)
+}
+
+// Takes `sock` BY VALUE and threads it back as the first tuple element
+// (see the linear-single-use note above) rather than the brief's draft
+// `(sock: &TcpSocket) -> i64`.
+pub fn tcp_send(sock: TcpSocket, buf: &RawBuf, len: i64) -> (TcpSocket, i64) with IO {
+    let TcpSocket { fd } = sock
+    let sent = syscall6(44, fd, buf.ptr as i64, len, 0, 0, 0)
+    (TcpSocket { fd: fd }, sent)
+}
+
+// Takes `sock` BY VALUE and threads it back — same reasoning as `tcp_send`.
+pub fn tcp_recv(sock: TcpSocket, buf: &RawBuf, cap: i64) -> (TcpSocket, i64) with IO {
+    let TcpSocket { fd } = sock
+    let received = syscall6(45, fd, buf.ptr as i64, cap, 0, 0, 0)
+    (TcpSocket { fd: fd }, received)
+}
+
+pub fn tcp_close(sock: TcpSocket) with IO {
+    // NOTE: `sock.fd` must be extracted into a plain local FIRST. Passing
+    // `sock.fd` directly as a `syscall6(...)` argument does not register as
+    // consuming the linear `sock` value on this compiler — it silently
+    // leaves it unconsumed, tripping `error[E040]: linear value not
+    // consumed` even though the field read visually looks identical to the
+    // (working) pattern of passing it to an ordinary function call like
+    // `print_int(sock.fd)`. Confirmed in isolation with
+    // /tmp/linear_close_spike4.sio (fails) vs /tmp/linear_close_spike6.sio
+    // (passes) during this task. `syscall6` is presumably handled as a
+    // compiler intrinsic that bypasses the normal argument-consumption path
+    // the checker uses for regular calls.
+    let fd = sock.fd
+    syscall6(3, fd, 0, 0, 0, 0, 0)
+}

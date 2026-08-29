@@ -1,0 +1,84 @@
+// examples/pbpk_viz/rapamycin_dose_linearity.sio
+// Dose-proportionality check: measured steady-state trough vs daily dose, with the
+// OLS fit, a 95% confidence band for the mean response, and a wider 95% prediction
+// band for a new patient. Bands from stats::reg_bands (Student-t multiplier).
+//   souc run examples/pbpk_viz/rapamycin_dose_linearity.sio -> rapamycin_dose_linearity.png
+use image::pure::types::{Image, image_new}
+use image::plot::{Area, area_new, plot_background, plot_grid, plot_band, plot_line_w, plot_point, plot_axes, plot_text_sc, draw_number}
+use image::pure::png::{png_write}
+use stats::reg_bands::{reg_fit, reg_conf_band, reg_pred_band, reg_predict, reg_slope_ci, RegFit}
+
+fn main() with IO, Mut, Div, Panic {
+    // 12 measured (dose mg, trough ng/mL) pairs, roughly dose-proportional.
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0;  y[0]=5.2
+    x[1]=2.0;  y[1]=9.1
+    x[2]=2.0;  y[2]=10.4
+    x[3]=3.0;  y[3]=13.8
+    x[4]=4.0;  y[4]=19.2
+    x[5]=5.0;  y[5]=22.1
+    x[6]=5.0;  y[6]=24.8
+    x[7]=6.0;  y[7]=28.3
+    x[8]=7.0;  y[8]=33.9
+    x[9]=8.0;  y[9]=37.2
+    x[10]=9.0; y[10]=43.1
+    x[11]=10.0; y[11]=47.8
+    let n = 12
+
+    let f = reg_fit(&x, &y, n as i32)
+
+    // Sample the bands across the x range.
+    let np = 60
+    var bx: [f64; 512] = [0.0; 512]
+    var clo: [f64; 512] = [0.0; 512]
+    var chi: [f64; 512] = [0.0; 512]
+    var plo: [f64; 512] = [0.0; 512]
+    var phi: [f64; 512] = [0.0; 512]
+    var ly: [f64; 512] = [0.0; 512]
+    let x0 = 0.5; let x1 = 10.5
+    var i = 0
+    while i < np {
+        let xi = x0 + (i as f64) * (x1 - x0) / ((np - 1) as f64)
+        bx[i as usize] = xi
+        let (cl, ch) = reg_conf_band(&f, xi, 0.95)
+        clo[i as usize] = cl; chi[i as usize] = ch
+        let (pl, ph) = reg_pred_band(&f, xi, 0.95)
+        plo[i as usize] = pl; phi[i as usize] = ph
+        ly[i as usize] = reg_predict(&f, xi)
+        i = i + 1
+    }
+
+    let w = 1200; let h = 760
+    var img = image_new(w as i32, h as i32)
+    plot_background(&!img, w as i64, h as i64, 0xFFFFFF)
+    let a = area_new(150, 110, 1150, 660, 0.0, 11.0, 0.0, 55.0)
+    plot_grid(&!img, &a, 11, 8, 0xEEEEEE)
+    // prediction band (light), then confidence band (darker), then the line
+    plot_band(&!img, &a, &bx, &plo, &phi, np, 0xEAF0F7)
+    plot_band(&!img, &a, &bx, &clo, &chi, np, 0xC9DCEF)
+    plot_line_w(&!img, &a, &bx, &ly, np, 0x1F5FA8, 2.4)
+    plot_axes(&!img, &a, 11, 8, 0x555555, 3)
+
+    // data points
+    var j = 0
+    while j < n {
+        plot_point(&!img, &a, x[j as usize], y[j as usize], 0x22384C, 5)
+        j = j + 1
+    }
+
+    let _t1 = plot_text_sc(&!img, "Rapamycin dose proportionality (trough vs dose)", 150, 40, 0x111111, 3)
+    let _t2 = plot_text_sc(&!img, "daily dose (mg)", 520, 706, 0x333333, 3)
+    let _t3 = plot_text_sc(&!img, "trough (ng/mL)", 150, 78, 0x333333, 3)
+    // slope and R^2 readout
+    let _ls = plot_text_sc(&!img, "slope", 220, 150, 0x666666, 3)
+    let _ns = draw_number(&!img, f.slope, 2, 330, 150, 0x1F5FA8, 3)
+    let _lr = plot_text_sc(&!img, "R2", 220, 185, 0x666666, 3)
+    let _nr = draw_number(&!img, f.r2, 4, 290, 185, 0x111111, 3)
+
+    let ok = png_write("rapamycin_dose_linearity.png", &img)
+    let (slo, shi) = reg_slope_ci(&f, 0.95)
+    print("slope="); print(f.slope); print(" [95% CI "); print(slo); print(", "); print(shi); print("]")
+    print(" intercept="); print(f.intercept); print(" R2="); print(f.r2)
+    print(" sigma="); print(f.sigma); print(" wrote="); print(ok); print("\n")
+}

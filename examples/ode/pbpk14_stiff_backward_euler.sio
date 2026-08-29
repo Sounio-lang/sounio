@@ -1,0 +1,354 @@
+// ============================================================================
+// PBPK-14 model-form repair: a STIFF (implicit, L-stable) integrator
+// ----------------------------------------------------------------------------
+// Future-work item "model-form / RK4 (stiff integrator)" + qualification P1.4.
+//
+// THE PROBLEM (model-form distortion to suit the solver):
+//   stdlib/ode/pbpk14_rk4.sio integrates the 14-compartment PBPK with EXPLICIT
+//   RK4 and openly halves every blood flow ("REDUCED by 50% for stability",
+//   cardiac output 350 -> 175 L/h, unphysiological). PBPK is STIFF: the fastest
+//   mode is ~ -q_lung/(v_lung*kp_lung) ~ -875/h (real) / -437/h (reduced). RK4
+//   is stable only for dt*lambda >~ -2.78; at dt=0.1h that is dt*lambda ~ -87
+//   (real) / -44 (reduced) -- BOTH far outside the stability region.
+//
+//   Empirically (running the existing demo): RK4 + REDUCED flows at dt=0.1h
+//   already BLOWS UP (arterial/venous/lung = NaN; the demo's own self-test
+//   reports "TEST FAILED"). So the flow-distortion does NOT even buy stability
+//   -- you pay the physiological-fidelity cost for nothing.
+//
+// THE REPAIR:
+//   PBPK linear kinetics => dy/dt = A*y exactly (A constant). Backward Euler
+//   (I - dt*A) y_{n+1} = y_n is unconditionally L-stable: one 14x14 linear
+//   solve per step handles the stiffness at the REAL flows, no distortion.
+//
+// THE PAYLOAD (model-form uncertainty, the epistemic interval):
+//   With a stiff solver BOTH the real-flow and the distorted reduced-flow
+//   models become stable, so we can finally MEASURE what the flow-distortion
+//   would have cost: the gap between real-flow and reduced-flow exposures is a
+//   pure STRUCTURAL (model-form) error, not integrator noise.
+//
+// A is built by PROBING the derivative on unit vectors (deriv is linear &
+// homogeneous, so deriv(e_j) is exactly column j of A) -- the physics is
+// written once, in deriv().
+//
+// Self-contained; build with the self-hosted compiler:
+//   bin/souc-linux-x86_64 examples/ode/pbpk14_stiff_backward_euler.sio out && ./out
+// ============================================================================
+
+// ---- state registers (index map below) ----
+// 0 gut(lumen) 1 art 2 ven 3 lung 4 heart 5 brain 6 muscle 7 adipose
+// 8 skin 9 bone 10 spleen 11 gut_tis 12 liver 13 kidney
+var S:  [f64; 14]    // derivative input register
+var DY: [f64; 14]    // derivative output register
+var A:  [f64; 196]   // system matrix (row-major, stride 14)
+var M:  [f64; 196]   // I - dt*A
+var G:  [f64; 196]   // gaussian-elimination work matrix
+var B:  [f64; 14]    // rhs / solution
+var Y:  [f64; 14]    // working state (BE or RK4)
+var K1: [f64; 14]
+var K2: [f64; 14]
+var K3: [f64; 14]
+var K4: [f64; 14]
+var TS: [f64; 14]    // RK4 stage state
+
+var QSCALE: f64      // blood-flow scale: 1.0 = real physiology, 0.5 = distorted
+var CL_INT: f64      // hepatic intrinsic clearance [L/h] (0 disables elimination)
+var GFR:    f64      // glomerular filtration rate [L/h]
+
+fn fabs(x: f64) -> f64 { if x < 0.0 { return 0.0 - x } return x }
+
+// ---- the physics: dy/dt for the 14-compartment PBPK (reads S, writes DY) ----
+fn deriv() with Mut, Div {
+    // volumes [L]
+    let v_art=1.0;   let v_ven=3.9;  let v_lung=0.5;   let v_heart=0.33
+    let v_brain=1.4; let v_muscle=28.0; let v_adipose=14.0; let v_skin=2.6
+    let v_bone=4.0;  let v_spleen=0.15; let v_gut=1.0;  let v_liver=1.5; let v_kidney=0.28
+    // REAL blood flows [L/h], scaled by QSCALE
+    let q_lung=350.0*QSCALE;   let q_heart=14.0*QSCALE;  let q_brain=42.0*QSCALE
+    let q_muscle=63.0*QSCALE;  let q_adipose=17.5*QSCALE; let q_skin=17.5*QSCALE
+    let q_bone=17.5*QSCALE;    let q_spleen=10.5*QSCALE; let q_gut=63.0*QSCALE
+    let q_liver_art=21.0*QSCALE; let q_kidney=77.0*QSCALE
+    // partition coefficients
+    let kp_lung=0.8; let kp_heart=1.0; let kp_brain=0.5; let kp_muscle=0.8
+    let kp_adipose=2.0; let kp_skin=1.0; let kp_bone=0.5; let kp_spleen=1.0
+    let kp_gut=1.0; let kp_liver=1.2; let kp_kidney=1.5
+    // pharmacokinetics
+    let ka=1.0; let rb=1.0; let fu=0.3
+    // concentrations
+    let c_art=S[1]/v_art/rb;     let c_ven=S[2]/v_ven/rb
+    let c_lung=S[3]/v_lung;      let c_heart=S[4]/v_heart
+    let c_brain=S[5]/v_brain;    let c_muscle=S[6]/v_muscle
+    let c_adipose=S[7]/v_adipose; let c_skin=S[8]/v_skin
+    let c_bone=S[9]/v_bone;      let c_spleen=S[10]/v_spleen
+    let c_gut=S[11]/v_gut;       let c_liver=S[12]/v_liver
+    let c_kidney=S[13]/v_kidney
+    let q_portal=q_gut+q_spleen
+    let q_hepatic=q_portal+q_liver_art
+    // mass balances
+    DY[0] = 0.0 - ka*S[0]
+    DY[1] = q_lung*c_lung/kp_lung - (q_heart+q_brain+q_muscle+q_adipose+q_skin+q_bone+q_gut+q_spleen+q_liver_art+q_kidney)*c_art
+    DY[2] = q_heart*c_heart/kp_heart + q_brain*c_brain/kp_brain + q_muscle*c_muscle/kp_muscle + q_adipose*c_adipose/kp_adipose + q_skin*c_skin/kp_skin + q_bone*c_bone/kp_bone + q_hepatic*c_liver/kp_liver + q_kidney*c_kidney/kp_kidney - q_lung*c_ven
+    DY[3] = q_lung*(c_ven - c_lung/kp_lung)
+    DY[4] = q_heart*(c_art - c_heart/kp_heart)
+    DY[5] = q_brain*(c_art - c_brain/kp_brain)
+    DY[6] = q_muscle*(c_art - c_muscle/kp_muscle)
+    DY[7] = q_adipose*(c_art - c_adipose/kp_adipose)
+    DY[8] = q_skin*(c_art - c_skin/kp_skin)
+    DY[9] = q_bone*(c_art - c_bone/kp_bone)
+    DY[10] = q_spleen*(c_art - c_spleen/kp_spleen)
+    DY[11] = q_gut*(c_art - c_gut/kp_gut) + ka*S[0]
+    let liver_in = q_liver_art*c_art + q_gut*c_gut/kp_gut + q_spleen*c_spleen/kp_spleen
+    DY[12] = liver_in - q_hepatic*c_liver/kp_liver - CL_INT*fu*c_liver
+    DY[13] = q_kidney*(c_art - c_kidney/kp_kidney) - GFR*fu*c_art*rb
+}
+
+// ---- build M = I - dt*A by probing deriv() on unit vectors ----
+fn build_M(dt: f64) with Mut, Div, Panic {
+    var j = 0
+    while j < 14 {
+        var i = 0
+        while i < 14 { S[i] = 0.0; i = i + 1 }
+        S[j] = 1.0
+        deriv()
+        i = 0
+        while i < 14 { A[i*14 + j] = DY[i]; i = i + 1 }
+        j = j + 1
+    }
+    var r = 0
+    while r < 14 {
+        var c = 0
+        while c < 14 {
+            let id = if r == c { 1.0 } else { 0.0 }
+            M[r*14 + c] = id - dt*A[r*14 + c]
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// ---- partial-pivot Gaussian elimination: G (nxn, stride 14) * x = B; sol in B ----
+fn gauss_solve(n: i64) with Mut, Div, Panic {
+    var col = 0
+    while col < n {
+        var piv = col
+        var best = fabs(G[col*14 + col])
+        var r = col + 1
+        while r < n {
+            let v = fabs(G[r*14 + col])
+            if v > best { best = v; piv = r }
+            r = r + 1
+        }
+        if piv != col {
+            var k = 0
+            while k < n {
+                let tmp = G[col*14 + k]; G[col*14 + k] = G[piv*14 + k]; G[piv*14 + k] = tmp
+                k = k + 1
+            }
+            let tb = B[col]; B[col] = B[piv]; B[piv] = tb
+        }
+        let diag = G[col*14 + col]
+        var row = col + 1
+        while row < n {
+            let factor = G[row*14 + col] / diag
+            var c = col
+            while c < n { G[row*14 + c] = G[row*14 + c] - factor*G[col*14 + c]; c = c + 1 }
+            B[row] = B[row] - factor*B[col]
+            row = row + 1
+        }
+        col = col + 1
+    }
+    var i = n - 1
+    while i >= 0 {
+        var s = B[i]
+        var jj = i + 1
+        while jj < n { s = s - G[i*14 + jj]*B[jj]; jj = jj + 1 }
+        B[i] = s / G[i*14 + i]
+        i = i - 1
+    }
+}
+
+// ---- one backward-Euler step on Y (M must be prebuilt for this dt) ----
+fn be_step() with Mut, Div, Panic {
+    var i = 0
+    while i < 196 { G[i] = M[i]; i = i + 1 }
+    i = 0
+    while i < 14 { B[i] = Y[i]; i = i + 1 }
+    gauss_solve(14)
+    i = 0
+    while i < 14 { Y[i] = B[i]; i = i + 1 }
+}
+
+// ---- one explicit RK4 step on Y (for the contrast / convergence reference) ----
+fn rk4_step(dt: f64) with Mut, Div, Panic {
+    var i = 0
+    while i < 14 { S[i] = Y[i]; i = i + 1 }
+    deriv()
+    i = 0
+    while i < 14 { K1[i] = DY[i]; i = i + 1 }
+    i = 0
+    while i < 14 { TS[i] = Y[i] + 0.5*dt*K1[i]; S[i] = TS[i]; i = i + 1 }
+    deriv()
+    i = 0
+    while i < 14 { K2[i] = DY[i]; i = i + 1 }
+    i = 0
+    while i < 14 { TS[i] = Y[i] + 0.5*dt*K2[i]; S[i] = TS[i]; i = i + 1 }
+    deriv()
+    i = 0
+    while i < 14 { K3[i] = DY[i]; i = i + 1 }
+    i = 0
+    while i < 14 { TS[i] = Y[i] + dt*K3[i]; S[i] = TS[i]; i = i + 1 }
+    deriv()
+    i = 0
+    while i < 14 { K4[i] = DY[i]; i = i + 1 }
+    i = 0
+    while i < 14 { Y[i] = Y[i] + (dt/6.0)*(K1[i] + 2.0*K2[i] + 2.0*K3[i] + K4[i]); i = i + 1 }
+}
+
+fn set_dose() with Mut {
+    var i = 0
+    while i < 14 { Y[i] = 0.0; i = i + 1 }
+    Y[0] = 500.0   // 500 mg oral dose into gut lumen
+}
+
+fn total_mass() -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < 14 { s = s + Y[i]; i = i + 1 }
+    return s
+}
+
+fn any_invalid() -> i64 with Mut {
+    // returns 1 if any compartment is NOT a finite bounded number.
+    // NOTE: the self-hosted compiler miscompiles NaN equality (NaN==NaN is
+    // wrongly true; fcmp self-compare bug class), so the `x!=x` idiom is
+    // unreliable here. The bounded test (x in (-1e6, 1e6)) IS robust: for
+    // NaN and +/-inf the unordered comparisons both yield false -> flagged.
+    var bad = 0
+    var i = 0
+    while i < 14 {
+        let x = Y[i]
+        let inrange = if x > 0.0e0 - 1000000.0 { if x < 1000000.0 { 1 } else { 0 } } else { 0 }
+        if inrange == 0 { bad = 1 }
+        i = i + 1
+    }
+    return bad
+}
+
+fn run_be(steps: i64) with Mut, Div, Panic {
+    set_dose()
+    var n = 0
+    while n < steps { be_step(); n = n + 1 }
+}
+
+fn run_rk4(steps: i64, dt: f64) with Mut, Div, Panic {
+    set_dose()
+    var n = 0
+    while n < steps { rk4_step(dt); n = n + 1 }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("=== PBPK-14 model-form repair: stiff backward-Euler integrator ===")
+    println("")
+
+    // ------------------------------------------------------------------
+    // (0) Sanity: probe-built A reproduces deriv on a test vector.
+    // ------------------------------------------------------------------
+    QSCALE = 1.0; CL_INT = 50.0; GFR = 7.5
+    build_M(0.1)
+    // deriv at test vector t = [1,2,...,14]
+    var i = 0
+    while i < 14 { S[i] = (i as f64) + 1.0; i = i + 1 }
+    deriv()
+    // A*t
+    var maxdiff = 0.0
+    var r = 0
+    while r < 14 {
+        var acc = 0.0
+        var c = 0
+        while c < 14 { acc = acc + A[r*14 + c]*((c as f64) + 1.0); c = c + 1 }
+        let d = fabs(acc - DY[r])
+        if d > maxdiff { maxdiff = d }
+        r = r + 1
+    }
+    println("[check] max|A*t - deriv(t)| (expect ~0):")
+    println(maxdiff)
+    println("")
+
+    // ------------------------------------------------------------------
+    // (1) Mass conservation: elimination OFF => total mass must stay 500.
+    // ------------------------------------------------------------------
+    QSCALE = 1.0; CL_INT = 0.0; GFR = 0.0
+    build_M(0.1)
+    run_be(240)
+    println("[invariant] BE, real flows, NO elimination, total mass after 24h")
+    println("            (expect 500.0):")
+    println(total_mass())
+    println("")
+
+    // ------------------------------------------------------------------
+    // (2) Explicit RK4 at REAL flows, dt=0.1h => stiff blow-up.
+    // ------------------------------------------------------------------
+    QSCALE = 1.0; CL_INT = 50.0; GFR = 7.5
+    run_rk4(240, 0.1)
+    println("[fail] RK4, REAL flows, dt=0.1h: any compartment invalid?")
+    println("       (1 = blew up):")
+    println(any_invalid())
+    println("")
+
+    // ------------------------------------------------------------------
+    // (3) Backward Euler at REAL flows, dt=0.1h => stable & physiological.
+    // ------------------------------------------------------------------
+    QSCALE = 1.0; CL_INT = 50.0; GFR = 7.5
+    build_M(0.1)
+    run_be(240)
+    println("[repair] BE, REAL flows, dt=0.1h, t=24h compartment masses [mg]")
+    println("  any invalid? (0 = stable):"); println(any_invalid())
+    println("  arterial:"); println(Y[1])
+    println("  venous:");   println(Y[2])
+    println("  lung:");     println(Y[3])
+    println("  liver:");    println(Y[12])
+    println("  kidney:");   println(Y[13])
+    println("  muscle:");   println(Y[6])
+    let liver_real = Y[12]
+    let kidney_real = Y[13]
+    println("")
+
+    // ------------------------------------------------------------------
+    // (4) Convergence reference: RK4 at REAL flows but tiny dt.
+    //     BE@0.1 should match this converged truth (integrator accuracy).
+    // ------------------------------------------------------------------
+    QSCALE = 1.0; CL_INT = 50.0; GFR = 7.5
+    run_rk4(48000, 0.0005)   // dt=0.0005h => dt*lambda ~ -0.44, inside RK4 region
+    println("[reference] RK4, REAL flows, dt=0.0005h (converged), t=24h")
+    println("  any invalid?:"); println(any_invalid())
+    println("  liver:");  println(Y[12])
+    println("  kidney:"); println(Y[13])
+    println("  => BE@0.1 vs converged, |dliver|:")
+    println(fabs(liver_real - Y[12]))
+    println("")
+
+    // ------------------------------------------------------------------
+    // (5) THE PAYLOAD: model-form error from the flow distortion.
+    //     Both runs use the STIFF solver (both stable, both converged in
+    //     dt), so the gap is PURE physiology distortion, not integrator
+    //     noise -- the epistemic interval the reduced-flow hack hides.
+    // ------------------------------------------------------------------
+    QSCALE = 0.5; CL_INT = 50.0; GFR = 7.5   // distorted (halved) flows
+    build_M(0.1)
+    run_be(240)
+    let liver_distorted = Y[12]
+    let kidney_distorted = Y[13]
+    println("[model-form] BE, REDUCED (distorted) flows, t=24h")
+    println("  liver:");  println(liver_distorted)
+    println("  kidney:"); println(kidney_distorted)
+    println("")
+    println("[model-form ERROR] real vs distorted exposure (structural):")
+    println("  |dliver| [mg]:");  println(fabs(liver_real - liver_distorted))
+    println("  |dkidney| [mg]:"); println(fabs(kidney_real - kidney_distorted))
+    println("")
+    println("Conclusion: explicit RK4 cannot integrate stiff PBPK at clinical")
+    println("dt even with halved flows; the stiff (L-stable) backward-Euler")
+    println("solver removes the distortion, and the real-vs-distorted gap is")
+    println("an honest model-form uncertainty the flow hack silently buries.")
+    return 0
+}

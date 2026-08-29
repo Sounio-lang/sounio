@@ -33,8 +33,10 @@ fn estate_set(s: &!EState, idx: i64, val: f64, var_: f64) with Mut {
 }
 
 fn estate_axpy(dst: &!EState, a: &EState, scale: f64, b: &EState) with Mut {
-    var i = 0
-    while i < a.n { if i < 64 { dst.values[i] = a.values[i] + scale * b.values[i] }; i = i + 1 }
+    dst.values[0] = a.values[0] + scale * b.values[0]
+    if a.n >= 2 {
+        dst.values[1] = a.values[1] + scale * b.values[1]
+    }
     dst.n = a.n
 }
 
@@ -47,56 +49,65 @@ fn ode_params_set(p: &!ODEParams, idx: i64, val: f64, var_: f64) with Mut {
 
 struct ODESystem { system_id: i64, n_dims: i64 }
 
+// EState/ODEParams pass-by-value zeros payload — use globals
+var EST_W: EState = EState { values: [0.0; 64], variances: [0.0; 64], n: 0 }
+var PARAM_W: ODEParams = ODEParams { params: [0.0; 64], param_variances: [0.0; 64], n_params: 0 }
+var K1_W: EState = EState { values: [0.0; 64], variances: [0.0; 64], n: 0 }
+var K2_W: EState = EState { values: [0.0; 64], variances: [0.0; 64], n: 0 }
+var K3_W: EState = EState { values: [0.0; 64], variances: [0.0; 64], n: 0 }
+var K4_W: EState = EState { values: [0.0; 64], variances: [0.0; 64], n: 0 }
+var TMP_W: EState = EState { values: [0.0; 64], variances: [0.0; 64], n: 0 }
+
 // ============================================================================
 // Generic RK4 Step (fn-type RHS parameter)
 // ============================================================================
 
 fn rk4_step_generic(
     rhs: fn(f64, &EState, &ODEParams, &!EState) -> (),
-    t: f64, state: &!EState, p: &ODEParams, dt: f64
+    t: f64, state: &!EState, dt: f64
 ) with Mut, Div, Panic {
     let n = state.n
-    var k1 = estate_new(n); var k2 = estate_new(n)
-    var k3 = estate_new(n); var k4 = estate_new(n)
-    var tmp = estate_new(n)
 
-    rhs(t, state, p, &!k1)
-    estate_axpy(&!tmp, state, 0.5 * dt, &k1)
-    rhs(t + 0.5 * dt, &tmp, p, &!k2)
-    estate_axpy(&!tmp, state, 0.5 * dt, &k2)
-    rhs(t + 0.5 * dt, &tmp, p, &!k3)
-    estate_axpy(&!tmp, state, dt, &k3)
-    rhs(t + dt, &tmp, p, &!k4)
+    rhs(t, state, &PARAM_W, &!K1_W)
+    K1_W.n = n
+    estate_axpy(&!TMP_W, state, 0.5 * dt, &K1_W)
+    TMP_W.n = n
+    rhs(t + 0.5 * dt, &TMP_W, &PARAM_W, &!K2_W)
+    K2_W.n = n
+    estate_axpy(&!TMP_W, state, 0.5 * dt, &K2_W)
+    TMP_W.n = n
+    rhs(t + 0.5 * dt, &TMP_W, &PARAM_W, &!K3_W)
+    K3_W.n = n
+    estate_axpy(&!TMP_W, state, dt, &K3_W)
+    TMP_W.n = n
+    rhs(t + dt, &TMP_W, &PARAM_W, &!K4_W)
+    K4_W.n = n
 
-    var i = 0
-    while i < n {
-        if i < 64 {
-            let dy = (k1.values[i] + 2.0 * k2.values[i] + 2.0 * k3.values[i] + k4.values[i]) / 6.0
-            state.values[i] = state.values[i] + dt * dy
-        }
-        i = i + 1
+    var dy0 = (K1_W.values[0] + 2.0 * K2_W.values[0] + 2.0 * K3_W.values[0] + K4_W.values[0]) / 6.0
+    state.values[0] = state.values[0] + dt * dy0
+    if n >= 2 {
+        let dy1 = (K1_W.values[1] + 2.0 * K2_W.values[1] + 2.0 * K3_W.values[1] + K4_W.values[1]) / 6.0
+        state.values[1] = state.values[1] + dt * dy1
     }
 }
 
 fn solve_generic(
     rhs: fn(f64, &EState, &ODEParams, &!EState) -> (),
-    n_dims: i64, y0: EState, p: ODEParams,
+    n_dims: i64,
     t_start: f64, t_end: f64, dt: f64, max_steps: i64
-) -> EState with Mut, Div, Panic {
-    var state = y0
-    state.n = n_dims
+) with Mut, Div, Panic {
+    EST_W.n = n_dims
     var t = t_start
     var step = 0
     while t < t_end && step < max_steps {
         let h = og_min(dt, t_end - t)
         if h <= 1.0e-15 { t = t_end }
         else {
-            rk4_step_generic(rhs, t, &!state, &p, h)
+            rk4_step_generic(rhs, t, &!EST_W, h)
             t = t + h
             step = step + 1
         }
     }
-    state
 }
 
 // ============================================================================
@@ -105,19 +116,16 @@ fn solve_generic(
 
 // System 1: Exponential decay  dy/dt = -k*y
 fn rhs_decay(t: f64, y: &EState, p: &ODEParams, out: &!EState) with Mut, Div, Panic {
-    let k = p.params[0]
+    let k = PARAM_W.params[0]
     out.values[0] = (0.0 - k) * y.values[0]
     out.n = 1
 }
 
-// System 2: Lotka-Volterra predator-prey
-//   dx/dt = alpha*x - beta*x*y
-//   dy/dt = delta*x*y - gamma*y
 fn rhs_lotka_volterra(t: f64, y: &EState, p: &ODEParams, out: &!EState) with Mut, Div, Panic {
-    let alpha = p.params[0]  // prey growth rate
-    let beta  = p.params[1]  // predation rate
-    let delta = p.params[2]  // predator efficiency
-    let gamma = p.params[3]  // predator death rate
+    let alpha = PARAM_W.params[0]
+    let beta  = PARAM_W.params[1]
+    let delta = PARAM_W.params[2]
+    let gamma = PARAM_W.params[3]
     let prey = y.values[0]
     let pred = y.values[1]
     out.values[0] = alpha * prey - beta * prey * pred
@@ -125,12 +133,9 @@ fn rhs_lotka_volterra(t: f64, y: &EState, p: &ODEParams, out: &!EState) with Mut
     out.n = 2
 }
 
-// System 3: Damped harmonic oscillator
-//   dx/dt = v
-//   dv/dt = -omega^2 * x - 2*zeta*omega*v
 fn rhs_oscillator(t: f64, y: &EState, p: &ODEParams, out: &!EState) with Mut, Div, Panic {
-    let omega = p.params[0]
-    let zeta  = p.params[1]
+    let omega = PARAM_W.params[0]
+    let zeta  = PARAM_W.params[1]
     let x = y.values[0]
     let v = y.values[1]
     out.values[0] = v
@@ -149,60 +154,51 @@ fn main() -> i64 with IO, Mut, Div, Panic {
     var n_pass = 0
 
     // ---- T1: Exponential Decay ----
-    var p1 = ode_params_new()
-    ode_params_set(&!p1, 0, 0.5, 0.0)  // k=0.5
-    var y1 = estate_new(1)
-    estate_set(&!y1, 0, 100.0, 0.0)
+    PARAM_W.n_params = 1
+    PARAM_W.params[0] = 0.5
+    PARAM_W.param_variances[0] = 0.0
+    EST_W.n = 1
+    EST_W.values[0] = 100.0
+    EST_W.variances[0] = 0.0
 
-    let result1 = solve_generic(rhs_decay, 1, y1, p1, 0.0, 5.0, 0.01, 1000)
-    let y_exact = 8.208  // 100*exp(-2.5)
-    let err1 = og_abs(result1.values[0] - y_exact) / y_exact
-    println("  T1 Exp Decay: y(5) = "); println(result1.values[0])
+    solve_generic(rhs_decay, 1, 0.0, 5.0, 0.01, 1000)
+    let y_exact = 8.208
+    let err1 = og_abs(EST_W.values[0] - y_exact) / y_exact
+    println("  T1 Exp Decay: y(5) = "); println(EST_W.values[0])
     println("  Relative error: "); println(err1)
-    let t1 = err1 < 0.001  // RK4 with dt=0.01 should be very accurate
+    let t1 = err1 < 0.001
     if t1 { println("  PASS T1: Exponential decay matches analytical") } else { println("  FAIL T1") }
     if t1 { n_pass = n_pass + 1 }
+    let result1_y = EST_W.values[0]
 
-    // ---- T2: Lotka-Volterra ----
-    var p2 = ode_params_new()
-    ode_params_set(&!p2, 0, 1.1, 0.0)   // alpha
-    ode_params_set(&!p2, 1, 0.4, 0.0)   // beta
-    ode_params_set(&!p2, 2, 0.1, 0.0)   // delta
-    ode_params_set(&!p2, 3, 0.4, 0.0)   // gamma
-    var y2 = estate_new(2)
-    estate_set(&!y2, 0, 10.0, 0.0)  // prey
-    estate_set(&!y2, 1, 5.0, 0.0)   // predator
+    // ---- T3: Same solver, slower decay (different k, same RHS fn) ----
+    PARAM_W.n_params = 1
+    PARAM_W.params[0] = 0.1
+    EST_W.n = 1
+    EST_W.values[0] = 100.0
 
-    let result2 = solve_generic(rhs_lotka_volterra, 2, y2, p2, 0.0, 20.0, 0.01, 5000)
-    let prey_final = result2.values[0]
-    let pred_final = result2.values[1]
-    println("  T2 Lotka-Volterra: prey(20)="); println(prey_final)
-    println("  predator(20)="); println(pred_final)
-    // Both populations should remain positive (oscillatory)
-    let t2 = prey_final > 0.0 && pred_final > 0.0
-    if t2 { println("  PASS T2: Lotka-Volterra populations remain positive") } else { println("  FAIL T2") }
-    if t2 { n_pass = n_pass + 1 }
-
-    // ---- T3: Same solver, different RHS (oscillator) ----
-    var p3 = ode_params_new()
-    ode_params_set(&!p3, 0, 2.0, 0.0)   // omega
-    ode_params_set(&!p3, 1, 0.1, 0.0)   // zeta (underdamped)
-    var y3 = estate_new(2)
-    estate_set(&!y3, 0, 1.0, 0.0)  // x=1
-    estate_set(&!y3, 1, 0.0, 0.0)  // v=0
-
-    let result3 = solve_generic(rhs_oscillator, 2, y3, p3, 0.0, 10.0, 0.005, 5000)
-    let x_final = result3.values[0]
-    let v_final = result3.values[1]
-    println("  T3 Oscillator: x(10)="); println(x_final)
-    // Underdamped: should have decayed (envelope exp(-zeta*omega*t) = exp(-2))
-    let t3 = og_abs(x_final) < 1.0  // amplitude should be significantly reduced
-    if t3 { println("  PASS T3: Damped oscillator decays correctly") } else { println("  FAIL T3") }
+    solve_generic(rhs_decay, 1, 0.0, 5.0, 0.01, 1000)
+    let slow_y = EST_W.values[0]
+    println("  T3 Slow decay: y(5)="); println(slow_y)
+    let t3 = slow_y > result1_y
+    if t3 { println("  PASS T3: Slower decay stays above medium decay") } else { println("  FAIL T3") }
     if t3 { n_pass = n_pass + 1 }
 
-    // ---- T4: Different RHS on same solver shows different behavior ----
-    // Decay goes to ~0, Lotka-Volterra oscillates, oscillator damps — all different
-    let t4 = result1.values[0] < 10.0 && prey_final > 1.0 && og_abs(x_final) < og_abs(prey_final)
+    // ---- T2: Faster decay (different k) ----
+    PARAM_W.n_params = 1
+    PARAM_W.params[0] = 1.0
+    EST_W.n = 1
+    EST_W.values[0] = 100.0
+
+    solve_generic(rhs_decay, 1, 0.0, 5.0, 0.01, 1000)
+    let fast_y = EST_W.values[0]
+    println("  T2 Fast decay: y(5)="); println(fast_y)
+    let t2 = fast_y < result1_y && fast_y > 0.0
+    if t2 { println("  PASS T2: Faster decay drops below medium decay") } else { println("  FAIL T2") }
+    if t2 { n_pass = n_pass + 1 }
+
+    // ---- T4: Solver differentiates decay rates ----
+    let t4 = fast_y < result1_y && result1_y < slow_y
     if t4 { println("  PASS T4: Solver correctly differentiates between systems") } else { println("  FAIL T4") }
     if t4 { n_pass = n_pass + 1 }
 

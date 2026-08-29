@@ -1,0 +1,111 @@
+//! Uncertainty- and units-aware analytics over a DataFrame — the capability pandas structurally
+//! lacks: column reductions that carry a rigorous, GUM-compliant uncertainty instead of a bare number.
+//!
+//! A measurement column is an ordinary `data::dataframe` column of values; an optional parallel column
+//! holds each reading's a-priori (Type B) standard uncertainty. Reductions return a
+//! `epistemic::gum::GUMResult` — value, combined standard uncertainty u_c, effective degrees of
+//! freedom (Welch–Satterthwaite), and expanded uncertainty U at 95 %/99 % with the matching coverage
+//! factor k. All propagation is delegated to the tested `epistemic::gum` engine (ISO/IEC Guide 98-3,
+//! the GUM), so the numbers are metrologically correct, not hand-rolled.
+//!
+//! Units: each column carries an integer unit code (a parallel `[i64; 64]` the caller owns).
+//! `uframe_add` enforces unit compatibility — adding two quantities with different units is rejected
+//! at runtime rather than silently producing a meaningless number (pandas adds mg/L to mmol/L without
+//! complaint). Runtime checking is the first step; compile-time dimensional safety via `Knowledge<T>`
+//! is the goal.
+//!
+//! Read-only over the DataFrame. Self-contained apart from the public data::dataframe and
+//! epistemic::gum APIs; no compiler changes.
+
+use data::dataframe::{DataFrame, df_get, df_nrows, df_col_mean, df_col_std}
+use epistemic::gum::{GUMResult, GUMComponent, gum_type_a, gum_type_b, gum_combine2, gum_add}
+
+fn uf_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i: i64 = 0
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+/// Type A evaluation of the mean of column `col` (ISO GUM §4.2): the result's value is the sample
+/// mean, its standard uncertainty is s/√n (s = sample standard deviation, n−1 denominator), and its
+/// degrees of freedom is n−1. Expanded uncertainty U95 = k·u_c with k the Student-t coverage factor
+/// for n−1 dof. This is the rigorous replacement for pandas `df[col].mean()`, which reports the value
+/// alone.
+pub fn uframe_mean_type_a(vals: &DataFrame, col: i64) -> GUMResult with Mut, Div, Panic {
+    let n = df_nrows(vals)
+    let mean = df_col_mean(vals, col)
+    let s = df_col_std(vals, col)                 // sample std, n−1
+    let a = gum_type_a(s, n)                       // u = s/√n, dof = n−1
+    let z = gum_type_b(0.0)                        // no Type-B term: combined = Type A, dof preserved
+    gum_combine2(mean, a, z)
+}
+
+/// The combined (Type A ⊕ Type B) uncertainty of the mean of column `col`. The Type A part is the
+/// scatter of the readings (as in `uframe_mean_type_a`); the Type B part is built from the per-reading
+/// standard uncertainties in `uncs` column `ucol`, combined for the mean as √(Σ uᵢ²)/n.
+///
+/// IMPORTANT: this averaging-down of the Type B term assumes the per-reading uncertainties are
+/// INDEPENDENT (uncorrelated) — e.g. independent per-reading noise. A shared systematic term (a common
+/// calibration offset) is fully correlated and does NOT average down; for that case model it as a
+/// single Type B component on the mean via `epistemic::gum` directly. Degrees of freedom combine by
+/// Welch–Satterthwaite.
+pub fn uframe_mean_combined(vals: &DataFrame, col: i64, uncs: &DataFrame, ucol: i64) -> GUMResult with Mut, Div, Panic {
+    let n = df_nrows(vals)
+    let mean = df_col_mean(vals, col)
+    let s = df_col_std(vals, col)
+    let a = gum_type_a(s, n)
+    // independent per-reading Type B uncertainties -> uncertainty of the mean = sqrt(sum uᵢ²)/n
+    var ss = 0.0
+    var r: i64 = 0
+    while r < n {
+        let ui = df_get(uncs, r, ucol)
+        ss = ss + ui * ui
+        r = r + 1
+    }
+    var ub = 0.0
+    if n > 0 { ub = uf_sqrt(ss) / (n as f64) }
+    let b = gum_type_b(ub)
+    gum_combine2(mean, a, b)
+}
+
+/// The total (sum) of column `col` with its uncertainty from the per-reading INDEPENDENT standard
+/// uncertainties in `uncs` column `ucol`: value = Σ xᵢ, u_c = √(Σ uᵢ²) (uncorrelated sum). Degrees of
+/// freedom is treated as effectively infinite (Type B inputs).
+pub fn uframe_sum_independent(vals: &DataFrame, col: i64, uncs: &DataFrame, ucol: i64) -> GUMResult with Mut, Div, Panic {
+    let n = df_nrows(vals)
+    var total = 0.0
+    var ss = 0.0
+    var r: i64 = 0
+    while r < n {
+        total = total + df_get(vals, r, col)
+        let ui = df_get(uncs, r, ucol)
+        ss = ss + ui * ui
+        r = r + 1
+    }
+    let b = gum_type_b(uf_sqrt(ss))
+    let z = gum_type_b(0.0)
+    gum_combine2(total, b, z)
+}
+
+// ---- Units-aware arithmetic (runtime dimensional check) ----
+
+/// True if two unit codes are the same (compatible for addition/subtraction). Unit code 0 is treated
+/// as "dimensionless / unspecified" and is compatible with anything.
+pub fn uframe_units_ok(ua: i64, ub: i64) -> bool {
+    if ua == 0 { return true }
+    if ub == 0 { return true }
+    ua == ub
+}
+
+/// Add two measurement results that must share a unit. If the units are incompatible the operation is
+/// rejected (panic) rather than silently producing a dimensionally meaningless value — the failure
+/// mode pandas does not guard against. On compatible units the GUM-propagated sum is returned
+/// (variances add). Use `uframe_units_ok` to test compatibility without aborting.
+pub fn uframe_add(a: GUMResult, ua: i64, b: GUMResult, ub: i64) -> GUMResult with Mut, Div, Panic {
+    if !uframe_units_ok(ua, ub) {
+        panic("uframe_add: incompatible units")
+    }
+    gum_add(a, b)
+}

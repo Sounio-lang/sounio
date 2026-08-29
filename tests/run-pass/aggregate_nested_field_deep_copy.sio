@@ -1,0 +1,165 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: AGGREGATE_NESTED_DEEP_COPY_OK
+// Regression gate for #1479: binding an aggregate local must value-copy its
+// AGGREGATE FIELDS too, not just its outer slots.
+//
+// #1475 fixed the outer copy: `var s2 = s1` stopped aliasing the struct handle,
+// so a SCALAR field write to the copy was no longer visible through the source.
+// That copy was FLAT, so a field holding an array or a nested struct still
+// copied the 64-bit HANDLE — `s2.arr[0] = 99` was observed through `s1`, check
+// passed, the ELF ran, exit 0, wrong answer. This file pins the deep copy.
+//
+// GATED TO MADAROS. lean_single INLINES an array-typed struct field
+// (struct_like_nslots = st_total_size / 8) where Madaros holds it as a handle
+// (lower_struct_literal_expr_ref, count_struct_fields * 8), so lean_single never
+// exhibited this bug — but its own `[Struct; N]` and nested-struct handling is a
+// separate representation with its own boundaries, and pinning both engines from
+// one file would conflate them. That engine divergence is unchanged by #1479 and
+// remains open.
+//
+// KNOWN COST, NOT YET RESOLVED — the deep copy ALLOCATES. A struct with k
+// aggregate fields needs 1 + k handles per copy instead of 1. The native handle
+// table is a fixed 1,048,576 entries that is never reclaimed
+// (native_v2_handle_table_capacity_default, self-hosted/native/gc.sio:36; the
+// slow path is fail-closed, "no empty-frame reset, live roots not precisely
+// mapped", exit 182). tests/run-pass/dissertation_pbpk28_parity_ref_rapamycin.sio
+// copies a 6-array-field struct on every one of its 30,000 CN steps. Measured by
+// bisecting the step count, the handle ceiling for that program moves from ~110,000
+// steps to ~26,800 (about 4.1x the handle pressure), leaving it roughly 12% past
+// the ceiling. Its numbers are UNCHANGED — a reduced-horizon run of the same model
+// is byte-identical under both compilers, exit 0 both — so the failure is resource
+// exhaustion, not semantics. That gate is why this change is not landable as it
+// stands.
+//
+// STILL DELIBERATELY NOT ASSERTED — an array-of-struct field (`[Inner; N]`).
+// Copying that array yields fresh element SLOTS whose element handles still
+// alias; a half-fix in aliasing is how a new miscompile class is born, so those
+// fields keep the shared handle. Same carve-out #1475 made for `[Struct; N]`
+// LOCALS.
+
+struct S { arr: [i64; 4], n: i64 }
+
+struct F { v: [f64; 4], k: f64 }
+
+struct Inner { x: i64, y: i64 }
+
+struct Outer { inner: Inner, tag: i64 }
+
+struct L2 { z: i64 }
+
+struct L1 { l2: L2, m: i64 }
+
+struct L0 { l1: L1, n: i64 }
+
+struct In { a: [i64; 3], t: i64 }
+
+struct Out { i: In, u: i64 }
+
+fn bump(s: S) -> i64 with Mut, Div, Panic, Alloc {
+    var q = s
+    q.arr[0] = 99
+    q.arr[0] + s.arr[0]
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
+    // 1. the headline shape: a word-scalar array field
+    var s1 = S { arr: [1, 2, 3, 4], n: 7 }
+    var s2 = s1
+    s2.arr[0] = 99
+    assert(s1.arr[0] == 1)
+    assert(s2.arr[0] == 99)
+    assert(s1.arr[3] == 4)
+    assert(s2.arr[3] == 4)
+    assert(s1.n == 7)
+
+    // 2. the reverse direction — mutating the SOURCE must not leak into the copy
+    var r1 = S { arr: [1, 2, 3, 4], n: 7 }
+    var r2 = r1
+    r1.arr[1] = 55
+    assert(r2.arr[1] == 2)
+    assert(r1.arr[1] == 55)
+
+    // 3. f64 array field. Bit survival alone proves little — a GPR copy of an
+    //    f64 pattern is bit-exact — so read the copy ARITHMETICALLY: an element
+    //    misclassified as int makes the sum wrong, not merely imprecise.
+    var f1 = F { v: [1.5, 2.25, 3.125, 4.0625], k: 9.5 }
+    var f2 = f1
+    let sum = f2.v[0] + f2.v[1]
+    assert(sum > 3.7)
+    assert(sum < 3.8)
+    let prod = f2.v[2] * 2.0
+    assert(prod > 6.2)
+    assert(prod < 6.3)
+    f2.v[0] = 99.75
+    assert(f1.v[0] < 2.0)
+    assert(f2.v[0] > 99.0)
+    let after = f1.v[0] + f1.v[1]
+    assert(after > 3.7)
+    assert(after < 3.8)
+    assert(f2.k > 9.0)
+
+    // 4. nested struct field, one level
+    var o1 = Outer { inner: Inner { x: 1, y: 2 }, tag: 5 }
+    var o2 = o1
+    o2.inner.x = 99
+    assert(o1.inner.x == 1)
+    assert(o2.inner.x == 99)
+    assert(o1.inner.y == 2)
+    o2.tag = 6
+    assert(o1.tag == 5)
+
+    // 5. two levels of struct nesting — the depth cap is 2, so this is the
+    //    deepest shape the copy follows
+    var a1 = L0 { l1: L1 { l2: L2 { z: 1 }, m: 2 }, n: 3 }
+    var a2 = a1
+    a2.l1.l2.z = 99
+    assert(a1.l1.l2.z == 1)
+    assert(a2.l1.l2.z == 99)
+    a2.l1.m = 88
+    assert(a1.l1.m == 2)
+
+    // 6. an array reached THROUGH a nested struct
+    var w1 = Out { i: In { a: [1, 2, 3], t: 4 }, u: 5 }
+    var w2 = w1
+    w2.i.a[0] = 99
+    assert(w1.i.a[0] == 1)
+    assert(w2.i.a[0] == 99)
+    w2.i.t = 88
+    assert(w1.i.t == 4)
+
+    // 7. by-value struct param with an array field, copied inside the callee
+    var p1 = S { arr: [1, 2, 3, 4], n: 7 }
+    let bumped = bump(p1)
+    assert(bumped == 100)
+    assert(p1.arr[0] == 1)
+
+    // 8. repeated copies in a loop stay independent and accumulate nothing
+    var base = S { arr: [1, 2, 3, 4], n: 0 }
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < 5 {
+        var c = base
+        c.arr[0] = c.arr[0] + i
+        acc = acc + c.arr[0]
+        i = i + 1
+    }
+    assert(base.arr[0] == 1)
+    assert(acc == 15)
+
+    // 9. the #1475 scalar-field fix must stay fixed
+    var q1 = Inner { x: 1, y: 2 }
+    var q2 = q1
+    q2.x = 99
+    assert(q1.x == 1)
+    assert(q2.y == 2)
+
+    // 10. previously-working plain array locals must stay working
+    var b1: [i64; 4] = [1, 2, 3, 4]
+    var b2 = b1
+    b2[0] = 99
+    assert(b1[0] == 1)
+
+    println("AGGREGATE_NESTED_DEEP_COPY_OK")
+    return 0
+}

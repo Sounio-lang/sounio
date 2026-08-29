@@ -1,0 +1,76 @@
+//@ run-pass
+//@ requires: madaros
+//
+// NOTE on structure: this test performs the entire socket lifecycle
+// (listen/connect/accept/send/recv/close) as one unconditional, straight-
+// line sequence, then checks all the resulting i64 status/data values
+// afterward. This is deliberate, not stylistic: this compiler's linear
+// checker treats a `TcpSocket` binding as consumed by ANY use (even a
+// second identical use in a branch that's never reached at runtime), and
+// requires a linear value to be consumed in BOTH arms of an `if` or
+// NEITHER — even `if c { close(x) } else { close(x) }` trips
+// `error[E039]: linear value has already been used` per the checker's own
+// source comment (self-hosted/check/check.sio:6010). Conditionally closing
+// sockets per error branch (the natural "check each step, bail out early"
+// shape) is therefore not expressible here. See stdlib/net/socket.sio's
+// header comment for the full empirical writeup from this task's spikes.
+
+use net::socket::*
+
+fn main() -> i64 with IO {
+    let server_ip = rawbuf_new(16)
+    rawbuf_set(&server_ip, 0, 127)
+    rawbuf_set(&server_ip, 1, 0)
+    rawbuf_set(&server_ip, 2, 0)
+    rawbuf_set(&server_ip, 3, 1)
+
+    let (listener, listen_err) = tcp_listen(&server_ip, 18090, 1)
+    let (client_sock, connect_err) = tcp_connect(&server_ip, 18090)
+    let (listener2, server_conn, accept_err) = tcp_accept(listener)
+
+    let send_buf = rawbuf_new(4)
+    rawbuf_set(&send_buf, 0, 72)   // 'H'
+    rawbuf_set(&send_buf, 1, 73)   // 'I'
+    let (client_sock2, sent) = tcp_send(client_sock, &send_buf, 2)
+
+    let recv_buf = rawbuf_new(4)
+    let (server_conn2, received) = tcp_recv(server_conn, &recv_buf, 4)
+    let byte0 = rawbuf_get(&recv_buf, 0)
+    let byte1 = rawbuf_get(&recv_buf, 1)
+
+    tcp_close(client_sock2)
+    tcp_close(server_conn2)
+    tcp_close(listener2)
+
+    if listen_err != 0 {
+        print_int(1)
+        return 1
+    }
+    if connect_err != 0 {
+        print_int(2)
+        return 1
+    }
+    if accept_err != 0 {
+        print_int(3)
+        return 1
+    }
+    if sent != 2 {
+        print_int(4)
+        return 1
+    }
+    if received != 2 {
+        print_int(5)
+        return 1
+    }
+    if byte0 != 72 {
+        print_int(6)
+        return 1
+    }
+    if byte1 != 73 {
+        print_int(7)
+        return 1
+    }
+
+    print_int(0)
+    return 0
+}

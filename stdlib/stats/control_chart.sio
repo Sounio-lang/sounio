@@ -1,0 +1,125 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/control_chart.sio — Shewhart individuals (I-MR) control chart
+//
+// Control limits for a stream of individual measurements, using the average
+// moving range to estimate short-term variation:
+//
+//   imr_chart(x, n) -> IMRResult
+//
+//   MRᵢ = |xᵢ − xᵢ₋₁|,   M̄R = mean MR,   σ̂ = M̄R / d₂  (d₂ = 1.128 for n=2),
+//   individuals: CL = x̄,  UCL/LCL = x̄ ± 3·σ̂  (= x̄ ± 2.66·M̄R),
+//   moving range: UCL = D₄·M̄R  (D₄ = 3.267),  LCL = 0.
+// Points outside the individuals limits signal an out-of-control process.
+//
+// Pure Sounio: two passes (mean, moving ranges); a final pass flags points. No
+// external dependency, no nested data-array calls.
+//
+// References:
+//   Shewhart (1931); Montgomery, "Statistical Quality Control" 7e, §6.4.
+
+module stats::control_chart
+
+pub struct IMRResult {
+    pub cl: f64,        // centre line (mean)
+    pub ucl: f64,       // upper control limit (individuals)
+    pub lcl: f64,       // lower control limit
+    pub mr_bar: f64,    // average moving range
+    pub ucl_mr: f64,    // upper control limit for moving range
+    pub n_out: i64,     // count of points outside the individuals limits
+}
+
+/// Shewhart individuals & moving-range (I-MR) control chart.
+///
+/// Parâmetros: x — measurement series; n — length (>=2, <=256).
+/// Retorno: IMRResult (cl, ucl, lcl, mr_bar, ucl_mr, n_out).
+/// Referências: Shewhart (1931); Montgomery §6.4.
+pub fn imr_chart(x: &[f64; 256], n: i32) -> IMRResult with Mut, Div, Panic {
+    if n < 2 { return IMRResult { cl: 0.0, ucl: 0.0, lcl: 0.0, mr_bar: 0.0, ucl_mr: 0.0, n_out: 0 } }
+    let nf = n as f64
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    let cl = s / nf
+    // average moving range
+    var smr = 0.0
+    var t = 1
+    while t < n {
+        let d = x[t as usize] - x[(t - 1) as usize]
+        let ad = if d < 0.0 { 0.0 - d } else { d }
+        smr = smr + ad
+        t = t + 1
+    }
+    let mr_bar = smr / ((n - 1) as f64)
+    let D2 = 1.128
+    let D4 = 3.267
+    let sigma = mr_bar / D2
+    let ucl = cl + 3.0 * sigma
+    let lcl = cl - 3.0 * sigma
+    let ucl_mr = D4 * mr_bar
+    // count points outside the individuals limits
+    var cnt = 0
+    var j = 0
+    while j < n {
+        let v = x[j as usize]
+        if v > ucl || v < lcl { cnt = cnt + 1 }
+        j = j + 1
+    }
+    return IMRResult { cl: cl, ucl: ucl, lcl: lcl, mr_bar: mr_bar, ucl_mr: ucl_mr, n_out: cnt as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x={10,12,11,13,12}: mean 11.6. MR={2,1,2,1}, M̄R=1.5.
+// sigma=1.5/1.128=1.329787; UCL=11.6+3.989362=15.589362; LCL=7.610638.
+// UCL_MR=3.267·1.5=4.9005. All points in control -> n_out=0.
+fn test_imr() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=10.0; x[1]=12.0; x[2]=11.0; x[3]=13.0; x[4]=12.0
+    let r = imr_chart(&x, 5)
+    var ok = true
+    ok = check(1, approx(r.cl, 11.6, 1.0e-9)) && ok
+    ok = check(2, approx(r.mr_bar, 1.5, 1.0e-9)) && ok
+    ok = check(3, approx(r.ucl, 15.589362, 1.0e-4)) && ok
+    ok = check(4, approx(r.lcl, 7.610638, 1.0e-4)) && ok
+    ok = check(5, approx(r.ucl_mr, 4.9005, 1.0e-4)) && ok
+    ok = check(6, r.n_out == 0) && ok
+    return ok
+}
+
+// an obvious outlier trips the limit. x={10,10,10,10,30}.
+fn test_outlier() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    x[0]=10.0; x[1]=10.0; x[2]=10.0; x[3]=10.0; x[4]=30.0
+    let r = imr_chart(&x, 5)
+    return check(10, r.n_out >= 1)
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_imr() && ok
+    ok = test_outlier() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -1,0 +1,116 @@
+//@ run-pass
+//@ expect-stdout: PASS unit_quadratic_recovery
+// tests/stdlib/darwin_pbpk/hessian_correction_test.sio
+//
+// Unit test for the second-order GUM correction kernel.
+//
+// We bypass the full PBPK14 simulator and feed the FD stencil
+// pre-computed values from a known quadratic in two variables:
+//
+//   f(x₁, x₂) = a₁ x₁² + a₂ x₂² + a₁₂ x₁ x₂  + b₁ x₁ + b₂ x₂ + c₀
+//
+// for which the analytic Hessian is constant:
+//
+//   ∂²f/∂x₁²    = 2 a₁
+//   ∂²f/∂x₂²    = 2 a₂
+//   ∂²f/∂x₁∂x₂  = a₁₂
+//
+// 4-point central FD recovers these exactly (truncation error O(h²)
+// vanishes for polynomials of degree ≤ 3).
+//
+// Pass condition: every analytic element matches the FD output to
+// 1e-9 absolute, and the second-order GUM variance term is exact for
+// the quadratic.
+
+use math::pure::*
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool with Mut, Div, Panic {
+    var d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    d < tol
+}
+
+// Analytic quadratic.
+fn quad(x1: f64, x2: f64,
+        a1: f64, a2: f64, a12: f64,
+        b1: f64, b2: f64, c0: f64) -> f64 {
+    a1 * x1 * x1 + a2 * x2 * x2 + a12 * x1 * x2 + b1 * x1 + b2 * x2 + c0
+}
+
+fn fail(tag: string) with IO, Mut, Panic, Div {
+    print("FAIL unit_quadratic_recovery: ")
+    println(tag)
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // Coefficients of the test quadratic.
+    let a1: f64  = 3.0
+    let a2: f64  = 5.0
+    let a12: f64 = 2.0
+    let b1: f64  = 1.0
+    let b2: f64  = 0.0 - 4.0
+    let c0: f64  = 7.0
+
+    // Expansion point and step sizes.
+    let x10: f64 = 1.5
+    let x20: f64 = 2.5
+    let h1: f64  = 0.05
+    let h2: f64  = 0.07
+
+    // --- Diagonal H[0][0] = (f(x1+h1,x2) - 2 f(x1,x2) + f(x1-h1,x2)) / h1² ---
+    let f0  = quad(x10,      x20, a1, a2, a12, b1, b2, c0)
+    let fp0 = quad(x10 + h1, x20, a1, a2, a12, b1, b2, c0)
+    let fn0 = quad(x10 - h1, x20, a1, a2, a12, b1, b2, c0)
+    let h00 = (fp0 - 2.0 * f0 + fn0) / (h1 * h1)
+    if !approx_eq(h00, 2.0 * a1, 1.0e-9) {
+        fail("diagonal_x1_x1")
+        return
+    }
+
+    // --- Diagonal H[1][1] ---
+    let f0p = quad(x10, x20 + h2, a1, a2, a12, b1, b2, c0)
+    let f0n = quad(x10, x20 - h2, a1, a2, a12, b1, b2, c0)
+    let h11 = (f0p - 2.0 * f0 + f0n) / (h2 * h2)
+    if !approx_eq(h11, 2.0 * a2, 1.0e-9) {
+        fail("diagonal_x2_x2")
+        return
+    }
+
+    // --- Off-diagonal H[0][1] (4-point central) ---
+    let fpp = quad(x10 + h1, x20 + h2, a1, a2, a12, b1, b2, c0)
+    let fpn = quad(x10 + h1, x20 - h2, a1, a2, a12, b1, b2, c0)
+    let fnp = quad(x10 - h1, x20 + h2, a1, a2, a12, b1, b2, c0)
+    let fnn = quad(x10 - h1, x20 - h2, a1, a2, a12, b1, b2, c0)
+    let h01 = (fpp - fpn - fnp + fnn) / (4.0 * h1 * h2)
+    if !approx_eq(h01, a12, 1.0e-9) {
+        fail("off_diagonal_x1_x2")
+        return
+    }
+
+    // --- Symmetry: 4-point stencil is symmetric by construction ---
+    let h10 = (fpp - fnp - fpn + fnn) / (4.0 * h2 * h1)
+    if !approx_eq(h10, h01, 1.0e-12) {
+        fail("hessian_symmetry")
+        return
+    }
+
+    // --- Second-order GUM correction: ½ Σᵢⱼ Hᵢⱼ² σᵢ² σⱼ² ---
+    // For uncorrelated inputs σ₁²=0.01, σ₂²=0.04:
+    //   correction = ½ * (H00² σ₁⁴ + 2 H01² σ₁² σ₂² + H11² σ₂⁴)
+    // With H00=6, H01=2, H11=10, σ₁²=0.01, σ₂²=0.04:
+    //   ½ * (36 * 1e-4 + 2 * 4 * 0.01*0.04 + 100 * 1.6e-3)
+    // = ½ * (3.6e-3 + 3.2e-3 + 0.16) = ½ * 0.1668 = 0.0834
+    let s12 = 0.01
+    let s22 = 0.04
+    let term_diag1 = h00 * h00 * s12 * s12
+    let term_diag2 = h11 * h11 * s22 * s22
+    let term_cross = 2.0 * h01 * h01 * s12 * s22
+    let v_corr = 0.5 * (term_diag1 + term_diag2 + term_cross)
+    let v_corr_expected = 0.0834
+    if !approx_eq(v_corr, v_corr_expected, 1.0e-6) {
+        fail("second_order_variance_correction")
+        return
+    }
+
+    println("PASS unit_quadratic_recovery")
+}

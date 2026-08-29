@@ -1,8 +1,8 @@
 ---
-title: "GPU Computing"
-description: "The checked GPU artifact, PTX emission, and attested compute lanes."
+title: "Kretikos GPU Compiler"
+description: "GPU compiler lane with checked thread builtins, serial CPU fallback, in-tree PTX/CUBIN templates, and artifact bundles."
 domain: "gpu"
-icon: "🚀"
+icon: "🏛️"
 topic_id: "website.showcases.gpu"
 authority: "website_only"
 audience: "researchers"
@@ -11,46 +11,131 @@ validated_by: "A6"
 source_of_truth: "docs/governance/topic-registry.v1.json#website.showcases.gpu"
 ---
 
-# GPU Computing with Sounio
+# Kretikos GPU Compiler
 
-Sounio ships a checked GPU profile in this repo snapshot. The public contract is
-no longer “parser-only GPU syntax”; it is an artifact-backed profile with PTX
-emission and committed CUDA/ROCm attestation artifacts.
+> **Scope note:** Kretikos is an active research lane. Clinical pharmacology (vancomycin ε gates, PBPK dissertation demo) is the primary public demo surface on this website — not GPU storefront features.
 
-## Checked Public Syntax
+**Kretikos** (Κρητικός) = Cretan. Like Ariadne's thread through the Labyrinth of Knossos,
+this is the named path for Sounio's GPU compiler work: source-level thread builtins,
+serial CPU fallback, in-tree PTX/CUBIN templates, and artifact bundles.
+
+## Executive reading
+
+Most languages wave at GPU ambition and hide the current boundary.
+Kretikos does the opposite: it exposes a bounded GPU surface as a first-class
+language feature, then ties each claim to an inspectable artifact or command.
+
+- Checked x-axis builtins compile today: `gpu_thread_id_x()`, `gpu_block_id_x()`, `gpu_block_dim_x()`, `gpu_sync_threads()`
+- y/z builtin spellings are recognized; the native CPU fallback returns deterministic stubs
+- Predefined PTX templates are live via `kretikos emit-ptx` using the in-tree `self-hosted/gpu/ptx.sio` emitter
+- Predefined CUBIN templates are live via `kretikos emit-cubin` using the in-tree `self-hosted/gpu/nvidia_bare.sio` emitter
+- Structural artifact bundles are live via `kretikos bundle`, with PTX/CUBIN hashes and explicit non-claims
+- Kretikos depends on the active `bin/souc`/`souc-linux-x86_64` compiler to build its small emitter drivers
+- CPU fallback path is deterministic and serial; it is not a parallel GPU simulator
+- The backend source — PTX emitter, SPIR-V lowerer, CUDA ELF generator — lives in-tree at `self-hosted/gpu/`
+
+## What Kretikos proves
+
+A language serious about scientific software must not delegate GPU honesty to a
+black-box runtime. Kretikos demonstrates that Sounio can:
+
+- expose thread indexing as source-level syntax, not driver-level magic
+- emit predefined PTX and CUBIN artifact templates from self-hosted code
+- run kernels on a deterministic serial CPU fallback for syntax/runtime smoke
+- keep the compiler, runtime, and narrative aligned under real pressure
+
+## Bare-metal syntax
 
 ```sio
-kernel fn vector_add(n: i64) with GPU {
-}
-
-kernel fn scale_vector(factor: f64, n: i64) with GPU, Div {
+kernel fn vec_add(n: i64) with GPU {
+    let tid = gpu_thread_id_x()
+    let bid = gpu_block_id_x()
+    let bdim = gpu_block_dim_x()
+    let i = bid * bdim + tid
+    if i >= n { return }
+    // This thread owns element i.
 }
 
 fn main() with GPU, IO {
     let grid = (16, 1, 1)
     let block = (64, 1, 1)
-
-    perform GPU.launch(vector_add, grid, block)(1024)
-    perform GPU.launch(scale_vector, grid, block)(2.0, 1024)
+    perform GPU.launch(vec_add, grid, block)(1024)
     perform GPU.sync()
 }
 ```
 
-## What is actually verified
+This is the checked public shape today: 1D indexing plus deterministic CPU
+fallback. Broader y/z lowering and richer memory surfaces are separate promotion
+lanes.
+
+## Verified commands
 
 ```bash
-export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
-export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+# Compile and run on serial CPU fallback (no GPU hardware required)
+souc examples/kernel_source_level.sio /tmp/kretikos_demo.elf
+/tmp/kretikos_demo.elf
 
-"$SOUC_GPU_BIN" check examples/gpu.sio
-"$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
+# Emit predefined PTX templates (self-hosted, no GPU required)
+kretikos emit-ptx vec_add     -o /tmp/kretikos.ptx
+kretikos emit-ptx vec_sub     -o /tmp/kretikos.ptx
+kretikos emit-ptx vec_mul     -o /tmp/kretikos.ptx
+kretikos emit-ptx vec_div     -o /tmp/kretikos.ptx
+kretikos emit-ptx vec_add_f64 -o /tmp/kretikos.ptx
+kretikos emit-ptx fma         -o /tmp/kretikos.ptx
+kretikos emit-ptx fma_f64     -o /tmp/kretikos.ptx
+kretikos emit-ptx store_u32_const -o /tmp/kretikos.ptx
+
+# Emit predefined Metal/MSL templates (self-hosted, no macOS required)
+kretikos emit-metal vec_add          -o /tmp/kretikos.metal
+kretikos emit-metal ossm_oct_step    -o /tmp/kretikos.metal
+kretikos emit-metal sedenion_cd_step -o /tmp/kretikos.metal
+
+# Emit the predefined vec_add_f32 CUBIN template
+kretikos emit-cubin vec_add_f32 -o /tmp/kretikos.cubin
+
+# Emit a structural artifact bundle with hashes and boundaries
+kretikos bundle -o /tmp/kretikos-bundle
+
+# Add optional toolchain/runtime validation when the host exposes those tools
+kretikos bundle -o /tmp/kretikos-validated-bundle --validate-toolchain --validate-runtime
+
+# Build PTX with the checked GPU artifact (broader pattern support)
+export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
+"$SOUC_GPU_BIN" build examples/kernel_source_level.sio --backend gpu -o /tmp/kretikos.ptx
 ```
+
+## Why this matters
+
+GPU work is where language marketing goes to die. It is easy to sketch intrinsics
+or promise tensor-core support. It is much harder to keep a self-hosted compiler,
+a bounded GPU surface, and a public-facing narrative aligned while real bugs surface
+in stack alignment, launch parameters, and PTX module loading.
+
+Kretikos is valuable not only because it accelerates compute, but because it
+forces the language to reveal whether its honesty survives contact with backend
+artifacts.
 
 ## Support tier
 
-- Attested compute evidence today: CUDA `cuda-sm80`, ROCm `rocm-gfx942`
-- Public emission path today: `build --backend gpu`
-- Larger source-tree GPU work exists under `self-hosted/gpu/`, including Metal,
-  SPIR-V, tensor, and runtime layers
-- Older `gpu.*` intrinsic sketches are still implementation work, not the
-  checked public surface
+- checked builtins: `gpu_thread_id_x`, `gpu_block_id_x`, `gpu_block_dim_x`, `gpu_sync_threads` — self-hosted compiler
+- recognized CPU-fallback stubs: y/z thread/block IDs return `0`; y/z block dimensions return `1`
+- PTX templates: `kretikos emit-ptx` with 6 patterns (vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma); broader PTX emission through `build --backend gpu` (checked GPU artifact)
+- MSL templates: `kretikos emit-metal` with 3 patterns (vec_add, ossm_oct_step, sedenion_cd_step) from in-tree self-hosted emitter
+- CUBIN templates: `kretikos emit-cubin` (in-tree self-hosted emitter)
+- Artifact bundle: `kretikos bundle` emits PTX+CUBIN plus `sounio.kretikos.bundle.v1`
+- Optional promotion checks: `--validate-toolchain` records `ptxas`/`nvdisasm` evidence, and `--validate-runtime` attempts the CUDA Driver API rung with exact `not_run` reasons on non-GPU hosts
+- backend source: `self-hosted/gpu/ptx.sio`, `self-hosted/gpu/ptx_advanced.sio`, `self-hosted/gpu/nvidia_bare.sio`, `self-hosted/gpu/spirv_lower.sio`
+- attested targets: CUDA `sm_80`, ROCm `gfx942`
+
+## The boundary
+
+Kretikos does **not** claim:
+- that every GPU backend is production-complete
+- that multi-dimensional kernels emit PTX for all patterns (currently pattern-matched)
+- that `gpu.alloc<T>()` or shared-memory abstractions are checked public surface
+- that the CPU fallback simulates a parallel GPU grid
+
+The honest claim is narrower and therefore stronger: there is a GPU compiler
+lane here, and the current Kretikos CLI artifact bundle is a predefined-template surface, not arbitrary user-kernel lowering.
+Toolchain and runtime validation apply only to those selected templates; they
+do not validate arbitrary user-written GPU kernels.

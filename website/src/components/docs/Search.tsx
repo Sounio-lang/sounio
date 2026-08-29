@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, type MouseEvent } from 'react';
 
 declare global {
   interface Window {
@@ -15,6 +15,10 @@ declare global {
     };
   }
 }
+
+type PagefindSearchResult = {
+  data: () => Promise<{ title: string; excerpt: string; url: string }>;
+};
 
 interface SearchResult {
   title: string;
@@ -60,7 +64,16 @@ export default function Search({ locale, strings }: Props) {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const searchTimeout = useRef<ReturnType<typeof setTimeout>>();
+  const searchTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const ensurePagefind = useCallback(async () => {
+    if (window.pagefind) return window.pagefind;
+
+    const pagefindUrl = ['', 'pagefind', 'pagefind.js'].join('/');
+    const mod = await import(/* @vite-ignore */ pagefindUrl);
+    window.pagefind = mod;
+    return mod;
+  }, []);
 
   // Keyboard shortcut to open search (Cmd/Ctrl + K, or /)
   useEffect(() => {
@@ -109,7 +122,7 @@ export default function Search({ locale, strings }: Props) {
 
   // Debounced search using Pagefind API
   const performSearch = useCallback(async (q: string) => {
-    if (!q.trim() || !window.pagefind) {
+    if (!q.trim()) {
       setResults([]);
       setLoading(false);
       return;
@@ -117,9 +130,10 @@ export default function Search({ locale, strings }: Props) {
 
     setLoading(true);
     try {
-      const search = await window.pagefind.search(q);
+      const pagefind = await ensurePagefind();
+      const search = await pagefind.search(q);
       const formattedResults = await Promise.all(
-        search.results.slice(0, 10).map(async (result) => {
+        search.results.slice(0, 10).map(async (result: PagefindSearchResult) => {
           const data = await result.data();
           return {
             title: data.title,
@@ -135,7 +149,7 @@ export default function Search({ locale, strings }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [locale]);
+  }, [ensurePagefind, locale]);
 
   // Debounce search input
   useEffect(() => {
@@ -160,7 +174,7 @@ export default function Search({ locale, strings }: Props) {
     setResults([]);
   };
 
-  const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {
+  const handleBackdropClick = (e: MouseEvent<HTMLDivElement>) => {
     if (e.target === e.currentTarget) {
       closeModal();
     }
@@ -169,7 +183,10 @@ export default function Search({ locale, strings }: Props) {
   // Trigger button for opening search
   const SearchButton = () => (
     <button
-      onClick={() => setIsOpen(true)}
+      onClick={() => {
+        void ensurePagefind();
+        setIsOpen(true);
+      }}
       className="flex items-center gap-2 px-3 py-1.5 text-sm text-[var(--color-text-muted)] bg-[var(--color-bg-alt)] border border-[var(--color-border)] rounded-lg hover:border-[var(--color-gold-500)] transition-colors"
       aria-label="Open search"
     >

@@ -21,12 +21,12 @@
 // MetalBuf — text buffer (same pattern as PtxBuf)
 // ============================================================================
 
-struct MetalBuf {
-    data: [i8; 65536],
-    len: i64,
+pub struct MetalBuf {
+    pub data: [i8; 65536],
+    pub len: i64,
 }
 
-fn metal_buf_new() -> MetalBuf {
+pub fn metal_buf_new() -> MetalBuf {
     MetalBuf { data: [0; 65536], len: 0 }
 }
 
@@ -40,7 +40,7 @@ fn metal_push_byte(buf: MetalBuf, b: i8) -> MetalBuf with Mut, Panic {
 }
 
 // Append one MetalBuf to another.
-fn metal_buf_append(dst: MetalBuf, src: MetalBuf) -> MetalBuf with Mut, Panic, Div {
+pub fn metal_buf_append(dst: MetalBuf, src: MetalBuf) -> MetalBuf with Mut, Panic, Div {
     var out = dst
     var i: i64 = 0
     while i < src.len {
@@ -54,7 +54,7 @@ fn metal_buf_append(dst: MetalBuf, src: MetalBuf) -> MetalBuf with Mut, Panic, D
 }
 
 // Print a MetalBuf to stdout.
-fn metal_buf_print(buf: MetalBuf) with IO, Mut, Panic, Div {
+pub(crate) fn metal_buf_print(buf: MetalBuf) with IO, Mut, Panic, Div {
     var i: i64 = 0
     while i < buf.len {
         print_char(buf.data[i as usize] as i64)
@@ -98,8 +98,47 @@ fn metal_buf_contains(buf: MetalBuf, needle: string) -> bool with Mut, Panic, Di
     false
 }
 
-fn metal_push_i64(buf: MetalBuf, n: i64) -> MetalBuf with Mut, Panic, Div, Alloc {
-    metal_push_str(buf, i64_to_string(n))
+fn metal_push_i64(buf: MetalBuf, n: i64) -> MetalBuf with Mut, Panic, Div {
+    if n == 0 { return metal_push_byte(buf, 48) }
+    var value: i64 = if n < 0 { 0 } else { n }
+    var digits: [i8; 20] = [0 as i8; 20]
+    var rev_len: i64 = 0
+    while value > 0 {
+        digits[rev_len as usize] = (48 + value % 10) as i8
+        rev_len = rev_len + 1
+        value = value / 10
+    }
+    var out = buf
+    var k: i64 = rev_len - 1
+    while k >= 0 {
+        out = metal_push_byte(out, digits[k as usize])
+        k = k - 1
+    }
+    out
+}
+
+var METAL_I64_TO_STRING_BUF: [i8; 32] = [0 as i8; 32]
+
+fn metal_i64_to_string(n: i64) -> string with Mut, Panic, Div {
+    var tmp = metal_buf_new()
+    tmp = metal_push_i64(tmp, n)
+    var i: i64 = 0
+    while i < tmp.len {
+        METAL_I64_TO_STRING_BUF[i as usize] = tmp.data[i as usize]
+        i = i + 1
+    }
+    METAL_I64_TO_STRING_BUF[tmp.len as usize] = 0
+    str_from_bytes(METAL_I64_TO_STRING_BUF, tmp.len)
+}
+
+fn metal_push_name(buf: MetalBuf, name: Name) -> MetalBuf with Mut, Panic {
+    var out = buf
+    var i: i64 = 0
+    while i < name.len {
+        out = metal_push_byte(out, name.buf[i as usize])
+        i = i + 1
+    }
+    out
 }
 
 fn metal_push_newline(buf: MetalBuf) -> MetalBuf with Mut, Panic {
@@ -116,8 +155,18 @@ fn metal_push_indent(buf: MetalBuf, depth: i64) -> MetalBuf with Mut, Panic, Div
     out
 }
 
-fn metal_to_string(buf: MetalBuf) -> string with Mut, Panic, Div, Alloc {
-    str_from_bytes(buf.data, buf.len)
+// Global output buffer for metal_to_string; avoids returning a dangling stack pointer
+// since str_from_bytes in lean_single returns the address of its first arg.
+pub var METAL_TO_STRING_BUF: [i8; 65536] = [0; 65536]
+
+fn metal_to_string(buf: MetalBuf) -> string with Mut, Panic {
+    var i: i64 = 0
+    while i < buf.len {
+        METAL_TO_STRING_BUF[i as usize] = buf.data[i as usize]
+        i = i + 1
+    }
+    METAL_TO_STRING_BUF[buf.len as usize] = 0
+    str_from_bytes(METAL_TO_STRING_BUF, buf.len)
 }
 
 // ============================================================================
@@ -138,24 +187,25 @@ fn metal_default_f64_policy() -> MetalF64Policy {
     MetalF64Policy::MetalF64F32Checked
 }
 
-fn metal_f64_policy_to_string(policy: MetalF64Policy) -> string {
-    match policy {
+// Soft-keyword: Madaros parser rejects param name `policy`.
+fn metal_f64_policy_to_string(f64_policy: MetalF64Policy) -> string {
+    match f64_policy {
         MetalF64Policy::MetalF64Reject => "reject"
         MetalF64Policy::MetalF64F32Checked => "f32_checked"
         MetalF64Policy::MetalF64Float2Compensated => "float2_compensated"
     }
 }
 
-fn metal_f64_value_type(policy: MetalF64Policy) -> string {
-    match policy {
+fn metal_f64_value_type(f64_policy: MetalF64Policy) -> string {
+    match f64_policy {
         MetalF64Policy::MetalF64Reject => "unsupported_f64"
         MetalF64Policy::MetalF64F32Checked => "float"
         MetalF64Policy::MetalF64Float2Compensated => "float2"
     }
 }
 
-fn metal_f64_param_type(policy: MetalF64Policy) -> string {
-    match policy {
+fn metal_f64_param_type(f64_policy: MetalF64Policy) -> string {
+    match f64_policy {
         MetalF64Policy::MetalF64Reject => "device unsupported_f64*"
         MetalF64Policy::MetalF64F32Checked => "device float*"
         MetalF64Policy::MetalF64Float2Compensated => "device float2*"
@@ -226,7 +276,7 @@ fn metal_emit_header(buf: MetalBuf) -> MetalBuf with Mut, Panic, Div {
 fn metal_emit_kernel_signature(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div, Alloc {
     var out = buf
     out = metal_push_str(out, "kernel void ")
-    out = metal_push_str(out, name_to_string(kernel.kernel_name))
+    out = metal_push_name(out, kernel.kernel_name)
     out = metal_push_str(out, "(\n")
 
     // Emit buffer parameters
@@ -236,7 +286,7 @@ fn metal_emit_kernel_signature(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf w
         out = metal_push_str(out, "    ")
         out = metal_push_str(out, gpu_type_to_msl_param(param.ty))
         out = metal_push_str(out, " ")
-        out = metal_push_str(out, name_to_string(param.name))
+        out = metal_push_name(out, param.name)
         out = metal_push_str(out, " [[buffer(")
         out = metal_push_i64(out, pi)
         out = metal_push_str(out, ")]]")
@@ -376,17 +426,22 @@ fn metal_emit_var_decls(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf with Mut
 
 fn metal_reg_name(ty: GpuType, idx: i64) -> string with Mut, Panic, Div, Alloc {
     match ty {
-        GpuType::GpuU32 => str_concat("r", i64_to_string(idx)),
-        GpuType::GpuU64 => str_concat("rd", i64_to_string(idx)),
-        GpuType::GpuF32 => str_concat("f", i64_to_string(idx)),
-        GpuType::GpuF64 => str_concat("fd", i64_to_string(idx)),
-        GpuType::GpuI32 => str_concat("sr", i64_to_string(idx)),
-        GpuType::GpuI64 => str_concat("srd", i64_to_string(idx)),
-        GpuType::GpuPtr => str_concat("rd", i64_to_string(idx)),
+        GpuType::GpuU32 => str_concat("r", metal_i64_to_string(idx)),
+        GpuType::GpuU64 => str_concat("rd", metal_i64_to_string(idx)),
+        GpuType::GpuF32 => str_concat("f", metal_i64_to_string(idx)),
+        GpuType::GpuF64 => str_concat("fd", metal_i64_to_string(idx)),
+        GpuType::GpuI32 => str_concat("sr", metal_i64_to_string(idx)),
+        GpuType::GpuI64 => str_concat("srd", metal_i64_to_string(idx)),
+        GpuType::GpuPtr => str_concat("rd", metal_i64_to_string(idx)),
+        GpuType::GpuBool => str_concat("p", metal_i64_to_string(idx)),
+        GpuType::GpuTf32 => str_concat("f", metal_i64_to_string(idx)),
+        GpuType::GpuF16 => str_concat("h", metal_i64_to_string(idx)),
+        GpuType::GpuB32 => str_concat("r", metal_i64_to_string(idx)),
+        GpuType::GpuB64 => str_concat("rd", metal_i64_to_string(idx)),
     }
 }
 
-fn metal_kernel_uses_lane_exchange(kernel: GpuKernelIr) -> bool {
+fn metal_kernel_uses_lane_exchange(kernel: GpuKernelIr) -> bool with Mut {
     var i: i64 = 0
     while i < kernel.op_count {
         let opc = kernel.ops[i as usize].opcode
@@ -601,7 +656,7 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
         out = metal_push_str(out, " = (")
         out = metal_push_str(out, gpu_type_to_msl(op.ty))
         out = metal_push_str(out, ")(ulong)")
-        out = metal_push_str(out, name_to_string(param.name))
+        out = metal_push_name(out, param.name)
         out = metal_push_str(out, ";\n")
         return out
     }
@@ -880,7 +935,7 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
     if opc == GpuOpcode::GpuVote || opc == GpuOpcode::GpuBallot {
         var pred_expr = "false"
         if op.pred_reg >= 0 {
-            pred_expr = str_concat("p", i64_to_string(op.pred_reg))
+            pred_expr = str_concat("p", metal_i64_to_string(op.pred_reg))
         } else if op.src_reg >= 0 {
             pred_expr = str_concat(metal_reg_name(op.ty, op.src_reg), " != 0")
         }
@@ -1305,7 +1360,7 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
 // Main entry: GpuKernelIr → MetalBuf
 // ============================================================================
 
-fn gpu_lower_to_metal(kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div, Alloc {
+pub fn gpu_lower_to_metal(kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div, Alloc {
     var buf = metal_buf_new()
     buf = metal_emit_header(buf)
     buf = metal_emit_kernel_signature(buf, kernel)
@@ -1451,6 +1506,48 @@ fn metal_emit_cvt_f32_to_f64(buf: MetalBuf, dst: string, src: string) -> MetalBu
 // ============================================================================
 // Metal-first algebraic kernel witnesses
 // ============================================================================
+
+fn metal_emit_vec_add_f32() -> MetalBuf with Mut, Panic, Div {
+    var b = metal_buf_new()
+    b = metal_push_str(b, "#include <metal_stdlib>\n")
+    b = metal_push_str(b, "using namespace metal;\n\n")
+    b = metal_push_str(b, "kernel void vec_add(\n")
+    b = metal_push_str(b, "    device const float* a [[buffer(0)]],\n")
+    b = metal_push_str(b, "    device const float* b_in [[buffer(1)]],\n")
+    b = metal_push_str(b, "    device float* c [[buffer(2)]],\n")
+    b = metal_push_str(b, "    uint tid [[thread_position_in_grid]]\n")
+    b = metal_push_str(b, ")\n")
+    b = metal_push_str(b, "{\n")
+    b = metal_push_str(b, "    c[tid] = a[tid] + b_in[tid];\n")
+    b = metal_push_str(b, "}\n")
+    b
+}
+
+fn metal_emit_epistemic_dual_output_f32() -> MetalBuf with Mut, Panic, Div {
+    var b = metal_buf_new()
+    b = metal_push_str(b, "#include <metal_stdlib>\n")
+    b = metal_push_str(b, "using namespace metal;\n\n")
+    b = metal_push_str(b, "kernel void epistemic_dual_output_f32(\n")
+    b = metal_push_str(b, "    device const float* a_value [[buffer(0)]],\n")
+    b = metal_push_str(b, "    device const float* b_value [[buffer(1)]],\n")
+    b = metal_push_str(b, "    device const float* a_eps [[buffer(2)]],\n")
+    b = metal_push_str(b, "    device const float* b_eps [[buffer(3)]],\n")
+    b = metal_push_str(b, "    device const uint* a_valid [[buffer(4)]],\n")
+    b = metal_push_str(b, "    device const uint* b_valid [[buffer(5)]],\n")
+    b = metal_push_str(b, "    device float* out_value [[buffer(6)]],\n")
+    b = metal_push_str(b, "    device float* out_eps [[buffer(7)]],\n")
+    b = metal_push_str(b, "    device uint* out_valid [[buffer(8)]],\n")
+    b = metal_push_str(b, "    device uint* out_prov [[buffer(9)]],\n")
+    b = metal_push_str(b, "    uint tid [[thread_position_in_grid]]\n")
+    b = metal_push_str(b, ")\n")
+    b = metal_push_str(b, "{\n")
+    b = metal_push_str(b, "    out_value[tid] = a_value[tid] + b_value[tid];\n")
+    b = metal_push_str(b, "    out_eps[tid] = (a_eps[tid] * a_eps[tid]) + (b_eps[tid] * b_eps[tid]);\n")
+    b = metal_push_str(b, "    out_valid[tid] = a_valid[tid] & b_valid[tid];\n")
+    b = metal_push_str(b, "    out_prov[tid] = (tid ^ 0x12345678u) ^ out_valid[tid];\n")
+    b = metal_push_str(b, "}\n")
+    b
+}
 
 fn metal_emit_ossm_oct_step_f64_checked() -> MetalBuf with Mut, Panic, Div {
     var out = metal_buf_new()

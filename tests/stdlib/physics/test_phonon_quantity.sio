@@ -1,0 +1,143 @@
+//@ run-pass
+// tests/stdlib/physics/test_phonon_quantity.sio
+// Integration test for stdlib/physics/phonon_quantity.sio
+//
+// Validates:
+//   1. PhononParams field dimensions match the units/Quantity constructors
+//   2. rapamycin defaults are in SI (ng/mL → kg/m³ factor 1e-6)
+//   3. pulsatile_input_q returns a Quantity with the right dim
+//   4. CFL timestep is bounded by 1e-4 s
+//   5. lattice64_init produces a uniform state with the right shape
+//   6. spatial_average of [1, 2, 3] is 2.0
+//   7. simulate preserves a uniform steady state with zero flow + zero clearance
+
+use physics::phonon_quantity::*
+use units::lib::*
+
+fn assert_close(got: f64, expected: f64, tol: f64) with Panic {
+    let d = got - expected
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    if ad > tol {
+        panic()
+    }
+}
+
+fn test_params_dimensions() with Panic {
+    let p = rapamycin_phonon_params_q()
+    assert(dim_eq(p.d_eff.dim,     dim_diffusion()))
+    assert(dim_eq(p.dx.dim,        dim_length()))
+    assert(dim_eq(p.k_release.dim, dim_rate()))
+    assert(dim_eq(p.cl_site.dim,   dim_rate()))
+    assert(dim_eq(p.fu.dim,        dim_dimensionless()))
+    assert(dim_eq(p.kp.dim,        dim_dimensionless()))
+    assert(dim_eq(p.c_portal.dim,  dim_concentration()))
+    assert(dim_eq(p.c_ha.dim,      dim_concentration()))
+    assert(dim_eq(p.f_heart.dim,   dim_rate()))
+    assert(dim_eq(p.a_portal.dim,  dim_dimensionless()))
+    assert(dim_eq(p.a_ha.dim,      dim_dimensionless()))
+    assert(dim_eq(p.phi_ha.dim,    dim_dimensionless()))
+    assert(dim_eq(p.c_tissue.dim,  dim_concentration()))
+    assert(dim_eq(p.v_blood.dim,   dim_velocity()))
+    assert(dim_eq(p.zonation.dim,  dim_dimensionless()))
+}
+
+fn test_params_si_scale() with Panic {
+    let p = rapamycin_phonon_params_q()
+    // 10 ng/mL = 1e-5 kg/m³
+    assert_close(p.c_portal.value, 1.0e-5, 1.0e-12)
+    // 8 ng/mL = 8e-6 kg/m³
+    assert_close(p.c_ha.value, 8.0e-6, 1.0e-12)
+    // 2 ng/mL = 2e-6 kg/m³
+    assert_close(p.c_tissue.value, 2.0e-6, 1.0e-12)
+    // 3.9 μm = 3.9e-6 m
+    assert_close(p.dx.value, 3.9e-6, 1.0e-12)
+    // 300 μm/s = 3.0e-4 m/s
+    assert_close(p.v_blood.value, 3.0e-4, 1.0e-12)
+}
+
+fn test_pulsatile_boundary_dim() with Mut, Div, Panic {
+    let p = rapamycin_phonon_params_q()
+    let b = pulsatile_input_q(0.0, &p)
+    assert(dim_eq(b.dim, dim_concentration()))
+    // The boundary is a weighted sum of two concentrations, so its
+    // absolute uncertainty is the sqrt-sum of weighted uncertainties.
+    // We just check it is positive and bounded.
+    assert(b.value > 0.0)
+    assert(b.uncertainty >= 0.0)
+}
+
+fn test_cfl_dt_bounded() with Div, Panic {
+    let p = rapamycin_phonon_params_q()
+    let dt = cfl_dt_q(&p)
+    assert(dt > 0.0)
+    assert(dt <= 1.0e-4)
+}
+
+fn test_lattice_init_uniform() with Mut, Panic {
+    let s = lattice64_init(1.5e-5, 1.0e-12)
+    assert_close(s.values[0],    1.5e-5,  1.0e-15)
+    assert_close(s.values[32],   1.5e-5,  1.0e-15)
+    assert_close(s.values[63],   1.5e-5,  1.0e-15)
+    assert_close(s.variances[0], 1.0e-12, 1.0e-18)
+    assert(s.n == 64)
+}
+
+fn test_spatial_average() with Mut, Panic {
+    var s = lattice64_zero()
+    s.values[0] = 1.0
+    s.values[1] = 2.0
+    s.values[2] = 3.0
+    s.n = 3
+    assert_close(lattice64_spatial_average(&s), 2.0, 1.0e-12)
+}
+
+fn test_simulate_uniform_steady() with Mut, Div, Panic {
+    let base = rapamycin_phonon_params_q()
+    // Build a parameters set with:
+    //   - zero advection, zero metabolism, zero release
+    //   - boundary concentration equal to the interior (no flux at inlet)
+    //   - zero pulsatility amplitudes (constant in time boundary)
+    var p = PhononParams {
+        d_eff:     base.d_eff,
+        dx:        base.dx,
+        k_release: quantity_new(0.0, 0.0, base.k_release.dim),
+        cl_site:   quantity_new(0.0, 0.0, base.cl_site.dim),
+        fu:        base.fu,
+        kp:        quantity_new(1.0, 0.0, base.kp.dim),
+        c_portal:  base.c_portal,
+        c_ha:      base.c_portal,                  // match boundary
+        f_heart:   base.f_heart,
+        a_portal:  quantity_new(0.0, 0.0, base.a_portal.dim),
+        a_ha:      quantity_new(0.0, 0.0, base.a_ha.dim),
+        phi_ha:    base.phi_ha,
+        c_tissue:  base.c_portal,
+        v_blood:   quantity_new(0.0, 0.0, base.v_blood.dim),
+        zonation:  base.zonation,
+    }
+    var s = lattice64_init(1.0e-5, 0.0)
+
+    let steps = phonon_simulate_q(&!s, &p, 0.0, 0.01)
+    assert(steps > 0)
+    // Without advection, metabolism, release, or pulsatile boundary,
+    // the lattice should stay at the initial uniform concentration.
+    var i: i64 = 0
+    while i < s.n {
+        let d = s.values[i] - 1.0e-5
+        let ad = if d < 0.0 { 0.0 - d } else { d }
+        assert(ad < 1.0e-9)
+        // Variances can grow (linearized GUM integration) but must stay ≥ 0
+        assert(s.variances[i] >= 0.0)
+        i = i + 1
+    }
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    test_params_dimensions()
+    test_params_si_scale()
+    test_pulsatile_boundary_dim()
+    test_cfl_dt_bounded()
+    test_lattice_init_uniform()
+    test_spatial_average()
+    test_simulate_uniform_steady()
+    0
+}

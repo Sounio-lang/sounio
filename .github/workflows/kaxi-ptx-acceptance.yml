@@ -1,0 +1,114 @@
+name: K-AXI PTX Acceptance (nightly, SLURM/GPU)
+
+# Real-hardware acceptance gate for the K-AXI -> PTX emitter.
+#
+# Emits every (pattern x mode) PTX kernel, then submits a SLURM job to the
+# gpu-orangefs partition that JIT-compiles each kernel through the CUDA driver
+# (cuModuleLoadDataEx) on a real GPU. Fails if any kernel is rejected.
+#
+# This is intentionally NOT a per-PR blocking check: it needs the on-prem
+# SLURM cluster, so it runs nightly and on manual dispatch only.
+#
+# ── REQUIRED INFRA (provision before enabling) ──────────────────────────────
+#   1. Repo variable  SOUNIO_ENABLE_KAXI_SLURM_GATE = "1"   (gates the job;
+#      while unset the job is skipped, so it never shows false red/green).
+#   2. The runner must be able to reach the cluster's k8s API. Either:
+#        (a) keep runs-on: ubuntu-latest and provide repo secret
+#            SLURM_KUBECONFIG (a kubeconfig with access to the slurm-pilot ns) —
+#            ONLY works if the cluster API is reachable from GitHub-hosted
+#            runners; OR
+#        (b) register a self-hosted runner inside the cluster network (where
+#            kubectl already works) and change runs-on to that runner's labels;
+#            then SLURM_KUBECONFIG is not needed (ambient in-cluster config).
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    - cron: '0 5 * * *'   # 05:00 UTC nightly
+  workflow_dispatch:
+    inputs:
+      nodelist:
+        description: 'SLURM nodelist (default gpuorangefs-r770-proxmox)'
+        required: false
+        default: 'gpuorangefs-r770-proxmox'
+
+concurrency:
+  group: kaxi-ptx-acceptance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    # Opt-in: skipped until the repo variable is set to "1".
+    if: vars.SOUNIO_ENABLE_KAXI_SLURM_GATE == '1'
+    # Default to a GitHub-hosted runner; point at an in-cluster self-hosted
+    # runner purely by config by setting repo variable KAXI_RUNNER_LABELS to
+    # that runner's unique label (e.g. "kaxi-slurm"). See
+    # slurm-jobs/kaxi-ptxas-accept/RUNNER_SETUP.md.
+    runs-on: ${{ vars.KAXI_RUNNER_LABELS || 'ubuntu-latest' }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        run: |
+          set -euo pipefail
+          curl -fsSLo /usr/local/bin/kubectl \
+            "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Write kubeconfig from secret (if provided)
+        env:
+          SLURM_KUBECONFIG: ${{ secrets.SLURM_KUBECONFIG }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${SLURM_KUBECONFIG:-}" ]]; then
+            mkdir -p "$HOME/.kube"
+            printf '%s' "$SLURM_KUBECONFIG" > "$HOME/.kube/config"
+            chmod 600 "$HOME/.kube/config"
+            echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+          else
+            echo "No SLURM_KUBECONFIG secret set — relying on ambient kube config (self-hosted in-cluster runner)."
+          fi
+
+      - name: Verify cluster reachability
+        run: |
+          set -euo pipefail
+          kubectl -n slurm-pilot get pods -l app.kubernetes.io/name=login \
+            --field-selector=status.phase=Running -o name
+
+      - name: Resolve pinned souc binary
+        env:
+          SOUNIO_CI_SOUC_VERSION: "0.100.3"
+          OMEGA_SOUC_REQUIRE_PINNED: "1"
+          OMEGA_SOUC_ALLOW_LOCAL_FALLBACK: "1"
+        run: bash scripts/build/fix_ci_binary.sh
+
+      - name: Build driver-JIT runner
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/kaxi_ptx_stage
+          gcc -O2 -o /tmp/kaxi_ptx_stage/kaxi_ptx_runner \
+            scripts/gpu/kaxi_ptx_runner.c -ldl -lm
+          file /tmp/kaxi_ptx_stage/kaxi_ptx_runner
+
+      - name: Emit all PTX kernels
+        env:
+          SOUNIO_KRETIKOS_COMPILER: ${{ env.SOUC_BIN }}
+        run: |
+          set -euo pipefail
+          bash slurm-jobs/kaxi-ptxas-accept/emit_ptx.sh /tmp/kaxi_ptx_stage/ptx
+          echo "emitted $(ls /tmp/kaxi_ptx_stage/ptx/*.ptx | wc -l) kernels"
+
+      - name: Submit acceptance job and wait
+        env:
+          SOUNIO_DIR: ${{ github.workspace }}
+          STAGE_LOCAL: /tmp/kaxi_ptx_stage
+          SBATCH_NODELIST: ${{ github.event.inputs.nodelist || 'gpuorangefs-r770-proxmox' }}
+          WAIT_TIMEOUT: '2400'
+        run: bash slurm-jobs/kaxi-ptxas-accept/submit_jit.sh --wait

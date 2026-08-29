@@ -1,0 +1,172 @@
+---
+title: "Decisiones Clínicas con Límites de Confianza"
+description: "Usa información sobre la incertidumbre para tomar decisiones de dosificación más seguras"
+series: "drug-dosing"
+order: 5
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-04-propagation"]
+topic_id: "website.tutorials.es.drug-dosing-05-decision"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.es.drug-dosing-05-decision"
+---
+
+Ahora tenemos una concentración valle predicha con incertidumbre. El paso final — y el más importante — es usar esa información para tomar una decisión clínica.
+
+## El Problema de la Decisión
+
+La vancomicina tiene una ventana terapéutica estrecha:
+- **Por debajo de 10 mg/L**: subterapéutica (infección no tratada adecuadamente)
+- **10–20 mg/L**: rango terapéutico
+- **Por encima de 20 mg/L**: riesgo de nefrotoxicidad
+
+Nuestro modelo predice una concentración valle de, digamos, 14.2 ± 4.8 mg/L. ¿Es segura esta dosis?
+
+Con una estimación puntual de 14.2, un sistema tradicional diría "sí, está en el rango". Pero la incertidumbre de ±4.8 significa que la concentración valle real podría estar plausiblemente entre ~5 y ~24 mg/L — abarcando todo el rango desde subterapéutico hasta tóxico.
+
+## Decisiones con Límites de Confianza
+
+Sounio te permite hacer preguntas de probabilidad sobre valores `Knowledge`:
+
+```sio
+struct DosingDecision {
+    recommendation: i32,    // 0 = seguro, 1 = ajustar al alza, 2 = ajustar a la baja, 3 = contraindicado
+    confidence: f64,        // probabilidad de estar en rango terapéutico
+    risk_below: f64,        // probabilidad de subterapéutico
+    risk_above: f64,        // probabilidad de supraterapéutico
+}
+
+fn evaluate_dose(trough: Knowledge<f64>,
+                 lower: f64, upper: f64) -> DosingDecision
+    with Mut, Panic, Div
+{
+    // Calcular probabilidad de estar en [lower, upper]
+    // Usando supuesto de distribución normal (TCL)
+    let z_lower = (lower - trough.value) / trough.uncertainty
+    let z_upper = (upper - trough.value) / trough.uncertainty
+
+    let p_below = normal_cdf(z_lower)
+    let p_above = 1.0 - normal_cdf(z_upper)
+    let p_in_range = 1.0 - p_below - p_above
+
+    // Lógica de decisión
+    let rec = if p_in_range > 0.80 {
+        0  // Seguro: >80% de probabilidad terapéutica
+    } else if p_below > p_above {
+        1  // Más probable subterapéutico → aumentar dosis
+    } else if p_above > 0.20 {
+        2  // >20% de riesgo de toxicidad → disminuir dosis
+    } else {
+        3  // Alta incertidumbre → obtener más datos antes de dosificar
+    }
+
+    DosingDecision {
+        recommendation: rec,
+        confidence: p_in_range,
+        risk_below: p_below,
+        risk_above: p_above,
+    }
+}
+```
+
+## La Aproximación de la CDF Normal
+
+Para los cálculos de probabilidad, necesitamos una CDF normal. Aquí hay una aproximación de serie de Taylor adecuada para Sounio:
+
+```sio
+fn normal_cdf(z: f64) -> f64 with Mut, Panic, Div {
+    // Aproximación de Abramowitz & Stegun (7.1.26)
+    if z < 0.0 - 6.0 { return 0.0 }
+    if z > 6.0 { return 1.0 }
+
+    let abs_z = if z < 0.0 { 0.0 - z } else { z }
+    let t = 1.0 / (1.0 + 0.2316419 * abs_z)
+    let d = 0.3989422804014327  // 1/sqrt(2*pi)
+    let p = d * exp_approx(0.0 - abs_z * abs_z / 2.0)
+          * (t * (0.319381530
+          + t * (0.0 - 0.356563782
+          + t * (1.781477937
+          + t * (0.0 - 1.821255978
+          + t * 1.330274429)))))
+
+    if z >= 0.0 { 1.0 - p } else { p }
+}
+```
+
+## Tomando la Decisión
+
+```sio
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let labs = measure_patient()
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+
+    let dose = 1000.0
+    let tau = 12.0
+
+    let trough = predict_trough(cl, vd, dose, tau)
+    let decision = evaluate_dose(trough, 10.0, 20.0)
+
+    print("Concentración valle predicha: ")
+    println(trough.value)
+    print(" ± ")
+    println(trough.uncertainty)
+    print(" mg/L\n")
+
+    print("P(terapéutico): ")
+    println(decision.confidence)
+    print("P(subterapéutico): ")
+    println(decision.risk_below)
+    print("P(supraterapéutico): ")
+    println(decision.risk_above)
+    print("\n")
+
+    if decision.recommendation == 0 {
+        print("SEGURO: continuar con la dosis actual\n")
+    }
+    if decision.recommendation == 1 {
+        print("AJUSTAR: considerar aumentar la dosis\n")
+    }
+    if decision.recommendation == 2 {
+        print("AJUSTAR: considerar disminuir la dosis\n")
+    }
+    if decision.recommendation == 3 {
+        print("DETENER: obtener laboratorios adicionales antes de dosificar\n")
+    }
+
+    0
+}
+```
+
+## Lo Que Sounio Te Ofrece
+
+Compara esto con un enfoque tradicional:
+
+| Enfoque | Salida | Valor Clínico |
+|---------|--------|---------------|
+| Hoja de cálculo | "Valle = 14.2 mg/L" | Precisión falsa, sin evaluación de riesgo |
+| Python + uncertainties | 14.2 ± 4.8 (biblioteca manual) | Incertidumbre visible pero no exigida |
+| **Sounio** | 14.2 ± 4.8, P(terapéutico) = 62% | Exigido por el compilador, listo para decisión |
+
+La diferencia clave: en Sounio, **no puedes ignorar accidentalmente la incertidumbre**. El sistema de tipos garantiza que cada función que consume un `Knowledge<f64>` debe manejar la incertidumbre. Si intentas usar `trough.value` sin considerar `trough.uncertainty`, el compilador te insta a abordarlo.
+
+## ¡Felicidades!
+
+Has construido un sistema completo de dosificación de medicamentos consciente de la incertidumbre:
+
+1. **Lección 1**: Entendiste la computación epistémica y por qué es importante
+2. **Lección 2**: Construiste un modelo farmacocinético con structs tipados y efectos
+3. **Lección 3**: Actualizaste a `Knowledge<T>` para mediciones inciertas
+4. **Lección 4**: Propagaste la incertidumbre a través de todo el pipeline
+5. **Lección 5**: Tomaste decisiones clínicas con límites de confianza
+
+Este patrón — medir, propagar, decidir con confianza — se aplica a cualquier dominio científico: modelado climático, ingeniería estructural, riesgo financiero, epidemiología. Sounio lo convierte en un primitivo del lenguaje, no en una ocurrencia tardía.
+
+## Próximos Pasos
+
+- Explora la [Referencia del Sistema de Efectos](/learn/effects) para más información sobre `with IO, Mut, Div`
+- Lee sobre [Unidades de Medida](/learn/units) para análisis dimensional
+- Mira el [conjunto de pruebas de incertidumbre PK](https://github.com/sounio-lang/sounio/blob/main/tests/run-pass/pk_uncertainty.sio) para la implementación completa
+- Intenta modificar la ventana terapéutica o los valores de incertidumbre para ver cómo cambian las decisiones

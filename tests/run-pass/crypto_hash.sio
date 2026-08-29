@@ -171,11 +171,21 @@ fn sha256_init() -> Sha256State with Mut, Panic {
 // SHA-256 BLOCK COMPRESSION
 // ============================================================================
 
-// Process a single 512-bit (64-byte) block stored as 16 i64 words (big-endian 32-bit)
-fn sha256_compress(state: Sha256State, block: [i64; 64]) -> Sha256State with Mut, Panic, Div {
-    let mask = 4294967295  // 0xFFFFFFFF
+fn sha256_set_init(out: &!Sha256State) with Mut, Panic {
+    out.h0 = 1779033703
+    out.h1 = 3144134277
+    out.h2 = 1013904242
+    out.h3 = 2773480762
+    out.h4 = 1359893119
+    out.h5 = 2600822924
+    out.h6 = 528734635
+    out.h7 = 1541459225
+}
 
-    // Prepare message schedule W[0..63]
+// Process a single 512-bit (64-byte) block stored as 16 i64 words (big-endian 32-bit)
+fn sha256_compress_inplace(state: &!Sha256State, block: [i64; 64]) with Mut, Panic, Div {
+    let mask = 4294967295
+
     var w: [i64; 64] = [0; 64]
     var i = 0
     while i < 16 {
@@ -188,7 +198,6 @@ fn sha256_compress(state: Sha256State, block: [i64; 64]) -> Sha256State with Mut
         i = i + 1
     }
 
-    // Working variables
     var a = state.h0
     var b = state.h1
     var c = state.h2
@@ -198,7 +207,6 @@ fn sha256_compress(state: Sha256State, block: [i64; 64]) -> Sha256State with Mut
     var g = state.h6
     var h = state.h7
 
-    // 64 rounds
     i = 0
     while i < 64 {
         let t1 = add32(add32(h, big_sigma1(e)),
@@ -217,17 +225,14 @@ fn sha256_compress(state: Sha256State, block: [i64; 64]) -> Sha256State with Mut
         i = i + 1
     }
 
-    // Add compressed chunk to hash state
-    Sha256State {
-        h0: add32(state.h0, a),
-        h1: add32(state.h1, b),
-        h2: add32(state.h2, c),
-        h3: add32(state.h3, d),
-        h4: add32(state.h4, e),
-        h5: add32(state.h5, f),
-        h6: add32(state.h6, g),
-        h7: add32(state.h7, h),
-    }
+    state.h0 = add32(state.h0, a)
+    state.h1 = add32(state.h1, b)
+    state.h2 = add32(state.h2, c)
+    state.h3 = add32(state.h3, d)
+    state.h4 = add32(state.h4, e)
+    state.h5 = add32(state.h5, f)
+    state.h6 = add32(state.h6, g)
+    state.h7 = add32(state.h7, h)
 }
 
 // ============================================================================
@@ -235,31 +240,25 @@ fn sha256_compress(state: Sha256State, block: [i64; 64]) -> Sha256State with Mut
 // ============================================================================
 
 // Hash an array of bytes (given as i64 values 0..255) of length `len` (max 55).
-// Returns the 8-word hash state.
-fn sha256_short(data: [i64; 64], len: i32) -> Sha256State with Mut, Panic, Div {
-    // Build padded block: data || 0x80 || zeros || big-endian 64-bit length
-    // For messages up to 55 bytes, padding fits in a single 64-byte block.
+fn sha256_short_into(out: &!Sha256State, data: [i64; 64], len: i32) with Mut, Panic, Div {
+    sha256_set_init(out)
+
     var padded: [i64; 64] = [0; 64]
 
-    // Copy data bytes into padded
     var i = 0
     while i < len {
         padded[i] = data[i]
         i = i + 1
     }
 
-    // Append the 0x80 byte
     padded[len] = 128
 
-    // Append length in bits as big-endian 64-bit integer at bytes 56..63
     let bit_len = (len * 8) as i64
-    // For messages up to 55 bytes, the high 4 bytes of the 64-bit length are 0.
     padded[60] = (bit_len >> 24) & 255
     padded[61] = (bit_len >> 16) & 255
     padded[62] = (bit_len >> 8) & 255
     padded[63] = bit_len & 255
 
-    // Convert 64 bytes to 16 big-endian 32-bit words
     var block: [i64; 64] = [0; 64]
     i = 0
     while i < 16 {
@@ -269,8 +268,7 @@ fn sha256_short(data: [i64; 64], len: i32) -> Sha256State with Mut, Panic, Div {
         i = i + 1
     }
 
-    let state = sha256_init()
-    return sha256_compress(state, block)
+    sha256_compress_inplace(out, block)
 }
 
 // ============================================================================
@@ -370,7 +368,8 @@ fn hex_char_code(c: i32) -> i64 with Mut, Panic, Div {
 // Test 1: SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e17c95868209a04551d8410d27
 fn test_empty_string() -> bool with IO, Mut, Panic, Div {
     var data: [i64; 64] = [0; 64]
-    let state = sha256_short(data, 0)
+    var state = Sha256State { h0: 0, h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0, h7: 0 }
+    sha256_short_into(&!state, data, 0)
 
     // Expected hash as ASCII char codes
     // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
@@ -449,7 +448,8 @@ fn test_abc() -> bool with IO, Mut, Panic, Div {
     data[0] = 97   // 'a'
     data[1] = 98   // 'b'
     data[2] = 99   // 'c'
-    let state = sha256_short(data, 3)
+    var state = Sha256State { h0: 0, h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0, h7: 0 }
+    sha256_short_into(&!state, data, 3)
 
     // ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
     var expected: [i64; 64] = [0; 64]
@@ -529,7 +529,8 @@ fn test_hello() -> bool with IO, Mut, Panic, Div {
     data[2] = 108  // 'l'
     data[3] = 108  // 'l'
     data[4] = 111  // 'o'
-    let state = sha256_short(data, 5)
+    var state = Sha256State { h0: 0, h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0, h7: 0 }
+    sha256_short_into(&!state, data, 5)
 
     // 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
     var expected: [i64; 64] = [0; 64]
@@ -607,13 +608,15 @@ fn test_determinism() -> bool with IO, Mut, Panic, Div {
     data1[0] = 120  // 'x'
     data1[1] = 121  // 'y'
     data1[2] = 122  // 'z'
-    let s1 = sha256_short(data1, 3)
+    var s1 = Sha256State { h0: 0, h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0, h7: 0 }
+    sha256_short_into(&!s1, data1, 3)
 
     var data2: [i64; 64] = [0; 64]
     data2[0] = 120
     data2[1] = 121
     data2[2] = 122
-    let s2 = sha256_short(data2, 3)
+    var s2 = Sha256State { h0: 0, h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0, h7: 0 }
+    sha256_short_into(&!s2, data2, 3)
 
     return s1.h0 == s2.h0 && s1.h1 == s2.h1 && s1.h2 == s2.h2 && s1.h3 == s2.h3 &&
            s1.h4 == s2.h4 && s1.h5 == s2.h5 && s1.h6 == s2.h6 && s1.h7 == s2.h7
@@ -623,11 +626,13 @@ fn test_determinism() -> bool with IO, Mut, Panic, Div {
 fn test_avalanche() -> bool with IO, Mut, Panic, Div {
     var data1: [i64; 64] = [0; 64]
     data1[0] = 0
-    let s1 = sha256_short(data1, 1)
+    var s1 = Sha256State { h0: 0, h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0, h7: 0 }
+    sha256_short_into(&!s1, data1, 1)
 
     var data2: [i64; 64] = [0; 64]
-    data2[0] = 1  // differ by one bit
-    let s2 = sha256_short(data2, 1)
+    data2[0] = 1
+    var s2 = Sha256State { h0: 0, h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0, h7: 0 }
+    sha256_short_into(&!s2, data2, 1)
 
     // Count differing bits in XOR of hash words
     var diff_bits = 0
@@ -739,11 +744,13 @@ fn test_ct_single_diff() -> bool with IO, Mut, Panic, Div {
 fn test_collision_resistance() -> bool with IO, Mut, Panic, Div {
     var d1: [i64; 64] = [0; 64]
     d1[0] = 97  // "a"
-    let s1 = sha256_short(d1, 1)
+    var s1 = Sha256State { h0: 0, h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0, h7: 0 }
+    sha256_short_into(&!s1, d1, 1)
 
     var d2: [i64; 64] = [0; 64]
-    d2[0] = 98  // "b"
-    let s2 = sha256_short(d2, 1)
+    d2[0] = 98
+    var s2 = Sha256State { h0: 0, h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0, h7: 0 }
+    sha256_short_into(&!s2, d2, 1)
 
     // Hashes must differ in at least one word
     let any_diff = (s1.h0 != s2.h0) || (s1.h1 != s2.h1) || (s1.h2 != s2.h2) || (s1.h3 != s2.h3) ||

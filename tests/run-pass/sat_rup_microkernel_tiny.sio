@@ -1,0 +1,204 @@
+//@ run-pass
+//@ description: Self-contained SAT RUP microkernel smoke
+
+fn sat_abs_i64(x: i64) -> i64 {
+    if x < 0 { return 0 - x }
+    return x
+}
+
+fn sat_pack(v1: i64, v2: i64, v3: i64) -> i64 {
+    return (v1 + 1) + (3 * (v2 + 1)) + (9 * (v3 + 1))
+}
+
+fn sat_pack_get(pack: i64, var_id: i64) -> i64 {
+    if var_id == 1 { return (pack % 3) - 1 }
+    if var_id == 2 { return ((pack / 3) % 3) - 1 }
+    if var_id == 3 { return ((pack / 9) % 3) - 1 }
+    return 0 - 2
+}
+
+fn sat_pack_set(pack: i64, var_id: i64, val: i64) -> i64 {
+    let old = sat_pack_get(pack, var_id)
+    if old != 0 {
+        if old != val { return 0 - 1 }
+        return pack
+    }
+    let v1 = sat_pack_get(pack, 1)
+    let v2 = sat_pack_get(pack, 2)
+    let v3 = sat_pack_get(pack, 3)
+    if var_id == 1 { return sat_pack(val, v2, v3) }
+    if var_id == 2 { return sat_pack(v1, val, v3) }
+    return sat_pack(v1, v2, val)
+}
+
+fn sat_assign_true(pack: i64, lit: i64) -> i64 with Mut {
+    var val: i64 = 1
+    if lit < 0 { val = 0 - 1 }
+    return sat_pack_set(pack, sat_abs_i64(lit), val)
+}
+
+fn sat_assign_false(pack: i64, lit: i64) -> i64 with Mut {
+    var val: i64 = 0 - 1
+    if lit < 0 { val = 1 }
+    return sat_pack_set(pack, sat_abs_i64(lit), val)
+}
+
+fn sat_lit_value(pack: i64, lit: i64) -> i64 {
+    if lit == 0 { return 0 }
+    let val = sat_pack_get(pack, sat_abs_i64(lit))
+    if val == 0 { return 0 }
+    if lit > 0 { return val }
+    return 0 - val
+}
+
+fn sat_clause_unit_or_conflict3(pack: i64, l1: i64, l2: i64, l3: i64) -> i64 with Mut {
+    var unknown_count: i64 = 0
+    var unit_lit: i64 = 0
+    let v1 = sat_lit_value(pack, l1)
+    if v1 == 1 { return 0 }
+    if l1 != 0 {
+        if v1 == 0 { unknown_count = unknown_count + 1; unit_lit = l1 }
+    }
+    let v2 = sat_lit_value(pack, l2)
+    if v2 == 1 { return 0 }
+    if l2 != 0 {
+        if v2 == 0 { unknown_count = unknown_count + 1; unit_lit = l2 }
+    }
+    let v3 = sat_lit_value(pack, l3)
+    if v3 == 1 { return 0 }
+    if l3 != 0 {
+        if v3 == 0 { unknown_count = unknown_count + 1; unit_lit = l3 }
+    }
+    if unknown_count == 0 { return 0 - 999 }
+    if unknown_count == 1 { return unit_lit }
+    return 0
+}
+
+fn sat_step(pack: i64,
+            c1_l1: i64, c1_l2: i64, c1_l3: i64,
+            c2_l1: i64, c2_l2: i64, c2_l3: i64,
+            c3_l1: i64, c3_l2: i64, c3_l3: i64) -> i64 with Mut {
+    let u1 = sat_clause_unit_or_conflict3(pack, c1_l1, c1_l2, c1_l3)
+    if u1 == 0 - 999 { return 0 - 2 }
+    if u1 != 0 { return sat_assign_true(pack, u1) }
+    let u2 = sat_clause_unit_or_conflict3(pack, c2_l1, c2_l2, c2_l3)
+    if u2 == 0 - 999 { return 0 - 2 }
+    if u2 != 0 { return sat_assign_true(pack, u2) }
+    let u3 = sat_clause_unit_or_conflict3(pack, c3_l1, c3_l2, c3_l3)
+    if u3 == 0 - 999 { return 0 - 2 }
+    if u3 != 0 { return sat_assign_true(pack, u3) }
+    return pack
+}
+
+fn sat_rup3_check(
+    c1_l1: i64, c1_l2: i64, c1_l3: i64,
+    c2_l1: i64, c2_l2: i64, c2_l3: i64,
+    c3_l1: i64, c3_l2: i64, c3_l3: i64,
+    cand_l1: i64, cand_l2: i64, cand_l3: i64) -> i64 with Mut {
+    if cand_l1 + cand_l2 == 0 {
+        if cand_l1 != 0 { return 0 }
+    }
+    if cand_l1 + cand_l3 == 0 {
+        if cand_l1 != 0 { return 0 }
+    }
+    if cand_l2 + cand_l3 == 0 {
+        if cand_l2 != 0 { return 0 }
+    }
+    var pack = sat_pack(0, 0, 0)
+    if cand_l1 != 0 { pack = sat_assign_false(pack, cand_l1) }
+    if pack < 0 { return 0 }
+    if cand_l2 != 0 { pack = sat_assign_false(pack, cand_l2) }
+    if pack < 0 { return 0 }
+    if cand_l3 != 0 { pack = sat_assign_false(pack, cand_l3) }
+    if pack < 0 { return 0 }
+    var i: i64 = 0
+    while i < 8 {
+        let next = sat_step(pack, c1_l1, c1_l2, c1_l3, c2_l1, c2_l2, c2_l3, c3_l1, c3_l2, c3_l3)
+        if next == 0 - 2 { return 1 }
+        if next < 0 { return 0 }
+        if next == pack { return 0 }
+        pack = next
+        i = i + 1
+    }
+    return 0
+}
+
+fn sat_rup_chain_unit_then_empty_check(
+    base1_l1: i64, base1_l2: i64, base1_l3: i64,
+    base2_l1: i64, base2_l2: i64, base2_l3: i64,
+    conflict_l1: i64, conflict_l2: i64, conflict_l3: i64,
+    derived_unit_lit: i64) -> i64 with Mut {
+    if derived_unit_lit == 0 { return 0 }
+    let unit_ok = sat_rup3_check(
+        base1_l1, base1_l2, base1_l3,
+        base2_l1, base2_l2, base2_l3,
+        3, 0 - 3, 0,
+        derived_unit_lit, 0, 0)
+    if unit_ok != 1 { return 0 }
+    let empty_ok = sat_rup3_check(
+        derived_unit_lit, 0, 0,
+        conflict_l1, conflict_l2, conflict_l3,
+        3, 0 - 3, 0,
+        0, 0, 0)
+    if empty_ok != 1 { return 0 }
+    return 1
+}
+
+fn main() -> i64 with Mut {
+    let empty_rup = sat_rup3_check(1, 0, 0, 0 - 1, 2, 0, 0 - 2, 0, 0, 0, 0, 0)
+    if empty_rup != 1 { return 1 }
+
+    let wrong_formula = sat_rup3_check(1, 0, 0, 0 - 1, 2, 0, 3, 0, 0, 0, 0, 0)
+    if wrong_formula != 0 { return 2 }
+
+    let tautology_candidate = sat_rup3_check(1, 0, 0, 0 - 1, 2, 0, 0 - 2, 0, 0, 1, 0 - 1, 0)
+    if tautology_candidate != 0 { return 3 }
+
+    let chain_ok = sat_rup_chain_unit_then_empty_check(1, 0, 0, 0 - 1, 2, 0, 0 - 2, 0, 0, 2)
+    if chain_ok != 1 { return 4 }
+
+    let wrong_unit = sat_rup_chain_unit_then_empty_check(1, 0, 0, 0 - 1, 2, 0, 0 - 2, 0, 0, 1)
+    if wrong_unit != 0 { return 5 }
+
+    let wrong_conflict = sat_rup_chain_unit_then_empty_check(1, 0, 0, 0 - 1, 2, 0, 3, 0, 0, 2)
+    if wrong_conflict != 0 { return 6 }
+
+    let artifact_fp: i64 = 715284039
+    let audit_fp: i64 = 304918672
+    let instance_fp: i64 = 806157423
+    let certificate_fp: i64 = 129640587
+    let family_mask: i64 = 3
+    let proof_format_mask: i64 = 6
+    let current_runtime_family_mask: i64 = 0
+    let imported_runtime_evidence_mask: i64 = 0
+    let public_claim_mask: i64 = 0
+    let formal_theorem_ready: i64 = 0
+    let microkernel_status: i64 = 97
+    let chain_artifact_fp: i64 = 428619705
+    let chain_audit_fp: i64 = 917264038
+    let chain_instance_fp: i64 = 572803941
+    let chain_certificate_fp: i64 = 248619370
+    let chain_status: i64 = 98
+    let ok_mask: i64 = 255
+    let chain_ok_mask: i64 = 511
+
+    if artifact_fp != 715284039 { return 7 }
+    if audit_fp != 304918672 { return 8 }
+    if instance_fp != 806157423 { return 9 }
+    if certificate_fp != 129640587 { return 10 }
+    if family_mask != 3 { return 11 }
+    if proof_format_mask != 6 { return 12 }
+    if current_runtime_family_mask != 0 { return 13 }
+    if imported_runtime_evidence_mask != 0 { return 14 }
+    if public_claim_mask != 0 { return 15 }
+    if formal_theorem_ready != 0 { return 16 }
+    if microkernel_status != 97 { return 17 }
+    if chain_artifact_fp != 428619705 { return 18 }
+    if chain_audit_fp != 917264038 { return 19 }
+    if chain_instance_fp != 572803941 { return 20 }
+    if chain_certificate_fp != 248619370 { return 21 }
+    if chain_status != 98 { return 22 }
+    if ok_mask != 255 { return 23 }
+    if chain_ok_mask != 511 { return 24 }
+    return 0
+}

@@ -1,0 +1,102 @@
+// Multi-row PK concentration-time table with per-point GUM uncertainty ->
+// byte-exact CSV (Data & Science I/O, Trilha A).
+//
+// This is the vertical's target shape: a real pharmacokinetic dataset (a
+// concentration decay over time) where EACH measurement carries a combined
+// standard uncertainty derived by ISO-GUM from a Type-A replicate SD and a
+// Type-B instrument half-width, emitted as a tabular record for a downstream
+// tool. Columns: time_min, conc_mg_l, u_c, U95.
+//
+// Per row: u_A = sd / sqrt(nrep)  (gum_type_a),  u_B = halfwidth / sqrt(3)
+// (gum_type_b_uniform, uniform),  u_c = sqrt(u_A^2 + u_B^2)  (gum_combine2).
+//
+// The expanded uncertainty U95 = k95 * u_c is deliberately NOT emitted: on
+// Madaros v0.80.0 gum's coverage factor gum_k95 returns 1.96 for ALL effective
+// degrees of freedom when gum is imported (the t95 lookup miscompiles across the
+// import boundary while nu_eff itself is computed correctly), so U95 would be
+// under-covered for these small (nrep=3) samples. u_c is exact and independently
+// verified, so this table reports value + combined standard uncertainty only.
+// See the k95 import-bug dispatch for status.
+//
+// Imports ONLY epistemic::gum and inlines the fixed-point formatting (identical
+// to data::csv csv_field_f64): a program importing gum + data::csv fails native
+// emission on Madaros v0.80.0 (multimodule thin-link — see
+// docs/audit/DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14.md). Collapses to
+// data::csv calls once that is repaired.
+use epistemic::gum::*
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var t: [i64; 4] = [0; 4]
+    t[0 as usize] = 30
+    t[1 as usize] = 60
+    t[2 as usize] = 120
+    t[3 as usize] = 240
+
+    var conc: [f64; 4] = [0.0; 4]
+    conc[0 as usize] = 24.50
+    conc[1 as usize] = 18.20
+    conc[2 as usize] = 10.10
+    conc[3 as usize] = 3.40
+
+    var sd: [f64; 4] = [0.0; 4]
+    sd[0 as usize] = 0.30
+    sd[1 as usize] = 0.25
+    sd[2 as usize] = 0.20
+    sd[3 as usize] = 0.15
+
+    var nrep: [i64; 4] = [0; 4]
+    nrep[0 as usize] = 3
+    nrep[1 as usize] = 3
+    nrep[2 as usize] = 3
+    nrep[3 as usize] = 3
+
+    var hw: [f64; 4] = [0.0; 4]
+    hw[0 as usize] = 0.20
+    hw[1 as usize] = 0.20
+    hw[2 as usize] = 0.15
+    hw[3 as usize] = 0.10
+
+    print("time_min,conc_mg_l,u_c\n")
+
+    var row: i64 = 0
+    while row < 4 {
+        let ua = gum_type_a(sd[row as usize], nrep[row as usize])
+        let ub = gum_type_b_uniform(hw[row as usize])
+        let r = gum_combine2(conc[row as usize], ua, ub)
+
+        let v = gum_value(r)
+        let uc = gum_std_u(r)
+
+        print_int(t[row as usize])
+
+        var j: i64 = 0
+        while j < 2 {
+            print(",")
+            let val = if j == 0 { v } else { uc }
+
+            var neg: bool = false
+            var mag: f64 = val
+            if mag < 0.0 { neg = true; mag = 0.0 - mag }
+
+            let scaled = (mag * 10000.0 + 0.5) as i64   // 4 decimals
+
+            if neg { print("-") }
+            let ip = scaled / 10000
+            let fp = scaled - ip * 10000
+            print_int(ip)
+            print(".")
+            var place: i64 = 1000
+            while place >= 1 {
+                let digit = (fp / place) - ((fp / (place * 10)) * 10)
+                print_int(digit)
+                place = place / 10
+            }
+
+            j = j + 1
+        }
+        print("\n")
+        row = row + 1
+    }
+
+    return 0
+}

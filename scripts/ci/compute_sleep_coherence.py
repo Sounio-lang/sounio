@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-compute_sleep_coherence.py — Extract EEG coherence matrices per sleep epoch
+compute_sleep_coherence.py -- Extract EEG coherence matrices per sleep epoch
 
 Reads BrainVision EEG files from OpenNeuro ds003768,
 computes 32×32 coherence matrices for each 30-second epoch,

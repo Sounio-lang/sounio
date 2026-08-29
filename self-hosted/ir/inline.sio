@@ -23,6 +23,7 @@
 module ir::inline
 
 use ir::ir::*
+use ir::normalize::*
 use parser::ast::{Name, empty_name}
 
 // ============================================================================
@@ -65,7 +66,7 @@ let INL_STRATEGY_PRECISION_BONUS: i64 = 40
 // ============================================================================
 
 // Represents a single call site discovered in the IR
-struct InlCallSite {
+pub struct InlCallSite {
     caller_id: i64,
     callee_id: i64,
     call_instr_idx: i64,
@@ -74,7 +75,7 @@ struct InlCallSite {
 }
 
 // Per-function metadata for inlining analysis
-struct InlFuncInfo {
+pub struct InlFuncInfo {
     func_id: i64,
     instr_count: i64,
     call_count: i64,
@@ -94,7 +95,7 @@ struct InlDecision {
 }
 
 // Overall inlining context with flat arrays for all state
-struct InlContext {
+pub struct InlContext {
     call_sites: [InlCallSite; 2048],
     call_site_count: i64,
     func_infos: [InlFuncInfo; 1024],
@@ -195,7 +196,7 @@ fn inl_default_decision() -> InlDecision {
     }
 }
 
-fn inl_context_new() -> InlContext {
+pub(crate) fn inl_context_new() -> InlContext {
     InlContext {
         call_sites: [inl_default_call_site(); 2048],
         call_site_count: 0,
@@ -239,7 +240,9 @@ fn inl_matches_opcode(op: IrOpcode, target: IrOpcode) -> bool {
         IrOpcode::IrBinOp => match target { IrOpcode::IrBinOp => true, _ => false },
         IrOpcode::IrUnaryOp => match target { IrOpcode::IrUnaryOp => true, _ => false },
         IrOpcode::IrCall => match target { IrOpcode::IrCall => true, _ => false },
+        IrOpcode::IrCallSret => match target { IrOpcode::IrCallSret => true, _ => false },
         IrOpcode::IrReturn => match target { IrOpcode::IrReturn => true, _ => false },
+        IrOpcode::IrReturnSret => match target { IrOpcode::IrReturnSret => true, _ => false },
         IrOpcode::IrJump => match target { IrOpcode::IrJump => true, _ => false },
         IrOpcode::IrBranchTrue => match target { IrOpcode::IrBranchTrue => true, _ => false },
         IrOpcode::IrBranchFalse => match target { IrOpcode::IrBranchFalse => true, _ => false },
@@ -252,7 +255,9 @@ fn inl_matches_opcode(op: IrOpcode, target: IrOpcode) -> bool {
 fn inl_opcodes_equal(a: IrOpcode, b: IrOpcode) -> bool {
     match a {
         IrOpcode::IrCall => inl_matches_opcode(b, IrOpcode::IrCall),
+        IrOpcode::IrCallSret => inl_matches_opcode(b, IrOpcode::IrCallSret),
         IrOpcode::IrReturn => inl_matches_opcode(b, IrOpcode::IrReturn),
+        IrOpcode::IrReturnSret => inl_matches_opcode(b, IrOpcode::IrReturnSret),
         IrOpcode::IrJump => inl_matches_opcode(b, IrOpcode::IrJump),
         IrOpcode::IrBranchTrue => inl_matches_opcode(b, IrOpcode::IrBranchTrue),
         IrOpcode::IrBranchFalse => inl_matches_opcode(b, IrOpcode::IrBranchFalse),
@@ -275,12 +280,12 @@ fn inl_opcodes_equal(a: IrOpcode, b: IrOpcode) -> bool {
 
 // Check if an instruction is a call
 fn inl_is_call(instr: IrInstr) -> bool {
-    inl_opcodes_equal(instr.op, IrOpcode::IrCall)
+    inl_opcodes_equal(instr.op, IrOpcode::IrCall) || inl_opcodes_equal(instr.op, IrOpcode::IrCallSret)
 }
 
 // Check if an instruction is a return
 fn inl_is_return(instr: IrInstr) -> bool {
-    inl_opcodes_equal(instr.op, IrOpcode::IrReturn)
+    inl_opcodes_equal(instr.op, IrOpcode::IrReturn) || inl_opcodes_equal(instr.op, IrOpcode::IrReturnSret)
 }
 
 // Check if an instruction is a backward jump (heuristic for loop detection).
@@ -314,14 +319,14 @@ fn inl_is_nop(instr: IrInstr) -> bool {
 // ============================================================================
 
 // Analyze a single function to compute its InlFuncInfo
-fn inl_analyze_function(func: IrFunction, func_id: i64) -> InlFuncInfo with Mut, Div, Panic {
+pub(crate) fn inl_analyze_function(func: IrFunction, func_id: i64) -> InlFuncInfo with Mut, Div, Panic {
     var info = inl_func_info_new(func_id)
     info.instr_count = func.instr_count
     info.compile_strategy = func.compile_strategy
 
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
 
         // Count calls
         if inl_is_call(instr) {
@@ -390,9 +395,9 @@ fn inl_discover_calls_in_func(ctx: InlContext, module: IrModule, caller_id: i64)
 
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if inl_is_call(instr) {
-            let callee_id = inl_find_func_by_name(module, instr.name)
+            let callee_id = inl_find_func_by_name(module, ir_name_at(instr.name_id))
             if callee_id >= 0 && out.call_site_count < INL_MAX_CALL_SITES {
                 var site = inl_call_site_new(caller_id, callee_id, i, instr.arg_count)
                 out.call_sites[out.call_site_count as usize] = site
@@ -511,7 +516,7 @@ fn inl_detect_mutual_recursion(ctx: InlContext) -> InlContext with Mut, Div, Pan
 // Compute the benefit score for a single call site.
 // Higher score = more desirable to inline.
 // Negative score = should not inline.
-fn inl_compute_benefit(ctx: InlContext, site_idx: i64) -> i64 with Mut, Div, Panic {
+pub(crate) fn inl_compute_benefit(ctx: InlContext, site_idx: i64) -> i64 with Mut, Div, Panic {
     let site = ctx.call_sites[site_idx as usize]
     let callee_id = site.callee_id
 
@@ -833,7 +838,7 @@ fn inl_transform(caller: IrFunction, callee: IrFunction, call_idx: i64) -> InlTr
         return result
     }
 
-    let call_instr = caller.instrs[call_idx as usize]
+    let call_instr = ir_arena_load(ir_region_slot_r(caller.region, (call_idx)))
     let call_dst = call_instr.dst
 
     // Number of callee instructions (excluding IrReturn, we replace those)
@@ -889,12 +894,12 @@ fn inl_transform(caller: IrFunction, callee: IrFunction, call_idx: i64) -> InlTr
     let label_offset = caller.label_count
 
     // Step 2: Shift existing instructions after call site to make room
-    var out_func = caller
+    var out_func = ir_function_clone(&caller)
     var shift: i64 = out_func.instr_count - 1
     while shift > call_idx {
         let new_pos = shift + net_added
         if new_pos >= 0 && new_pos < 32768 {
-            out_func.instrs[new_pos as usize] = out_func.instrs[shift as usize]
+            ir_arena_copy_slot(ir_region_slot_w(out_func.region, (new_pos)),ir_region_slot_r(out_func.region, (shift)))
         }
         shift = shift - 1
     }
@@ -903,20 +908,20 @@ fn inl_transform(caller: IrFunction, callee: IrFunction, call_idx: i64) -> InlTr
     var write_pos: i64 = call_idx
     var ci: i64 = 0
     while ci < callee.instr_count {
-        let callee_instr = callee.instrs[ci as usize]
+        let callee_instr = ir_arena_load(ir_region_slot_r(callee.region, (ci)))
 
         if inl_is_return(callee_instr) {
             // Replace return with copy to caller's destination
             if call_dst >= 0 {
                 let remapped_src = inl_reg_map_lookup(rmap, callee_instr.src1)
-                out_func.instrs[write_pos as usize] = ir_copy(call_dst, remapped_src)
+                ir_arena_store(ir_region_slot_w(out_func.region, (write_pos)), ir_copy(call_dst, remapped_src))
             } else {
-                out_func.instrs[write_pos as usize] = ir_nop()
+                ir_arena_store(ir_region_slot_w(out_func.region, (write_pos)), ir_nop())
             }
         } else {
             var remapped = inl_remap_instr(callee_instr, rmap)
             remapped = inl_remap_label(remapped, label_offset)
-            out_func.instrs[write_pos as usize] = remapped
+            ir_arena_store(ir_region_slot_w(out_func.region, (write_pos)), remapped)
         }
 
         write_pos = write_pos + 1
@@ -1068,7 +1073,7 @@ fn inl_count_real_instrs(func: IrFunction) -> i64 with Mut, Div, Panic {
     var count: i64 = 0
     var i: i64 = 0
     while i < func.instr_count {
-        if !inl_is_nop(func.instrs[i as usize]) {
+        if !inl_is_nop(ir_arena_load(ir_region_slot_r(func.region, (i)))) {
             count = count + 1
         }
         i = i + 1
@@ -1106,14 +1111,14 @@ fn inl_make_test_func(func_id: i64, body_size: i64) -> IrFunction with Mut, Div,
     // Fill body with load_imm instructions
     var i: i64 = 0
     while i < body_size - 1 && i < 32767 {
-        func.instrs[i as usize] = ir_load_imm(i, i + 100)
+        ir_arena_store(ir_region_slot_w(func.region, (i)), ir_load_imm(i, i + 100))
         i = i + 1
     }
 
     // Final instruction: return
     if body_size > 0 {
         let ret_reg = if body_size > 1 { body_size - 2 } else { 0 }
-        func.instrs[(body_size - 1) as usize] = ir_return(ret_reg)
+        ir_arena_store(ir_region_slot_w(func.region, ((body_size - 1))), ir_return(ret_reg))
     }
 
     func.instr_count = body_size
@@ -1148,26 +1153,26 @@ fn inl_make_caller_func(func_id: i64, callee_name: Name, body_before: i64, body_
     // Load-imm instructions before call
     var b: i64 = 0
     while b < body_before {
-        func.instrs[pos as usize] = ir_load_imm(pos, b + 200)
+        ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_load_imm(pos, b + 200))
         pos = pos + 1
         b = b + 1
     }
 
     // Call instruction
     let call_dst = pos
-    func.instrs[pos as usize] = ir_call(call_dst, 0, callee_name, ir_empty_reg_list(), 0)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_call(call_dst, 0, callee_name, ir_empty_reg_list(), 0))
     pos = pos + 1
 
     // Load-imm instructions after call
     var a: i64 = 0
     while a < body_after {
-        func.instrs[pos as usize] = ir_load_imm(pos, a + 300)
+        ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_load_imm(pos, a + 300))
         pos = pos + 1
         a = a + 1
     }
 
     // Return
-    func.instrs[pos as usize] = ir_return(call_dst)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_return(call_dst))
     pos = pos + 1
 
     func.instr_count = pos
@@ -1179,7 +1184,11 @@ fn inl_make_caller_func(func_id: i64, callee_name: Name, body_before: i64, body_
 // Build a module with given functions
 fn inl_make_test_module(funcs: [IrFunction; 1024], count: i64) -> IrModule {
     var module = ir_empty_module()
-    module.functions = funcs
+    var fi: i64 = 0
+    while fi < count && fi < 1024 {
+        module.functions[fi as usize] = funcs[fi as usize]
+        fi = fi + 1
+    }
     module.fn_count = count
     module
 }
@@ -1207,17 +1216,17 @@ fn inl_make_recursive_func(func_id: i64, body_size: i64) -> IrFunction with Mut,
     // Some body
     var b: i64 = 0
     while b < body_size - 2 && b < 32766 {
-        func.instrs[pos as usize] = ir_load_imm(pos, b)
+        ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_load_imm(pos, b))
         pos = pos + 1
         b = b + 1
     }
 
     // Self-call
-    func.instrs[pos as usize] = ir_call(pos, func_id, name, ir_empty_reg_list(), 0)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_call(pos, func_id, name, ir_empty_reg_list(), 0))
     pos = pos + 1
 
     // Return
-    func.instrs[pos as usize] = ir_return(pos - 1)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_return(pos - 1))
     pos = pos + 1
 
     func.instr_count = pos
@@ -1245,18 +1254,18 @@ fn inl_make_loop_func(func_id: i64) -> IrFunction with Mut, Div, Panic {
     func.name = name
 
     // r0 = 0 (counter)
-    func.instrs[0] = ir_load_imm(0, 0)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 0))
     // L0:
-    func.instrs[1] = ir_label(0)
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_label(0))
     // r1 = r0 + 1
-    func.instrs[2] = ir_binop(1, 0, BinaryOp::OpAdd, 0)
+    ir_arena_store(ir_region_slot_w(func.region, (2)), ir_binop(1, 0, BinaryOp::OpAdd, 0))
     // r2 = r1 < 10
-    func.instrs[3] = ir_load_imm(2, 10)
-    func.instrs[4] = ir_binop(3, 1, BinaryOp::OpLt, 2)
+    ir_arena_store(ir_region_slot_w(func.region, (3)), ir_load_imm(2, 10))
+    ir_arena_store(ir_region_slot_w(func.region, (4)), ir_binop(3, 1, BinaryOp::OpLt, 2))
     // branch back to L0 if true (backward branch: label 0, current idx 5)
-    func.instrs[5] = ir_branch_true(3, 0)
+    ir_arena_store(ir_region_slot_w(func.region, (5)), ir_branch_true(3, 0))
     // return r1
-    func.instrs[6] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(func.region, (6)), ir_return(1))
 
     func.instr_count = 7
     func.reg_count = 4
@@ -1367,11 +1376,11 @@ fn test_inl_multiple_call_sites() -> i32 with IO, Mut, Div, Panic {
     // Build caller with two calls manually
     var caller = ir_empty_function()
     caller.name = inl_get_test_func_name(0)
-    caller.instrs[0] = ir_load_imm(0, 1)
-    caller.instrs[1] = ir_call(1, 0, callee_name, ir_empty_reg_list(), 0)
-    caller.instrs[2] = ir_load_imm(2, 2)
-    caller.instrs[3] = ir_call(3, 0, callee_name, ir_empty_reg_list(), 0)
-    caller.instrs[4] = ir_return(3)
+    ir_arena_store(ir_region_slot_w(caller.region, (0)), ir_load_imm(0, 1))
+    ir_arena_store(ir_region_slot_w(caller.region, (1)), ir_call(1, 0, callee_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(caller.region, (2)), ir_load_imm(2, 2))
+    ir_arena_store(ir_region_slot_w(caller.region, (3)), ir_call(3, 0, callee_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(caller.region, (4)), ir_return(3))
     caller.instr_count = 5
     caller.reg_count = 4
 
@@ -1810,9 +1819,9 @@ fn test_inl_leaf_higher_benefit() -> i32 with IO, Mut, Div, Panic {
     // f0: calls f1 and f2
     var f0 = ir_empty_function()
     f0.name = inl_get_test_func_name(0)
-    f0.instrs[0] = ir_call(0, 0, f1_name, ir_empty_reg_list(), 0)
-    f0.instrs[1] = ir_call(1, 0, f2_name, ir_empty_reg_list(), 0)
-    f0.instrs[2] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(f0.region, (0)), ir_call(0, 0, f1_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(f0.region, (1)), ir_call(1, 0, f2_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(f0.region, (2)), ir_return(1))
     f0.instr_count = 3
     f0.reg_count = 2
 
@@ -1931,9 +1940,9 @@ fn test_inl_approved_count() -> i32 with IO, Mut, Div, Panic {
     // f0 calls f1 (small, will inline) and f2 (large, won't)
     var f0 = ir_empty_function()
     f0.name = inl_get_test_func_name(0)
-    f0.instrs[0] = ir_call(0, 0, f1_name, ir_empty_reg_list(), 0)
-    f0.instrs[1] = ir_call(1, 0, f2_name, ir_empty_reg_list(), 0)
-    f0.instrs[2] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(f0.region, (0)), ir_call(0, 0, f1_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(f0.region, (1)), ir_call(1, 0, f2_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(f0.region, (2)), ir_return(1))
     f0.instr_count = 3
     f0.reg_count = 2
 
@@ -1965,8 +1974,8 @@ fn test_inl_rejected_reason_count() -> i32 with IO, Mut, Div, Panic {
 
     var f0 = ir_empty_function()
     f0.name = inl_get_test_func_name(0)
-    f0.instrs[0] = ir_call(0, 0, f1_name, ir_empty_reg_list(), 0)
-    f0.instrs[1] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(f0.region, (0)), ir_call(0, 0, f1_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(f0.region, (1)), ir_return(0))
     f0.instr_count = 2
     f0.reg_count = 1
 
@@ -1996,18 +2005,18 @@ fn test_inl_transform_basic() -> i32 with IO, Mut, Div, Panic {
     // Callee (f1): load 42, return r0
     var caller = ir_empty_function()
     caller.name = inl_get_test_func_name(0)
-    caller.instrs[0] = ir_load_imm(0, 1)
+    ir_arena_store(ir_region_slot_w(caller.region, (0)), ir_load_imm(0, 1))
     let callee_name = inl_get_test_func_name(1)
-    caller.instrs[1] = ir_call(1, 0, callee_name, ir_empty_reg_list(), 0)
-    caller.instrs[2] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(caller.region, (1)), ir_call(1, 0, callee_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(caller.region, (2)), ir_return(1))
     caller.instr_count = 3
     caller.reg_count = 2
     caller.label_count = 0
 
     var callee = ir_empty_function()
     callee.name = inl_get_test_func_name(1)
-    callee.instrs[0] = ir_load_imm(0, 42)
-    callee.instrs[1] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(callee.region, (0)), ir_load_imm(0, 42))
+    ir_arena_store(ir_region_slot_w(callee.region, (1)), ir_return(0))
     callee.instr_count = 2
     callee.reg_count = 1
     callee.label_count = 0
@@ -2030,20 +2039,20 @@ fn test_inl_transform_basic() -> i32 with IO, Mut, Div, Panic {
 fn test_inl_transform_preserves_context() -> i32 with IO, Mut, Div, Panic {
     var caller = ir_empty_function()
     caller.name = inl_get_test_func_name(0)
-    caller.instrs[0] = ir_load_imm(0, 111)  // before
-    caller.instrs[1] = ir_load_imm(1, 222)  // before
+    ir_arena_store(ir_region_slot_w(caller.region, (0)), ir_load_imm(0, 111)) // before
+    ir_arena_store(ir_region_slot_w(caller.region, (1)), ir_load_imm(1, 222)) // before
     let callee_name = inl_get_test_func_name(1)
-    caller.instrs[2] = ir_call(2, 0, callee_name, ir_empty_reg_list(), 0)
-    caller.instrs[3] = ir_load_imm(3, 333)  // after
-    caller.instrs[4] = ir_return(3)
+    ir_arena_store(ir_region_slot_w(caller.region, (2)), ir_call(2, 0, callee_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(caller.region, (3)), ir_load_imm(3, 333)) // after
+    ir_arena_store(ir_region_slot_w(caller.region, (4)), ir_return(3))
     caller.instr_count = 5
     caller.reg_count = 4
     caller.label_count = 0
 
     var callee = ir_empty_function()
     callee.name = callee_name
-    callee.instrs[0] = ir_load_imm(0, 99)
-    callee.instrs[1] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(callee.region, (0)), ir_load_imm(0, 99))
+    ir_arena_store(ir_region_slot_w(callee.region, (1)), ir_return(0))
     callee.instr_count = 2
     callee.reg_count = 1
     callee.label_count = 0
@@ -2055,8 +2064,8 @@ fn test_inl_transform_preserves_context() -> i32 with IO, Mut, Div, Panic {
     }
 
     // Instructions before call should be preserved
-    let i0 = xform.func.instrs[0]
-    let i1 = xform.func.instrs[1]
+    let i0 = ir_arena_load(ir_region_slot_r(xform.func.region, (0)))
+    let i1 = ir_arena_load(ir_region_slot_r(xform.func.region, (1)))
     if i0.imm_i64 != 111 || i1.imm_i64 != 222 {
         print("FAIL: test_inl_transform_preserves_context\n")
         return 1
@@ -2076,16 +2085,16 @@ fn test_inl_transform_return_to_copy() -> i32 with IO, Mut, Div, Panic {
     var caller = ir_empty_function()
     caller.name = inl_get_test_func_name(0)
     let callee_name = inl_get_test_func_name(1)
-    caller.instrs[0] = ir_call(0, 0, callee_name, ir_empty_reg_list(), 0)
-    caller.instrs[1] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(caller.region, (0)), ir_call(0, 0, callee_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(caller.region, (1)), ir_return(0))
     caller.instr_count = 2
     caller.reg_count = 1
     caller.label_count = 0
 
     var callee = ir_empty_function()
     callee.name = callee_name
-    callee.instrs[0] = ir_load_imm(0, 77)
-    callee.instrs[1] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(callee.region, (0)), ir_load_imm(0, 77))
+    ir_arena_store(ir_region_slot_w(callee.region, (1)), ir_return(0))
     callee.instr_count = 2
     callee.reg_count = 1
     callee.label_count = 0
@@ -2098,7 +2107,7 @@ fn test_inl_transform_return_to_copy() -> i32 with IO, Mut, Div, Panic {
 
     // The callee's return should become a copy instruction
     // Inlined body: [load_imm(remapped, 77), copy(0, remapped)]
-    let copy_instr = xform.func.instrs[1]
+    let copy_instr = ir_arena_load(ir_region_slot_r(xform.func.region, (1)))
     if !inl_opcodes_equal(copy_instr.op, IrOpcode::IrCopy) {
         print("FAIL: test_inl_transform_return_to_copy\n")
         return 1
@@ -2116,13 +2125,13 @@ fn test_inl_transform_return_to_copy() -> i32 with IO, Mut, Div, Panic {
 fn test_inl_transform_invalid_idx() -> i32 with IO, Mut, Div, Panic {
     var caller = ir_empty_function()
     caller.name = inl_get_test_func_name(0)
-    caller.instrs[0] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(caller.region, (0)), ir_return(0))
     caller.instr_count = 1
     caller.reg_count = 1
 
     var callee = ir_empty_function()
     callee.name = inl_get_test_func_name(1)
-    callee.instrs[0] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(callee.region, (0)), ir_return(0))
     callee.instr_count = 1
     callee.reg_count = 1
 
@@ -2143,9 +2152,9 @@ fn test_inl_multiple_callees() -> i32 with IO, Mut, Div, Panic {
 
     var f0 = ir_empty_function()
     f0.name = inl_get_test_func_name(0)
-    f0.instrs[0] = ir_call(0, 0, f1_name, ir_empty_reg_list(), 0)
-    f0.instrs[1] = ir_call(1, 0, f2_name, ir_empty_reg_list(), 0)
-    f0.instrs[2] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(f0.region, (0)), ir_call(0, 0, f1_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(f0.region, (1)), ir_call(1, 0, f2_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(f0.region, (2)), ir_return(1))
     f0.instr_count = 3
     f0.reg_count = 2
 
@@ -2272,11 +2281,11 @@ fn test_inl_find_site_helper() -> i32 with IO, Mut, Div, Panic {
 // T37: Count real instructions helper
 fn test_inl_count_real_instrs_helper() -> i32 with IO, Mut, Div, Panic {
     var func = ir_empty_function()
-    func.instrs[0] = ir_load_imm(0, 1)
-    func.instrs[1] = ir_nop()
-    func.instrs[2] = ir_load_imm(1, 2)
-    func.instrs[3] = ir_nop()
-    func.instrs[4] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 1))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_nop())
+    ir_arena_store(ir_region_slot_w(func.region, (2)), ir_load_imm(1, 2))
+    ir_arena_store(ir_region_slot_w(func.region, (3)), ir_nop())
+    ir_arena_store(ir_region_slot_w(func.region, (4)), ir_return(1))
     func.instr_count = 5
 
     let count = inl_count_real_instrs(func)
@@ -2436,18 +2445,18 @@ fn test_inl_transform_reg_count() -> i32 with IO, Mut, Div, Panic {
     var caller = ir_empty_function()
     caller.name = inl_get_test_func_name(0)
     let callee_name = inl_get_test_func_name(1)
-    caller.instrs[0] = ir_call(0, 0, callee_name, ir_empty_reg_list(), 0)
-    caller.instrs[1] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(caller.region, (0)), ir_call(0, 0, callee_name, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(caller.region, (1)), ir_return(0))
     caller.instr_count = 2
     caller.reg_count = 1
     caller.label_count = 0
 
     var callee = ir_empty_function()
     callee.name = callee_name
-    callee.instrs[0] = ir_load_imm(0, 1)
-    callee.instrs[1] = ir_load_imm(1, 2)
-    callee.instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
-    callee.instrs[3] = ir_return(2)
+    ir_arena_store(ir_region_slot_w(callee.region, (0)), ir_load_imm(0, 1))
+    ir_arena_store(ir_region_slot_w(callee.region, (1)), ir_load_imm(1, 2))
+    ir_arena_store(ir_region_slot_w(callee.region, (2)), ir_binop(2, 0, BinaryOp::OpAdd, 1))
+    ir_arena_store(ir_region_slot_w(callee.region, (3)), ir_return(2))
     callee.instr_count = 4
     callee.reg_count = 3
     callee.label_count = 0

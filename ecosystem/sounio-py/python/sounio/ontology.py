@@ -79,7 +79,7 @@ def _default_ontology_home() -> Path:
     env = os.environ.get("SOUNIO_ONTOLOGY_HOME")
     if env:
         return Path(env)
-    return _repo_root() / "data" / "ontology" / "bundles"
+    return _repo_root() / "stdlib" / "data" / "data" / "ontology" / "bundles"
 
 
 def _default_cache_dir() -> Path:

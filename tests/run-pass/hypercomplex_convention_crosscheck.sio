@@ -1,0 +1,176 @@
+//@ run-pass
+//@ requires: madaros
+// Canonical hypercomplex convention oracle (Convention X = cd_sigma / XOR indexing).
+//
+// This test PINS the canonical octonion/sedenion multiplication convention as executable truth:
+// e_i·e_j = σ(i,j)·e_{i⊕j}, where σ is the recursive Cayley–Dickson 2-cocycle `cd_sigma`
+// (Albuquerque–Majid; the same sign function in stdlib/algebra/octonion.sio and
+// stdlib/algebra/cayley_dickson.sio). It is the reference every oct_mul/sed_mul implementation must
+// match — see stdlib/algebra/README.md ("Multiplication convention").
+//
+// Asserted invariants:
+//   * e_i² = −1                       (octonion i=1..7, sedenion i=1..15)
+//   * e1·e2 = +e3, e2·e5 = +e7        (canonical basis products)
+//   * octonion norm-multiplicativity  ‖xy‖² = ‖x‖²‖y‖²  (octonions are a normed division algebra)
+//   * canonical sedenion zero-divisor (e3+e10)·(e6−e15) = 0  (exactly)
+//   * octonion non-associativity present (associator ≠ 0 for some basis triple)
+//
+// Single-module (cd_sigma inlined) to avoid the multimodule thin-link defect (#921).
+// By-value array params + array return (Madaros miscompiles multiple `&[f64;N]` ref params).
+
+// Recursive Cayley–Dickson twist sign σ(i,j,bits) ∈ {+1,−1}; pure i32, field-independent.
+fn cd_sigma(a: i32, b: i32, bits: i32) -> i32 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return -1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma(0, a_lo, bits - 1) }
+    cd_sigma(b_lo, a_lo, bits - 1)
+}
+
+// Octonion product (8-dim, bits=3) via XOR index + cd_sigma sign.
+fn omul(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var r: [f64; 8] = [0.0; 8]
+    var i: i32 = 0
+    while i < 8 {
+        var j: i32 = 0
+        while j < 8 {
+            let idx = i ^ j
+            let s = cd_sigma(i, j, 3)
+            let prod = a[i as usize] * b[j as usize]
+            if s > 0 {
+                r[idx as usize] = r[idx as usize] + prod
+            } else {
+                r[idx as usize] = r[idx as usize] - prod
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    r
+}
+
+// Sedenion product (16-dim, bits=4) via XOR index + cd_sigma sign (canonical = CD-split).
+fn smul(a: [f64; 16], b: [f64; 16]) -> [f64; 16] with Mut, Panic, Div {
+    var r: [f64; 16] = [0.0; 16]
+    var i: i32 = 0
+    while i < 16 {
+        var j: i32 = 0
+        while j < 16 {
+            let idx = i ^ j
+            let s = cd_sigma(i, j, 4)
+            let prod = a[i as usize] * b[j as usize]
+            if s > 0 {
+                r[idx as usize] = r[idx as usize] + prod
+            } else {
+                r[idx as usize] = r[idx as usize] - prod
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    r
+}
+
+fn approx(x: f64, y: f64) -> bool {
+    let d = x - y
+    let a = if d < 0.0 { 0.0 - d } else { d }
+    a < 0.000001
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var fails: i64 = 0
+
+    // --- octonion e_i² = −1 (i=1..7) ---
+    var i: i32 = 1
+    while i < 8 {
+        var ei: [f64; 8] = [0.0; 8]
+        ei[i as usize] = 1.0
+        let p = omul(ei, ei)
+        if !approx(p[0 as usize], 0.0 - 1.0) { fails = fails + 1 }
+        i = i + 1
+    }
+
+    // --- e1·e2 = +e3, e2·e5 = +e7 (octonion) ---
+    var e1: [f64; 8] = [0.0; 8]
+    e1[1 as usize] = 1.0
+    var e2: [f64; 8] = [0.0; 8]
+    e2[2 as usize] = 1.0
+    var e5: [f64; 8] = [0.0; 8]
+    e5[5 as usize] = 1.0
+    let p12 = omul(e1, e2)
+    if !approx(p12[3 as usize], 1.0) { fails = fails + 1 }
+    let p25 = omul(e2, e5)
+    if !approx(p25[7 as usize], 1.0) { fails = fails + 1 }
+
+    // --- octonion norm-multiplicativity on a sample ---
+    var x: [f64; 8] = [1.0, 2.0, 0.0, 0.0 - 1.0, 3.0, 0.0, 1.0, 0.0 - 2.0]
+    var y: [f64; 8] = [0.0, 1.0, 0.0 - 1.0, 2.0, 0.0, 1.0, 1.0, 0.0]
+    let xy = omul(x, y)
+    var nx: f64 = 0.0
+    var ny: f64 = 0.0
+    var nxy: f64 = 0.0
+    var t: i32 = 0
+    while t < 8 {
+        nx = nx + x[t as usize] * x[t as usize]
+        ny = ny + y[t as usize] * y[t as usize]
+        nxy = nxy + xy[t as usize] * xy[t as usize]
+        t = t + 1
+    }
+    if !approx(nxy, nx * ny) { fails = fails + 1 }
+
+    // --- octonion non-associativity present: (e1·e2)·e4 ≠ e1·(e2·e4) ---
+    var e4: [f64; 8] = [0.0; 8]
+    e4[4 as usize] = 1.0
+    let lft = omul(omul(e1, e2), e4)
+    let rgt = omul(e1, omul(e2, e4))
+    var assoc_diff: bool = false
+    var u: i32 = 0
+    while u < 8 {
+        if !approx(lft[u as usize], rgt[u as usize]) { assoc_diff = true }
+        u = u + 1
+    }
+    if !assoc_diff { fails = fails + 1 }
+
+    // --- sedenion e_i² = −1 (i=1..15) ---
+    var si: i32 = 1
+    while si < 16 {
+        var sei: [f64; 16] = [0.0; 16]
+        sei[si as usize] = 1.0
+        let sp = smul(sei, sei)
+        if !approx(sp[0 as usize], 0.0 - 1.0) { fails = fails + 1 }
+        si = si + 1
+    }
+
+    // --- canonical sedenion zero-divisor (e3+e10)·(e6−e15) = 0 ---
+    var A: [f64; 16] = [0.0; 16]
+    A[3 as usize] = 1.0
+    A[10 as usize] = 1.0
+    var B: [f64; 16] = [0.0; 16]
+    B[6 as usize] = 1.0
+    B[15 as usize] = 0.0 - 1.0
+    let Z = smul(A, B)
+    var zk: i32 = 0
+    while zk < 16 {
+        if !approx(Z[zk as usize], 0.0) { fails = fails + 1 }
+        zk = zk + 1
+    }
+
+    if fails == 0 {
+        print("HYPERCOMPLEX-CONVENTION-X PASS\n")
+        return 0
+    }
+    print("HYPERCOMPLEX-CONVENTION-X FAIL fails=")
+    print_int(fails)
+    print("\n")
+    return 1
+}

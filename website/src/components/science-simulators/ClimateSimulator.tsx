@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { SimulatorShell } from './SimulatorShell';
 
 export function ClimateSimulator() {
@@ -9,7 +9,6 @@ export function ClimateSimulator() {
   const PRESENT_YEAR = 2020;
   const START_YEAR = 1850;
   const END_YEAR = 2100;
-  const MAX_SPREAD_THRESHOLD = 80; // Truncate if projection spread gets too wide
 
   const projectionData = useMemo(() => {
     const historical = [];

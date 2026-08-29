@@ -11,6 +11,19 @@
 // - Epistemic Knowledge<T> values get four shadow registers each.
 // - Counterfactual mode replicates lanes across the warp.
 
+use gpu::lower_to_ptx::*
+use gpu::kernel_ir::*
+use gpu::ptx::*
+use gpu::metal::*
+use gpu::cuda_tile::*
+use gpu::epistemic_spirv::*
+use hlir::ir::*
+use io::trace::{io_write_bytes_to_file}
+use gpu::spirv::*
+use gpu::kaxi_backend::*
+use gpu::opt::fusion::*
+use gpu::opt::autotune::*
+
 // ============================================================================
 // Section 1 — HlirTypeTag constants
 // ============================================================================
@@ -173,20 +186,20 @@ let GpuOpcodeShr: i64 = 37
 // Section 6 — GpuOpEntry
 // ============================================================================
 
-struct GpuOpEntry {
-    opcode: i64,
-    type_tag: i64,
-    dst_idx: i64,
-    src0: i64,
-    src1: i64,
-    src2: i64,
-    imm_int: i64,
-    imm_f32: f32,
-    pred: i64,
-    axis: i64,
+pub struct GpuOpEntry {
+    pub opcode: i64,
+    pub type_tag: i64,
+    pub dst_idx: i64,
+    pub src0: i64,
+    pub src1: i64,
+    pub src2: i64,
+    pub imm_int: i64,
+    pub imm_f32: f32,
+    pub pred: i64,
+    pub axis: i64,
 }
 
-fn gpu_op_entry_default() -> GpuOpEntry {
+pub fn gpu_op_entry_default() -> GpuOpEntry {
     GpuOpEntry {
         opcode: 0,
         type_tag: 0,
@@ -205,17 +218,17 @@ fn gpu_op_entry_default() -> GpuOpEntry {
 // Section 7 — GpuBlockEntry
 // ============================================================================
 
-struct GpuBlockEntry {
-    id: i64,
-    ops: [GpuOpEntry; 4096],
-    op_count: i64,
-    term_tag: i64,
-    term_src: i64,
-    term_target0: i64,
-    term_target1: i64,
+pub struct GpuBlockEntry {
+    pub id: i64,
+    pub ops: [GpuOpEntry; 4096],
+    pub op_count: i64,
+    pub term_tag: i64,
+    pub term_src: i64,
+    pub term_target0: i64,
+    pub term_target1: i64,
 }
 
-fn gpu_block_entry_default() -> GpuBlockEntry {
+pub fn gpu_block_entry_default() -> GpuBlockEntry {
     GpuBlockEntry {
         id: -1,
         ops: [gpu_op_entry_default(); 4096],
@@ -231,14 +244,14 @@ fn gpu_block_entry_default() -> GpuBlockEntry {
 // Section 8 — GpuParamEntry
 // ============================================================================
 
-struct GpuParamEntry {
-    name: [i8; 64],
-    name_len: i64,
-    type_tag: i64,
-    is_restrict: bool,
+pub struct GpuParamEntry {
+    pub name: [i8; 64],
+    pub name_len: i64,
+    pub type_tag: i64,
+    pub is_restrict: bool,
 }
 
-fn gpu_param_entry_default() -> GpuParamEntry {
+pub fn gpu_param_entry_default() -> GpuParamEntry {
     GpuParamEntry {
         name: [0; 64],
         name_len: 0,
@@ -251,17 +264,17 @@ fn gpu_param_entry_default() -> GpuParamEntry {
 // Section 9 — GpuKernelEntry
 // ============================================================================
 
-struct GpuKernelEntry {
-    name: [i8; 256],
-    name_len: i64,
-    is_kernel: bool,
-    params: [GpuParamEntry; 32],
-    param_count: i64,
-    blocks: [GpuBlockEntry; 256],
-    block_count: i64,
+pub struct GpuKernelEntry {
+    pub name: [i8; 256],
+    pub name_len: i64,
+    pub is_kernel: bool,
+    pub params: [GpuParamEntry; 32],
+    pub param_count: i64,
+    pub blocks: [GpuBlockEntry; 256],
+    pub block_count: i64,
 }
 
-fn gpu_kernel_entry_default() -> GpuKernelEntry {
+pub fn gpu_kernel_entry_default() -> GpuKernelEntry {
     GpuKernelEntry {
         name: [0; 256],
         name_len: 0,
@@ -277,23 +290,23 @@ fn gpu_kernel_entry_default() -> GpuKernelEntry {
 // Section 10 — GpuModuleOutput
 // ============================================================================
 
-struct GpuModuleOutput {
-    kernels: [GpuKernelEntry; 64],
-    kernel_count: i64,
-    device_fns: [GpuKernelEntry; 64],
-    device_fn_count: i64,
+pub struct GpuModuleOutput {
+    pub kernels: [GpuKernelEntry; 64],
+    pub kernel_count: i64,
+    pub device_fns: [GpuKernelEntry; 64],
+    pub device_fn_count: i64,
 }
 
 // ============================================================================
 // Section 11 — EpistemicShadowEntry
 // ============================================================================
 
-struct EpistemicShadowEntry {
-    hlir_value: i64,
-    gpu_value: i64,
-    eps_value: i64,
-    valid_value: i64,
-    prov_value: i64,
+pub struct EpistemicShadowEntry {
+    pub hlir_value: i64,
+    pub gpu_value: i64,
+    pub eps_value: i64,
+    pub valid_value: i64,
+    pub prov_value: i64,
 }
 
 fn epistemic_shadow_entry_default() -> EpistemicShadowEntry {
@@ -328,20 +341,20 @@ fn value_map_entry_default() -> ValueMapEntry {
 // Section 13 — HlirToGpuState
 // ============================================================================
 
-struct HlirToGpuState {
-    next_value_id: i64,
-    next_block_id: i64,
-    value_map: [ValueMapEntry; 8192],
-    value_map_count: i64,
-    block_map_src: [i64; 2048],
-    block_map_dst: [i64; 2048],
-    block_map_count: i64,
-    epistemic_shadows: [EpistemicShadowEntry; 8192],
-    shadow_count: i64,
-    epistemic_enabled: bool,
-    counterfactual_enabled: bool,
-    target_sm: i64,
-    fast_math: bool,
+pub struct HlirToGpuState {
+    pub next_value_id: i64,
+    pub next_block_id: i64,
+    pub value_map: [ValueMapEntry; 8192],
+    pub value_map_count: i64,
+    pub block_map_src: [i64; 2048],
+    pub block_map_dst: [i64; 2048],
+    pub block_map_count: i64,
+    pub epistemic_shadows: [EpistemicShadowEntry; 8192],
+    pub shadow_count: i64,
+    pub epistemic_enabled: bool,
+    pub counterfactual_enabled: bool,
+    pub target_sm: i64,
+    pub fast_math: bool,
 }
 
 // ============================================================================
@@ -1414,10 +1427,10 @@ fn hlir_to_gpu_sm_supports_fast_math(sm: i64) -> bool {
 // ============================================================================
 
 // Count kernel functions in an HlirModule.
-fn hlir_extract_kernel_count(module: HlirModule) -> i64 {
+pub(crate) fn hlir_extract_kernel_count(module: HlirModule) -> i64 {
     var count: i64 = 0
     var i: i64 = 0
-    while i < module.function_count {
+    while i < module.fn_count {
         if module.functions[i as usize].is_kernel {
             count = count + 1
         }
@@ -1431,7 +1444,7 @@ fn hlir_extract_kernel_count(module: HlirModule) -> i64 {
 fn hlir_get_kernel_index(module: HlirModule, kernel_idx: i64) -> i64 {
     var count: i64 = 0
     var i: i64 = 0
-    while i < module.function_count {
+    while i < module.fn_count {
         if module.functions[i as usize].is_kernel {
             if count == kernel_idx {
                 return i
@@ -1456,33 +1469,119 @@ fn hlir_type_kind_to_gpu(kind: HlirTypeKind) -> GpuType {
     else { GpuType::GpuI64 }
 }
 
-// Map a binary op tag (HlirOpAdd..HlirOpFGe) to a GpuOpcode.
+// Map an HLIR v2 binary op tag (HLIR_BIN_*) to a GpuOpcode.
 fn hlir_bin_op_to_gpu_opcode(bin_op: i64) -> GpuOpcode {
-    if bin_op == HlirOpAdd || bin_op == HlirOpFAdd { GpuOpcode::GpuAdd }
-    else if bin_op == HlirOpSub || bin_op == HlirOpFSub { GpuOpcode::GpuSub }
-    else if bin_op == HlirOpMul || bin_op == HlirOpFMul { GpuOpcode::GpuMul }
-    else if bin_op == HlirOpDiv || bin_op == HlirOpFDiv { GpuOpcode::GpuDiv }
-    else if bin_op == HlirOpLt || bin_op == HlirOpFLt { GpuOpcode::GpuSetpLt }
-    else if bin_op == HlirOpLe || bin_op == HlirOpFLe { GpuOpcode::GpuSetpLe }
-    else if bin_op == HlirOpGt || bin_op == HlirOpFGt { GpuOpcode::GpuSetpGt }
-    else if bin_op == HlirOpGe || bin_op == HlirOpFGe { GpuOpcode::GpuSetpGe }
-    else if bin_op == HlirOpEq || bin_op == HlirOpFEq { GpuOpcode::GpuSetpEq }
-    else if bin_op == HlirOpNe || bin_op == HlirOpFNe { GpuOpcode::GpuSetpNe }
+    if bin_op == HLIR_BIN_ADD || bin_op == HLIR_BIN_FADD { GpuOpcode::GpuAdd }
+    else if bin_op == HLIR_BIN_SUB || bin_op == HLIR_BIN_FSUB { GpuOpcode::GpuSub }
+    else if bin_op == HLIR_BIN_MUL || bin_op == HLIR_BIN_FMUL { GpuOpcode::GpuMul }
+    else if bin_op == HLIR_BIN_SDIV || bin_op == HLIR_BIN_UDIV || bin_op == HLIR_BIN_FDIV { GpuOpcode::GpuDiv }
+    else if bin_op == HLIR_BIN_SLT || bin_op == HLIR_BIN_ULT || bin_op == HLIR_BIN_FOLT { GpuOpcode::GpuSetpLt }
+    else if bin_op == HLIR_BIN_SLE || bin_op == HLIR_BIN_ULE || bin_op == HLIR_BIN_FOLE { GpuOpcode::GpuSetpLe }
+    else if bin_op == HLIR_BIN_SGT || bin_op == HLIR_BIN_UGT || bin_op == HLIR_BIN_FOGT { GpuOpcode::GpuSetpGt }
+    else if bin_op == HLIR_BIN_SGE || bin_op == HLIR_BIN_UGE || bin_op == HLIR_BIN_FOGE { GpuOpcode::GpuSetpGe }
+    else if bin_op == HLIR_BIN_EQ || bin_op == HLIR_BIN_FOEQ { GpuOpcode::GpuSetpEq }
+    else if bin_op == HLIR_BIN_NE || bin_op == HLIR_BIN_FONE { GpuOpcode::GpuSetpNe }
     else { GpuOpcode::GpuAdd }
 }
 
-// Map a binary op tag to a GpuType (float ops → f32, int ops → i32 default).
+// Map a binary op tag to a GpuType.
+// IMPORTANT: classify explicit HLIR_BIN_* ranges. The legacy HlirOp* constants
+// are a different tag space and make source-level kernels lose compare width.
+// This is the WIDTH source ONLY for comparisons, where the HlirInstr result type
+// is bool and therefore useless for operand width; arithmetic/logical instrs
+// instead take width from instr.ty.kind at the HLIR_OP_BINARY site below.
+// World A (check.sio: gpu thread/block intrinsics typed i64) ⇒ every integer
+// operand of a comparison in these kernels is i64, so int-compare → GpuI64.
 fn hlir_bin_op_type(bin_op: i64) -> GpuType {
-    if bin_op >= HlirOpFAdd && bin_op <= HlirOpFGe { GpuType::GpuF32 }
-    else { GpuType::GpuI32 }
+    if bin_op >= HLIR_BIN_FOEQ && bin_op <= HLIR_BIN_FOGE { GpuType::GpuF32 }
+    else if bin_op >= HLIR_BIN_FADD && bin_op <= HLIR_BIN_FREM { GpuType::GpuF32 }
+    else if bin_op >= HLIR_BIN_EQ && bin_op <= HLIR_BIN_UGE { GpuType::GpuI64 }
+    else { GpuType::GpuI64 }
+}
+
+fn gpu_kernel_bump_reg(kernel: GpuKernelIr, reg: i64, ty: GpuType) -> GpuKernelIr with Mut {
+    var k = kernel
+    if reg < 0 { return k }
+
+    let next = reg + 1
+    if ty == GpuType::GpuBool {
+        if next > k.max_reg_pred { k.max_reg_pred = next }
+    } else if ty == GpuType::GpuU32 {
+        if next > k.max_reg_u32 { k.max_reg_u32 = next }
+    } else if ty == GpuType::GpuI32 {
+        if next > k.max_reg_i32 { k.max_reg_i32 = next }
+    } else if ty == GpuType::GpuF32 {
+        if next > k.max_reg_f32 { k.max_reg_f32 = next }
+    } else if ty == GpuType::GpuF64 {
+        if next > k.max_reg_f64 { k.max_reg_f64 = next }
+    } else {
+        if next > k.max_reg_u64 { k.max_reg_u64 = next }
+    }
+
+    k
 }
 
 // Append a single GPU op to a GpuKernelIr. Returns the kernel with op appended.
 fn gpu_kernel_append_op(kernel: GpuKernelIr, op: GpuOp) -> GpuKernelIr with Mut, Panic {
     var k = kernel
     if k.op_count < 1024 {
+        if op.opcode == GpuOpcode::GpuCvt {
+            k = gpu_kernel_bump_reg(k, op.dst_reg, op.dst_ty)
+            k = gpu_kernel_bump_reg(k, op.src_reg, op.src_ty)
+        } else if op.opcode == GpuOpcode::GpuSetpLt || op.opcode == GpuOpcode::GpuSetpLe ||
+                  op.opcode == GpuOpcode::GpuSetpEq || op.opcode == GpuOpcode::GpuSetpGe ||
+                  op.opcode == GpuOpcode::GpuSetpGt || op.opcode == GpuOpcode::GpuSetpNe {
+            k = gpu_kernel_bump_reg(k, op.dst_reg, GpuType::GpuBool)
+            k = gpu_kernel_bump_reg(k, op.lhs_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.rhs_reg, op.ty)
+        } else if op.opcode == GpuOpcode::GpuLoadGlobal {
+            k = gpu_kernel_bump_reg(k, op.dst_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.addr_reg, GpuType::GpuU64)
+        } else if op.opcode == GpuOpcode::GpuStoreGlobal {
+            k = gpu_kernel_bump_reg(k, op.src_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.addr_reg, GpuType::GpuU64)
+        } else if op.opcode == GpuOpcode::GpuLoadParam {
+            k = gpu_kernel_bump_reg(k, op.dst_reg, op.ty)
+        } else if op.opcode == GpuOpcode::GpuBra {
+            k = gpu_kernel_bump_reg(k, op.pred_reg, GpuType::GpuBool)
+        } else {
+            k = gpu_kernel_bump_reg(k, op.dst_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.src_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.lhs_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.rhs_reg, op.ty)
+            k = gpu_kernel_bump_reg(k, op.addr_reg, GpuType::GpuU64)
+            k = gpu_kernel_bump_reg(k, op.pred_reg, GpuType::GpuBool)
+        }
         k.ops[k.op_count as usize] = op
         k.op_count = k.op_count + 1
+    }
+    k
+}
+
+fn hlir_gpu_type_size_bytes(ty: GpuType) -> i64 {
+    if ty == GpuType::GpuF64 || ty == GpuType::GpuI64 || ty == GpuType::GpuU64 || ty == GpuType::GpuPtr {
+        8
+    } else {
+        4
+    }
+}
+
+// Widen a 32-bit thread/block intrinsic result to i64 when the HLIR result type
+// is i64. Appends `cvt.u64.u32 %rd<reg>, %r<reg>` so the value's 64-bit register
+// bank is materialized for downstream i64 index arithmetic (World A: the GPU
+// thread/block-index intrinsics are typed i64 by the checker). The sreg read
+// itself stays mov.u32 (the special registers are genuinely 32-bit).
+fn gpu_widen_intrinsic_to_i64(kernel: GpuKernelIr, reg: i64, res_kind: HlirTypeKind) -> GpuKernelIr with Mut, Panic {
+    var k = kernel
+    if res_kind == HlirTypeKind::HlirTypeI64 || res_kind == HlirTypeKind::HlirTypeU64 {
+        var cvt = gpu_op_new()
+        cvt.opcode = GpuOpcode::GpuCvt
+        cvt.dst_reg = reg
+        cvt.src_reg = reg
+        cvt.dst_ty = GpuType::GpuU64
+        cvt.src_ty = GpuType::GpuU32
+        cvt.ty = GpuType::GpuU64
+        k = gpu_kernel_append_op(k, cvt)
     }
     k
 }
@@ -1498,7 +1597,17 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
         op.dst_reg = instr.result
         op.lhs_reg = instr.lhs
         op.rhs_reg = instr.rhs
-        op.ty = hlir_bin_op_type(instr.bin_op)
+        // Width source: for arithmetic/logical ops the HlirInstr result type IS
+        // the operand width, so use it (gives i64 for index math, f64 for
+        // vec_add_f64 — fixing the old hardcoded i32/f32). For comparisons the
+        // result type is bool, useless for width, so fall back to the op-tag map
+        // (int-compare → i64 over %rd, float-compare → f-width).
+        let is_compare = instr.bin_op >= HLIR_BIN_EQ && instr.bin_op <= HLIR_BIN_FOGE
+        if is_compare {
+            op.ty = hlir_bin_op_type(instr.bin_op)
+        } else {
+            op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        }
         k = gpu_kernel_append_op(k, op)
     } else if op_kind == HLIR_OP_LOAD {
         var op = gpu_op_new()
@@ -1513,15 +1622,43 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
         op.opcode = GpuOpcode::GpuStoreGlobal
         op.addr_reg = instr.store_ptr
         op.src_reg = instr.store_value
-        op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        if instr.ty.kind == HlirTypeKind::HlirTypeVoid {
+            op.ty = GpuType::GpuI64
+        } else {
+            op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        }
         op.memory_space = GpuMemorySpace::GpuMemGlobal
         k = gpu_kernel_append_op(k, op)
+    } else if op_kind == HLIR_OP_GET_ELEMENT_PTR {
+        let elem_ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        let scale_reg = instr.result + 512
+
+        var scale = gpu_op_new()
+        scale.opcode = GpuOpcode::GpuMulImm
+        scale.dst_reg = scale_reg
+        scale.lhs_reg = instr.index
+        scale.rhs_imm = hlir_gpu_type_size_bytes(elem_ty)
+        scale.ty = GpuType::GpuU64
+        scale.dst_ty = GpuType::GpuU64
+        k = gpu_kernel_append_op(k, scale)
+
+        var addr = gpu_op_new()
+        addr.opcode = GpuOpcode::GpuAdd
+        addr.dst_reg = instr.result
+        addr.lhs_reg = instr.base
+        addr.rhs_reg = scale_reg
+        addr.ty = GpuType::GpuU64
+        addr.dst_ty = GpuType::GpuU64
+        k = gpu_kernel_append_op(k, addr)
     } else if op_kind == HLIR_OP_CONST {
-        // Emit constant as immediate load into a virtual register
+        // Emit constant as immediate load into a virtual register. lhs_reg = -1 marks a
+        // PURE immediate (no base register) so the renderer emits `mov dst, imm` rather than
+        // `add dst, %reg0, imm` — reg 0 is the first kernel param, NOT a zero register, so the
+        // add form silently corrupts every integer constant (e.g. array/GEP indices).
         var op = gpu_op_new()
         op.opcode = GpuOpcode::GpuAddImm
         op.dst_reg = instr.result
-        op.src_reg = 0
+        op.lhs_reg = 0 - 1
         op.rhs_imm = instr.constant.int_val
         op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
         k = gpu_kernel_append_op(k, op)
@@ -1530,7 +1667,7 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
         var op = gpu_op_new()
         op.opcode = GpuOpcode::GpuAddImm
         op.dst_reg = instr.result
-        op.src_reg = instr.src
+        op.lhs_reg = instr.src
         op.rhs_imm = 0
         op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
         k = gpu_kernel_append_op(k, op)
@@ -1571,18 +1708,209 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
             op.axis = 0
             op.ty = GpuType::GpuU32
             k = gpu_kernel_append_op(k, op)
+            k = gpu_widen_intrinsic_to_i64(k, instr.result, instr.ty.kind)
         } else if hlir_name_starts_with_gpu_block_id(cn) {
             op.opcode = GpuOpcode::GpuGetBid
             op.dst_reg = instr.result
             op.axis = 0
             op.ty = GpuType::GpuU32
             k = gpu_kernel_append_op(k, op)
+            k = gpu_widen_intrinsic_to_i64(k, instr.result, instr.ty.kind)
         } else if hlir_name_starts_with_gpu_block_dim(cn) {
             op.opcode = GpuOpcode::GpuGetNtid
             op.dst_reg = instr.result
             op.axis = 0
             op.ty = GpuType::GpuU32
             k = gpu_kernel_append_op(k, op)
+            k = gpu_widen_intrinsic_to_i64(k, instr.result, instr.ty.kind)
+        } else if hlir_name_is_oct_batch_mul(cn) || hlir_name_is_sed_batch_mul(cn) {
+            // Batched hypercomplex multiply → tensor-core tile. call_args = [pa, pH, pout].
+            // The stage op builds L(a) (row-major f16) at shared[0] and H (col-major f16) at
+            // shared[512]; the tile writes D = L(a)·H (row-major f32) to pout. Octonion uses the
+            // top-left 8×8 (stage dim=8); sedenion fills the full 16×16 (dim=16).
+            let dim = if hlir_name_is_sed_batch_mul(cn) { 16 } else { 8 }
+            if k.shared_bytes < 1024 { k.shared_bytes = 1024 }
+            let pa_reg = instr.call_args[0]
+            let pH_reg = instr.call_args[1]
+            let pout_reg = instr.call_args[2]
+            var stg = gpu_op_new()
+            stg.opcode = GpuOpcode::GpuOctBatchStage
+            stg.lhs_reg = pa_reg
+            stg.rhs_reg = pH_reg
+            stg.rhs_imm = dim
+            k = gpu_kernel_append_op(k, stg)
+            var tile = gpu_op_wmma_tile(0, 512, pout_reg, 16)
+            k = gpu_kernel_append_op(k, tile)
+        } else if hlir_name_is_ossm_oct_step(cn) || hlir_name_is_ossm_sed_step(cn) {
+            // O-SSM linear step S = A⊗H + B·x on tensor cores. Octonion dim=8; sedenion dim=16.
+            // call_args = [pA, pB, px, pH, pout]. Stage L(A)+H → tile D=L(A)·H → post-add B·x.
+            let sdim = if hlir_name_is_ossm_sed_step(cn) { 16 } else { 8 }
+            if k.shared_bytes < 1024 { k.shared_bytes = 1024 }
+            let pA_reg = instr.call_args[0]
+            let pB_reg = instr.call_args[1]
+            let px_reg = instr.call_args[2]
+            let pH_reg = instr.call_args[3]
+            let po_reg = instr.call_args[4]
+            var stg = gpu_op_new()
+            stg.opcode = GpuOpcode::GpuOctBatchStage
+            stg.lhs_reg = pA_reg
+            stg.rhs_reg = pH_reg
+            stg.rhs_imm = sdim
+            k = gpu_kernel_append_op(k, stg)
+            var tile = gpu_op_wmma_tile(0, 512, po_reg, 16)
+            k = gpu_kernel_append_op(k, tile)
+            var pad = gpu_op_new()
+            pad.opcode = GpuOpcode::GpuOctPostAddBx
+            pad.lhs_reg = pB_reg
+            pad.rhs_reg = px_reg
+            pad.addr_reg = po_reg
+            pad.rhs_imm = sdim
+            k = gpu_kernel_append_op(k, pad)
+        } else if hlir_name_is_ossm_oct_cell(cn) || hlir_name_is_ossm_sed_cell(cn) {
+            // Full O-SSM cell: y = Re(C⊗sigmoid(A⊗H + B·x)). call_args = [pA,pB,px,pC,pH,py].
+            // Octonion dim=8; sedenion dim=16. Two shared tiles + sigmoid + Re → one GpuOctCell.
+            if k.shared_bytes < 2048 { k.shared_bytes = 2048 }
+            var cell = gpu_op_new()
+            cell.opcode = GpuOpcode::GpuOctCell
+            cell.rhs_imm = if hlir_name_is_ossm_sed_cell(cn) { 16 } else { 8 }
+            cell.lhs_reg = instr.call_args[0]
+            cell.rhs_reg = instr.call_args[1]
+            cell.addr_reg = instr.call_args[2]
+            cell.src_reg = instr.call_args[3]
+            cell.shared_addr = instr.call_args[4]
+            cell.compare_reg = instr.call_args[5]
+            k = gpu_kernel_append_op(k, cell)
+        } else if hlir_name_is_ossm_oct_recur(cn) || hlir_name_is_ossm_sed_recur(cn) {
+            // O-SSM recurrence over T. call_args = [pA,pB,px,pC,pH,py,T]. Octonion dim=8, sedenion 16.
+            if k.shared_bytes < 2048 { k.shared_bytes = 2048 }
+            var rec = gpu_op_new()
+            rec.opcode = GpuOpcode::GpuOctRecur
+            rec.rhs_imm = if hlir_name_is_ossm_sed_recur(cn) { 16 } else { 8 }
+            rec.lhs_reg = instr.call_args[0]
+            rec.rhs_reg = instr.call_args[1]
+            rec.addr_reg = instr.call_args[2]
+            rec.src_reg = instr.call_args[3]
+            rec.shared_addr = instr.call_args[4]
+            rec.compare_reg = instr.call_args[5]
+            rec.byte_offset = instr.call_args[6]
+            k = gpu_kernel_append_op(k, rec)
+        } else if hlir_name_is_oct_assoc_bwd_dh(cn) || hlir_name_is_sed_assoc_bwd_dh(cn) {
+            // VJP of the associator w.r.t. its input H: dH = L(a⊗b)ᵀ·dD − L(b)ᵀ·(L(a)ᵀ·dD).
+            // call_args = [pa, pb, pdD, pdH]. Three transposed tiles + subtract → one GpuOctAssocBwdDh.
+            if k.shared_bytes < 3072 { k.shared_bytes = 3072 }
+            var abd = gpu_op_new()
+            abd.opcode = GpuOpcode::GpuOctAssocBwdDh
+            abd.rhs_imm = if hlir_name_is_sed_assoc_bwd_dh(cn) { 16 } else { 8 }
+            abd.lhs_reg = instr.call_args[0]
+            abd.rhs_reg = instr.call_args[1]
+            abd.addr_reg = instr.call_args[2]
+            abd.src_reg = instr.call_args[3]
+            k = gpu_kernel_append_op(k, abd)
+        } else if hlir_name_is_oct_assoc(cn) || hlir_name_is_sed_assoc(cn) {
+            // Batched hypercomplex associator [a,b,H] = (a⊗b)⊗H − a⊗(b⊗H) on tensor cores.
+            // call_args = [pa, pb, pH, pout]. Three tiles (L(b)·H, L(a)·q, L(a⊗b)·H) + subtract →
+            // one GpuOctAssoc. Octonion dim=8; sedenion dim=16. Needs sL+sH+sS+sR = 3072 shared bytes.
+            if k.shared_bytes < 3072 { k.shared_bytes = 3072 }
+            var asc = gpu_op_new()
+            asc.opcode = GpuOpcode::GpuOctAssoc
+            asc.rhs_imm = if hlir_name_is_sed_assoc(cn) { 16 } else { 8 }
+            asc.lhs_reg = instr.call_args[0]
+            asc.rhs_reg = instr.call_args[1]
+            asc.addr_reg = instr.call_args[2]
+            asc.src_reg = instr.call_args[3]
+            k = gpu_kernel_append_op(k, asc)
+        } else if hlir_name_is_oct_batch_vjp(cn) || hlir_name_is_sed_batch_vjp(cn) {
+            // Backward / VJP of D = L(a)·H. call_args = [pa, pH, pdD, pdH, pda]. One transposed tile
+            // (dH = L(a)ᵀ·dD) + a runtime da accumulation → one GpuOctVjp. Needs sL+sH+sS = 2048 bytes.
+            if k.shared_bytes < 2048 { k.shared_bytes = 2048 }
+            var vjp = gpu_op_new()
+            vjp.opcode = GpuOpcode::GpuOctVjp
+            vjp.rhs_imm = if hlir_name_is_sed_batch_vjp(cn) { 16 } else { 8 }
+            vjp.lhs_reg = instr.call_args[0]
+            vjp.rhs_reg = instr.call_args[1]
+            vjp.addr_reg = instr.call_args[2]
+            vjp.src_reg = instr.call_args[3]
+            vjp.shared_addr = instr.call_args[4]
+            k = gpu_kernel_append_op(k, vjp)
+        } else if hlir_name_is_ossm_oct_bwd(cn) || hlir_name_is_ossm_sed_bwd(cn) {
+            // One BPTT backward step. call_args = [pA, pHprev, pdHt, pdHprev, pdA]. Transposed tile
+            // (dHprev = L(A)ᵀ·dHt, D-layout) + in-place dA accumulation → one GpuOctBwd. 2048 bytes.
+            if k.shared_bytes < 2048 { k.shared_bytes = 2048 }
+            var bwd = gpu_op_new()
+            bwd.opcode = GpuOpcode::GpuOctBwd
+            bwd.rhs_imm = if hlir_name_is_ossm_sed_bwd(cn) { 16 } else { 8 }
+            bwd.lhs_reg = instr.call_args[0]
+            bwd.rhs_reg = instr.call_args[1]
+            bwd.addr_reg = instr.call_args[2]
+            bwd.src_reg = instr.call_args[3]
+            bwd.shared_addr = instr.call_args[4]
+            k = gpu_kernel_append_op(k, bwd)
+        } else if hlir_name_is_oct_matvec_dh8(cn) || hlir_name_is_oct_matvec_dh16(cn) {
+            // Hypercomplex matrix-vector H_out = A ⊛ H over D_h octonion channels → dense block-L matmul
+            // A_big(N×N)·H_big(N×16), N=D_h·8, f16 m16n16k16 tiles. call_args = [pA, pH, pout].
+            let dh = if hlir_name_is_oct_matvec_dh16(cn) { 16 } else { 8 }
+            let nn = dh * 8
+            let sb = nn * nn * 2 + nn * 16 * 2
+            if k.shared_bytes < sb { k.shared_bytes = sb }
+            var mv = gpu_op_new()
+            mv.opcode = GpuOpcode::GpuOctMatvec
+            mv.rhs_imm = dh
+            mv.lhs_reg = instr.call_args[0]
+            mv.rhs_reg = instr.call_args[1]
+            mv.addr_reg = instr.call_args[2]
+            k = gpu_kernel_append_op(k, mv)
+        } else if hlir_name_is_oct_batch_mul_f64(cn) || hlir_name_is_sed_batch_mul_f64(cn) || hlir_name_is_oct_batch_mul_f64_t(cn) || hlir_name_is_sed_batch_mul_f64_t(cn) || hlir_name_is_oct_batch_mul_f64_grid(cn) || hlir_name_is_sed_batch_mul_f64_grid(cn) {
+            // Batched hypercomplex multiply on f64 TENSOR CORES (wmma m8n8k4.f64). call_args =
+            // [pa, pH, pout]. L(a) f64 in shared + m8n8k4 f64 tiles → one GpuOctBatchF64. 2048 bytes.
+            // byte_offset: 0 = normal, 1 = transpose (L(a)ᵀ·B, BPTT backward), 2 = grid (block-indexed
+            // by %ctaid.x — each block does one independent problem, for multi-block throughput).
+            let is_t = hlir_name_is_oct_batch_mul_f64_t(cn) || hlir_name_is_sed_batch_mul_f64_t(cn)
+            let is_grid = hlir_name_is_oct_batch_mul_f64_grid(cn) || hlir_name_is_sed_batch_mul_f64_grid(cn)
+            let is_sed = hlir_name_is_sed_batch_mul_f64(cn) || hlir_name_is_sed_batch_mul_f64_t(cn) || hlir_name_is_sed_batch_mul_f64_grid(cn)
+            if k.shared_bytes < 2048 { k.shared_bytes = 2048 }
+            var bf = gpu_op_new()
+            bf.opcode = GpuOpcode::GpuOctBatchF64
+            bf.rhs_imm = if is_sed { 16 } else { 8 }
+            bf.byte_offset = if is_t { 1 } else { if is_grid { 2 } else { 0 } }
+            bf.lhs_reg = instr.call_args[0]
+            bf.rhs_reg = instr.call_args[1]
+            bf.addr_reg = instr.call_args[2]
+            k = gpu_kernel_append_op(k, bf)
+        } else if hlir_name_is_ossm_oct_step_f64(cn) || hlir_name_is_ossm_sed_step_f64(cn) {
+            // Full-f64 O-SSM step. call_args = [pA, pB, px, pH, pout]. Exact f64 → one GpuOctStepF64.
+            var sf = gpu_op_new()
+            sf.opcode = GpuOpcode::GpuOctStepF64
+            sf.rhs_imm = if hlir_name_is_ossm_sed_step_f64(cn) { 16 } else { 8 }
+            sf.lhs_reg = instr.call_args[0]
+            sf.rhs_reg = instr.call_args[1]
+            sf.addr_reg = instr.call_args[2]
+            sf.src_reg = instr.call_args[3]
+            sf.shared_addr = instr.call_args[4]
+            k = gpu_kernel_append_op(k, sf)
+        } else if hlir_name_is_ossm_oct_readout(cn) || hlir_name_is_ossm_sed_readout(cn) {
+            // O-SSM real readout y = Re(C⊗h). call_args = [pC, pH, py]. σ(p,p)-signed reduction → one
+            // GpuOctReadout (no tile). Octonion dim=8; sedenion dim=16.
+            var rdo = gpu_op_new()
+            rdo.opcode = GpuOpcode::GpuOctReadout
+            rdo.rhs_imm = if hlir_name_is_ossm_sed_readout(cn) { 16 } else { 8 }
+            rdo.lhs_reg = instr.call_args[0]
+            rdo.rhs_reg = instr.call_args[1]
+            rdo.addr_reg = instr.call_args[2]
+            k = gpu_kernel_append_op(k, rdo)
+        } else if hlir_name_is_ossm_oct_bwd_nl(cn) || hlir_name_is_ossm_sed_bwd_nl(cn) {
+            // NONLINEAR BPTT backward step. call_args = [pA, pHprev, pdHt, pS, pdHprev, pdA]. Applies
+            // dS = dHt ⊙ σ'(S) then the backward multiply → one GpuOctBwdNl. Needs 2048 shared bytes.
+            if k.shared_bytes < 2048 { k.shared_bytes = 2048 }
+            var bwn = gpu_op_new()
+            bwn.opcode = GpuOpcode::GpuOctBwdNl
+            bwn.rhs_imm = if hlir_name_is_ossm_sed_bwd_nl(cn) { 16 } else { 8 }
+            bwn.lhs_reg = instr.call_args[0]
+            bwn.rhs_reg = instr.call_args[1]
+            bwn.addr_reg = instr.call_args[2]
+            bwn.src_reg = instr.call_args[3]
+            bwn.shared_addr = instr.call_args[4]
+            bwn.compare_reg = instr.call_args[5]
+            k = gpu_kernel_append_op(k, bwn)
         }
         // Other calls: skip in MVP
     }
@@ -1592,6 +1920,289 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
 }
 
 // Check if an HlirName starts with "gpu_thread_id" (13 chars).
+// "oct_batch_mul" (13 chars) — the batched octonion multiply intrinsic that lowers to a
+// tensor-core tile: oct_batch_mul(pa, pH, pout) computes L(a)·H for a 16-state batch.
+fn hlir_name_is_oct_batch_mul(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8
+}
+
+// "ossm_oct_step" (13 chars) — the O-SSM octonion linear recurrence step S = A⊗H + B·x on tensor
+// cores: ossm_oct_step(pA, pB, px, pH, pout).
+fn hlir_name_is_ossm_oct_step(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 115 as i8 && n.buf[10] == 116 as i8 && n.buf[11] == 101 as i8 &&
+    n.buf[12] == 112 as i8
+}
+
+// "ossm_sed_step" (13 chars) — the O-SSM sedenion linear step S = A⊗H + B·x (dim=16, bits=4).
+fn hlir_name_is_ossm_sed_step(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 115 as i8 && n.buf[10] == 116 as i8 && n.buf[11] == 101 as i8 &&
+    n.buf[12] == 112 as i8
+}
+
+// "ossm_sed_cell" (13 chars) — full O-SSM sedenion cell (dim=16, bits=4).
+fn hlir_name_is_ossm_sed_cell(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 99 as i8 && n.buf[10] == 101 as i8 && n.buf[11] == 108 as i8 &&
+    n.buf[12] == 108 as i8
+}
+
+// "ossm_sed_recur" (14 chars) — O-SSM sedenion recurrence over T (dim=16, bits=4).
+fn hlir_name_is_ossm_sed_recur(n: HlirName) -> bool {
+    if n.len != 14 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 114 as i8 && n.buf[10] == 101 as i8 && n.buf[11] == 99 as i8 &&
+    n.buf[12] == 117 as i8 && n.buf[13] == 114 as i8
+}
+
+// "ossm_oct_cell" (13 chars) — the full O-SSM octonion cell: y = Re(C⊗sigmoid(A⊗H + B·x)).
+fn hlir_name_is_ossm_oct_cell(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 99 as i8 && n.buf[10] == 101 as i8 && n.buf[11] == 108 as i8 &&
+    n.buf[12] == 108 as i8
+}
+
+// "ossm_oct_recur" (14 chars) — the O-SSM octonion recurrence over T timesteps.
+fn hlir_name_is_ossm_oct_recur(n: HlirName) -> bool {
+    if n.len != 14 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 114 as i8 && n.buf[10] == 101 as i8 && n.buf[11] == 99 as i8 &&
+    n.buf[12] == 117 as i8 && n.buf[13] == 114 as i8
+}
+
+// "sed_batch_mul" (13 chars) — the batched sedenion multiply intrinsic (L(a)·H, dim=16, bits=4).
+fn hlir_name_is_sed_batch_mul(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8 && n.buf[2] == 100 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8
+}
+
+// "oct_assoc_bwd_dh" (16 chars) — VJP of the octonion associator w.r.t. its input H (dim=8, bits=3).
+fn hlir_name_is_oct_assoc_bwd_dh(n: HlirName) -> bool {
+    if n.len != 16 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 97 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 115 as i8 && n.buf[7] == 111 as i8 &&
+    n.buf[8] == 99 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 98 as i8 && n.buf[11] == 119 as i8 &&
+    n.buf[12] == 100 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 100 as i8 && n.buf[15] == 104 as i8
+}
+
+// "sed_assoc_bwd_dh" (16 chars) — VJP of the sedenion associator w.r.t. its input H (dim=16, bits=4).
+fn hlir_name_is_sed_assoc_bwd_dh(n: HlirName) -> bool {
+    if n.len != 16 { return false }
+    n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8 && n.buf[2] == 100 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 97 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 115 as i8 && n.buf[7] == 111 as i8 &&
+    n.buf[8] == 99 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 98 as i8 && n.buf[11] == 119 as i8 &&
+    n.buf[12] == 100 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 100 as i8 && n.buf[15] == 104 as i8
+}
+
+// "oct_assoc" (9 chars) — the batched octonion associator intrinsic: oct_assoc(pa,pb,pH,pout)
+// computes [a,b,H_b] = (a⊗b)⊗H_b − a⊗(b⊗H_b) for a 16-state batch on tensor cores (dim=8, bits=3).
+fn hlir_name_is_oct_assoc(n: HlirName) -> bool {
+    if n.len != 9 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 97 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 115 as i8 && n.buf[7] == 111 as i8 &&
+    n.buf[8] == 99 as i8
+}
+
+// "sed_assoc" (9 chars) — the batched sedenion associator intrinsic (dim=16, bits=4).
+fn hlir_name_is_sed_assoc(n: HlirName) -> bool {
+    if n.len != 9 { return false }
+    n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8 && n.buf[2] == 100 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 97 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 115 as i8 && n.buf[7] == 111 as i8 &&
+    n.buf[8] == 99 as i8
+}
+
+// "oct_batch_vjp" (13 chars) — VJP/backward of the batched octonion multiply: given dD, computes
+// dH = L(a)ᵀ·dD and da[p] = Σ σ(p,k⊕p)·H·dD. oct_batch_vjp(pa,pH,pdD,pdH,pda) (dim=8, bits=3).
+fn hlir_name_is_oct_batch_vjp(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 118 as i8 && n.buf[11] == 106 as i8 &&
+    n.buf[12] == 112 as i8
+}
+
+// "sed_batch_vjp" (13 chars) — VJP/backward of the batched sedenion multiply (dim=16, bits=4).
+fn hlir_name_is_sed_batch_vjp(n: HlirName) -> bool {
+    if n.len != 13 { return false }
+    n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8 && n.buf[2] == 100 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 118 as i8 && n.buf[11] == 106 as i8 &&
+    n.buf[12] == 112 as i8
+}
+
+// "ossm_oct_bwd" (12 chars) — one BPTT backward step (octonion): dHprev = L(A)ᵀ·dHt (D-layout) +
+// in-place dA accumulation. ossm_oct_bwd(pA, pHprev, pdHt, pdHprev, pdA) (dim=8, bits=3).
+fn hlir_name_is_ossm_oct_bwd(n: HlirName) -> bool {
+    if n.len != 12 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 98 as i8 && n.buf[10] == 119 as i8 && n.buf[11] == 100 as i8
+}
+
+// "ossm_sed_bwd" (12 chars) — one BPTT backward step (sedenion, dim=16, bits=4).
+fn hlir_name_is_ossm_sed_bwd(n: HlirName) -> bool {
+    if n.len != 12 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 98 as i8 && n.buf[10] == 119 as i8 && n.buf[11] == 100 as i8
+}
+
+// "ossm_oct_bwd_nl" (15 chars) — NONLINEAR BPTT backward step (octonion): dS=dHt⊙σ'(S) then the
+// backward multiply. ossm_oct_bwd_nl(pA, pHprev, pdHt, pS, pdHprev, pdA) (dim=8, bits=3).
+fn hlir_name_is_ossm_oct_bwd_nl(n: HlirName) -> bool {
+    if n.len != 15 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 98 as i8 && n.buf[10] == 119 as i8 && n.buf[11] == 100 as i8 &&
+    n.buf[12] == 95 as i8 && n.buf[13] == 110 as i8 && n.buf[14] == 108 as i8
+}
+
+// "ossm_sed_bwd_nl" (15 chars) — NONLINEAR BPTT backward step (sedenion, dim=16, bits=4).
+fn hlir_name_is_ossm_sed_bwd_nl(n: HlirName) -> bool {
+    if n.len != 15 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 98 as i8 && n.buf[10] == 119 as i8 && n.buf[11] == 100 as i8 &&
+    n.buf[12] == 95 as i8 && n.buf[13] == 110 as i8 && n.buf[14] == 108 as i8
+}
+
+// "ossm_oct_readout" (16 chars) — O-SSM real readout y = Re(C⊗h) (octonion, dim=8, bits=3).
+fn hlir_name_is_ossm_oct_readout(n: HlirName) -> bool {
+    if n.len != 16 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 114 as i8 && n.buf[10] == 101 as i8 && n.buf[11] == 97 as i8 &&
+    n.buf[12] == 100 as i8 && n.buf[13] == 111 as i8 && n.buf[14] == 117 as i8 && n.buf[15] == 116 as i8
+}
+
+// "ossm_sed_readout" (16 chars) — O-SSM real readout y = Re(C⊗h) (sedenion, dim=16, bits=4).
+fn hlir_name_is_ossm_sed_readout(n: HlirName) -> bool {
+    if n.len != 16 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 114 as i8 && n.buf[10] == 101 as i8 && n.buf[11] == 97 as i8 &&
+    n.buf[12] == 100 as i8 && n.buf[13] == 111 as i8 && n.buf[14] == 117 as i8 && n.buf[15] == 116 as i8
+}
+
+// "oct_matvec_dh8" (14 chars) — hypercomplex matrix-vector, D_h=8 octonion channels (N=64).
+fn hlir_name_is_oct_matvec_dh8(n: HlirName) -> bool {
+    if n.len != 14 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 109 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 118 as i8 &&
+    n.buf[8] == 101 as i8 && n.buf[9] == 99 as i8 && n.buf[10] == 95 as i8 && n.buf[11] == 100 as i8 &&
+    n.buf[12] == 104 as i8 && n.buf[13] == 56 as i8
+}
+
+// "oct_matvec_dh16" (15 chars) — hypercomplex matrix-vector, D_h=16 octonion channels (N=128).
+fn hlir_name_is_oct_matvec_dh16(n: HlirName) -> bool {
+    if n.len != 15 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 109 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 118 as i8 &&
+    n.buf[8] == 101 as i8 && n.buf[9] == 99 as i8 && n.buf[10] == 95 as i8 && n.buf[11] == 100 as i8 &&
+    n.buf[12] == 104 as i8 && n.buf[13] == 49 as i8 && n.buf[14] == 54 as i8
+}
+
+// "oct_batch_mul_f64" (17 chars) — batched octonion multiply on f64 tensor cores (m8n8k4.f64).
+fn hlir_name_is_oct_batch_mul_f64(n: HlirName) -> bool {
+    if n.len != 17 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 102 as i8 && n.buf[15] == 54 as i8 &&
+    n.buf[16] == 52 as i8
+}
+
+// "sed_batch_mul_f64" (17 chars) — batched sedenion multiply on f64 tensor cores (dim=16, bits=4).
+fn hlir_name_is_sed_batch_mul_f64(n: HlirName) -> bool {
+    if n.len != 17 { return false }
+    n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8 && n.buf[2] == 100 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 102 as i8 && n.buf[15] == 54 as i8 &&
+    n.buf[16] == 52 as i8
+}
+
+// "oct_batch_mul_f64_t" (19 chars) — TRANSPOSED f64 tensor-core tile L(a)ᵀ·B (the BPTT backward).
+fn hlir_name_is_oct_batch_mul_f64_t(n: HlirName) -> bool {
+    if n.len != 19 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 102 as i8 && n.buf[15] == 54 as i8 &&
+    n.buf[16] == 52 as i8 && n.buf[17] == 95 as i8 && n.buf[18] == 116 as i8
+}
+
+// "sed_batch_mul_f64_t" (19 chars) — TRANSPOSED f64 tensor-core tile (sedenion, dim=16, bits=4).
+fn hlir_name_is_sed_batch_mul_f64_t(n: HlirName) -> bool {
+    if n.len != 19 { return false }
+    n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8 && n.buf[2] == 100 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 102 as i8 && n.buf[15] == 54 as i8 &&
+    n.buf[16] == 52 as i8 && n.buf[17] == 95 as i8 && n.buf[18] == 116 as i8
+}
+
+// "oct_batch_mul_f64_grid" (22 chars) — grid (block-indexed by %ctaid.x) f64 tensor-core tile: each
+// block does one independent L(a)·H problem, for multi-block throughput.
+fn hlir_name_is_oct_batch_mul_f64_grid(n: HlirName) -> bool {
+    if n.len != 22 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 99 as i8 && n.buf[2] == 116 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 102 as i8 && n.buf[15] == 54 as i8 &&
+    n.buf[16] == 52 as i8 && n.buf[17] == 95 as i8 && n.buf[18] == 103 as i8 && n.buf[19] == 114 as i8 &&
+    n.buf[20] == 105 as i8 && n.buf[21] == 100 as i8
+}
+
+// "sed_batch_mul_f64_grid" (22 chars) — grid f64 tensor-core tile (sedenion, dim=16, bits=4).
+fn hlir_name_is_sed_batch_mul_f64_grid(n: HlirName) -> bool {
+    if n.len != 22 { return false }
+    n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8 && n.buf[2] == 100 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 97 as i8 && n.buf[6] == 116 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 104 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 109 as i8 && n.buf[11] == 117 as i8 &&
+    n.buf[12] == 108 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 102 as i8 && n.buf[15] == 54 as i8 &&
+    n.buf[16] == 52 as i8 && n.buf[17] == 95 as i8 && n.buf[18] == 103 as i8 && n.buf[19] == 114 as i8 &&
+    n.buf[20] == 105 as i8 && n.buf[21] == 100 as i8
+}
+
+// "ossm_oct_step_f64" (17 chars) — full-f64 O-SSM step S = A⊗H + B·x (octonion, dim=8, bits=3).
+fn hlir_name_is_ossm_oct_step_f64(n: HlirName) -> bool {
+    if n.len != 17 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 111 as i8 && n.buf[6] == 99 as i8 && n.buf[7] == 116 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 115 as i8 && n.buf[10] == 116 as i8 && n.buf[11] == 101 as i8 &&
+    n.buf[12] == 112 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 102 as i8 && n.buf[15] == 54 as i8 &&
+    n.buf[16] == 52 as i8
+}
+
+// "ossm_sed_step_f64" (17 chars) — full-f64 O-SSM step (sedenion, dim=16, bits=4).
+fn hlir_name_is_ossm_sed_step_f64(n: HlirName) -> bool {
+    if n.len != 17 { return false }
+    n.buf[0] == 111 as i8 && n.buf[1] == 115 as i8 && n.buf[2] == 115 as i8 && n.buf[3] == 109 as i8 &&
+    n.buf[4] == 95 as i8 && n.buf[5] == 115 as i8 && n.buf[6] == 101 as i8 && n.buf[7] == 100 as i8 &&
+    n.buf[8] == 95 as i8 && n.buf[9] == 115 as i8 && n.buf[10] == 116 as i8 && n.buf[11] == 101 as i8 &&
+    n.buf[12] == 112 as i8 && n.buf[13] == 95 as i8 && n.buf[14] == 102 as i8 && n.buf[15] == 54 as i8 &&
+    n.buf[16] == 52 as i8
+}
+
 fn hlir_name_starts_with_gpu_thread(n: HlirName) -> bool {
     if n.len < 13 { return false }
     // "gpu_thread_id" = g(103) p(112) u(117) _(95) t(116) h(104) r(114) e(101) a(97) d(100) _(95) i(105) d(100)
@@ -1638,11 +2249,22 @@ fn hlir_function_to_gpu_kernel(func: HlirFunction) -> GpuKernelIr with Mut, Pani
     while pi < func.param_count {
         if pi < 8 {
             let p = func.params[pi as usize]
+            let param_ty = hlir_type_kind_to_gpu(p.ty.kind)
             kernel.params[pi as usize] = GpuParam {
                 name: hlir_name_to_name(p.name),
-                ty: hlir_type_kind_to_gpu(p.ty.kind),
+                ty: param_ty,
             }
             kernel.param_count = kernel.param_count + 1
+
+            if p.value_id >= 0 {
+                var load_param = gpu_op_new()
+                load_param.opcode = GpuOpcode::GpuLoadParam
+                load_param.dst_reg = p.value_id
+                load_param.param_idx = pi
+                load_param.ty = param_ty
+                load_param.dst_ty = param_ty
+                kernel = gpu_kernel_append_op(kernel, load_param)
+            }
         }
         pi = pi + 1
     }
@@ -1652,10 +2274,23 @@ fn hlir_function_to_gpu_kernel(func: HlirFunction) -> GpuKernelIr with Mut, Pani
     while bi < func.block_count {
         let block = func.blocks[bi as usize]
 
+        var label_op = gpu_op_new()
+        label_op.opcode = GpuOpcode::GpuBra
+        label_op.src_reg = 1
+        label_op.rhs_imm = block.id
+        kernel = gpu_kernel_append_op(kernel, label_op)
+
         // Lower instructions in this block
         var ii: i64 = 0
         while ii < block.instr_count {
-            kernel = hlir_instr_to_gpu_ops(kernel, block.instrs[ii as usize])
+            var instr = block.instrs[ii as usize]
+            if instr.op_kind == HLIR_OP_STORE {
+                let store_ty = hlir_function_lookup_local_type(func, instr.store_value)
+                if store_ty.kind != HlirTypeKind::HlirTypeVoid {
+                    instr.ty = store_ty
+                }
+            }
+            kernel = hlir_instr_to_gpu_ops(kernel, instr)
             ii = ii + 1
         }
 
@@ -1668,27 +2303,21 @@ fn hlir_function_to_gpu_kernel(func: HlirFunction) -> GpuKernelIr with Mut, Pani
         } else if term.kind == HLIR_TERM_BRANCH {
             var bra_op = gpu_op_new()
             bra_op.opcode = GpuOpcode::GpuBra
+            bra_op.src_reg = 0
             bra_op.rhs_imm = term.branch_target
             bra_op.pred_reg = 0 - 1
             kernel = gpu_kernel_append_op(kernel, bra_op)
         } else if term.kind == HLIR_TERM_COND_BRANCH {
-            // Conditional branch: setp on condition, then predicated branch
-            var setp_op = gpu_op_new()
-            setp_op.opcode = GpuOpcode::GpuSetpNe
-            setp_op.dst_reg = 0
-            setp_op.lhs_reg = term.cond_value
-            setp_op.rhs_imm = 0
-            setp_op.ty = GpuType::GpuI32
-            kernel = gpu_kernel_append_op(kernel, setp_op)
-
             var bra_then = gpu_op_new()
             bra_then.opcode = GpuOpcode::GpuBra
+            bra_then.src_reg = 0
             bra_then.rhs_imm = term.then_block
-            bra_then.pred_reg = 0
+            bra_then.pred_reg = term.cond_value
             kernel = gpu_kernel_append_op(kernel, bra_then)
 
             var bra_else = gpu_op_new()
             bra_else.opcode = GpuOpcode::GpuBra
+            bra_else.src_reg = 0
             bra_else.rhs_imm = term.else_block
             bra_else.pred_reg = 0 - 1
             kernel = gpu_kernel_append_op(kernel, bra_else)
@@ -1927,9 +2556,31 @@ fn hlir_function_to_epistemic_gpu_kernel(func: HlirFunction) -> GpuKernelIr with
 // Section 26 — End-to-end pipeline orchestrators (Sprint 28)
 // ============================================================================
 
+fn hlir_ptx_append_kernel_module(dst: PtxBuf, src: PtxBuf, include_header: bool) -> PtxBuf with Mut, Panic {
+    var out = dst
+    var i: i64 = 0
+    if !include_header {
+        var newline_count: i64 = 0
+        while i < src.len && newline_count < 4 {
+            if src.data[i as usize] == 10 as i8 {
+                newline_count = newline_count + 1
+            }
+            i = i + 1
+        }
+    }
+    while i < src.len {
+        if out.len < 65536 {
+            out.data[out.len as usize] = src.data[i as usize]
+            out.len = out.len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
 // Extract all kernel functions from an HlirModule, lower each to GpuKernelIr,
 // then lower each to PTX and concatenate into a single PtxBuf.
-fn hlir_kernels_to_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
+pub(crate) fn hlir_kernels_to_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
     var combined = ptx_buf_new()
     let kcount = hlir_extract_kernel_count(module)
     if kcount == 0 {
@@ -1942,7 +2593,7 @@ fn hlir_kernels_to_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc
             let func = module.functions[fidx as usize]
             let gpu_kernel = hlir_function_to_gpu_kernel(func)
             let ptx = gpu_lower_to_ptx(gpu_kernel)
-            combined = ptx_buf_append(combined, ptx)
+            combined = hlir_ptx_append_kernel_module(combined, ptx, ki == 0)
         }
         ki = ki + 1
     }
@@ -1951,7 +2602,7 @@ fn hlir_kernels_to_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc
 
 // Extract all kernel functions, apply auto-tuning, then lower to PTX.
 // Auto-tuning detects workload patterns and sets optimal CTA dimensions.
-fn hlir_kernels_to_tuned_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
+pub(crate) fn hlir_kernels_to_tuned_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
     var combined = ptx_buf_new()
     let kcount = hlir_extract_kernel_count(module)
     if kcount == 0 {
@@ -1974,7 +2625,7 @@ fn hlir_kernels_to_tuned_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div,
                 gpu_kernel.shared_mem_bytes = tuned.shared_mem_bytes
             }
             let ptx = gpu_lower_to_ptx(gpu_kernel)
-            combined = ptx_buf_append(combined, ptx)
+            combined = hlir_ptx_append_kernel_module(combined, ptx, ki == 0)
         }
         ki = ki + 1
     }
@@ -1983,7 +2634,7 @@ fn hlir_kernels_to_tuned_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div,
 
 // Extract all kernel functions, attempt pairwise fusion, then lower to PTX.
 // Kernel fusion merges compatible adjacent kernels to reduce launch overhead.
-fn hlir_kernels_to_fused_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
+pub(crate) fn hlir_kernels_to_fused_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
     var combined = ptx_buf_new()
     let kcount = hlir_extract_kernel_count(module)
     if kcount == 0 {
@@ -2032,7 +2683,7 @@ fn hlir_kernels_to_fused_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div,
     var pi: i64 = 0
     while pi < fused_count {
         let ptx = gpu_lower_to_ptx(fused_kernels[pi as usize])
-        combined = ptx_buf_append(combined, ptx)
+        combined = hlir_ptx_append_kernel_module(combined, ptx, pi == 0)
         pi = pi + 1
     }
     combined
@@ -2040,7 +2691,7 @@ fn hlir_kernels_to_fused_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div,
 
 // Extract all kernel functions with epistemic shadow registers, then lower to PTX.
 // Each kernel gets companion uncertainty propagation ops for arithmetic operations.
-fn hlir_kernels_to_epistemic_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
+pub(crate) fn hlir_kernels_to_epistemic_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
     var combined = ptx_buf_new()
     let kcount = hlir_extract_kernel_count(module)
     if kcount == 0 {
@@ -2053,7 +2704,7 @@ fn hlir_kernels_to_epistemic_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, 
             let func = module.functions[fidx as usize]
             let gpu_kernel = hlir_function_to_epistemic_gpu_kernel(func)
             let ptx = gpu_lower_to_ptx(gpu_kernel)
-            combined = ptx_buf_append(combined, ptx)
+            combined = hlir_ptx_append_kernel_module(combined, ptx, ki == 0)
         }
         ki = ki + 1
     }
@@ -2113,6 +2764,7 @@ fn hlir_kernels_to_spirv(module: HlirModule) -> SpvBuf with Mut, Panic, Div, All
             var ops_src_a:   [i64; 256] = [0; 256]
             var ops_src_b:   [i64; 256] = [0; 256]
             var ops_types:   [i64; 256] = [0; 256]
+            var ops_imm:     [i64; 256] = [0; 256]
             var op_count: i64 = 0
             while op_count < gpu_kernel.op_count && op_count < 256 {
                 let op = gpu_kernel.ops[op_count as usize]
@@ -2126,7 +2778,7 @@ fn hlir_kernels_to_spirv(module: HlirModule) -> SpvBuf with Mut, Panic, Div, All
 
             let kname = name_to_string(gpu_kernel.kernel_name)
             let spv = gpu_lower_to_spirv(kname, gpu_kernel.param_count,
-                          ops_opcodes, ops_dst, ops_src_a, ops_src_b, ops_types, op_count)
+                          ops_opcodes, ops_dst, ops_src_a, ops_src_b, ops_types, ops_imm, op_count)
 
             // Append this kernel's words to combined output
             var wi: i64 = 0
@@ -2189,7 +2841,7 @@ fn hlir_kernels_to_epistemic_spirv(module: HlirModule) -> SpvBuf with Mut, Panic
     combined
 }
 
-struct GpuSpirvArtifact {
+pub struct GpuSpirvArtifact {
     data: [i8; 65536],
     len: i64,
     word_count: i64,
@@ -2217,16 +2869,16 @@ fn gpu_spirv_artifact_from_buf(buf: SpvBuf) -> GpuSpirvArtifact with Mut, Panic,
     out
 }
 
-fn hlir_kernels_to_spirv_artifact(module: HlirModule) -> GpuSpirvArtifact with Mut, Panic, Div, Alloc {
+pub(crate) fn hlir_kernels_to_spirv_artifact(module: HlirModule) -> GpuSpirvArtifact with Mut, Panic, Div, Alloc {
     gpu_spirv_artifact_from_buf(hlir_kernels_to_spirv(module))
 }
 
-fn hlir_kernels_to_epistemic_spirv_artifact(module: HlirModule) -> GpuSpirvArtifact with Mut, Panic, Div, Alloc {
+pub(crate) fn hlir_kernels_to_epistemic_spirv_artifact(module: HlirModule) -> GpuSpirvArtifact with Mut, Panic, Div, Alloc {
     gpu_spirv_artifact_from_buf(hlir_kernels_to_epistemic_spirv(module))
 }
 
 // Extract all kernel functions and lower to Metal MSL.
-fn hlir_kernels_to_metal(module: HlirModule) -> MetalBuf with Mut, Panic, Div, Alloc {
+pub(crate) fn hlir_kernels_to_metal(module: HlirModule) -> MetalBuf with Mut, Panic, Div, Alloc {
     var combined = metal_buf_new()
     let kcount = hlir_extract_kernel_count(module)
     var ki: i64 = 0
@@ -2245,7 +2897,114 @@ fn hlir_kernels_to_metal(module: HlirModule) -> MetalBuf with Mut, Panic, Div, A
 
 // Extract all kernel functions and lower to CUDA Tile IR (MLIR dialect text).
 // Returns a TileBuf containing all kernels as cuda_tile.module blocks.
-fn hlir_kernels_to_cuda_tile(module: HlirModule) -> TileBuf with Mut, Panic, Div, Alloc {
+// Map GpuOpcode enum variant → K-AXI numeric tag (matches gpu_lower_to_kaxi constants).
+fn gpu_opcode_to_kaxi_tag(op: GpuOpcode) -> i64 {
+    if op == GpuOpcode::GpuGetTid      { return GpuOpcodeGetTid }
+    if op == GpuOpcode::GpuCvt         { return GpuOpcodeCvt }
+    if op == GpuOpcode::GpuMulImm      { return GpuOpcodeMulImm }
+    if op == GpuOpcode::GpuAdd         { return GpuOpcodeAdd }
+    if op == GpuOpcode::GpuSub         { return GpuOpcodeSub }
+    if op == GpuOpcode::GpuMul         { return GpuOpcodeMul }
+    if op == GpuOpcode::GpuDiv         { return GpuOpcodeDiv }
+    if op == GpuOpcode::GpuMax         { return GpuOpcodeMax }
+    if op == GpuOpcode::GpuMin         { return GpuOpcodeMin }
+    if op == GpuOpcode::GpuAnd         { return GpuOpcodeAnd }
+    if op == GpuOpcode::GpuOr          { return GpuOpcodeOr }
+    if op == GpuOpcode::GpuXor         { return GpuOpcodeXor }
+    if op == GpuOpcode::GpuShl         { return GpuOpcodeShl }
+    if op == GpuOpcode::GpuLoadGlobal  { return GpuOpcodeLoadGlobal }
+    if op == GpuOpcode::GpuStoreGlobal { return GpuOpcodeStoreGlobal }
+    if op == GpuOpcode::GpuRet         { return GpuOpcodeRet }
+    if op == GpuOpcode::GpuFma         { return GpuOpcodeFma }
+    if op == GpuOpcode::GpuGetBid      { return GpuOpcodeGetBid }
+    if op == GpuOpcode::GpuGetNtid     { return GpuOpcodeGetNtid }
+    if op == GpuOpcode::GpuAddImm      { return GpuOpcodeAddImm }
+    if op == GpuOpcode::GpuBarrierSync { return GpuOpcodeBarrierSync }
+    if op == GpuOpcode::GpuSetpLt      { return GpuOpcodeSetpLt }
+    if op == GpuOpcode::GpuSetpLe      { return GpuOpcodeSetpLe }
+    if op == GpuOpcode::GpuSetpEq      { return GpuOpcodeSetpEq }
+    if op == GpuOpcode::GpuSetpGe      { return GpuOpcodeSetpGe }
+    if op == GpuOpcode::GpuSelp        { return GpuOpcodeSelp }
+    if op == GpuOpcode::GpuAtomicAdd   { return GpuOpcodeAtomicAdd }
+    if op == GpuOpcode::GpuAtomicSub   { return GpuOpcodeAtomicSub }
+    if op == GpuOpcode::GpuAtomicMin   { return GpuOpcodeAtomicMin }
+    if op == GpuOpcode::GpuAtomicMax   { return GpuOpcodeAtomicMax }
+    if op == GpuOpcode::GpuSqrt        { return GpuOpcodeSqrt }
+    if op == GpuOpcode::GpuAbs         { return GpuOpcodeAbs }
+    if op == GpuOpcode::GpuNeg         { return GpuOpcodeNeg }
+    if op == GpuOpcode::GpuSetpGt      { return GpuOpcodeSetpGt }
+    if op == GpuOpcode::GpuSetpNe      { return GpuOpcodeSetpNe }
+    if op == GpuOpcode::GpuLoadParam   { return GpuOpcodeLoadParam }
+    0
+}
+
+// Extract all kernel functions and lower to K-AXI epistemic assembly.
+// Returns a KaxiAsmBuf containing all kernels concatenated with separators.
+pub(crate) fn hlir_kernels_to_kaxi(module: HlirModule) -> KaxiAsmBuf with Mut, Panic, Div, Alloc {
+    var combined = kaxi_asm_new()
+    let kcount = hlir_extract_kernel_count(module)
+    if kcount == 0 {
+        return combined
+    }
+    var ki: i64 = 0
+    while ki < kcount {
+        let fidx = hlir_get_kernel_index(module, ki)
+        if fidx >= 0 {
+            let func = module.functions[fidx as usize]
+            let gpu_kernel = hlir_function_to_gpu_kernel(func)
+
+            // Flatten GpuKernelIr ops into the flat arrays expected by gpu_lower_to_kaxi_typed
+            var ops_opcodes: [i64; 256] = [0; 256]
+            var ops_dst:     [i64; 256] = [0; 256]
+            var ops_src_a:   [i64; 256] = [0; 256]
+            var ops_src_b:   [i64; 256] = [0; 256]
+            var ops_imm:     [i64; 256] = [0; 256]
+            var ops_types:   [i64; 256] = [0; 256]
+            var op_count: i64 = 0
+            while op_count < gpu_kernel.op_count && op_count < 256 {
+                let op = gpu_kernel.ops[op_count as usize]
+                let tag = gpu_opcode_to_kaxi_tag(op.opcode)
+                ops_opcodes[op_count as usize] = tag
+                ops_dst[op_count as usize]     = op.dst_reg
+                var op_type_code: i64 = 0
+                if op.ty == GpuType::GpuF64 {
+                    op_type_code = 1
+                } else if op.ty == GpuType::GpuI32 {
+                    op_type_code = 2
+                }
+                ops_types[op_count as usize]   = op_type_code
+                if op.opcode == GpuOpcode::GpuLoadGlobal {
+                    ops_src_a[op_count as usize] = op.addr_reg
+                    ops_src_b[op_count as usize] = 0
+                } else if op.opcode == GpuOpcode::GpuStoreGlobal {
+                    ops_src_a[op_count as usize] = op.src_reg
+                    ops_src_b[op_count as usize] = op.addr_reg
+                } else if op.opcode == GpuOpcode::GpuMulImm || op.opcode == GpuOpcode::GpuAddImm {
+                    ops_src_a[op_count as usize] = 0
+                    ops_src_b[op_count as usize] = 0
+                    ops_imm[op_count as usize]   = op.rhs_imm
+                } else if op.opcode == GpuOpcode::GpuLoadParam {
+                    ops_src_a[op_count as usize] = 0
+                    ops_src_b[op_count as usize] = 0
+                    ops_imm[op_count as usize]   = op.param_idx
+                } else {
+                    ops_src_a[op_count as usize] = op.lhs_reg
+                    ops_src_b[op_count as usize] = op.rhs_reg
+                }
+                op_count = op_count + 1
+            }
+
+            let kaxi = gpu_lower_to_kaxi_typed(ops_opcodes, ops_dst, ops_src_a, ops_src_b, ops_imm, ops_types, op_count)
+            combined = kaxi_asm_buf_append(combined, kaxi)
+        }
+        ki = ki + 1
+    }
+    combined
+}
+
+// Extract all kernel functions and lower to CUDA Tile IR (MLIR dialect text).
+// Returns a TileBuf containing all kernels as cuda_tile.module blocks.
+pub(crate) fn hlir_kernels_to_cuda_tile(module: HlirModule) -> TileBuf with Mut, Panic, Div, Alloc {
     var combined = tile_buf_new()
     let kcount = hlir_extract_kernel_count(module)
     if kcount == 0 {
@@ -2340,7 +3099,7 @@ fn spec_is_heavy_math_kernel(kernel: GpuKernelIr) -> bool {
 // Extract all kernel functions and apply epistemic kernel fusion (Novelty 4),
 // then lower to PTX. Fuses kernels with provenance XOR weighting + uncertainty penalties.
 // Production implementation: inline epistemic pairwise fusion with provenance scoring.
-fn hlir_kernels_to_epistemic_fused_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
+pub(crate) fn hlir_kernels_to_epistemic_fused_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
     var combined = ptx_buf_new()
     let kcount = hlir_extract_kernel_count(module)
     if kcount == 0 {
@@ -2413,7 +3172,7 @@ fn hlir_kernels_to_epistemic_fused_ptx(module: HlirModule) -> PtxBuf with Mut, P
     var pi: i64 = 0
     while pi < fused_count {
         let ptx = gpu_lower_to_ptx(fused_kernels[pi as usize])
-        combined = ptx_buf_append(combined, ptx)
+        combined = hlir_ptx_append_kernel_module(combined, ptx, pi == 0)
         pi = pi + 1
     }
 
@@ -2423,7 +3182,7 @@ fn hlir_kernels_to_epistemic_fused_ptx(module: HlirModule) -> PtxBuf with Mut, P
 // Extract all kernel functions and apply speculative epistemic execution (Novelty 5),
 // then lower to PTX. Emits uncertainty-threshold skip guards for refinement kernels.
 // Production implementation: classify kernels, emit speculative plan metadata.
-fn hlir_kernels_to_speculative_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
+pub(crate) fn hlir_kernels_to_speculative_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
     var combined = ptx_buf_new()
     let kcount = hlir_extract_kernel_count(module)
     if kcount == 0 {
@@ -2475,7 +3234,7 @@ fn hlir_kernels_to_speculative_ptx(module: HlirModule) -> PtxBuf with Mut, Panic
             combined = ptx_push_str(combined, "\n")
         }
         let ptx = gpu_lower_to_ptx(kernels[si as usize])
-        combined = ptx_buf_append(combined, ptx)
+        combined = hlir_ptx_append_kernel_module(combined, ptx, si == 0)
         si = si + 1
     }
 
@@ -2486,7 +3245,7 @@ fn hlir_kernels_to_speculative_ptx(module: HlirModule) -> PtxBuf with Mut, Panic
 // then lower to PTX. Builds kernel DAG, assigns CUDA streams via provenance XOR,
 // emits stream assignment metadata as PTX comments.
 // Production implementation: full Kahn's topological sort + greedy stream coloring.
-fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
+pub(crate) fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
     var combined = ptx_buf_new()
     let kcount = hlir_extract_kernel_count(module)
     if kcount == 0 {
@@ -2515,8 +3274,10 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
         pi = pi + 1
     }
 
-    // Phase 3: Build dependency graph (adjacency list)
-    var deps: [[i64; 16]; 64] = [[0; 16]; 64]
+    // Phase 3: Build dependency graph (adjacency list).
+    // Flat [i64; 1024] avoids souc's nested-array-type parse bug.
+    // deps[kernel_idx * 16 + dep_slot] stores the dependency kernel index.
+    var deps: [i64; 1024] = [0; 1024]
     var dep_count: [i64; 64] = [0; 64]
     var di: i64 = 0
     while di < actual {
@@ -2527,7 +3288,7 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
                 if overlap > 0 && prov_tags[di as usize] & prov_tags[dj as usize] != 0 {
                     // kernel dj depends on di
                     if dep_count[dj as usize] < 16 {
-                        deps[dj as usize][dep_count[dj as usize] as usize] = di
+                        deps[(dj * 16 + dep_count[dj as usize]) as usize] = di
                         dep_count[dj as usize] = dep_count[dj as usize] + 1
                     }
                 }
@@ -2573,7 +3334,7 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
         while fi < actual {
             var dci: i64 = 0
             while dci < dep_count[fi as usize] {
-                if deps[fi as usize][dci as usize] == node {
+                if deps[(fi * 16 + dci) as usize] == node {
                     in_degree[fi as usize] = in_degree[fi as usize] - 1
                     if in_degree[fi as usize] == 0 {
                         queue[rear as usize] = fi
@@ -2607,7 +3368,7 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
             var next_stream: i64 = 0
             var dci: i64 = 0
             while dci < dep_count[node as usize] {
-                let dep = deps[node as usize][dci as usize]
+                let dep = deps[(node * 16 + dci) as usize]
                 if stream_ids[dep as usize] == next_stream {
                     next_stream = next_stream + 1
                 }
@@ -2642,7 +3403,7 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
         var dci2: i64 = 0
         while dci2 < dep_count[di2 as usize] {
             combined = ptx_push_str(combined, "// SOUNIO_DEP from=")
-            combined = gpu_push_i64(combined, deps[di2 as usize][dci2 as usize])
+            combined = gpu_push_i64(combined, deps[(di2 * 16 + dci2) as usize])
             combined = ptx_push_str(combined, " to=")
             combined = gpu_push_i64(combined, di2)
             combined = ptx_push_str(combined, "\n")
@@ -2653,6 +3414,7 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
 
     // Phase 7: Lower each kernel in topological order to PTX
     var loi: i64 = 0
+    var emitted_count: i64 = 0
     while loi < topo_count {
         // Find node at this topo position
         var node: i64 = -1
@@ -2667,7 +3429,8 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
 
         if node >= 0 {
             let ptx = gpu_lower_to_ptx(kernels[node as usize])
-            combined = ptx_buf_append(combined, ptx)
+            combined = hlir_ptx_append_kernel_module(combined, ptx, emitted_count == 0)
+            emitted_count = emitted_count + 1
         }
 
         loi = loi + 1
@@ -2848,7 +3611,7 @@ fn ptx_meta_spec_guards(ptx: PtxBuf, guard_kernels: &! [i64; 64]) -> i64 with Mu
 
 // Emit production DAG host glue file with multi-stream launch.
 // Parses SOUNIO_DAG metadata from PTX, generates functional .sio code.
-fn gpu_emit_dag_host_glue(ptx: PtxBuf, output_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
+pub(crate) fn gpu_emit_dag_host_glue(ptx: PtxBuf, output_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
     let host_path = output_path ++ "_dag_host.sio"
 
     // Phase 1: Parse metadata from the PTX buffer
@@ -2959,7 +3722,7 @@ fn gpu_emit_dag_host_glue(ptx: PtxBuf, output_path: string) -> bool with IO, Mut
 
 // Emit production speculative host glue file with epsilon-threshold skip guards.
 // Parses SOUNIO_SPEC metadata from PTX, generates conditional launch code.
-fn gpu_emit_spec_host_glue(ptx: PtxBuf, output_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
+pub(crate) fn gpu_emit_spec_host_glue(ptx: PtxBuf, output_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
     let host_path = output_path ++ "_spec_host.sio"
 
     // Phase 1: Parse metadata

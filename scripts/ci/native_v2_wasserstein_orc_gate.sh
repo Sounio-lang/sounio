@@ -8,9 +8,9 @@ OUT_DIR="${SOUNIO_NATIVE_V2_WASSERSTEIN_DIR:-$(mktemp -d /tmp/sounio-native-v2-w
 
 echo "[native-v2-wasserstein] out=$OUT_DIR"
 echo "[native-v2-wasserstein] Door Φ: Wasserstein Distance + Ollivier-Ricci Curvature"
-echo "[native-v2-wasserstein] W₁ = Earth Mover's Distance — canonical metric on probability distributions"
-echo "[native-v2-wasserstein] ORC κ(x,y) = 1 - W₁(mₓ,mᵧ)/d(x,y) — curvature of graph geometry"
-echo "[native-v2-wasserstein] Connection: Paper 4 — ORC on ABIDE-I brain connectomes"
+echo "[native-v2-wasserstein] W₁ = Earth Mover's Distance -- canonical metric on probability distributions"
+echo "[native-v2-wasserstein] ORC κ(x,y) = 1 - W₁(mₓ,mᵧ)/d(x,y) -- curvature of graph geometry"
+echo "[native-v2-wasserstein] Connection: Paper 4 -- ORC on ABIDE-I brain connectomes"
 echo "[native-v2-wasserstein] First compiler with W₁ + ORC as IR primitives"
 
 MANIFEST_FILE="$(mktemp /tmp/wasserstein-manifest.XXXXXX.tsv)"

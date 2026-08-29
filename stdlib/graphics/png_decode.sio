@@ -1,0 +1,424 @@
+// stdlib/graphics/png_decode.sio — Pure-Sounio PNG decoder
+//
+// Decodes PNG files produced by stdlib/graphics/png.sio (and compatible files).
+// Supports:
+//   - Color types 2 (RGB) and 6 (RGBA)
+//   - 8-bit depth only
+//   - Stored DEFLATE blocks (BTYPE=00)
+//   - Fixed Huffman DEFLATE blocks (BTYPE=01) — literal-only, no LZ77
+//   - All PNG filter types (None, Sub, Up, Average, Paeth)
+//
+// Limitations:
+//   - Max image size: 256×256 (matches Surface capacity)
+//   - No interlacing (interlace must be 0)
+//   - No 16-bit, indexed, or grayscale color types
+//   - No dynamic Huffman (BTYPE=10) blocks
+
+use graphics::surface::{Surface, surface_new}
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const MAX_RAW_SIZE: i64 = 300000
+const MAX_SCANLINE: i64 = 1280
+const MAX_WIDTH: i64 = 256
+const MAX_HEIGHT: i64 = 256
+
+// ============================================================================
+// BYTE READERS
+// ============================================================================
+
+fn read_u8(data: string, offset: i64, data_len: i64) -> i64 {
+    if offset < 0 || offset >= data_len { return 0 }
+    let v = str_char_at(data, offset)
+    if v < 0 { v + 256 } else { v }
+}
+
+fn read_u32_be(data: string, offset: i64, data_len: i64) -> i64 {
+    (read_u8(data, offset, data_len) << 24) |
+    (read_u8(data, offset + 1, data_len) << 16) |
+    (read_u8(data, offset + 2, data_len) << 8) |
+    read_u8(data, offset + 3, data_len)
+}
+
+fn check_png_sig(data: string, data_len: i64) -> bool {
+    data_len >= 8 &&
+    read_u8(data, 0, data_len) == 137 &&
+    read_u8(data, 1, data_len) == 80 &&
+    read_u8(data, 2, data_len) == 78 &&
+    read_u8(data, 3, data_len) == 71 &&
+    read_u8(data, 4, data_len) == 13 &&
+    read_u8(data, 5, data_len) == 10 &&
+    read_u8(data, 6, data_len) == 26 &&
+    read_u8(data, 7, data_len) == 10
+}
+
+fn chunk_type_eq(data: string, offset: i64, data_len: i64,
+                 a: i64, b: i64, c: i64, d: i64) -> bool {
+    offset + 4 <= data_len &&
+    read_u8(data, offset, data_len) == a &&
+    read_u8(data, offset + 1, data_len) == b &&
+    read_u8(data, offset + 2, data_len) == c &&
+    read_u8(data, offset + 3, data_len) == d
+}
+
+// ============================================================================
+// BIT READER (for fixed Huffman decode)
+// ============================================================================
+
+struct BitReader {
+    pos: i64,
+    end: i64,
+    bits: i64,
+    nbits: i64,
+}
+
+fn br_new(pos: i64, end: i64) -> BitReader {
+    BitReader { pos: pos, end: end, bits: 0, nbits: 0 }
+}
+
+fn br_read_bits(data: &[i64; 300000], bra: BitReader, n: i64) -> (BitReader, i64) with Mut {
+    var b = bra
+    while b.nbits < n && b.pos < b.end {
+        let byte = data[b.pos]
+        b.bits = b.bits | (byte << b.nbits)
+        b.nbits = b.nbits + 8
+        b.pos = b.pos + 1
+    }
+    let mask = (1 << n) - 1
+    let result = b.bits & mask
+    b.bits = b.bits >> n
+    b.nbits = b.nbits - n
+    (b, result)
+}
+
+fn br_read_byte(data: &[i64; 300000], bra: BitReader) -> (BitReader, i64) with Mut {
+    var b = bra
+    if b.nbits >= 8 {
+        let result = b.bits & 0xFF
+        b.bits = b.bits >> 8
+        b.nbits = b.nbits - 8
+        return (b, result)
+    }
+    if b.pos < b.end {
+        let result = data[b.pos]
+        b.pos = b.pos + 1
+        return (b, result)
+    }
+    (b, 0)
+}
+
+fn br_skip_to_byte(bra: BitReader) -> BitReader with Mut {
+    var b = bra
+    b.bits = 0
+    b.nbits = 0
+    b
+}
+
+// ============================================================================
+// FIXED HUFFMAN DECODE
+// ============================================================================
+
+fn reverse_bits(v: i64, n: i64) -> i64 with Mut {
+    var r: i64 = 0
+    var i: i64 = 0
+    var x: i64 = v
+    while i < n {
+        r = (r << 1) | (x & 1)
+        x = x >> 1
+        i = i + 1
+    }
+    r
+}
+
+fn decode_fixed_symbol(data: &[i64; 300000], bra: BitReader) -> (BitReader, i64) with Mut, Panic {
+    var b = bra
+    let v7 = br_read_bits(data, b, 7)
+    b = v7.0
+    let orig7 = reverse_bits(v7.1, 7)
+    if orig7 <= 23 {
+        return (b, 256 + orig7)
+    }
+    // Not a 7-bit code; read 1 more bit to make 8
+    let extra1 = br_read_bits(data, b, 1)
+    b = extra1.0
+    let v8 = v7.1 | (extra1.1 << 7)
+    let orig8 = reverse_bits(v8, 8)
+    if orig8 >= 48 && orig8 <= 191 {
+        return (b, orig8 - 48)
+    }
+    if orig8 >= 192 && orig8 <= 199 {
+        return (b, orig8 + 88)
+    }
+    // Not an 8-bit code; read 1 more bit to make 9
+    let extra2 = br_read_bits(data, b, 1)
+    b = extra2.0
+    let v9 = v8 | (extra2.1 << 8)
+    let orig9 = reverse_bits(v9, 9)
+    if orig9 >= 400 && orig9 <= 511 {
+        return (b, orig9 - 256)
+    }
+    (b, -1)
+}
+
+// ============================================================================
+// ADLER32
+// ============================================================================
+
+fn compute_adler32(data: &[i64; 300000], len: i64) -> i64 with Mut, Panic, Div {
+    var a: i64 = 1
+    var b: i64 = 0
+    var i: i64 = 0
+    while i < len {
+        a = (a + data[i]) % 65521
+        b = (b + a) % 65521
+        i = i + 1
+    }
+    (b << 16) | a
+}
+
+// ============================================================================
+// DEFLATE DECOMPRESSION
+// ============================================================================
+
+fn decompress_idat(idat: &[i64; 300000], idat_len: i64,
+                   raw: &![i64; 300000]) -> i64 with Mut, Panic, Div {
+    if idat_len < 6 { return 0 }
+
+    let zlib_cmf = idat[0]
+    let zlib_flg = idat[1]
+
+    if (zlib_cmf & 0x0F) != 8 { return 0 }
+
+    let adler_offset = idat_len - 4
+    if adler_offset < 2 { return 0 }
+
+    let deflate_start = 2
+    let deflate_end = adler_offset
+
+    var br = br_new(deflate_start, deflate_end)
+    var raw_pos: i64 = 0
+    var done = false
+
+    while !done && raw_pos < MAX_RAW_SIZE {
+        let bfinal_res = br_read_bits(idat, br, 1)
+        br = bfinal_res.0
+        let bfinal = bfinal_res.1
+
+        let btype_res = br_read_bits(idat, br, 2)
+        br = btype_res.0
+        let btype = btype_res.1
+
+        if btype == 0 {
+            br = br_skip_to_byte(br)
+            let len_lo = br_read_byte(idat, br)
+            br = len_lo.0
+            let len_hi = br_read_byte(idat, br)
+            br = len_hi.0
+            let nlen_lo = br_read_byte(idat, br)
+            br = nlen_lo.0
+            let nlen_hi = br_read_byte(idat, br)
+            br = nlen_hi.0
+
+            let len = len_lo.1 | (len_hi.1 << 8)
+            let nlen = nlen_lo.1 | (nlen_hi.1 << 8)
+            if (len ^ nlen) != 0xFFFF { return 0 }
+
+            var i: i64 = 0
+            while i < len && raw_pos < MAX_RAW_SIZE {
+                let byte_res = br_read_byte(idat, br)
+                br = byte_res.0
+                (*raw)[raw_pos] = byte_res.1
+                raw_pos = raw_pos + 1
+                i = i + 1
+            }
+        } else if btype == 1 {
+            var sym = 0
+            while sym != 256 && raw_pos < MAX_RAW_SIZE {
+                let sym_res = decode_fixed_symbol(idat, br)
+                br = sym_res.0
+                sym = sym_res.1
+                if sym < 0 { return 0 }
+                if sym < 256 {
+                    (*raw)[raw_pos] = sym
+                    raw_pos = raw_pos + 1
+                }
+            }
+        } else {
+            return 0
+        }
+
+        done = bfinal == 1
+    }
+
+    raw_pos
+}
+
+// ============================================================================
+// FILTER RECONSTRUCTION
+// ============================================================================
+
+fn paeth_predictor(a: i64, b_val: i64, c: i64) -> i64 {
+    let p = a + b_val - c
+    let pa = if p >= a { p - a } else { a - p }
+    let pb = if p >= b_val { p - b_val } else { b_val - p }
+    let pc = if p >= c { p - c } else { c - p }
+    if pa <= pb && pa <= pc { a }
+    else if pb <= pc { b_val }
+    else { c }
+}
+
+fn reconstruct_scanlines(raw: &[i64; 300000], raw_len: i64,
+                         width: i64, height: i64, bpp: i64) -> Surface with Mut, Panic, Div {
+    let scanline_size = 1 + width * bpp
+    let expected = height * scanline_size
+    if raw_len < expected {
+        return surface_new(1, 1)
+    }
+
+    var s = surface_new(width, height)
+    var prev: [i64; 1280] = [0; 1280]
+    var curr: [i64; 1280] = [0; 1280]
+
+    var y: i64 = 0
+    while y < height {
+        let filter = raw[y * scanline_size]
+        var i: i64 = 0
+        while i < width * bpp {
+            let raw_val = raw[y * scanline_size + 1 + i]
+            let a = if i >= bpp { curr[i - bpp] } else { 0 }
+            let b_val = prev[i]
+            let c = if i >= bpp { prev[i - bpp] } else { 0 }
+
+            let recon = if filter == 0 {
+                raw_val
+            } else if filter == 1 {
+                (raw_val + a) & 0xFF
+            } else if filter == 2 {
+                (raw_val + b_val) & 0xFF
+            } else if filter == 3 {
+                (raw_val + ((a + b_val) >> 1)) & 0xFF
+            } else if filter == 4 {
+                (raw_val + paeth_predictor(a, b_val, c)) & 0xFF
+            } else {
+                raw_val
+            }
+
+            curr[i] = recon
+            i = i + 1
+        }
+
+        var x: i64 = 0
+        while x < width {
+            let sidx = y * width + x
+            let bi = x * bpp
+            s.r[sidx] = curr[bi]
+            s.g[sidx] = curr[bi + 1]
+            s.b[sidx] = curr[bi + 2]
+            if bpp == 4 {
+                s.a[sidx] = curr[bi + 3]
+            } else {
+                s.a[sidx] = 255
+            }
+            x = x + 1
+        }
+
+        var j: i64 = 0
+        while j < width * bpp {
+            prev[j] = curr[j]
+            j = j + 1
+        }
+
+        y = y + 1
+    }
+
+    s
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+pub fn png_decode_surface(filename: string) -> Surface with IO, Mut, Panic, Div {
+    let data = read_file(filename)
+    let data_len = file_size(filename)
+
+    if data_len < 33 || !check_png_sig(data, data_len) {
+        return surface_new(1, 1)
+    }
+
+    var width: i64 = 0
+    var height: i64 = 0
+    var color_type: i64 = 0
+    var bit_depth: i64 = 0
+    var compression: i64 = 0
+    var filter_method: i64 = 0
+    var interlace: i64 = 0
+
+    var idat_buf: [i64; 300000] = [0; 300000]
+    var idat_pos: i64 = 0
+
+    var pos: i64 = 8
+    while pos + 12 <= data_len {
+        let chunk_len = read_u32_be(data, pos, data_len)
+        if chunk_len < 0 || pos + 12 + chunk_len > data_len { break }
+
+        if chunk_type_eq(data, pos + 4, data_len, 73, 72, 68, 82) {
+            if chunk_len != 13 { break }
+            width = read_u32_be(data, pos + 8, data_len)
+            height = read_u32_be(data, pos + 12, data_len)
+            bit_depth = read_u8(data, pos + 16, data_len)
+            color_type = read_u8(data, pos + 17, data_len)
+            compression = read_u8(data, pos + 18, data_len)
+            filter_method = read_u8(data, pos + 19, data_len)
+            interlace = read_u8(data, pos + 20, data_len)
+        } else if chunk_type_eq(data, pos + 4, data_len, 73, 68, 65, 84) {
+            var i: i64 = 0
+            while i < chunk_len && idat_pos < MAX_RAW_SIZE {
+                idat_buf[idat_pos] = read_u8(data, pos + 8 + i, data_len)
+                idat_pos = idat_pos + 1
+                i = i + 1
+            }
+        } else if chunk_type_eq(data, pos + 4, data_len, 73, 69, 78, 68) {
+            break
+        }
+
+        pos = pos + 12 + chunk_len
+    }
+
+    if width <= 0 || width > MAX_WIDTH || height <= 0 || height > MAX_HEIGHT {
+        return surface_new(1, 1)
+    }
+    if bit_depth != 8 {
+        return surface_new(1, 1)
+    }
+    if color_type != 2 && color_type != 6 {
+        return surface_new(1, 1)
+    }
+    if compression != 0 || filter_method != 0 || interlace != 0 {
+        return surface_new(1, 1)
+    }
+    if idat_pos < 6 {
+        return surface_new(1, 1)
+    }
+
+    let bpp = if color_type == 6 { 4 } else { 3 }
+
+    var raw_buf: [i64; 300000] = [0; 300000]
+    let raw_len = decompress_idat(&idat_buf, idat_pos, &!raw_buf)
+    if raw_len <= 0 {
+        return surface_new(1, 1)
+    }
+
+    let expected_adler = (idat_buf[idat_pos - 4] << 24) |
+                         (idat_buf[idat_pos - 3] << 16) |
+                         (idat_buf[idat_pos - 2] << 8) |
+                         idat_buf[idat_pos - 1]
+    let computed_adler = compute_adler32(&raw_buf, raw_len)
+    if expected_adler != computed_adler {
+        return surface_new(1, 1)
+    }
+
+    reconstruct_scanlines(&raw_buf, raw_len, width, height, bpp)
+}

@@ -1,0 +1,145 @@
+//@ run-pass
+//@ expect-stdout: INVARIANT HOLDS
+// FRENTE B — the pre-geometric BOUNDARY of the sedenion zero-divisor set, executed exactly.
+//
+// The 168-census (sedenion_zd_census_168.sio) GENERATES its 84 primitive representatives with the
+// filter "hi in 9..15 and (lo XOR hi) != 8" — it silently drops the e8 family. This test proves that
+// filter is not an arbitrary convenience but the exact ALGEBRAIC BOUNDARY of annihilation:
+//
+//   Of the 112 mixed-half signed two-support primitives  v = e_lo (+/-) e_hi  (lo in 1..7, hi in
+//   8..15, sign in {+,-}), EXACTLY 84 participate in some sedenion zero-divisor pair and 28 in NONE;
+//   and the 28 dead ones are EXACTLY  { hi == 8 }  U  { lo XOR hi == 8 }  — the doubling unit
+//   e8 (the imaginary that doubles the octonions O into the sedenions S = O (+) O.e8) and its
+//   xor-grade-8 diagonal  e_lo (+/-) e_{lo+8} = e_lo (1 (+/-) e8).
+//
+// Interpretation: the zero-divisor geometry lives strictly AWAY from the doubling seam. A mixed-half
+// primitive annihilates iff it avoids e8 both as a support element and as an xor-grade.
+//
+// Decidable integer equality over Z, no tolerance. SELF-CONTAINED (Lean-bridge prim_prod; no
+// [i64;2048] engine import -> no #637). Cross-verified element-wise vs scripts/research/
+// sedenion_e8_boundary_oracle.py by scripts/ci/sedenion_e8_boundary_gate.sh.
+
+// Cayley-Dickson sign at tower level `bits`: e_a * e_b = cd_sigma_c(a,b) * e_{a XOR b}, returns +/-1.
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+
+fn sed_sigma(a: i64, b: i64) -> i64 with Mut, Panic, Div { cd_sigma_c(a, b, 4) }
+
+// k-th integer coefficient of the product of primitives u = e_ulo (+/-) e_uhi, v = e_vlo (+/-) e_vhi.
+fn prim_prod(ulo: i64, uhi: i64, uneg: i64, vlo: i64, vhi: i64, vneg: i64, k: i64) -> i64 with Mut, Panic, Div {
+    let su = if uneg == 1 { 0 - 1 } else { 1 }
+    let sv = if vneg == 1 { 0 - 1 } else { 1 }
+    var acc = 0
+    if (ulo ^ vlo) == k { acc = acc + sed_sigma(ulo, vlo) }
+    if (ulo ^ vhi) == k { acc = acc + sv * sed_sigma(ulo, vhi) }
+    if (uhi ^ vlo) == k { acc = acc + su * sed_sigma(uhi, vlo) }
+    if (uhi ^ vhi) == k { acc = acc + su * sv * sed_sigma(uhi, vhi) }
+    acc
+}
+
+// The exact product is the zero vector across all 16 components (decidable).
+fn is_zero_pair(ulo: i64, uhi: i64, uneg: i64, vlo: i64, vhi: i64, vneg: i64) -> bool with Mut, Panic, Div {
+    var k = 0
+    while k < 16 {
+        if prim_prod(ulo, uhi, uneg, vlo, vhi, vneg, k) != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // Enumerate the 112 mixed-half signed primitives: lo 1..7, hi 8..15, neg in {0,1}.
+    var clo = [0; 112]
+    var chi = [0; 112]
+    var cneg = [0; 112]
+    var n = 0
+    var lo = 1
+    while lo <= 7 {
+        var hi = 8
+        while hi <= 15 {
+            var neg = 0
+            while neg <= 1 {
+                clo[n as usize] = lo
+                chi[n as usize] = hi
+                cneg[n as usize] = neg
+                n = n + 1
+                neg = neg + 1
+            }
+            hi = hi + 1
+        }
+        lo = lo + 1
+    }
+
+    // Participation: candidate i participates iff some candidate j gives a zero product.
+    var npart = 0
+    var nexcl = 0
+    var inv_ok = 1
+    var touch8 = 0
+    var diag = 0
+    var i = 0
+    while i < n {
+        var parti = false
+        var j = 0
+        while j < n {
+            if is_zero_pair(clo[i as usize], chi[i as usize], cneg[i as usize],
+                            clo[j as usize], chi[j as usize], cneg[j as usize]) {
+                parti = true
+            }
+            j = j + 1
+        }
+        let lo_i = clo[i as usize]
+        let hi_i = chi[i as usize]
+        let in_e8 = (hi_i == 8) || ((lo_i ^ hi_i) == 8)
+        if parti {
+            npart = npart + 1
+            if in_e8 { inv_ok = 0 }
+        } else {
+            nexcl = nexcl + 1
+            if !in_e8 { inv_ok = 0 }
+            if hi_i == 8 { touch8 = touch8 + 1 }
+            if (lo_i ^ hi_i) == 8 { diag = diag + 1 }
+            // Emit each excluded triple as ONE encoded int (lo*10000+hi*100+neg), with an EXPLICIT
+            // trailing newline. (print_int's newline behavior differs across souc builds — stage2
+            // appends one, bin/souc does not — so we add our own to keep "EXCL <code>" one-per-line
+            // under BOTH, for the element-wise cross-check in sedenion_e8_boundary_gate.sh.)
+            print("EXCL ")
+            print_int(lo_i * 10000 + hi_i * 100 + cneg[i as usize])
+            print("\n")
+        }
+        i = i + 1
+    }
+
+    print("PARTICIPATE ")
+    print_int(npart as i64)
+    print("\n")
+    print("EXCLUDED ")
+    print_int(nexcl as i64)
+    print("\n")
+    print("TOUCH_E8 ")
+    print_int(touch8 as i64)
+    print("\n")
+    print("DIAGONAL ")
+    print_int(diag as i64)
+    print("\n")
+    // The single load-bearing verdict (checked by the run-pass output gate).
+    if inv_ok == 1 && npart == 84 && nexcl == 28 && touch8 == 14 && diag == 14 {
+        println("INVARIANT HOLDS")
+    } else {
+        println("INVARIANT FAILS")
+    }
+}

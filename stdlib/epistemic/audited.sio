@@ -1,0 +1,113 @@
+// stdlib/epistemic/audited.sio
+//
+// Audited<T> — witness-bearing surgery (G9).
+//
+// WHAT THIS MODULE ACTUALLY EMITS (audited 2026-07-25):
+//   A surgical operation records, in a module-level buffer, (a) a fixed
+//   ASCII header naming the relevant Lean theorem
+//   (`[audit] surgical_op=unlearn witness=kernel_exact`) and (b) an L2
+//   residual, checked against a 1e-10 tolerance by `witness_is_exact_zd`.
+//   The named theorem — `unlearning_kernel_exact` — is a PRE-EXISTING
+//   result about the algebra, verified once by `native_decide`; it is not
+//   re-derived per operation.
+//
+// CORRECTED OVER-CLAIMS — this module does NOT:
+//   - generate a per-operation Lean 4 derivation (the witness cites a
+//     theorem by name; it does not construct a proof term);
+//   - make the witness intrinsic to the value. The witness lives in the
+//     global WITNESS_BUF and is NOT coupled to the surgical result, so
+//     downstream code CAN separate the effect from its evidence. This is
+//     post-hoc logging with a numeric check — which is useful, but is
+//     precisely what the previous header claimed it was not.
+//
+// What it does give: a machine-readable audit trail tying an operation to
+// a named, independently verified algebraic fact, plus an exactness test
+// on the residual. Making the witness genuinely inseparable would require
+// carrying it in the value's type — an open design item.
+//
+// Required effects: `with ZD, Witness`.  Compiler enforces via error 205.
+// Formal backing (accurate scope): `unlearning_kernel_exact` proves that
+// A = e3+e10 annihilates a 4-dimensional subspace exactly — i.e. the
+// LOCALITY of the surgery. (`audit_witness_is_derivation` in that file is
+// a `def` re-exporting that same proposition, not an additional result.)
+// Operational benchmark: examples/zd_audit_witness.sio.
+
+// WITNESS_BUF: ring-buffer backing store for the audit records emitted
+// during a run.  Each record is a short ASCII line naming the algebraic
+// fact relied upon, e.g. `unlearning_kernel_exact primA <hash>\n`.
+// It is an audit REFERENCE, not a Lean proof term: it names a theorem
+// that is verified independently in formal/lean4/, and is not itself
+// input to `lean --run`.
+var WITNESS_BUF: [i8; 4096] = [0 as i8; 4096]
+var WITNESS_LEN: i64 = 0
+
+// witness_reset: clear the buffer before an audited session.
+fn witness_reset() with Mut, ZD {
+    var i = 0
+    while i < 4096 { WITNESS_BUF[i] = 0 as i8; i = i + 1 }
+    WITNESS_LEN = 0
+}
+
+// witness_push_byte: append a single byte to the witness buffer.  Drops
+// silently if the buffer is full (in a full run we would panic; here we
+// prefer graceful degradation so the surgical op completes).
+fn witness_push_byte(b: i8) with Mut, ZD {
+    if WITNESS_LEN < 4096 {
+        WITNESS_BUF[WITNESS_LEN as usize] = b
+        WITNESS_LEN = WITNESS_LEN + 1
+    }
+}
+
+fn witness_push_str_bytes(buf: &[i8; 64], n: i64) with Mut, ZD {
+    var i = 0
+    while i < n {
+        witness_push_byte((*buf)[i as usize])
+        i = i + 1
+    }
+}
+
+// witness_emit_unlearn_header: write the canonical header for an
+// unlearning witness into the buffer.  Header format:
+//   `[audit] surgical_op=unlearn witness=unlearning_kernel_exact\n`
+// This is the prefix verified by audit.sio against the Lean theorem
+// name.  The full witness must be emitted by the caller; this helper
+// only writes the machine-checkable prefix.
+fn witness_emit_unlearn_header() with Mut, ZD {
+    // "[audit] surgical_op=unlearn witness=unlearning_kernel_exact\n"
+    let header: [i8; 64] = [
+        91 as i8, 97 as i8, 117 as i8, 100 as i8, 105 as i8, 116 as i8, 93 as i8, 32 as i8,  // "[audit] "
+        115 as i8, 117 as i8, 114 as i8, 103 as i8, 105 as i8, 99 as i8, 97 as i8, 108 as i8, // "surgical"
+        95 as i8, 111 as i8, 112 as i8, 61 as i8, 117 as i8, 110 as i8, 108 as i8, 101 as i8, // "_op=unle"
+        97 as i8, 114 as i8, 110 as i8, 32 as i8, 119 as i8, 105 as i8, 116 as i8, 110 as i8, // "arn witn"
+        101 as i8, 115 as i8, 115 as i8, 61 as i8, 107 as i8, 101 as i8, 114 as i8, 110 as i8, // "ess=kern"
+        101 as i8, 108 as i8, 95 as i8, 101 as i8, 120 as i8, 97 as i8, 99 as i8, 116 as i8,  // "el_exact"
+        10 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8,
+        0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8,
+    ]
+    witness_push_str_bytes(&header, 49)
+}
+
+// witness_verify_residual: given the post-surgery vector `w` and the
+// target-surgery reference `target`, compute the L2 residual and record
+// it in the witness.  A residual of 0.0 fp-exact corresponds to the
+// theorem `unlearning_kernel_exact` being applicable; any non-zero value
+// means the operation was not an exact ZD action.
+fn witness_verify_residual(w: &[f64; 16], target: &[f64; 16]) -> f64 with Mut, ZD {
+    var s = 0.0
+    var i = 0
+    while i < 16 {
+        let d = (*w)[i] - (*target)[i]
+        s = s + d * d
+        i = i + 1
+    }
+    s
+}
+
+// witness_is_exact_zd: predicate used by audit harnesses to decide if
+// the recorded surgery satisfies the algebraic exactness predicate
+// backed by the Lean theorem.  Tolerates a 1e-10 fp epsilon to account
+// for the 0.707107 vs exact 1/sqrt(2) representation used in examples.
+fn witness_is_exact_zd(residual: f64) -> bool with Mut, ZD {
+    if residual < 0.0 { residual > 0.0 - 0.0000000001 }
+    else { residual < 0.0000000001 }
+}

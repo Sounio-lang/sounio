@@ -444,7 +444,6 @@ instance instDual2FieldNat : Dual2Field Nat where
   add_zero := Nat.add_zero
   add_comm := Nat.add_comm
   mul_comm := Nat.mul_comm
-  mul_assoc := Nat.mul_assoc
 
 /-- The `proj_a` callee as an abstract Dual2 operator: returns its first
     argument, discards the second.  Models `fn proj_a(a, b) = a` which is
@@ -1120,15 +1119,18 @@ axioms that are bit-exact for finite non-NaN values (`float_zero_add_ax`,
 `F.zero_add`, and the reified Dual2 evaluation threads through
 `dual2Add` only.
 
-However, `#print axioms canary_gtt_corresponds_float` reports the full
-seven-axiom set because Lean's dependency tracker traces every field
-of the `Dual2Field Float` instance bundle, including the four mul-laws
-that are never exercised along this witness.  This is a Lean
-bookkeeping artifact, not a semantic reliance: the `float_mul_assoc_ax`
-trust boundary is never applied inside the proof steps, only sitting
-unused in the instance record.  A typeclass refactor that splits
-`Dual2AddField` out of `Dual2Field` would tighten the reported
-footprint to match the semantic one; deferred.
+Since the `mul_assoc` law was removed from the `Dual2Field` base class
+(it is FALSE for IEEE-754 and was the sole false axiom in this path),
+`#print axioms` for the Float canaries now reports only true axioms
+(`propext`/`Classical.choice` plus the sound additive/commutative/
+identity float facts).  The reported footprint therefore matches the
+semantic one: these bridge witnesses are EXACT over `Float`, not
+ε-bounded.  Associativity, when genuinely needed (the unary
+transcendental Hessian-symmetry theorem `symmetric_apply_unary`), is
+now supplied as an explicit per-call hypothesis rather than asserted
+for every Float value — making the exactness condition visible at the
+use site.  (This resolves the previously-deferred `Dual2Field`
+typeclass split.)
 -/
 
 /-- Full-seed environment on `Float`.  Structural twin of `seedEnvNat`;

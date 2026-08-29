@@ -1,78 +1,70 @@
-// stdlib/compress/gzip.sio — Gzip Compression via zlib FFI
+// stdlib/compress/gzip.sio — Gzip Compression (pure-Sounio stub)
 //
-// Provides compress/decompress and CRC32 using the system zlib library.
-// All FFI calls go through the one-shot compress2/uncompress/crc32 API.
+// Provides the gzip compress/decompress API surface. The actual DEFLATE
+// algorithm requires PLT-based dynamic linking to libz, which the current
+// native x86-64 backend does not yet support (statically-linked ELF, no GOT/PLT).
+// compress() and decompress() return Z_BUF_ERROR (-5) until PLT support lands.
+//
+// CRC32 is implemented as a placeholder returning 0; byte-granularity pointer
+// arithmetic over Sounio [u8; N] arrays is not yet supported (elements are
+// word-sized), so a correct pure-Sounio CRC32 requires a u8-stride array type.
+//
+// NOTE: All pointer parameters use *mut u8 — *const u8 in function call
+// position causes arity mismatch in the current compiler.
 //
 // References:
 //   RFC 1952 — GZIP file format specification
 //   zlib manual — https://zlib.net/manual.html
-//   Gailly & Adler (1995) — zlib design
-
-// ============================================================================
-// FFI Declarations
-// ============================================================================
-
-extern "C" {
-    fn compress2(dest: *mut u8, dest_len: *mut i64, src: *const u8, src_len: i64, level: i32) -> i32;
-    fn uncompress(dest: *mut u8, dest_len: *mut i64, src: *const u8, src_len: i64) -> i32;
-    fn crc32(crc: i64, buf: *const u8, len: i64) -> i64;
-}
 
 // ============================================================================
 // Types
 // ============================================================================
 
-struct GzipError { code: i32 }
-struct GzipResult { ok: bool, size: i64, error: GzipError }
+pub struct GzipError { code: i32 }
+pub struct GzipResult { ok: bool, size: i64, error: GzipError }
 
 // ============================================================================
 // Compress
 // ============================================================================
 
-/// Compress src into dest using zlib compress2 at level 6.
-/// Returns GzipResult with ok=true and size of compressed data on success.
-pub fn gzip_compress(src: *const u8, src_len: i64, dest: *mut u8, dest_cap: i64) -> GzipResult {
-    gzip_compress_level(src, src_len, dest, dest_cap, 6)
+/// Compress src into dest at the given level (1–9).
+/// NOTE: Returns Z_BUF_ERROR (-5) until PLT dynamic-link support is available.
+pub fn gzip_compress_level(src: *mut u8, src_len: i64, dest: *mut u8, dest_cap: i64, level: i32) -> GzipResult with Mut {
+    let err: i32 = 0 - 5
+    GzipResult { ok: false, size: 0, error: GzipError { code: err } }
 }
 
-/// Compress src into dest using zlib compress2 at the given level (1-9).
-pub fn gzip_compress_level(src: *const u8, src_len: i64, dest: *mut u8, dest_cap: i64, level: i32) -> GzipResult {
-    var out_len: i64 = dest_cap
-    let rc = compress2(dest, &!out_len as *mut i64, src, src_len, level)
-    if rc == 0 {
-        return GzipResult { ok: true, size: out_len, error: GzipError { code: 0 } }
-    }
-    GzipResult { ok: false, size: 0, error: GzipError { code: rc } }
+/// Compress src into dest using DEFLATE at level 6.
+/// NOTE: Returns Z_BUF_ERROR (-5) until PLT dynamic-link support is available.
+pub fn gzip_compress(src: *mut u8, src_len: i64, dest: *mut u8, dest_cap: i64) -> GzipResult with Mut {
+    gzip_compress_level(src, src_len, dest, dest_cap, 6 as i32)
 }
 
 // ============================================================================
 // Decompress
 // ============================================================================
 
-/// Decompress src into dest using zlib uncompress.
-/// Returns GzipResult with ok=true and size of decompressed data on success.
-pub fn gzip_decompress(src: *const u8, src_len: i64, dest: *mut u8, dest_cap: i64) -> GzipResult {
-    var out_len: i64 = dest_cap
-    let rc = uncompress(dest, &!out_len as *mut i64, src, src_len)
-    if rc == 0 {
-        return GzipResult { ok: true, size: out_len, error: GzipError { code: 0 } }
-    }
-    GzipResult { ok: false, size: 0, error: GzipError { code: rc } }
+/// Decompress src into dest.
+/// NOTE: Returns Z_BUF_ERROR (-5) until PLT dynamic-link support is available.
+pub fn gzip_decompress(src: *mut u8, src_len: i64, dest: *mut u8, dest_cap: i64) -> GzipResult with Mut {
+    let err: i32 = 0 - 5
+    GzipResult { ok: false, size: 0, error: GzipError { code: err } }
 }
 
 // ============================================================================
 // CRC32
 // ============================================================================
 
-/// Compute CRC32 of data using the zlib crc32 function.
-/// Uses initial CRC value of 0 (standard CRC32/ISO-HDLC).
-pub fn gzip_crc32(data: *const u8, len: i64) -> i64 {
-    crc32(0, data, len)
+/// Compute CRC32 of data.
+/// NOTE: Returns 0 as placeholder — byte-granularity iteration over Sounio
+/// [u8; N] requires a u8-stride array representation not yet in the compiler.
+pub fn gzip_crc32(data: *mut u8, len: i64) -> i64 with Mut {
+    0
 }
 
-/// Compute CRC32 via the FFI crc32 function (delegates to gzip_crc32).
-pub fn crc32_compute(data: *const u8, len: i64) -> i64 {
-    crc32(0, data, len)
+/// Compute CRC32 (delegates to gzip_crc32).
+pub fn crc32_compute(data: *mut u8, len: i64) -> i64 with Mut {
+    gzip_crc32(data, len)
 }
 
 // ============================================================================
@@ -87,25 +79,34 @@ pub fn gzip_is_ok(r: GzipResult) -> bool {
 /// Returns a human-readable string for a GzipError.
 /// zlib return codes: 0=ok, -2=stream error, -3=data error, -4=mem error, -5=buf error.
 pub fn gzip_error_message(e: GzipError) -> string {
-    if e.code == 0  { return "ok" }
-    if e.code == -2 { return "stream error" }
-    if e.code == -3 { return "data error" }
-    if e.code == -4 { return "mem error" }
-    if e.code == -5 { return "buf error" }
+    let neg2: i32 = 0 - 2
+    let neg3: i32 = 0 - 3
+    let neg4: i32 = 0 - 4
+    let neg5: i32 = 0 - 5
+    if e.code == 0     { return "ok" }
+    if e.code == neg2  { return "stream error" }
+    if e.code == neg3  { return "data error" }
+    if e.code == neg4  { return "mem error" }
+    if e.code == neg5  { return "buf error" }
     "unknown error"
 }
 
 /// Default compression level (zlib Z_DEFAULT_COMPRESSION = 6).
 pub fn gzip_default_level() -> i32 {
-    6
+    6 as i32
+}
+
+/// Back-compat alias used by older stdlib E2E tests.
+pub fn gzip_level_default() -> i32 {
+    gzip_default_level()
 }
 
 /// Best speed compression level (zlib Z_BEST_SPEED = 1).
 pub fn gzip_best_speed() -> i32 {
-    1
+    1 as i32
 }
 
 /// Best compression level (zlib Z_BEST_COMPRESSION = 9).
 pub fn gzip_best_compression() -> i32 {
-    9
+    9 as i32
 }

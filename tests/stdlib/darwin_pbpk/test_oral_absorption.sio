@@ -1,0 +1,81 @@
+//@ run-pass
+//@ expect-stdout: ORAL_ABSORPTION_OK
+// Analytical validation of the first-order oral absorption model.
+
+use darwin_pbpk::absorption::*
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn rel_err(expected: f64, actual: f64) -> f64 {
+    if expected == 0.0 {
+        abs_f64(actual)
+    } else {
+        abs_f64(actual - expected) / abs_f64(expected)
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let params = rapamycin_absorption_params()
+    let dose = 100.0
+
+    // --- Check 1: Lag time respected ---
+    // Before tlag, no mass should leave the gut.
+    let st0 = absorption_state_with_dose(dose)
+    let st1 = absorption_step(st0, 0.0, 0.3, params)
+    if st1.a_gut != dose { return 1 }
+    if st1.released_cum != 0.0 { return 2 }
+
+    // --- Check 2: First-order decay after lag ---
+    // Step from t=0.5 to t=1.5 (dt=1.0) with ka=1.1.
+    // a_gut should be dose * exp(-1.1).
+    // released_cum should be dose * F * (1 - exp(-1.1)).
+    let st2 = absorption_state_with_dose(dose)
+    let st3 = absorption_step(st2, 0.5, 1.0, params)
+
+    let expected_decay = 0.3328710836980796   // exp(-1.1)
+    let expected_a_gut = dose * expected_decay
+    let expected_released = dose * params.f_bio * (1.0 - expected_decay)
+
+    if rel_err(expected_a_gut, st3.a_gut) > 0.001 { return 3 }
+    if rel_err(expected_released, st3.released_cum) > 0.001 { return 4 }
+
+    // --- Check 3: Bioavailability scaling ---
+    // Run multiple small steps until a_gut is negligible.
+    // Cumulative released mass should approach dose * F.
+    var st_sim = absorption_state_with_dose(dose)
+    var t = 0.0
+    let dt = 0.25
+    while st_sim.a_gut >= 0.01 && t < 24.0 {
+        st_sim = absorption_step(st_sim, t, dt, params)
+        t = t + dt
+    }
+    if st_sim.a_gut >= 0.01 { return 5 }
+
+    let target_released = dose * params.f_bio
+    if rel_err(target_released, st_sim.released_cum) > 0.01 { return 6 }
+
+    // --- Check 4: Mass conservation ---
+    // At any time: a_gut + released_cum / f_bio == initial dose.
+    // Re-check on the final state from the simulation above.
+    let total_mass = st_sim.a_gut + (st_sim.released_cum / params.f_bio)
+    if rel_err(dose, total_mass) > 0.001 { return 7 }
+
+    // Also check mass conservation on an intermediate state.
+    var st_mid = absorption_state_with_dose(dose)
+    st_mid = absorption_step(st_mid, 0.0, 1.0, params)   // t=0->1, active 0.5->1
+    let total_mid = st_mid.a_gut + (st_mid.released_cum / params.f_bio)
+    if rel_err(dose, total_mid) > 0.001 { return 8 }
+
+    // --- Check 5: Blood concentration conversion ---
+    let delta = absorption_mass_to_blood_delta(10.0, 5.0)
+    if delta != 2.0 { return 9 }
+
+    // Edge case: zero volume returns 0.0
+    let delta_zero = absorption_mass_to_blood_delta(10.0, 0.0)
+    if delta_zero != 0.0 { return 10 }
+
+    println("ORAL_ABSORPTION_OK")
+    0
+}

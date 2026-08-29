@@ -1,0 +1,86 @@
+// stdlib/chemistry/thermochem.sio — Real thermochemistry with GUM uncertainty
+//
+// Gibbs energy from enthalpy/entropy, Hess's law, and ΔG -> log10 K,
+// all with first-order (JCGM) uncertainty propagation.
+
+module chemistry::thermochem
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
+fn sqrt_approx(x: f64) -> f64 with Mut, Panic {
+    if x <= 0.0 { return 0.0; }
+    var g = if x > 1.0 { x } else { 1.0 };
+    var i = 0;
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1; }
+    g
+}
+
+// R (J/mol/K) and ln 10 as module constants
+fn r_gas() -> f64 { 8.314462618 }
+fn ln10() -> f64 { 2.302585093 }
+
+// ΔG = ΔH − T·ΔS  (dh in kJ/mol, ds in kJ/mol/K), independent inputs -> RSS
+pub fn gibbs(dh: f64, udh: f64, ds: f64, uds: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
+    let g = dh - t * ds;
+    let u = sqrt_approx(udh * udh + t * t * uds * uds + ds * ds * ut * ut);
+    (g, u)
+}
+
+// Hess's law: total enthalpy = Σ steps; uncertainty = RSS of step uncertainties
+pub fn hess(dhs: &[f64; 4], udhs: &[f64; 4], n: i64) -> (f64, f64) with Mut, Div, Panic {
+    var total = 0.0;
+    var var_u = 0.0;
+    var i: i64 = 0;
+    while i < n {
+        total = total + dhs[i];
+        var_u = var_u + udhs[i] * udhs[i];
+        i = i + 1;
+    }
+    (total, sqrt_approx(var_u))
+}
+
+// log10 K = −ΔG / (R T ln 10)   (dg in J/mol); GUM on dg and t
+pub fn gibbs_to_log10k(dg: f64, udg: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
+    let denom = r_gas() * t * ln10();
+    let lk = 0.0 - dg / denom;
+    let d_dg = 1.0 / denom;
+    let d_t = abs_f64(dg) / (r_gas() * t * t * ln10());
+    let u = sqrt_approx(d_dg * d_dg * udg * udg + d_t * d_t * ut * ut);
+    (lk, u)
+}
+
+pub fn test_dg() -> bool with Mut, Div, Panic {
+    // H2O(l) formation at 298.15 K: ΔHf° = −285.83 kJ/mol, ΔS° ≈ −0.1632 kJ/mol/K
+    // -> ΔG = −285.83 − 298.15·(−0.1632) = −237.17 kJ/mol  (lit ΔGf° = −237.13)
+    let (g, ug) = gibbs(-285.83, 0.04, -0.1632, 0.0005, 298.15, 0.1);
+    check_near(g, -237.2, 0.1) && ug > 0.0
+}
+
+pub fn test_hess() -> bool with Mut, Div, Panic {
+    // CH4 + 2 O2 -> CO2 + 2 H2O(l), via formation enthalpies (kJ/mol):
+    // ΔHc = [−393.51 + 2·(−285.83)] − [−74.6 + 2·0] = −890.57 kJ/mol (textbook −890.3)
+    let products: [f64; 4] = [-393.51, -285.83, -285.83, 0.0];
+    let uproducts: [f64; 4] = [0.13, 0.04, 0.04, 0.0];
+    let reactants: [f64; 4] = [-74.6, 0.0, 0.0, 0.0];
+    let ureactants: [f64; 4] = [0.3, 0.0, 0.0, 0.0];
+    let (hp, uhp) = hess(&products, &uproducts, 3 as i64);
+    let (hr, uhr) = hess(&reactants, &ureactants, 1 as i64);
+    let dh = hp - hr;
+    let u = sqrt_approx(uhp * uhp + uhr * uhr);
+    check_near(dh, -890.6, 0.5) && u > 0.0
+}
+
+pub fn test_gibbs_k() -> bool with Mut, Div, Panic {
+    // ΔG = −237170 J/mol at 298.15 K -> log10 K = 237170/(8.314462618·298.15·2.302585093) = 41.55
+    let (lk, ulk) = gibbs_to_log10k(-237170.0, 100.0, 298.15, 0.1);
+    check_near(lk, 41.55, 0.05) && ulk > 0.0
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    var p = 0; var f = 0;
+    if test_dg() { p = p + 1 } else { f = f + 1; println("FAIL thermochem dg") }
+    if test_hess() { p = p + 1 } else { f = f + 1; println("FAIL thermochem hess") }
+    if test_gibbs_k() { p = p + 1 } else { f = f + 1; println("FAIL thermochem gibbs_k") }
+    if f == 0 { println("THERMOCHEM REAL GUM PASS") } else { println("THERMOCHEM FAIL") }
+    return f
+}

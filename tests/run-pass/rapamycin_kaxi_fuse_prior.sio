@@ -1,0 +1,49 @@
+//@ run-pass
+//@ description: kaxi_fuse — inverse-variance assimilation of repeated clearance observations into the
+//@ rapamycin population prior (normal-normal Bayesian-forecasting / TDM individualization step).
+//@ METHOD demonstration only: the individual observations are illustrative synthetic values, NOT
+//@ clinical data, and this makes NO clinical-accuracy, dose-individualization, or patient-safety claim.
+use epistemic::kaxi::*;
+
+// Method note (addresses M2 clinical review, deepseek 2026-05-25):
+//   Treating the population prior N(μ₀, σ₀²) as one pseudo-observation and inverse-variance-pooling it
+//   with the individual observations is EXACTLY the normal-normal conjugate posterior — posterior
+//   precision = prior precision + Σ obs precisions — i.e. kaxi_fuse({prior}+obs) equals the sequential
+//   pairwise `observe()` update (verified: M1 math-review + the 11.6 observe-equivalence). It does not
+//   double-count: σ₀² enters once, as the prior's precision term.
+//   The posterior-SD narrowing below the smallest input SD is a MATHEMATICAL consequence of
+//   precision-weighting, NOT a clinical-accuracy claim. The residual ~13% CV here is far from the CV a
+//   real dose-individualization decision would require.
+
+fn main() with IO, Alloc, Mut, Epistemic, Div, Panic {
+    // Population prior for rapamycin hepatic clearance: 12.4 L/h, SD 7.4 (CV 60%, Ferron 1997 n=24,
+    // RENAL-TRANSPLANT recipients — the value in ep14_rapamycin_priors, cl_hepatic). The high CV is
+    // between-subject variability in that population; it is not a general-population figure.
+    // The three individual estimates are ILLUSTRATIVE/SYNTHETIC with idealized SDs (2.5–3.5 L/h);
+    // routine trough-derived clearance is typically noisier. They demonstrate the method, not a patient.
+    var obs: Seq<Knowledge<f64>> = seq_new()
+    obs.push(measure(12.4, uncertainty: 7.4))   // population prior pseudo-observation (Ferron 1997)
+    obs.push(measure(10.8, uncertainty: 3.0))   // illustrative individual observation 1 (synthetic)
+    obs.push(measure(11.5, uncertainty: 2.5))   // illustrative individual observation 2 (synthetic)
+    obs.push(measure(9.9,  uncertainty: 3.5))   // illustrative individual observation 3 (synthetic)
+
+    let post: Knowledge<f64> = kaxi_fuse(obs)
+    let cl_post: f64 = acknowledge(post, "individualized clearance prior")
+    let sd_post: f64 = uncertainty_of(post)
+
+    // Exact correctness check: posterior SD must equal the closed-form inverse-variance result
+    // 1/sqrt(Σ 1/σᵢ²) — guards against a degenerate/fixed-SD implementation (M2 nit #5).
+    let prec_sum: f64 = 1.0/(7.4*7.4) + 1.0/(3.0*3.0) + 1.0/(2.5*2.5) + 1.0/(3.5*3.5)
+    let sd_expected: f64 = sqrt(1.0 / prec_sum)
+
+    var ok: i64 = 1
+    let d: f64 = sd_post - sd_expected
+    if d > 0.001 { ok = 0 }
+    if d < -0.001 { ok = 0 }                       // (A) matches the closed-form inverse-variance SD
+    if cl_post < 9.9 { ok = 0 }
+    if cl_post >= 12.4 { ok = 0 }                  // (B) posterior in [9.9, 12.4), shifted off the prior mean
+
+    print("rapamycin_kaxi_fuse_prior cl_post="); print_f64(cl_post)
+    print(" sd_post="); print_f64(sd_post); print(" sd_expected="); print_f64(sd_expected); print("\n")
+    if ok == 1 { print("PASS\n") } else { print("FAIL\n") }
+}

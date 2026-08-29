@@ -1,0 +1,146 @@
+//@ run-pass
+// tests/stdlib/pbpk/test_rapamycin_2cmt_with_bridge.sio
+//
+// Regression test for the application of
+// stdlib/pbpk/rapamycin_units_bridge.sio inside
+// stdlib/pbpk/rapamycin_2cmt.sio (Phase 4c, 2026-06-02).
+//
+// Validates that the new `rap2_params_bridged()` function:
+//   1. Compiles and runs.
+//   2. Returns a Rap2CmtParams with the same numeric values as the
+//      legacy `rap2_params()` (bridge is dim-only, no magnitude change).
+//   3. Drives a 2-compartment Euler integration whose trajectory
+//      (C_plasma, GUM std) is bit-identical to the legacy path
+//      (1e-9 abs tolerance; far looser than the 1e-12 round-trip
+//      precision of the bridge itself).
+//   4. Consumes the bridge's t_half wrapper — the upstream source of
+//      the derived ke — rather than the raw Epistemic handle.
+//
+// Method:
+//   - For each Rap2CmtParams field, compare legacy vs bridged with
+//     assert_close(.., 1.0e-9).
+//   - Run `simulate()` with the legacy and bridged parameter sets on
+//     the same initial conditions / step / time horizon, then compare
+//     every C_plasma and GUM std sample point.
+//
+// Why 1e-9 (and not 1e-12):
+//   The bridge round-trip is exact at 1e-12 for t_half (small-σ
+//   regime, σ=16). The Euler integration accumulates fp round-off
+//   over ~720 steps, so we use a generous 1e-9 to keep this test
+//   focused on the bridge-application contract, not the integrator's
+//   long-horizon stability.
+
+use pbpk::rapamycin_2cmt::{Rap2CmtParams, rap2_params, rap2_params_bridged, simulate}
+use pbpk::rapamycin_units_bridge::{rap_t_half_q, dim_time}
+use pbpk::rapamycin_params::{rap_ke, rap_t_half}
+use units::lib::*
+
+fn assert_close(got: f64, expected: f64, tol: f64) with Panic {
+    let d = got - expected
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    if ad > tol {
+        panic()
+    }
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ----------------------------------------------------------------------------
+// TEST 1 — every Rap2CmtParams field is identical between rap2_params() and
+//          rap2_params_bridged() within 1e-9 abs.
+// ----------------------------------------------------------------------------
+
+fn test_params_fields_match() with Mut, Div, Panic {
+    let raw      = rap2_params()
+    let bridged  = rap2_params_bridged()
+    assert_close(raw.ke_val,      bridged.ke_val,      1.0e-9)
+    assert_close(raw.ke_var,      bridged.ke_var,      1.0e-9)
+    assert_close(raw.k12_val,     bridged.k12_val,     1.0e-9)
+    assert_close(raw.k12_var,     bridged.k12_var,     1.0e-9)
+    assert_close(raw.k21_val,     bridged.k21_val,     1.0e-9)
+    assert_close(raw.k21_var,     bridged.k21_var,     1.0e-9)
+    assert_close(raw.vc_val,      bridged.vc_val,      1.0e-9)
+    assert_close(raw.krel_val,    bridged.krel_val,    1.0e-9)
+    assert_close(raw.krel_var,    bridged.krel_var,    1.0e-9)
+    assert_close(raw.a_poly0,     bridged.a_poly0,     1.0e-9)
+    assert_close(raw.a_poly0_var, bridged.a_poly0_var, 1.0e-9)
+}
+
+// ----------------------------------------------------------------------------
+// TEST 2 — the bridge is genuinely exercised: the bridged ke derivation
+//          actually consumes a Quantity (not an Epistemic).
+// ----------------------------------------------------------------------------
+
+fn test_bridge_is_actually_used() with Mut, Div, Panic {
+    // rap_t_half_q() returns a Quantity with dim=dim_time() and the
+    // clinical rapamycin t_half value (62 h ± 16 h).
+    let t_half_q = rap_t_half_q()
+    let raw_t_half = rap_t_half()
+    // The bridge round-trips the source Epistemic to a Quantity and
+    // back losslessly (within fp round-off) — so the bridged value
+    // and uncertainty must match the raw Epistemic at 1e-12.
+    assert_close(t_half_q.value,       raw_t_half.val(),  1.0e-12)
+    assert_close(t_half_q.uncertainty, raw_t_half.std(),  1.0e-12)
+    // The dim tag is dim_time() (h, not s; clinical convention).
+    assert(dim_eq(t_half_q.dim, dim_time()))
+
+    // The bridged ke must equal the raw ke: ke = ln2 / t_half; the
+    // bridged derivation is ln2 / t_half_q.value with σ_ke² derivable
+    // by GUM §5.1.2. 1e-9 abs to allow fp round-off over the multi-step
+    // derivation, well below the 1% clinical parameter uncertainty.
+    let raw_ke   = rap_ke()
+    let bridged  = rap2_params_bridged()
+    assert_close(bridged.ke_val, raw_ke.val(),  1.0e-9)
+    assert_close(bridged.ke_var, raw_ke.variance(), 1.0e-9)
+}
+
+// ----------------------------------------------------------------------------
+// TEST 3 — 2-compartment simulation driven by bridged params is bit-identical
+//          to the legacy path. Exercises euler_step + simulate with the
+//          full Rap2CmtParams (ke, k12, k21, vc, krel, a_poly0 + their
+//          variances) flowing through the GUM-variance ODE integrator.
+// ----------------------------------------------------------------------------
+
+fn test_simulate_trajectory_matches() with Mut, Div, Panic {
+    let raw     = rap2_params()
+    let bridged = rap2_params_bridged()
+
+    // Short horizon (24 h, dt = 0.1 h) — captures the rising
+    // absorption phase without exhausting the 30 s test timeout.
+    let t_end   = 24.0
+    let dt      = 0.1
+    let n_out   = 10
+
+    var t_raw:   [f64; 50] = [0.0; 50]
+    var c_raw:   [f64; 50] = [0.0; 50]
+    var s_raw:   [f64; 50] = [0.0; 50]
+    var t_br:    [f64; 50] = [0.0; 50]
+    var c_br:    [f64; 50] = [0.0; 50]
+    var s_br:    [f64; 50] = [0.0; 50]
+
+    simulate(t_end, dt, 0.0, 0.0, &raw,     n_out, &!t_raw, &!c_raw, &!s_raw)
+    simulate(t_end, dt, 0.0, 0.0, &bridged, n_out, &!t_br,  &!c_br,  &!s_br)
+
+    var i: i64 = 0
+    while i < n_out {
+        assert_close(t_raw[i], t_br[i], 1.0e-9)
+        assert_close(c_raw[i], c_br[i], 1.0e-9)
+        // std can be 0.0 at the start (initial variance is 0); the
+        // legacy-vs-bridged diff is still 0 within 1e-9.
+        assert_close(s_raw[i], s_br[i], 1.0e-9)
+        // Sanity: concentrations are non-negative (no NaN/neg from
+        // either param path).
+        if c_raw[i] < 0.0 || c_br[i] < 0.0 { return }
+        if s_raw[i] < 0.0 || s_br[i] < 0.0 { return }
+        i = i + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    test_params_fields_match()
+    test_bridge_is_actually_used()
+    test_simulate_trajectory_matches()
+    0
+}

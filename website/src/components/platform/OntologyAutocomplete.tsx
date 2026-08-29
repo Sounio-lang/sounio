@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { Fragment, useState } from 'react';
 
 // Mock data to simulate the ontology database (stdlib modules exist; type-level integration planned for 2026)
 const ONTOLOGY_DB = [
@@ -148,14 +148,14 @@ export function OntologyAutocomplete() {
             </div>
             <div className="flex flex-wrap gap-2 items-center">
               {selectedTerm.parents.map((parent, idx) => (
-                <React.Fragment key={idx}>
+                <Fragment key={idx}>
                   <div className="text-xs px-2 py-1 rounded bg-[var(--color-surface)] text-[var(--color-text-secondary)] border border-[var(--glass-border)]">
                     {parent}
                   </div>
                   <svg className="w-3 h-3 text-[var(--color-text-tertiary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
                   </svg>
-                </React.Fragment>
+                </Fragment>
               ))}
               <div className="text-xs px-2 py-1 rounded bg-[var(--color-accent-teal)]/10 text-[var(--color-accent-teal)] border border-[var(--color-accent-teal)]/20 font-medium">
                 {selectedTerm.name}

@@ -1,0 +1,282 @@
+//@ run-pass
+//
+// Beta-Bernoulli polarity Thompson Sampling validation.
+// Exercises phase_mode=1 — the second confirmed literature gap.
+//
+// Tests:
+//   T1: Correctness — PHP(5,4) still UNSAT under phase_mode=1 (polarity TS can't
+//       change the answer, only the search path)
+//   T2: Posterior update — after solving PHP(5,4), at least one variable has
+//       phase_beta > phase_alpha (true-polarity penalised on hard UNSAT instance)
+//   T3: smt_reset_activities resets posteriors to uniform Beta(1,1) prior
+//   T4: Statistical — polarity-biased formula (mostly-positive 3-SAT):
+//       phase_mode=1 wins >= phase_mode=0 across 100 seeds
+//       (Beta-TS converges toward the biased polarity, reducing backtracking)
+//   T5: Fully epistemic DPLL — score_mode=3 + phase_mode=1 solves PHP(5,4) UNSAT
+//       and terminates correctly (no infinite loop, correct answer)
+
+use theorem::smt::*
+
+fn add_php54(ctx: &!SmtContext) with Mut, Div {
+    var lits: [i32; 8] = [0; 8]
+    var i: i32 = 0
+    while i < 5 {
+        lits[0] = (i * 4 + 0) * 2
+        lits[1] = (i * 4 + 1) * 2
+        lits[2] = (i * 4 + 2) * 2
+        lits[3] = (i * 4 + 3) * 2
+        smt_add_clause(ctx, &lits, 4)
+        i = i + 1
+    }
+    var j: i32 = 0
+    while j < 4 {
+        var i1: i32 = 0
+        while i1 < 5 {
+            var i2: i32 = i1 + 1
+            while i2 < 5 {
+                lits[0] = (i1 * 4 + j) * 2 + 1
+                lits[1] = (i2 * 4 + j) * 2 + 1
+                smt_add_clause(ctx, &lits, 2)
+                i2 = i2 + 1
+            }
+            i1 = i1 + 1
+        }
+        j = j + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    var pass: i32 = 0
+    var fail: i32 = 0
+
+    // ============================================================
+    // T1: PHP(5,4) UNSAT under phase_mode=1
+    // ============================================================
+    var ctx1 = smt_new()
+    add_php54(&! ctx1)
+    smt_set_phase_mode(&! ctx1, 1)
+    let r1 = smt_solve(&! ctx1)
+
+    var t1_pass: i32 = 1
+    if r1 != 0 { t1_pass = 0 }   // must be UNSAT
+
+    if t1_pass == 1 {
+        println("T1 PASS: PHP(5,4) UNSAT under phase_mode=1 (correct result preserved)")
+    } else {
+        println("T1 FAIL: phase_mode=1 gave wrong answer on PHP(5,4)")
+        print_int(r1)
+        fail = fail + 1
+    }
+    if t1_pass == 1 { pass = pass + 1 }
+
+    // ============================================================
+    // T2: Posterior update after PHP(5,4) — true was bad → beta > alpha for some var
+    // PHP uses only positive literals (lits[i] = var*2), so assign[v]>0 is always
+    // the "wrong" polarity for pigeon-hole variables — phase_beta[v] should grow.
+    // ============================================================
+    var has_penalised_true: i32 = 0
+    var vi: i32 = 0
+    while vi < 20 {
+        let alpha_v = smt_get_phase_alpha(&ctx1, vi)
+        let beta_v = smt_get_phase_beta(&ctx1, vi)
+        if beta_v > alpha_v { has_penalised_true = 1 }
+        vi = vi + 1
+    }
+
+    var t2_pass: i32 = 1
+    if has_penalised_true == 0 { t2_pass = 0 }
+
+    if t2_pass == 1 {
+        println("T2 PASS: Beta posterior updated — at least one var has beta > alpha (true penalised)")
+    } else {
+        println("T2 FAIL: no variable had true-polarity penalised after hard UNSAT PHP(5,4)")
+        fail = fail + 1
+    }
+    if t2_pass == 1 { pass = pass + 1 }
+
+    // ============================================================
+    // T3: smt_reset_activities restores uniform Beta(1,1) prior
+    // ============================================================
+    smt_reset_activities(&! ctx1)
+    var posteriors_reset: i32 = 1
+    vi = 0
+    while vi < 20 {
+        let alpha_v = smt_get_phase_alpha(&ctx1, vi)
+        let beta_v = smt_get_phase_beta(&ctx1, vi)
+        if alpha_v < 0.999 { posteriors_reset = 0 }
+        if alpha_v > 1.001 { posteriors_reset = 0 }
+        if beta_v < 0.999 { posteriors_reset = 0 }
+        if beta_v > 1.001 { posteriors_reset = 0 }
+        vi = vi + 1
+    }
+
+    var t3_pass: i32 = 1
+    if posteriors_reset == 0 { t3_pass = 0 }
+
+    if t3_pass == 1 {
+        println("T3 PASS: smt_reset_activities restores uniform Beta(1,1) prior")
+    } else {
+        println("T3 FAIL: posteriors not reset to 1.0/1.0 after smt_reset_activities")
+        fail = fail + 1
+    }
+    if t3_pass == 1 { pass = pass + 1 }
+
+    // ============================================================
+    // T4: Statistical — polarity-biased mixed formula
+    // n=15, 30 short clauses (len-2, mostly positive lits) + 15 long (len-4, mixed).
+    // Beta-TS (phase_mode=1) vs saved-phase (phase_mode=0), 100 seeds, no_ple=1.
+    // Expected: mode=1 wins >= mode=0 wins (learns bias, fewer polarity mistakes).
+    // ============================================================
+    let lcg_a: i64 = 1103515245
+    let lcg_c: i64 = 12345
+    let lcg_m: i64 = 2147483648
+    let n_vars: i32 = 15
+
+    var w1: i32 = 0; var w0: i32 = 0; var ties: i32 = 0
+    var si: i32 = 0
+
+    while si < 100 {
+        let seed: i64 = 7000 + (si as i64)
+        var st: i64 = seed
+
+        // Build context A: phase_mode=1 (Beta-TS polarity)
+        var ca = smt_new()
+        smt_set_no_ple(&! ca, 1)
+        smt_set_phase_mode(&! ca, 1)
+        var ci: i32 = 0
+        // Short clauses: 70% positive literals (bias toward true)
+        while ci < 30 {
+            var lits: [i32; 8] = [0; 8]
+            var li: i32 = 0
+            while li < 2 {
+                var raw = st * lcg_a + lcg_c
+                raw = raw % lcg_m
+                if raw < 0 { raw = raw + lcg_m }
+                st = raw
+                let var_i = ((raw % n_vars) as i32)
+                // 70% positive: polarity bit from bit 18 thresholded at 0.3
+                let pol_raw = (raw / 262144) % 10
+                var pol: i32 = 0
+                if pol_raw >= 3 { pol = 0 } else { pol = 1 }  // 70% positive
+                lits[li] = var_i * 2 + pol
+                li = li + 1
+            }
+            smt_add_clause(&! ca, &lits, 2)
+            ci = ci + 1
+        }
+        // Long clauses: uniform polarity
+        ci = 0
+        while ci < 15 {
+            var lits: [i32; 8] = [0; 8]
+            var li: i32 = 0
+            while li < 4 {
+                var raw = st * lcg_a + lcg_c
+                raw = raw % lcg_m
+                if raw < 0 { raw = raw + lcg_m }
+                st = raw
+                lits[li] = ((raw % n_vars) as i32) * 2 + (((raw / 65536) % 2) as i32)
+                li = li + 1
+            }
+            smt_add_clause(&! ca, &lits, 4)
+            ci = ci + 1
+        }
+        let da = smt_get_decisions(&ca)
+        let _ = smt_solve(&! ca)
+        let da2 = smt_get_decisions(&ca)
+
+        // Build context B: phase_mode=0 (saved phase, same formula)
+        st = seed
+        var cb = smt_new()
+        smt_set_no_ple(&! cb, 1)
+        smt_set_phase_mode(&! cb, 0)
+        ci = 0
+        while ci < 30 {
+            var lits: [i32; 8] = [0; 8]
+            var li: i32 = 0
+            while li < 2 {
+                var raw = st * lcg_a + lcg_c
+                raw = raw % lcg_m
+                if raw < 0 { raw = raw + lcg_m }
+                st = raw
+                let var_i = ((raw % n_vars) as i32)
+                let pol_raw = (raw / 262144) % 10
+                var pol: i32 = 0
+                if pol_raw >= 3 { pol = 0 } else { pol = 1 }
+                lits[li] = var_i * 2 + pol
+                li = li + 1
+            }
+            smt_add_clause(&! cb, &lits, 2)
+            ci = ci + 1
+        }
+        ci = 0
+        while ci < 15 {
+            var lits: [i32; 8] = [0; 8]
+            var li: i32 = 0
+            while li < 4 {
+                var raw = st * lcg_a + lcg_c
+                raw = raw % lcg_m
+                if raw < 0 { raw = raw + lcg_m }
+                st = raw
+                lits[li] = ((raw % n_vars) as i32) * 2 + (((raw / 65536) % 2) as i32)
+                li = li + 1
+            }
+            smt_add_clause(&! cb, &lits, 4)
+            ci = ci + 1
+        }
+        let _ = smt_solve(&! cb)
+        let db = smt_get_decisions(&cb)
+
+        if da2 < db { w1 = w1 + 1 }
+        else if db < da2 { w0 = w0 + 1 }
+        else { ties = ties + 1 }
+        si = si + 1
+    }
+
+    println("T4 Beta-TS(1) vs saved-phase(0), biased 2+4 formula, 100 seeds, no_ple=1:")
+    println("mode=1 wins / mode=0 wins / ties:")
+    print_int(w1); print_int(w0); print_int(ties)
+
+    var t4_pass: i32 = 0
+    if w1 >= w0 { t4_pass = 1 }
+
+    if t4_pass == 1 {
+        println("T4 PASS: Beta-TS polarity wins >= saved-phase on biased formula")
+    } else {
+        println("T4 FAIL: saved-phase outperformed Beta-TS on polarity-biased formula")
+        fail = fail + 1
+    }
+    if t4_pass == 1 { pass = pass + 1 }
+
+    // ============================================================
+    // T5: Fully epistemic DPLL — score_mode=3 + phase_mode=1
+    // PHP(5,4) must still be UNSAT (combined modes don't corrupt correctness)
+    // ============================================================
+    var ctx5 = smt_new()
+    add_php54(&! ctx5)
+    smt_set_score_mode(&! ctx5, 3)
+    smt_set_phase_mode(&! ctx5, 1)
+    let r5 = smt_solve(&! ctx5)
+
+    var t5_pass: i32 = 1
+    if r5 != 0 { t5_pass = 0 }
+
+    if t5_pass == 1 {
+        println("T5 PASS: fully epistemic DPLL (score_mode=3 + phase_mode=1) correct on PHP(5,4)")
+    } else {
+        println("T5 FAIL: fully epistemic DPLL gave wrong answer")
+        print_int(r5)
+        fail = fail + 1
+    }
+    if t5_pass == 1 { pass = pass + 1 }
+
+    // ============================================================
+    // Summary
+    // ============================================================
+    println("---")
+    if fail == 0 {
+        println("ALL PASS: Beta-Bernoulli polarity TS verified — first fully epistemic DPLL")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}
