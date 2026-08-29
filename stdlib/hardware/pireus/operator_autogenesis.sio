@@ -262,7 +262,7 @@ fn oag_parent_semantics_hash() -> [i64; 8] {
 
 fn oag_parent_freeze_hash() -> [i64; 8] {
     [0x871544da, 0x76207ff1, 0xea8c3e6c, 0x92af2efa,
-     0xa80ee0dc, 0xf01e1f72, 0x8d245220, 0x045b578a]
+     0xaa80ee0d, 0xcf01e1f7, 0x28d24522, 0x045b578a]
 }
 
 fn oag_parent_evidence_hash() -> [i64; 8] {
@@ -464,6 +464,9 @@ with Mut, Panic, Div {
     var parse_failures: i64 = 0
     var seed_weight: i64 = -1
     var word_block = false
+    var pending_cell: i64 = -1
+    var pending_left: i64 = -1
+    var pending_right: i64 = -1
     let size = str_len(raw)
     var start: i64 = 0
     while start < size {
@@ -493,30 +496,49 @@ with Mut, Panic, Div {
             if seed_weight < 0 { parse_failures = parse_failures + 1 }
         } else if oag_span_has_prefix(raw, start, line_end,
             "PIREUS_OSK_SEED_CELL id=") {
-            let cell = oag_parse_field_uint(raw, start, line_end, "id=")
-            let left = oag_parse_field_uint(raw, start, line_end, "left=")
-            let right = oag_parse_field_uint(raw, start, line_end, "right=")
+            if pending_cell >= 0 { parse_failures = parse_failures + 1 }
+            pending_cell = oag_parse_field_uint(raw, start, line_end, "id=")
+            pending_left = -1
+            pending_right = -1
+        } else if pending_cell >= 0 &&
+            oag_span_has_prefix(raw, start, line_end, " left=") {
+            pending_left = oag_parse_prefixed_uint(
+                raw, start, line_end, " left=")
+        } else if pending_cell >= 0 &&
+            oag_span_has_prefix(raw, start, line_end, " right=") {
+            pending_right = oag_parse_prefixed_uint(
+                raw, start, line_end, " right=")
+        } else if pending_cell >= 0 &&
+            oag_span_has_prefix(raw, start, line_end, " bit=") {
             let bit = oag_parse_field_uint(raw, start, line_end, "bit=")
-            if cell < 0 || cell >= PIREUS_OAG_CELLS ||
-                left != cell / PIREUS_OAG_LANES ||
-                right != cell - (cell / PIREUS_OAG_LANES) * PIREUS_OAG_LANES ||
+            if pending_cell < 0 || pending_cell >= PIREUS_OAG_CELLS ||
+                pending_left != pending_cell / PIREUS_OAG_LANES ||
+                pending_right != pending_cell -
+                    (pending_cell / PIREUS_OAG_LANES) * PIREUS_OAG_LANES ||
                 (bit != 0 && bit != 1) {
                 parse_failures = parse_failures + 1
-            } else if seen[cell] != 0 {
+            } else if seen[pending_cell] != 0 {
                 duplicate_cells = duplicate_cells + 1
             } else {
-                seen[cell] = 1
-                cells[cell] = bit
+                seen[pending_cell] = 1
+                cells[pending_cell] = bit
                 cell_count = cell_count + 1
             }
+            pending_cell = -1
+            pending_left = -1
+            pending_right = -1
         }
         start = end + 1
     }
-    if word_block { parse_failures = parse_failures + 1 }
-    let result_valid = oag_line_count(raw,
-        "PIREUS_OSK_RESULT valid=1 error=0 failure_groups=0 claim_ready=0") == 1
-    let frozen_match = oag_line_count(raw,
-        "PIREUS_OSK_FROZEN match=1 mismatch_code=0") == 1
+    if word_block || pending_cell >= 0 { parse_failures = parse_failures + 1 }
+    let result_valid =
+        oag_line_count(raw, "PIREUS_OSK_RESULT valid=1") == 1 &&
+        oag_line_count(raw, " error=0") == 1 &&
+        oag_line_count(raw, " failure_groups=0") == 1 &&
+        oag_line_count(raw, " claim_ready=0") == 1
+    let frozen_match =
+        oag_line_count(raw, "PIREUS_OSK_FROZEN match=1") == 1 &&
+        oag_line_count(raw, " mismatch_code=0") == 1
     var weight: i64 = 0
     var replay_failures: i64 = 0
     var cell: i64 = 0
