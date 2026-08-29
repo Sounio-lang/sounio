@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.27.39"
+let runtime_version = "2026.08.29.40"
 let max_control_bytes = 16 * 1024
 let max_kernel_control_bytes = 2 * 1024 * 1024
 let max_snapshot_bytes = 1024 * 1024
@@ -11237,10 +11237,180 @@ let exec_grant_cell_probe_command cli =
       else failf "unknown exec-grant-cell probe mode: %s" mode);
   0
 
+let peer_activation_capsule_probe_command cli =
+  if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
+    failf "peer-activation-capsule-probe-requires-test-mode";
+  let root = required cli "--root" |> Unix.realpath in
+  let mode = required cli "--mode" in
+  let deadline_ms =
+    try int_of_string (required cli "--deadline-ms")
+    with _ -> failf "--deadline-ms must be an integer"
+  in
+  let frame name = required cli name |> read_file |> trim in
+  let seal_frame = frame "--seal" in
+  let optional_frame name =
+    optional cli name |> Option.map (fun path -> read_file path |> trim)
+  in
+  let require_frame name value =
+    match value with
+    | Some frame -> frame
+    | None -> failf "%s is required for mode %s" name mode
+  in
+  let consume_frame = optional_frame "--consume" in
+  let extinguish_frame = optional_frame "--extinguish" in
+  let poison_frame = optional_frame "--poison" in
+  let deny_frame = optional_frame "--deny" in
+  let prohibited_prefixes =
+    [ "LD_PRELOAD="; "LD_LIBRARY_PATH="; "LD_AUDIT=";
+      "SOUNIO_LOOM_RESIDENT_MEMBRANE_" ]
+  in
+  let environment =
+    Unix.environment () |> Array.to_list
+    |> List.filter (fun binding ->
+           not (List.exists (fun prefix -> starts_with binding prefix)
+                  prohibited_prefixes))
+    |> Array.of_list
+  in
+  let refused callback =
+    try ignore (callback ()); false
+    with Loom_peer_activation_capsule.Error _ -> true
+  in
+  Loom_peer_activation_capsule.with_cell ~root ~environment ~deadline_ms
+    (fun cell ->
+      let print ~codes ~control_refused ~reuse_refused ~deny_preserved =
+        Printf.printf
+          "LOOM_PEER_ACTIVATION_CAPSULE_OCAML_PROBE mode=%s semantic_authority=Sounio operational_realization=OCaml resident_model=single-Sounio-pid manifest_sha256=%s semantics_sha256=%s resident_v5_sha256=%s pid=%d generation_sha256=%s sequence=%d codes=%s state=%s poisoned=%s control_refused=%s reuse_refused=%s deny_preserved=%s same_uid_peer_isolation=true capsule_material=false production_activation=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false\n%!"
+          mode (Loom_peer_activation_capsule.manifest_sha256 cell)
+          (Loom_peer_activation_capsule.semantics_sha256 cell)
+          (Loom_peer_activation_capsule.resident_v5_sha256 cell)
+          (Loom_peer_activation_capsule.resident_pid cell)
+          (Loom_peer_activation_capsule.generation cell)
+          (Loom_peer_activation_capsule.sequence cell) codes
+          (Loom_peer_activation_capsule.state cell
+           |> Loom_peer_activation_capsule.state_name)
+          (if Loom_peer_activation_capsule.is_poisoned cell then "true"
+           else "false")
+          (if control_refused then "true" else "false")
+          (if reuse_refused then "true" else "false")
+          (if deny_preserved then "true" else "false")
+      in
+      if mode = "current" || mode = "python" then (
+        let decision = Loom_peer_activation_capsule.seal cell seal_frame in
+        let preserved =
+          Loom_peer_activation_capsule.state cell
+          = Loom_peer_activation_capsule.Empty
+        in
+        print ~codes:(string_of_int decision.code) ~control_refused:false
+          ~reuse_refused:false ~deny_preserved:preserved)
+      else if mode = "happy" then (
+        let seal = Loom_peer_activation_capsule.seal cell seal_frame in
+        let consume =
+          Loom_peer_activation_capsule.consume cell
+            (require_frame "--consume" consume_frame)
+        in
+        let extinguish =
+          Loom_peer_activation_capsule.extinguish cell
+            (require_frame "--extinguish" extinguish_frame)
+        in
+        print
+          ~codes:(Printf.sprintf "%d,%d,%d" seal.code consume.code
+                    extinguish.code)
+          ~control_refused:false ~reuse_refused:false ~deny_preserved:false)
+      else if mode = "deny-preserves" then (
+        let denied =
+          Loom_peer_activation_capsule.seal cell
+            (require_frame "--deny" deny_frame)
+        in
+        let preserved =
+          Loom_peer_activation_capsule.state cell
+          = Loom_peer_activation_capsule.Empty
+        in
+        let seal = Loom_peer_activation_capsule.seal cell seal_frame in
+        let consume =
+          Loom_peer_activation_capsule.consume cell
+            (require_frame "--consume" consume_frame)
+        in
+        let extinguish =
+          Loom_peer_activation_capsule.extinguish cell
+            (require_frame "--extinguish" extinguish_frame)
+        in
+        print
+          ~codes:(Printf.sprintf "%d,%d,%d,%d" denied.code seal.code
+                    consume.code extinguish.code)
+          ~control_refused:false ~reuse_refused:false
+          ~deny_preserved:preserved)
+      else if mode = "poison" then (
+        let seal = Loom_peer_activation_capsule.seal cell seal_frame in
+        let consume =
+          Loom_peer_activation_capsule.consume cell
+            (require_frame "--consume" consume_frame)
+        in
+        let poison =
+          Loom_peer_activation_capsule.poison cell
+            (require_frame "--poison" poison_frame)
+        in
+        print ~codes:(Printf.sprintf "%d,%d,%d" seal.code consume.code poison.code)
+          ~control_refused:false ~reuse_refused:false ~deny_preserved:false)
+      else if mode = "replay" then (
+        let seal = Loom_peer_activation_capsule.seal cell seal_frame in
+        let control_refused =
+          refused (fun () -> Loom_peer_activation_capsule.seal cell seal_frame)
+        in
+        let reuse_refused =
+          refused (fun () ->
+              Loom_peer_activation_capsule.consume cell
+                (require_frame "--consume" consume_frame))
+        in
+        print ~codes:(string_of_int seal.code) ~control_refused ~reuse_refused
+          ~deny_preserved:false)
+      else if mode = "mismatch" then (
+        let seal = Loom_peer_activation_capsule.seal cell seal_frame in
+        let control_refused =
+          refused (fun () ->
+              Loom_peer_activation_capsule.consume cell seal_frame)
+        in
+        let reuse_refused =
+          refused (fun () ->
+              Loom_peer_activation_capsule.consume cell
+                (require_frame "--consume" consume_frame))
+        in
+        print ~codes:(string_of_int seal.code) ~control_refused ~reuse_refused
+          ~deny_preserved:false)
+      else if mode = "timeout" then (
+        let seal = Loom_peer_activation_capsule.seal cell seal_frame in
+        let control_refused =
+          Loom_peer_activation_capsule.test_timeout cell
+            (require_frame "--consume" consume_frame)
+        in
+        let reuse_refused =
+          refused (fun () ->
+              Loom_peer_activation_capsule.consume cell
+                (require_frame "--consume" consume_frame))
+        in
+        print ~codes:(string_of_int seal.code) ~control_refused ~reuse_refused
+          ~deny_preserved:false)
+      else if mode = "eof" then (
+        let seal = Loom_peer_activation_capsule.seal cell seal_frame in
+        let control_refused =
+          Loom_peer_activation_capsule.test_eof cell
+            (require_frame "--consume" consume_frame)
+        in
+        let reuse_refused =
+          refused (fun () ->
+              Loom_peer_activation_capsule.consume cell
+                (require_frame "--consume" consume_frame))
+        in
+        print ~codes:(string_of_int seal.code) ~control_refused ~reuse_refused
+          ~deny_preserved:false)
+      else failf "unknown peer-activation-capsule probe mode: %s" mode);
+  0
+
 let usage () =
   Printf.eprintf
     "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
+  Printf.eprintf
+    "  peer-activation-capsule-probe --root DIR --mode current|python|happy|deny-preserves|poison|replay|mismatch|timeout|eof --seal FILE [--consume FILE] [--extinguish FILE] [--poison FILE] [--deny FILE] --deadline-ms N (test mode only)\n";
   Printf.eprintf "  provider-open persistent providers: claude, codex, kimi\n";
   Printf.eprintf
     "\nSpectral data plane:\n  export-events-arrow --out PATH [--state-dir DIR]\n  verify-events-arrow --file PATH\n";
@@ -11289,6 +11459,8 @@ let main () =
     | "resident-authority-probe" -> resident_authority_probe_command cli
     | "invocation-cell-probe" -> invocation_cell_probe_command cli
     | "exec-grant-cell-probe" -> exec_grant_cell_probe_command cli
+    | "peer-activation-capsule-probe" ->
+        peer_activation_capsule_probe_command cli
     | "start" -> start_command cli; 0
     | "recover" -> recover_command cli; 0
     | "status" -> status_command cli; 0
@@ -11390,6 +11562,8 @@ let () =
   | Loom_effect_closure.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_invocation_cell.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_exec_grant_cell.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
+  | Loom_peer_activation_capsule.Error error ->
+      Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_epistemic.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_witness.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_witness_epoch.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1

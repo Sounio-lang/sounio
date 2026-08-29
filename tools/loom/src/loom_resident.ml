@@ -14,6 +14,9 @@ let pinned_runtime_v3_manifest_sha256 =
 let pinned_runtime_v4_manifest_sha256 =
   "f61c93a3aefdbab792ed757faddf778017d34e0fa6bed97c565b56fe3147d473"
 
+let pinned_runtime_v5_manifest_sha256 =
+  "b3cf8c1e0524be35fc67b2b5a779bad9a9291195d65dc82dbc87595396fb5353"
+
 let max_file_bytes = 8 * 1024 * 1024
 let max_frame_bytes = 65_535
 
@@ -28,9 +31,11 @@ type policy = {
   parent_9025_sha256 : string option;
   parent_9029_sha256 : string option;
   parent_9030_sha256 : string option;
+  parent_9031_sha256 : string option;
   closure_enabled : bool;
   invocation_enabled : bool;
   exec_grant_enabled : bool;
+  peer_activation_enabled : bool;
 }
 
 type decision = {
@@ -221,8 +226,9 @@ let load_policy root =
   in
   { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
     parent_9024_sha256; parent_9025_sha256 = None; parent_9029_sha256 = None;
-    parent_9030_sha256 = None; closure_enabled = false;
-    invocation_enabled = false; exec_grant_enabled = false }
+    parent_9030_sha256 = None; parent_9031_sha256 = None;
+    closure_enabled = false; invocation_enabled = false;
+    exec_grant_enabled = false; peer_activation_enabled = false }
 
 let load_policy_v2 root =
   let path =
@@ -280,8 +286,9 @@ let load_policy_v2 root =
   { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
     parent_9024_sha256; parent_9025_sha256 = Some parent_9025_sha256;
     parent_9029_sha256 = None; parent_9030_sha256 = None;
-    closure_enabled = true; invocation_enabled = false;
-    exec_grant_enabled = false }
+    parent_9031_sha256 = None; closure_enabled = true;
+    invocation_enabled = false; exec_grant_enabled = false;
+    peer_activation_enabled = false }
 
 let load_policy_v3 root =
   let path =
@@ -347,8 +354,9 @@ let load_policy_v3 root =
   { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
     parent_9024_sha256; parent_9025_sha256 = Some parent_9025_sha256;
     parent_9029_sha256 = Some parent_9029_sha256;
-    parent_9030_sha256 = None; closure_enabled = true;
-    invocation_enabled = true; exec_grant_enabled = false }
+    parent_9030_sha256 = None; parent_9031_sha256 = None;
+    closure_enabled = true; invocation_enabled = true;
+    exec_grant_enabled = false; peer_activation_enabled = false }
 
 let load_policy_v4 root =
   let path =
@@ -418,8 +426,103 @@ let load_policy_v4 root =
   { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
     parent_9024_sha256; parent_9025_sha256 = Some parent_9025_sha256;
     parent_9029_sha256 = Some parent_9029_sha256;
-    parent_9030_sha256 = Some parent_9030_sha256; closure_enabled = true;
-    invocation_enabled = true; exec_grant_enabled = true }
+    parent_9030_sha256 = Some parent_9030_sha256;
+    parent_9031_sha256 = None; closure_enabled = true;
+    invocation_enabled = true; exec_grant_enabled = true;
+    peer_activation_enabled = false }
+
+let load_policy_v5 root =
+  let path =
+    match test_override "SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_MANIFEST" with
+    | Some path -> path
+    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v5"
+  in
+  if not (Sys.file_exists path) then failf "resident-runtime-v5-manifest-missing";
+  let manifest_sha256 = sha256_file path in
+  if manifest_sha256 <> pinned_runtime_v5_manifest_sha256 then
+    failf "resident-runtime-v5-manifest-hash-mismatch";
+  let manifest = parse_manifest path in
+  if required manifest "schema" <> "loom-resident-membrane-runtime-v5"
+     || required manifest "stage" <> "SOUNIO_RESIDENT_REALIZATION"
+     || required manifest "producing_language" <> "Sounio"
+     || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
+     || required manifest "actions" <> "9023,9024,9025,9029,9030,9031"
+     || required manifest "runtime_frozen" <> "true"
+     || required manifest "route_9024" <> "1"
+     || required manifest "route_9023" <> "2"
+     || required manifest "route_9025" <> "3"
+     || required manifest "route_9029" <> "4"
+     || required manifest "route_9030" <> "5"
+     || required manifest "route_9031" <> "6"
+     || required manifest "route_stop" <> "0"
+     || required manifest "max_frame_bytes" <> "65535"
+     || required manifest "framing" <> "sounio-read-byte-newline"
+     || required manifest "process_model" <> "single-resident-sounio-pid"
+     || required manifest "same_uid_peer_isolation" <> "true"
+     || required manifest "ocaml_capsule_started" <> "false"
+     || required manifest "capsule_material" <> "false"
+     || required manifest "production_activation" <> "false"
+     || required manifest "launch_open" <> "false"
+     || required manifest "recycle_open" <> "false"
+     || required manifest "exec_attached" <> "false"
+     || required manifest "commit_attached" <> "false"
+     || required manifest "ci_attached" <> "false"
+     || required manifest "parity_open" <> "false"
+     || required manifest "claim_ready" <> "false"
+  then failf "resident-runtime-v5-manifest-state-invalid";
+  let parent_9023_sha256 = required manifest "parent_9023_sha256" in
+  let parent_9024_sha256 = required manifest "parent_9024_sha256" in
+  let parent_9025_sha256 = required manifest "parent_9025_sha256" in
+  let parent_9029_sha256 = required manifest "parent_9029_sha256" in
+  let parent_9030_sha256 = required manifest "parent_9030_sha256" in
+  let parent_9031_sha256 = required manifest "parent_9031_sha256" in
+  let verify path_key expected reason =
+    let target = Filename.concat root (required manifest path_key) in
+    if sha256_file target <> expected then failf "%s" reason
+  in
+  verify "parent_9023_manifest_path" parent_9023_sha256
+    "resident-v5-parent-9023-hash-mismatch";
+  verify "parent_9024_manifest_path" parent_9024_sha256
+    "resident-v5-parent-9024-hash-mismatch";
+  verify "parent_9025_manifest_path" parent_9025_sha256
+    "resident-v5-parent-9025-hash-mismatch";
+  verify "parent_9029_manifest_path" parent_9029_sha256
+    "resident-v5-parent-9029-hash-mismatch";
+  verify "parent_9030_manifest_path" parent_9030_sha256
+    "resident-v5-parent-9030-hash-mismatch";
+  verify "parent_9031_manifest_path" parent_9031_sha256
+    "resident-v5-parent-9031-hash-mismatch";
+  verify "parent_9025_v13_manifest_path"
+    (required manifest "parent_9025_v13_sha256")
+    "resident-v5-parent-9025-v13-hash-mismatch";
+  verify "parent_resident_v4_manifest_path"
+    (required manifest "parent_resident_v4_sha256")
+    "resident-v5-parent-runtime-v4-hash-mismatch";
+  verify "dispatcher_path" (required manifest "dispatcher_sha256")
+    "resident-v5-dispatcher-hash-mismatch";
+  verify "build_script_path" (required manifest "build_script_sha256")
+    "resident-v5-build-script-hash-mismatch";
+  verify "gate_script_path" (required manifest "gate_script_sha256")
+    "resident-v5-gate-script-hash-mismatch";
+  let parent_9031 =
+    Filename.concat root (required manifest "parent_9031_manifest_path")
+    |> parse_manifest
+  in
+  if required parent_9031 "parent_9030_manifest_sha256" <> parent_9030_sha256
+     || required parent_9031 "parent_9025_manifest_sha256"
+          <> required manifest "parent_9025_v13_sha256"
+  then failf "resident-v5-action-9031-binding-invalid";
+  let runtime, runtime_sha256 =
+    runtime_path ~override:"SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_RUNTIME"
+      ~sibling_name:"sounio-loom-resident-membrane-runtime-v5" root manifest
+  in
+  { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
+    parent_9024_sha256; parent_9025_sha256 = Some parent_9025_sha256;
+    parent_9029_sha256 = Some parent_9029_sha256;
+    parent_9030_sha256 = Some parent_9030_sha256;
+    parent_9031_sha256 = Some parent_9031_sha256;
+    closure_enabled = true; invocation_enabled = true;
+    exec_grant_enabled = true; peer_activation_enabled = true }
 
 let digest_u32_of_hex digest =
   if String.length digest <> 64 then failf "invalid-resident-sha256:%s" digest;
@@ -583,6 +686,7 @@ let validate_output route output =
     else if route = 3 then "SOUNIO_EFFECT_CLOSURE_"
     else if route = 4 then "SOUNIO_KERNEL_INVOCATION_CELL_"
     else if route = 5 then "SOUNIO_KERNEL_EXEC_GRANT_CELL_"
+    else if route = 6 then "SOUNIO_KERNEL_PEER_ACTIVATION_CAPSULE_"
     else failf "resident-route-invalid"
   in
   if not (starts_with output prefix)
@@ -631,11 +735,17 @@ let append_receipt resident ~event ~sequence ~frame ~code ~output ~latency_us =
           | Some digest ->
               closure_parents @ [ "parent_9029_manifest_sha256=" ^ digest ]
         in
-        let parents =
+        let grant_parents =
           match resident.policy.parent_9030_sha256 with
           | None -> invocation_parents
           | Some digest ->
               invocation_parents @ [ "parent_9030_manifest_sha256=" ^ digest ]
+        in
+        let parents =
+          match resident.policy.parent_9031_sha256 with
+          | None -> grant_parents
+          | Some digest ->
+              grant_parents @ [ "parent_9031_manifest_sha256=" ^ digest ]
         in
         String.concat "\t"
           (parents @
@@ -791,6 +901,10 @@ let spawn_v4 ~root ~environment ~deadline_ms =
   let root = Unix.realpath root in
   spawn_with_policy ~root ~policy:(load_policy_v4 root) ~environment ~deadline_ms
 
+let spawn_v5 ~root ~environment ~deadline_ms =
+  let root = Unix.realpath root in
+  spawn_with_policy ~root ~policy:(load_policy_v5 root) ~environment ~deadline_ms
+
 let decide_with_route resident ~route ~event resident_deadline_ms frame =
   ensure_usable resident;
   if resident.outstanding then (
@@ -864,6 +978,12 @@ let decide_exec_grant_cell resident ~deadline_ms frame =
   if not resident.policy.exec_grant_enabled then
     failf "resident-exec-grant-cell-route-unavailable";
   decide_with_route resident ~route:5 ~event:"EXEC_GRANT_CELL" deadline_ms frame
+
+let decide_peer_activation_capsule resident ~deadline_ms frame =
+  if not resident.policy.peer_activation_enabled then
+    failf "resident-peer-activation-capsule-route-unavailable";
+  decide_with_route resident ~route:6 ~event:"PEER_ACTIVATION_CAPSULE"
+    deadline_ms frame
 
 let close resident ~deadline_ms =
   if resident.poisoned || resident.closed then ()
@@ -1072,6 +1192,35 @@ let test_exec_grant_eof resident ~deadline_ms frame =
     ignore (invoke resident ~route:5 ~event:"EXEC_GRANT_EOF" ~sequence:1
               ~deadline_us frame);
     failf "resident-exec-grant-eof-control-admitted"
+  with
+  | Error "resident-not-alive" -> true
+  | Error "resident-response-eof" -> true
+
+let test_peer_activation_timeout resident frame =
+  if not (test_mode ()) then
+    failf "resident-test-peer-activation-timeout-requires-test-mode";
+  if not resident.policy.peer_activation_enabled then
+    failf "resident-peer-activation-capsule-route-unavailable";
+  let deadline_us = Int64.sub (monotonic_us ()) 1L in
+  try
+    ignore (invoke resident ~route:6 ~event:"PEER_ACTIVATION_TIMEOUT"
+              ~sequence:1 ~deadline_us frame);
+    failf "resident-peer-activation-timeout-control-admitted"
+  with
+  | Error "resident-request-timeout" -> true
+  | Error "resident-response-timeout" -> true
+
+let test_peer_activation_eof resident ~deadline_ms frame =
+  if not (test_mode ()) then
+    failf "resident-test-peer-activation-eof-requires-test-mode";
+  if not resident.policy.peer_activation_enabled then
+    failf "resident-peer-activation-capsule-route-unavailable";
+  Unix.kill resident.pid Sys.sigkill;
+  let deadline_us = deadline_after_ms deadline_ms in
+  try
+    ignore (invoke resident ~route:6 ~event:"PEER_ACTIVATION_EOF"
+              ~sequence:1 ~deadline_us frame);
+    failf "resident-peer-activation-eof-control-admitted"
   with
   | Error "resident-not-alive" -> true
   | Error "resident-response-eof" -> true
