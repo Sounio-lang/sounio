@@ -237,7 +237,10 @@ r[d] = acc_15
 The reference path must be checked against an independently structured direct
 evaluation of the same genotype law inside Sounio. The two paths may share
 `cd_sigma` and the packed-matrix law, but they may not share a precomputed sign
-table or a target lowering.
+table or a target lowering. Extensional cell checks establish equality of all
+partner, sign, destination, and ordinal fields. The numeric fixture checks one
+exact execution of that already cell-equal plan; it is not a universal
+floating-point equivalence theorem.
 
 The first executable chooses deterministic integer-valued `f64` inputs whose
 products and reductions are exactly representable. This makes equality a
