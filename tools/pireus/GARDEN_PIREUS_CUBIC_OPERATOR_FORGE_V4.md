@@ -190,6 +190,11 @@ descriptors, and all child semantic digests.
 No child digest, mask, defect count, or population digest is fixed in this
 Garden. Those values must first be produced by Sounio.
 
+The three structural counts are diagnostics of the complete child sign table
+`cd_sigma XOR b_B XOR m`, not invariants of the mutation monomial alone. The
+fixture is smoke-only because both evaluators consume the same already
+extensionally checked child sign bits; it is not an independent proof.
+
 ## Executable identity checks
 
 The first executable must prove extensionally:
