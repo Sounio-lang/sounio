@@ -22,6 +22,7 @@ cleanup() {
       --state-dir "$INSTALL_STATE" --agent freeze-installed --lane detached \
       --cwd "$TEST_ROOT/outside-repository" >/dev/null 2>&1 || true
   fi
+  chmod -R u+w "$TEST_ROOT" 2>/dev/null || true
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
@@ -260,8 +261,12 @@ installed_output="$($installed_loom start --state-dir "$INSTALL_STATE" \
   fail "installed Loom lost its Sounio observation: $installed_output"
 installed_log="$INSTALL_STATE/product-launch-dark.tsv"
 [[ -f "$installed_log" ]] || fail 'installed Loom omitted the durable receipt'
-grep -Fq $'schema=loom-product-launch-dark-decision-v1\tlaunch_source=start\tdecision=DENY\tcode='"$(field current_material_code)"$'\t' \
-  "$installed_log" || fail 'installed Loom receipt differs from Sounio authority'
+installed_receipt="$(grep -m1 $'\tlaunch_source=start\t' "$installed_log")"
+[[ "$installed_receipt" == schema=loom-product-launch-dark-decision-v1$'\t'* && \
+   "$installed_receipt" == *$'\tdecision=DENY\tcode='"$(field current_material_code)"$'\t'* && \
+   "$installed_receipt" == *$'\tproducing_language=Sounio\tlanguage_role=SEMANTIC_AUTHORITY\t'* && \
+   "$installed_receipt" == *$'\toperational_language=OCaml\toperational_role=OPERATIONAL_ATTACHMENT\t'* ]] ||
+  fail 'installed Loom receipt differs from Sounio authority'
 "$installed_loom" stop --state-dir "$INSTALL_STATE" --agent freeze-installed \
   --lane detached --cwd "$TEST_ROOT/outside-repository" >/dev/null
 
