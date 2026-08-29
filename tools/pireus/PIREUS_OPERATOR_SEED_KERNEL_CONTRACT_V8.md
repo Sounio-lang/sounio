@@ -27,14 +27,25 @@ frozen matcher.
 
 ## Parent admission
 
-v8 binds the frozen v7 source, semantics, and freeze receipt and runs the live
-v7 evaluator plus exact frozen matcher. Admission requires:
+v8 binds the exact v7 source, freeze receipt, and frozen Sounio process
+evidence by full SHA-256. It also checks that the freeze receipt names the
+expected v7 semantics hash. The v7 evaluator is not called recursively inside
+the v8 process. The outer gate must first run v7 as a separate Guardian-
+authorized process, verify that it matches its frozen transcript, and only
+then launch v8. v8 extracts the seed words and all 256 seed cells from that
+hash-bound transcript; no seed value is embedded in the v8 source.
+
+Admission requires:
 
 ```text
 parent.valid
 parent.error == 0
 parent.failures == 0
-frozen_mismatch_code(parent) == 0
+source_file_sha256 == frozen_source_sha256
+freeze_file_sha256 == frozen_freeze_sha256
+process_evidence_sha256 == frozen_evidence_sha256
+process_evidence.result_valid == true
+process_evidence.frozen_match == true
 parent.outcome == OperatorSeed
 parent.existing_bridge == false
 parent.residual_nonzero > 0
@@ -42,7 +53,9 @@ all 256 seed cells are bits
 all 256 packed-word/cell replays match
 ```
 
-No target evidence participates in admission.
+Missing process evidence, a recursive parent-evaluation request, or a
+pre-filled parent seed fails closed. No target evidence participates in
+admission.
 
 ## Operator semantics
 
@@ -104,13 +117,14 @@ first source compares none of them against an expected value.
 
 The first Sounio execution emits:
 
-- three frozen-parent identities and live admission fields;
+- three frozen-parent identities, exact file/receipt-match fields, and
+  externalized process-evidence admission fields;
 - all 256 seed cells;
 - the complete 256-term IR;
 - all 256 basis witnesses;
 - three input pairs and both 16-lane outputs;
 - the generated candidate and bounded receipt;
-- 32 request/admission negatives;
+- 35 request/admission negatives;
 - seven digests;
 - `claim_ready=false`.
 
@@ -119,11 +133,12 @@ Only after this transcript is committed may the source gain an exact matcher.
 ## Negative contract
 
 The Sounio request layer refuses non-Sounio authority, missing policy, wrong
-stage, absent/unfrozen/unbound parent, injected expected results, target or
-material evidence, cost/performance evidence, parity writes, review promotion,
-novelty/priority/claim promotion, invalid waiver, bridge-as-seed, zero seed,
-and malformed seed. The native Guardian separately denies forbidden processes
-before launch.
+stage, absent/unfrozen/unbound parent, missing parent process evidence,
+recursive parent evaluation, pre-filled parent seed, injected expected
+results, target or material evidence, cost/performance evidence, parity
+writes, review promotion, novelty/priority/claim promotion, invalid waiver,
+bridge-as-seed, zero seed, and malformed seed. The native Guardian separately
+denies forbidden processes before launch.
 
 ## Claim boundary
 

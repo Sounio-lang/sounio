@@ -21,7 +21,8 @@ The direction is:
 
 ```text
 frozen v7 OperatorSeed
-        |
+        | exact source/freeze/evidence hashes
+        | externalized Sounio process transcript
         v
 TwistedXorOperator<4>
         |
@@ -82,11 +83,21 @@ a1be292392727cf515baf6d95a376d6060d56f9b807fc58d8998fbe23bdc7726
 
 freeze_receipt_sha256=
 7293594eb7a881d1f89d9593b1cc19e3e611f99a491a4cd1146afe0a68cd623a
+
+frozen_process_evidence_sha256=
+da2adf49188c1dcc1ca4c2a072f72f419705a8d2f12f34633ddd8a5e604998be
 ```
 
-The live v7 evaluator and frozen matcher must both pass. v8 admits only the
-frozen `OperatorSeed` branch. An `ExistingClassBridge`, zero residual, altered
-seed, unbound lineage, target observation, or expected result is refused.
+The outer gate runs v7 as its own Guardian-authorized process and verifies its
+frozen matcher before v8 starts. v8 does not recursively execute v7. Instead,
+it reads the exact hash-bound v7 source, freeze receipt, and Sounio process
+evidence, then parses the seed words and all 256 seed cells from that evidence.
+No concrete seed value may be embedded or supplied to v8.
+
+v8 admits only the frozen `OperatorSeed` branch. An `ExistingClassBridge`,
+zero residual, altered or pre-filled seed, missing process evidence, recursive
+parent evaluation, unbound lineage, target observation, or expected result is
+refused.
 
 The inherited residual has 256 sign bits addressed in row-major order:
 
@@ -222,7 +233,8 @@ the first material contract.
 
 After the matcher-free source is committed, the first Sounio execution emits:
 
-- the v7 parent lineage and live frozen-match result;
+- the v7 parent lineage, exact file matches, and externalized frozen process-
+  evidence result;
 - the generated operator kind and bounded scope;
 - all 256 canonical IR terms;
 - all 256 basis-sweep results and failure counts;
@@ -270,7 +282,9 @@ receipt from one endpoint is not global material parity.
 The executable and native Guardian must refuse or detect:
 
 - a non-Sounio producer or non-semantic parent;
-- a v7 parent that is absent, unfrozen, hash-unbound, or live-mismatched;
+- a v7 parent that is absent, unfrozen, hash-unbound, or process-mismatched;
+- missing parent process evidence, recursive parent evaluation, or a
+  pre-filled parent seed;
 - a bridge presented as a seed;
 - a zero or malformed seed table;
 - an expected probe output supplied before first execution;
