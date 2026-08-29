@@ -13,6 +13,7 @@
 #include <linux/sched.h>
 #include <linux/seccomp.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/mman.h>
 #include <sys/personality.h>
 #include <sys/prctl.h>
@@ -692,15 +693,43 @@ std::string classify(const Vertex& vertex, const ProbeResult& result) {
   return "REFUSED_BEFORE_EFFECT";
 }
 
+std::string completed_syscall_result(std::string_view witness_kind) {
+  if (witness_kind == "CHILD_CREATED") return "CHILD_REAPED";
+  if (witness_kind == "FILE_CREATED") return "FILE_CREATED_AND_REMOVED";
+  if (witness_kind == "FD9_CREATED") return "FD9_CREATED_AND_CLOSED";
+  if (witness_kind == "SHARED_MAPPING_CREATED") {
+    return "MAPPING_WRITTEN_AND_UNMAPPED";
+  }
+  if (witness_kind == "IO_URING_CREATED") return "RING_CREATED_AND_CLOSED";
+  if (witness_kind == "HOST_ENDPOINT_CONNECTED" ||
+      witness_kind == "UNIX_ENDPOINT_CONNECTED") {
+    return "CONNECT_ACCEPTED_AND_CLOSED";
+  }
+  if (witness_kind == "MEMFD_CREATED") return "MEMFD_CREATED_AND_CLOSED";
+  if (witness_kind == "PERSONALITY_CHANGED_AND_RESTORED") {
+    return "CHANGED_RESTORED";
+  }
+  if (witness_kind == "PROC_SELF_MEM_OPENED") {
+    return "OBJECT_OPENED_AND_CLOSED";
+  }
+  if (witness_kind == "GETPID_RETURNED") return "PID_RETURNED";
+  return "SUCCESS_WITH_UNNAMED_WITNESS";
+}
+
 std::string receipt(const Vertex& vertex, std::string_view invariant_sha256,
                     const ProbeResult& result) {
   const std::string observation = classify(vertex, result);
-  const std::string syscall_result = result.syscall_result < 0
-      ? errno_name(result.error_number)
-      : "SUCCESS";
   const std::string witness_kind = result.effect_completed == 1
       ? std::string(result.witness_kind)
       : "NONE";
+  std::string syscall_result = result.syscall_result < 0
+      ? errno_name(result.error_number)
+      : completed_syscall_result(witness_kind);
+  if (vertex.family == 7 && vertex.bits == "10" &&
+      (syscall_result == "ECONNREFUSED" || syscall_result == "ENETUNREACH" ||
+       syscall_result == "ERRNO_100")) {
+    syscall_result = "ENDPOINT_UNREACHABLE";
+  }
   const std::string witness_preimage =
       "observation=" + observation + "|syscall_result=" + syscall_result +
       "|witness_kind=" + witness_kind + "|detail=" + result.detail +
@@ -717,6 +746,101 @@ std::string receipt(const Vertex& vertex, std::string_view invariant_sha256,
       " semantic_authority=Sounio producer=C++20 role=MATERIAL_PARITY"
       " transitory=true semantic_decision=false material_coverage=false"
       " complete_effects=false material_execution=false claim_ready=false";
+}
+
+ProbeResult run_unix_vertex(const Vertex& vertex,
+                            const std::vector<sock_filter>& filter) {
+  unlink(vertex.unix_path.c_str());
+  if (vertex.bits[0] == '1') {
+    return run_probe_child(vertex, filter);
+  }
+  const int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (listener < 0) throw Error("Unix witness listener creation failed");
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  if (vertex.unix_path.size() >= sizeof(address.sun_path)) {
+    close(listener);
+    throw Error("Unix witness endpoint path is too long");
+  }
+  std::memcpy(address.sun_path, vertex.unix_path.c_str(),
+              vertex.unix_path.size() + 1);
+  if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
+      listen(listener, 1) != 0) {
+    close(listener);
+    unlink(vertex.unix_path.c_str());
+    throw Error("Unix witness listener cannot bind");
+  }
+  const pid_t server = fork();
+  if (server < 0) {
+    close(listener);
+    unlink(vertex.unix_path.c_str());
+    throw Error("Unix witness listener cannot fork");
+  }
+  if (server == 0) {
+    pollfd descriptor{listener, POLLIN, 0};
+    const int ready = poll(&descriptor, 1, 1000);
+    if (ready > 0 && (descriptor.revents & POLLIN) != 0) {
+      const int peer = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+      if (peer >= 0) close(peer);
+    }
+    close(listener);
+    _exit(0);
+  }
+  close(listener);
+  const ProbeResult result = run_probe_child(vertex, filter);
+  int status = 0;
+  while (waitpid(server, &status, 0) < 0 && errno == EINTR) {}
+  const bool removed = unlink(vertex.unix_path.c_str()) == 0;
+  errno = 0;
+  const bool absent = access(vertex.unix_path.c_str(), F_OK) != 0 &&
+                      errno == ENOENT;
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || !removed || !absent) {
+    throw Error("Unix witness endpoint extinction failed");
+  }
+  return result;
+}
+
+int run_inet_server(int port) {
+  if (port < 0 || port > 65535) throw Error("inet server port is malformed");
+  const int listener = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (listener < 0) throw Error("inet witness listener creation failed");
+  const int enabled = 1;
+  if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &enabled,
+                 sizeof(enabled)) != 0) {
+    close(listener);
+    throw Error("inet witness listener option failed");
+  }
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(static_cast<std::uint16_t>(port));
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
+      listen(listener, 1) != 0) {
+    close(listener);
+    throw Error("inet witness listener cannot bind");
+  }
+  socklen_t length = sizeof(address);
+  if (getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+    close(listener);
+    throw Error("inet witness listener identity failed");
+  }
+  std::cout << "LOOM_EFFECT_INET_SERVER_V11 READY address=127.0.0.1 port="
+            << ntohs(address.sin_port) << std::endl;
+  pollfd descriptor{listener, POLLIN, 0};
+  const int ready = poll(&descriptor, 1, 60000);
+  if (ready <= 0 || (descriptor.revents & POLLIN) == 0) {
+    close(listener);
+    throw Error("inet witness listener timed out");
+  }
+  const int peer = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+  if (peer < 0) {
+    close(listener);
+    throw Error("inet witness listener accept failed");
+  }
+  close(peer);
+  close(listener);
+  std::cout << "LOOM_EFFECT_INET_SERVER_V11 ACCEPTED extinction=true\n";
+  return 0;
 }
 
 void emit_exec_receipt(std::string_view probe, std::string_view bits,
@@ -901,7 +1025,9 @@ int run_vertex(const Vertex& vertex) {
   if (vertex.family == 1) {
     return run_exec_vertex(vertex, invariant_sha256, filter);
   }
-  const ProbeResult result = run_probe_child(vertex, filter);
+  const ProbeResult result = vertex.family == 8
+      ? run_unix_vertex(vertex, filter)
+      : run_probe_child(vertex, filter);
   std::cout << receipt(vertex, invariant_sha256, result) << '\n';
   return 0;
 }
@@ -916,6 +1042,10 @@ int main(int argc, char** argv) {
     if (argc == 4 && std::string_view(argv[1]) == "--selftest" &&
         std::string_view(argv[2]) == "--policy-manifest") {
       return selftest(argv[3]);
+    }
+    if (argc == 4 && std::string_view(argv[1]) == "--inet-server" &&
+        std::string_view(argv[2]) == "--port") {
+      return run_inet_server(parse_int(argv[3], "inet server port"));
     }
     if (argc >= 2 && std::string_view(argv[1]) == "--vertex") {
       return run_vertex(parse_vertex(argc, argv));

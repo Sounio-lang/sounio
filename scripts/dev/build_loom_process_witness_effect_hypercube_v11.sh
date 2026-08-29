@@ -20,7 +20,7 @@ for tool in "$CXX" sha256sum readelf; do
 done
 [[ -f "$SOURCE" && ! -L "$SOURCE" ]] || fail 'V11 material source is absent or linked'
 [[ "$(sha256sum "$SOURCE" | cut -d ' ' -f 1)" == \
-  d7e7888e1e89f36e6884955c6c0334df71dbbbf5cae52bfd43e0d99f8a52acc5 ]] ||
+  424d8cd2d5b8b32880cfce7b9ab2825c66932404f1fb6e34f9f78692c6526d5a ]] ||
   fail 'V11 material source drifted'
 [[ -f "$POLICY_MANIFEST" && ! -L "$POLICY_MANIFEST" ]] ||
   fail 'frozen Sounio V11 policy manifest is absent or linked'

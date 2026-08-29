@@ -142,14 +142,17 @@ for family_probe in \
   run_vertex "$family" "$probe" 01
   run_vertex "$family" "$probe" 00
 done
+for bits in 11 10 01 00; do
+  run_vertex 8 connect_hash_bound_unix_endpoint "$bits"
+done
 
-[[ "$material_vertices" == 26 && "$(wc -l < "$RECEIPTS")" == 26 ]] ||
+[[ "$material_vertices" == 30 && "$(wc -l < "$RECEIPTS")" == 30 ]] ||
   fail 'local material vertex count diverged'
-[[ "$(grep -c ' observation=REFUSED_BEFORE_EFFECT ' "$RECEIPTS" || true)" == 13 ]] ||
+[[ "$(grep -c ' observation=REFUSED_BEFORE_EFFECT ' "$RECEIPTS" || true)" == 16 ]] ||
   fail 'local treatment-refusal count diverged'
-[[ "$(grep -c ' observation=EFFECT_COMPLETED ' "$RECEIPTS" || true)" == 13 ]] ||
+[[ "$(grep -c ' observation=EFFECT_COMPLETED ' "$RECEIPTS" || true)" == 14 ]] ||
   fail 'local open-completion count diverged'
-[[ "$(grep -c ' witness_extinct=true ' "$RECEIPTS" || true)" == 13 ]] ||
+[[ "$(grep -c ' witness_extinct=true ' "$RECEIPTS" || true)" == 14 ]] ||
   fail 'local positive extinction count diverged'
 if grep -Eq 'observation=(CROSSED_NAMED_RULE|EXPERIMENT_UNAVAILABLE)' "$RECEIPTS"; then
   fail 'local material subset crossed a rule or became unavailable'
@@ -180,7 +183,7 @@ if printf '%s\n' "$dependencies" | grep -Eqi 'python|rust'; then
   fail 'native V11 laboratory has a prohibited runtime dependency'
 fi
 
-printf 'sounio-loom-process-witness-effect-hypercube-v11-selftest: PASS semantic_authority=Sounio producer=C++20 role=MATERIAL_PARITY transitory=true semantic_decision=false action=9025 policy_manifest_sha256=adbc7151da91bd12928cf059a4fce01de59b38096bb7bebe55be0402fab9972c families=12 probes=13 mechanism_dimensions=18 vertices=40 compiled_filters=12 local_material_families=10 local_material_probes=11 local_material_vertices=26 local_treatments=13 local_open_completions=13 local_extinctions=13 exec_vertices=8 Sounio_expected_results=true invariant_stable=true delta_distinct=true triple_hash_binding=true noncanonical_vertex=refused wrong_cell_identity=refused v10_manifest=refused deterministic=true runtime_dependencies=static source_sha256=%s executable_sha256=%s local_receipts_sha256=%s host_structural_families_pending=3+7+8+10+11 host_network_families_pending=7+8 material_hypercube=false material_coverage=false complete_effects=false material_execution=false action_9025_judged=false claim_ready=false\n' \
+printf 'sounio-loom-process-witness-effect-hypercube-v11-selftest: PASS semantic_authority=Sounio producer=C++20 role=MATERIAL_PARITY transitory=true semantic_decision=false action=9025 policy_manifest_sha256=adbc7151da91bd12928cf059a4fce01de59b38096bb7bebe55be0402fab9972c families=12 probes=13 mechanism_dimensions=18 vertices=40 compiled_filters=12 local_material_families=11 local_material_probes=12 local_material_vertices=30 local_treatments=16 local_open_completions=14 local_extinctions=14 exec_vertices=8 unix_endpoint_vertices=4 Sounio_expected_results=true invariant_stable=true delta_distinct=true triple_hash_binding=true noncanonical_vertex=refused wrong_cell_identity=refused v10_manifest=refused deterministic=true runtime_dependencies=static source_sha256=%s executable_sha256=%s local_receipts_sha256=%s host_structural_families_pending=3+7+10+11 host_network_families_pending=7 material_hypercube=false material_coverage=false complete_effects=false material_execution=false action_9025_judged=false claim_ready=false\n' \
   "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_process_witness_effect_hypercube_v11.cpp" | cut -d ' ' -f 1)" \
   "$CELL_SHA256" \
   "$(sha256sum "$RECEIPTS" | cut -d ' ' -f 1)"
