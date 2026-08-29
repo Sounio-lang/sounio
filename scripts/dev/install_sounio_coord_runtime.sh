@@ -190,8 +190,9 @@ activate_runtime() {
     local exec_ingress_capsule="$version_dir/policy/product-exec-ingress"
     local exec_ingress_freeze="$exec_ingress_capsule/tools/loom/product_exec_ingress_dark.runtime.v1"
     grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" &&
+      grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$manifest" &&
       grep -q '^capability=loom-product-launch-dark-attachment-v1$' "$manifest" ||
-      die "installed runtime declares product ExecIngress without the native hook and Sounio action 9031: $runtime_id"
+      die "installed runtime declares product ExecIngress without binary attestation, the native hook, and Sounio action 9031: $runtime_id"
     verify_manifest_binary_sha256 "$manifest" \
       loom_product_exec_ingress_manifest_sha256 "$exec_ingress_freeze"
     verify_manifest_binary_sha256 "$manifest" \
@@ -200,6 +201,24 @@ activate_runtime() {
     verify_manifest_binary_sha256 "$manifest" \
       loom_product_exec_ingress_evidence_sha256 \
       "$exec_ingress_capsule/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt"
+    local source_pair source_path_key source_hash_key source_rel source_expected source_actual
+    for source_pair in \
+      exec_ingress_source_path:exec_ingress_source_sha256 \
+      hook_source_path:hook_source_sha256 \
+      membrane_source_path:membrane_source_sha256 \
+      cli_source_path:cli_source_sha256 \
+      c_stub_path:c_stub_sha256 \
+      dune_path:dune_sha256; do
+      source_path_key="${source_pair%%:*}"
+      source_hash_key="${source_pair#*:}"
+      source_rel="$(manifest_value "$exec_ingress_freeze" "$source_path_key")"
+      [[ "$source_rel" == tools/loom/src/* && "$source_rel" != *'..'* ]] ||
+        die "installed product ExecIngress source path is unsafe: $source_rel"
+      source_expected="$(manifest_value "$exec_ingress_freeze" "$source_hash_key")"
+      source_actual="$(sha256sum "$exec_ingress_capsule/$source_rel" | awk '{print $1}')"
+      [[ "$source_actual" == "$source_expected" ]] ||
+        die "installed product ExecIngress source drifted: $source_rel"
+    done
     [[ "$(manifest_value "$exec_ingress_freeze" semantic_authority)" == Sounio &&
       "$(manifest_value "$exec_ingress_freeze" semantic_action)" == 9031 &&
       "$(manifest_value "$exec_ingress_freeze" operational_language)" == OCaml &&
@@ -207,10 +226,14 @@ activate_runtime() {
       "$(manifest_value "$exec_ingress_freeze" descriptor_dark_attached)" == true &&
       "$(manifest_value "$exec_ingress_freeze" descriptor_is_bearer)" == false &&
       "$(manifest_value "$exec_ingress_freeze" same_uid_self_broker)" == refused &&
+      "$(manifest_value "$exec_ingress_freeze" contract_sha256)" == \
+        "$(manifest_value "$manifest" loom_product_exec_ingress_contract_sha256)" &&
+      "$(manifest_value "$exec_ingress_freeze" evidence_sha256)" == \
+        "$(manifest_value "$manifest" loom_product_exec_ingress_evidence_sha256)" &&
       "$(manifest_value "$exec_ingress_freeze" runtime_version)" == \
         "$(manifest_value "$manifest" runtime_version)" &&
       "$(manifest_value "$exec_ingress_freeze" runtime_sha256)" == \
-        "$(manifest_value "$manifest" loom_runtime_sha256)" &&
+        "$(manifest_value "$manifest" loom_product_exec_ingress_reference_runtime_sha256)" &&
       "$(manifest_value "$exec_ingress_freeze" action_9031_manifest_sha256)" == \
         "$(manifest_value "$manifest" loom_product_activation_action_manifest_sha256)" &&
       "$(manifest_value "$exec_ingress_freeze" action_9031_runtime_sha256)" == \
@@ -626,6 +649,14 @@ loom_product_activation_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_resident_trans
 loom_product_exec_ingress_freeze="$SOURCE_ROOT/tools/loom/product_exec_ingress_dark.runtime.v1"
 loom_product_exec_ingress_contract="$SOURCE_ROOT/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md"
 loom_product_exec_ingress_evidence="$SOURCE_ROOT/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt"
+loom_product_exec_ingress_sources=(
+  "$SOURCE_ROOT/tools/loom/src/loom_exec_ingress.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_membrane.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_pty_stubs.c"
+  "$SOURCE_ROOT/tools/loom/src/dune"
+)
 [[ -x "$installer_source" ]] || die "runtime installer source missing or not executable: $installer_source"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
@@ -739,7 +770,8 @@ done
 for product_exec_ingress_source in \
   "$loom_product_exec_ingress_freeze" \
   "$loom_product_exec_ingress_contract" \
-  "$loom_product_exec_ingress_evidence"; do
+  "$loom_product_exec_ingress_evidence" \
+  "${loom_product_exec_ingress_sources[@]}"; do
   [[ -f "$product_exec_ingress_source" ]] ||
     die "Loom product ExecIngress capsule is incomplete: $product_exec_ingress_source"
 done
@@ -1121,7 +1153,8 @@ else
     "$stage/policy/product-activation/stdlib/coordination" \
     "$stage/policy/product-activation/scripts/dev" \
     "$stage/policy/product-activation/scripts/ci" \
-    "$stage/policy/product-exec-ingress/tools/loom/evidence"
+    "$stage/policy/product-exec-ingress/tools/loom/evidence" \
+    "$stage/policy/product-exec-ingress/tools/loom/src"
   install -m 0755 "$runtime_source" "$stage/bin/sounio-coord-runtime"
   install -m 0755 "$causal_source" "$stage/bin/sounio-coord-causal-runtime"
   install -m 0755 "$agentd_source" "$stage/bin/sounio-agentd-runtime"
@@ -1200,6 +1233,10 @@ else
     "$stage/policy/product-exec-ingress/tools/loom/$(basename "$loom_product_exec_ingress_contract")"
   install -m 0444 "$loom_product_exec_ingress_evidence" \
     "$stage/policy/product-exec-ingress/tools/loom/evidence/$(basename "$loom_product_exec_ingress_evidence")"
+  for product_exec_ingress_source in "${loom_product_exec_ingress_sources[@]}"; do
+    install -m 0444 "$product_exec_ingress_source" \
+      "$stage/policy/product-exec-ingress/tools/loom/src/$(basename "$product_exec_ingress_source")"
+  done
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
@@ -1232,6 +1269,14 @@ else
   loom_product_exec_ingress_evidence_sha256="$(
     sha256sum "$stage/policy/product-exec-ingress/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt" | awk '{print $1}'
   )"
+  loom_product_exec_ingress_reference_runtime_sha256="$(
+    manifest_value "$loom_product_exec_ingress_freeze" runtime_sha256
+  )"
+  loom_product_exec_ingress_reference_runtime_match=false
+  if [[ "$loom_product_exec_ingress_reference_runtime_sha256" == \
+    "$loom_runtime_sha256" ]]; then
+    loom_product_exec_ingress_reference_runtime_match=true
+  fi
   {
     printf 'runtime_id=%s\n' "$runtime_id"
     printf 'protocol_version=%s\n' "$protocol"
@@ -1290,6 +1335,10 @@ else
       "$loom_product_exec_ingress_contract_sha256"
     printf 'loom_product_exec_ingress_evidence_sha256=%s\n' \
       "$loom_product_exec_ingress_evidence_sha256"
+    printf 'loom_product_exec_ingress_reference_runtime_sha256=%s\n' \
+      "$loom_product_exec_ingress_reference_runtime_sha256"
+    printf 'loom_product_exec_ingress_reference_runtime_match=%s\n' \
+      "$loom_product_exec_ingress_reference_runtime_match"
     printf 'loom_continuity_language=Sounio\n'
     printf 'loom_continuity_engine=lean_single\n'
     printf 'loom_obligation_language=Sounio\n'

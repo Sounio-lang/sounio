@@ -333,10 +333,53 @@ for pair in \
   grep -qx "$manifest_key=$capsule_sha" "$first_manifest" ||
     fail "runtime manifest did not pin $capsule_path"
 done
-grep -qx "runtime_sha256=$loom_runtime_sha" "$exec_ingress_freeze" ||
-  fail 'product ExecIngress freeze does not pin the installed Loom binary'
+exec_ingress_reference_sha="$(sed -n 's/^runtime_sha256=//p' \
+  "$exec_ingress_freeze")"
+grep -qx "loom_product_exec_ingress_reference_runtime_sha256=$exec_ingress_reference_sha" \
+  "$first_manifest" || fail 'runtime manifest omitted the reference Loom binary'
+expected_reference_match=false
+[[ "$exec_ingress_reference_sha" != "$loom_runtime_sha" ]] ||
+  expected_reference_match=true
+grep -qx "loom_product_exec_ingress_reference_runtime_match=$expected_reference_match" \
+  "$first_manifest" || fail 'runtime manifest misstated reference reproducibility'
+for source_pair in \
+  exec_ingress_source_path:exec_ingress_source_sha256 \
+  hook_source_path:hook_source_sha256 \
+  membrane_source_path:membrane_source_sha256 \
+  cli_source_path:cli_source_sha256 \
+  c_stub_path:c_stub_sha256 \
+  dune_path:dune_sha256; do
+  source_path_key="${source_pair%%:*}"
+  source_hash_key="${source_pair#*:}"
+  source_rel="$(sed -n "s/^${source_path_key}=//p" "$exec_ingress_freeze")"
+  source_expected="$(sed -n "s/^${source_hash_key}=//p" "$exec_ingress_freeze")"
+  source_actual="$(sha256sum "$exec_ingress_capsule/$source_rel" | awk '{print $1}')"
+  [[ "$source_actual" == "$source_expected" ]] ||
+    fail "product ExecIngress source capsule drifted: $source_rel"
+done
 
 active_before_tamper="$(readlink -f "$RUNTIME_ROOT/current")"
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/product-exec-ingress-source-drift"
+sed -i \
+  's/^runtime_id=.*/runtime_id=product-exec-ingress-source-drift/' \
+  "$RUNTIME_ROOT/versions/product-exec-ingress-source-drift/manifest"
+chmod u+w \
+  "$RUNTIME_ROOT/versions/product-exec-ingress-source-drift/policy/product-exec-ingress/tools/loom/src/loom_exec_ingress.ml"
+printf '\n(* product ExecIngress source sabotage *)\n' >> \
+  "$RUNTIME_ROOT/versions/product-exec-ingress-source-drift/policy/product-exec-ingress/tools/loom/src/loom_exec_ingress.ml"
+set +e
+exec_ingress_tamper_output="$(cd "$REPO" && \
+  scripts/dev/install_sounio_coord_runtime.sh --runtime-dir "$RUNTIME_ROOT" \
+    --activate product-exec-ingress-source-drift 2>&1)"
+exec_ingress_tamper_rc=$?
+set -e
+[[ "$exec_ingress_tamper_rc" -ne 0 && \
+  "$exec_ingress_tamper_output" == \
+    *'installed product ExecIngress source drifted: tools/loom/src/loom_exec_ingress.ml'* ]] ||
+  fail "activation did not causally refuse product ExecIngress source drift: rc=$exec_ingress_tamper_rc output=$exec_ingress_tamper_output"
+[[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$active_before_tamper" ]] ||
+  fail 'failed product ExecIngress source activation changed the current runtime link'
 for tamper_binary in sounio-coord-runtime sounio-loom-runtime \
   sounio-loom-custody-transfer-runtime sounio-loom-execution-outcome-runtime; do
   binary="$RUNTIME_ROOT/versions/$first_id/bin/$tamper_binary"
@@ -1035,7 +1078,32 @@ chmod +x "$ALT/scripts/dev/"*
 git -C "$ALT" config user.name 'Sounio Runtime Upgrade Selftest'
 git -C "$ALT" config user.email 'coord-runtime-upgrade@sounio.local'
 git -C "$ALT" add scripts/dev/sounio_coord_runtime.sh tools/loom/src/loom.ml
-git -C "$ALT" commit -qm 'test runtime upgrade'
+git -C "$ALT" commit -qm 'test runtime upgrade source'
+upgrade_implementation_commit="$(git -C "$ALT" rev-parse HEAD)"
+dune build --root "$ALT/tools/loom" src/loom.exe >/dev/null
+upgrade_runtime_sha="$(sha256sum \
+  "$ALT/tools/loom/_build/default/src/loom.exe" | awk '{print $1}')"
+upgrade_cli_sha="$(sha256sum "$ALT/tools/loom/src/loom.ml" | awk '{print $1}')"
+upgrade_evidence="$ALT/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt"
+upgrade_freeze="$ALT/tools/loom/product_exec_ingress_dark.runtime.v1"
+sed -i \
+  -e "s/^implementation_commit=.*/implementation_commit=$upgrade_implementation_commit/" \
+  -e "s/^cli_source_sha256=.*/cli_source_sha256=$upgrade_cli_sha/" \
+  -e 's/^runtime_version=.*/runtime_version=2026.08.23.8-test/' \
+  -e "s/^runtime_sha256=.*/runtime_sha256=$upgrade_runtime_sha/" \
+  "$upgrade_evidence"
+upgrade_evidence_sha="$(sha256sum "$upgrade_evidence" | awk '{print $1}')"
+sed -i \
+  -e "s/^implementation_commit=.*/implementation_commit=$upgrade_implementation_commit/" \
+  -e "s/^evidence_sha256=.*/evidence_sha256=$upgrade_evidence_sha/" \
+  -e "s/^cli_source_sha256=.*/cli_source_sha256=$upgrade_cli_sha/" \
+  -e 's/^runtime_version=.*/runtime_version=2026.08.23.8-test/' \
+  -e "s/^runtime_sha256=.*/runtime_sha256=$upgrade_runtime_sha/" \
+  "$upgrade_freeze"
+git -C "$ALT" add \
+  tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt \
+  tools/loom/product_exec_ingress_dark.runtime.v1
+git -C "$ALT" commit -qm 'test runtime upgrade freeze'
 output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord install-runtime --source-root "$ALT")"
 upgrade_output="$output"
