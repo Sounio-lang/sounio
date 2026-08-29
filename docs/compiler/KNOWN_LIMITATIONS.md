@@ -13,7 +13,7 @@ This document tracks limitations in the Sounio language implementation.
 **Authoritative source for maturity tiering is `docs/serious-language/public-claim-registry.v1.tsv`.**
 This file is reconciled to that registry. If they disagree, the registry wins.
 
-Last reconciled: 2026-08-24 against `origin/main` at `7ecec1088158db3a92983cb3c96f9fc52f5ed19e`, then re-measured 2026-08-27 on rebase against `origin/main` at `055825a3f9`. Engine- and artifact-specific limits below name their scope; an unqualified claim must hold for both Madaros and `lean_single`.
+Last reconciled: 2026-08-24 against `origin/main` at `7ecec1088158db3a92983cb3c96f9fc52f5ed19e`, then re-measured 2026-08-27 on rebase against `origin/main` at `055825a3f9`, and again 2026-08-29 on merge against `origin/main` at `64db7167f8` (only the stdlib file count moved: 1604 -> 1608). Engine- and artifact-specific limits below name their scope; an unqualified claim must hold for both Madaros and `lean_single`.
 
 ## Maturity Tiers
 
