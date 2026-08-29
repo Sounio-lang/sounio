@@ -47,6 +47,8 @@ with:
   network, private temporary storage, and a read-only system view;
 - the actual native `agent-hook --agent codex` entrypoint;
 - the frozen Sounio language-authority and resident action-9031 runtimes;
+- an exact-path Git `safe.directory` projection for this root-owned, read-only
+  capsule, with no global or wildcard trust;
 - no bearer-token file;
 - one connected Unix-stream descriptor created during the root execution setup
   that PID 1 authorizes through systemd `OpenFile=`, then inherited as

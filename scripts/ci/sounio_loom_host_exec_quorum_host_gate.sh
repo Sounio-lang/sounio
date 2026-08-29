@@ -130,6 +130,7 @@ AUTHORITY_ROOT="$RELEASE/$(record_value "$MANIFEST" authority_root_path)"
   fail 'authority root topology is incomplete'
 PRODUCT_ROOT="$RELEASE/$(record_value "$MANIFEST" product_authority_root_path)"
 [[ "$PRODUCT_ROOT" == "$AUTHORITY_ROOT" && -d "$PRODUCT_ROOT/.git" && \
+   "$(stat -c '%u:%g:%a' "$PRODUCT_ROOT/.git")" == 0:0:555 && \
    "$(record_value "$MANIFEST" product_exec_ingress_action)" == 9031 && \
    "$(record_value "$MANIFEST" product_lane_cell_canary)" == false && \
    "$(record_value "$MANIFEST" distinct_uid_product_broker_canary)" == false ]] ||

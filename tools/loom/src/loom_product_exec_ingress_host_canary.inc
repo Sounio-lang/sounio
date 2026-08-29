@@ -304,6 +304,9 @@ class ProductExecIngressHostCase {
           "--setenv=SOUNIO_LOOM_EXEC_INGRESS_REQUIRED=1",
           "--setenv=SOUNIO_LOOM_EXEC_INGRESS_PROBE_ONLY=1",
           "--setenv=SOUNIO_LOOM_EXEC_INGRESS_FD=3",
+          "--setenv=GIT_CONFIG_COUNT=1",
+          "--setenv=GIT_CONFIG_KEY_0=safe.directory",
+          "--setenv=GIT_CONFIG_VALUE_0=" + product_root_,
           "--setenv=SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT=" + product_root_,
           "--setenv=SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME=" +
               language_runtime_,
@@ -434,6 +437,11 @@ class ProductExecIngressHostCase {
                   environment, "SOUNIO_LOOM_EXEC_INGRESS_REQUIRED=1") &&
               product_environment_has(
                   environment, "SOUNIO_LOOM_EXEC_INGRESS_PROBE_ONLY=1") &&
+              product_environment_has(environment, "GIT_CONFIG_COUNT=1") &&
+              product_environment_has(environment,
+                                      "GIT_CONFIG_KEY_0=safe.directory") &&
+              product_environment_has(environment,
+                                      "GIT_CONFIG_VALUE_0=" + product_root_) &&
               (!descriptor_present_ ||
                (product_environment_has(environment, "LISTEN_FDS=1") &&
                 product_environment_has(

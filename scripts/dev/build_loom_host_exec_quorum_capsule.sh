@@ -197,7 +197,7 @@ install -m 0555 \
 git init -q --initial-branch=loom "$AUTHORITY_ROOT"
 find "$AUTHORITY_ROOT/.git" -type f -exec chmod 0444 {} +
 while IFS= read -r -d '' directory; do
-  [[ "$directory" == "$AUTHORITY_ROOT/.git" ]] || chmod 0555 "$directory"
+  chmod 0555 "$directory"
 done < <(find "$AUTHORITY_ROOT" -type d -print0)
 
 BROKER_SHA256="$(sha256_file "$BIN/loom-kernel-principal-broker")"
