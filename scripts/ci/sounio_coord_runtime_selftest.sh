@@ -156,17 +156,23 @@ cp "$ROOT_DIR/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md" \
   "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1" \
   "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1" \
   "$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v1" \
+  "$ROOT_DIR/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md" \
+  "$ROOT_DIR/tools/loom/product_exec_ingress_dark.runtime.v1" \
   "$ROOT_DIR/tools/loom/resident_membrane.runtime.v1" \
   "$ROOT_DIR/tools/loom/resident_membrane.runtime.v2" \
   "$ROOT_DIR/tools/loom/resident_membrane.runtime.v3" \
   "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4" \
   "$ROOT_DIR/tools/loom/resident_membrane_v5_main.sio" \
   "$REPO/tools/loom/"
+mkdir -p "$REPO/tools/loom/evidence"
+cp "$ROOT_DIR/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt" \
+  "$REPO/tools/loom/evidence/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
   "$ROOT_DIR/tools/loom/src/loom_effect_closure.ml" \
   "$ROOT_DIR/tools/loom/src/loom_exec.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_ingress.ml" \
   "$ROOT_DIR/tools/loom/src/loom_exec_grant_cell.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
   "$ROOT_DIR/tools/loom/src/loom_invocation_cell.ml" \
@@ -311,6 +317,24 @@ grep -qx "loom_execution_outcome_runtime_sha256=$loom_execution_outcome_sha" \
   fail 'runtime manifest did not pin the frozen Sounio execution-outcome executable'
 grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$first_manifest" || \
   fail 'runtime manifest omitted native hook binary attestation'
+grep -q '^capability=loom-product-exec-ingress-dark-attachment-v1$' \
+  "$first_manifest" || fail 'runtime manifest omitted product ExecIngress'
+exec_ingress_capsule="$RUNTIME_ROOT/versions/$first_id/policy/product-exec-ingress"
+exec_ingress_freeze="$exec_ingress_capsule/tools/loom/product_exec_ingress_dark.runtime.v1"
+exec_ingress_contract="$exec_ingress_capsule/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md"
+exec_ingress_evidence="$exec_ingress_capsule/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt"
+for pair in \
+  "$exec_ingress_freeze:loom_product_exec_ingress_manifest_sha256" \
+  "$exec_ingress_contract:loom_product_exec_ingress_contract_sha256" \
+  "$exec_ingress_evidence:loom_product_exec_ingress_evidence_sha256"; do
+  capsule_path="${pair%%:*}"
+  manifest_key="${pair#*:}"
+  capsule_sha="$(sha256sum "$capsule_path" | awk '{print $1}')"
+  grep -qx "$manifest_key=$capsule_sha" "$first_manifest" ||
+    fail "runtime manifest did not pin $capsule_path"
+done
+grep -qx "runtime_sha256=$loom_runtime_sha" "$exec_ingress_freeze" ||
+  fail 'product ExecIngress freeze does not pin the installed Loom binary'
 
 active_before_tamper="$(readlink -f "$RUNTIME_ROOT/current")"
 for tamper_binary in sounio-coord-runtime sounio-loom-runtime \
