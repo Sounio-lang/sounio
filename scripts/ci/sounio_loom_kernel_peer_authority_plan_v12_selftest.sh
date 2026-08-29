@@ -136,8 +136,18 @@ done < <(grep '^ACTION_CASE ' "$bundle")
 boundary='BOUNDARY garden_v12=true sounio_executable_v12=false semantics_frozen_v12=false backend_discovery=false material_peer_matrix=false same_uid_peer_isolation=false action_9025_decision=DENY451 material_coverage=false complete_effects=false material_execution=false production_activation=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false'
 grep -Fxq "$boundary" "$bundle" || fail 'V12 boundary drifted'
 
-[[ ! -e "$ROOT_DIR/tools/loom/src/loom_kernel_peer_authority_v12.cpp" ]] ||
-  fail 'V12 material bytes appeared before semantic freeze'
+PREMATERIAL_COMMIT="${SOUNIO_LOOM_KERNEL_PEER_PLAN_V12_PREMATERIAL_COMMIT:-}"
+if [[ -n "$PREMATERIAL_COMMIT" ]]; then
+  git -C "$ROOT_DIR" cat-file -e "${PREMATERIAL_COMMIT}^{commit}" 2>/dev/null ||
+    fail "prematerial commit is absent: $PREMATERIAL_COMMIT"
+  if git -C "$ROOT_DIR" cat-file -e \
+    "$PREMATERIAL_COMMIT:tools/loom/src/loom_kernel_peer_authority_v12.cpp" 2>/dev/null; then
+    fail 'V12 material bytes existed in the frozen prematerial commit'
+  fi
+else
+  [[ ! -e "$ROOT_DIR/tools/loom/src/loom_kernel_peer_authority_v12.cpp" ]] ||
+    fail 'V12 material bytes appeared before semantic freeze'
+fi
 
 printf 'sounio-loom-kernel-peer-authority-plan-v12-selftest: PASS producer=Sounio role=SEMANTIC_POLICY_PLAN semantic_authority=Sounio action=9025 principal_vertices=5 operations=10 observations=50 decisive_pairs=10 receiver_properties=7 refused=26 completed=14 unavailable=10 treatment_refused=10 mediator_removed_completed=10 distinct_kuid_control=10 caller_seccomp_invalid_proof=10 dumpable_partial=4+6 complete_hypothesis=ALLOW current_v11=DENY451 coverage_missing=DENY447 deterministic=true output_bounded=true shell_expected_results=false python_executed=false rust_executed=false source_sha256=%s executable_sha256=%s bundle_sha256=%s garden_v12=true sounio_executable_v12=false semantics_frozen_v12=false backend_discovery=false native_v12_bytes_created=false material_peer_matrix=false same_uid_peer_isolation=false material_coverage=false complete_effects=false material_execution=false production_activation=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false\n' \
   "$(file_hash "$SOURCE")" "$(file_hash "$PLAN_A")" "$(file_hash "$bundle")"
