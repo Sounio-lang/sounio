@@ -1,4 +1,31 @@
+<!-- docs:meta
+topic_id: repo.docs.e201-nome-desconhecido
+authority: repo_only
+audience: users
+last_validated: 2026-08-29
+validated_by: claude-2 (rebase onto integration/sounio-dev-ready-base @ 1c1b6549ad)
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.e201-nome-desconhecido
+-->
+
 # E201 — nome desconhecido em posição de chamada passa a ser fatal
+
+> **Nota de rebase, 29-ago-2026 — leia antes do resto.** Este documento foi escrito contra
+> `8d203709e1`. Ao integrar `integration/sounio-dev-ready-base` (205 commits à frente), quase
+> tudo que ele descreve **já tinha sido feito na base, de forma independente e melhor**, e o
+> PR deixou de carregá-lo. Medido, arquivo por arquivo:
+>
+> | o que este doc descreve | estado na base, medido 29-ago-2026 |
+> |---|---|
+> | o conserto de `tc_undefined_var` (imprimir `E201` + `tc_mark_failed()`) | **já feito na base** (`4ff763a9e9`, localização em `bb3a2b2da2`): imprime `error: unknown identifier \`nome\` at <arquivo:linha>` e chama `tc_mark_failed()`. Nomeia o identificador e a origem, coisa que a versão deste PR não fazia. **O PR agora toma a versão da base.** |
+> | o número `E201` | **colidia**: `error[E201]` já existe no mesmo `lean_single.sio` com o sentido "parameter uses `ExactlyPrivate<T>` without `with ZD` effect" (linha 29658 na base). A escolha da base — prefixo `error:` sem número — evita a colisão. |
+> | 8 dos 13 programas triados (`gum_iso_budget`, `gum_iso_budget_ode`, `knowledge_octonion_structure`, `rapamycin_*` ×3, `test_dissertation_e2e`, `test_pipeline_real_e2e`) | **já consertados na base**, por outro caminho: `epistemic::budget64` (uma API de orçamento de verdade, em vez das oito chamadas a `sensitivity_of` que saíam zero) e um `run_fmri_pipeline_gate` próprio. **O PR toma a base nesses oito.** |
+> | `test_types` | a base substituiu o arquivo por um *stub* de três linhas que imprime `GEOMETRY_OK`. A reescrita deste PR **não sobrevive**: ela lê `soma.x` de fora do módulo e a base transformou isso em erro duro (`private struct field access`, 37 sítios em `lean_single.sio`, **0** em `8d203709e1`), e `stdlib/geometry` não declara nada `pub`. Marcar os campos `pub` conserta `Point2D` mas **não** `Point3D`: existe um segundo `struct Point3D` em `stdlib/geo/pure/types.sio` e a tabela de símbolos plana resolve o nome para aquele. **O PR toma o stub da base** e registra a dívida aqui. |
+> | ponto fixo do bootstrap "byte-idêntico ao `gen1`, e `gen1 == gen2`" | **VAZIO após o rebase.** O `bin/souc-linux-x86_64` deste PR é agora, byte a byte, o da base (`150e57d2a6`), e não foi reconstruído a partir do fonte integrado. Nenhuma afirmação de ponto fixo pode ser lida deste PR. |
+> | `gum_h1_native`, os três `ontology_*` | **sobrevivem** — a base não os tocou. Re-medidos 29-ago-2026 sob `lean_single`: os quatro rodam `rc=0`, e `gum_h1_native` imprime `Sounio U: 66.361342` contra 67 nm publicado (0,95 % de erro relativo). |
+> | contagens de suíte (864 testes; 639→626; 638/3/223) | **não re-derivadas.** Um número de suíte medido contra `8d203709e1` não diz nada sobre uma árvore 205 commits à frente, e re-derivá-lo exigiria uma execução completa em cima de um compilador reconstruído. Trate-os como históricos. |
+>
+> O que resta deste documento é o valor forense: o defeito era real, o mecanismo está descrito
+> corretamente, e os dois achados laterais no fim continuam de pé.
 
 28-ago-2026. Pré-requisito da Fase 1, e do `IndepKnowledge`: enquanto um nome inexistente passar
 em silêncio, **nenhuma garantia de tipo é executável** — um erro de digitação no nome de um

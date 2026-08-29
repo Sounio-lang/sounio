@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.auditoria-indepknowledge
+authority: repo_only
+audience: users
+last_validated: 2026-08-29
+validated_by: claude-2 (rebase onto integration/sounio-dev-ready-base @ 1c1b6549ad)
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.auditoria-indepknowledge
+-->
+
 # Auditoria — a faixa CI (`IndepKnowledge<T, A, B | Z>`) não existe
 
 Data: 28-ago-2026. Motivo: pedido de "ligar o IndepKnowledge no checador", como segunda metade da
@@ -6,21 +15,45 @@ Fase 1 (a primeira, a lei de composição, está em `24aba6b9c`).
 **Veredito: não há o que ligar.** O tipo não é construível, não é parseável, e o validador não é
 chamado. O que existe é a moldura sem a peça.
 
+> **Nota de rebase, 29-ago-2026.** As linhas citadas abaixo foram re-medidas contra
+> `integration/sounio-dev-ready-base` @ `1c1b6549ad` e **todas tinham deslocado** — a tabela já
+> traz os números corrigidos. Os *veredictos* (existe / zero chamadores / não existe) foram
+> re-verificados um a um e **continuam válidos**: `ty_cond_indep` e `is_valid_cond_indep` têm
+> exatamente uma ocorrência na árvore (a própria definição), `cond_indep_structurally_holds` tem
+> duas (definição + comentário), e `TypeCondIndep`, a função de parsing e o token do lexer
+> continuam com zero ocorrências. Duas correções de substância, e não só de linha:
+>
+> - **Uma afirmação do corpo do PR era falsa desde que foi escrita**: "`E072` existe no fonte
+>   modular e **0×** no binário". `E072` aparece **6×** em `lean_single.sio` — e já aparecia em
+>   `8d203709e1`. O sentido lá é outro ("kernel function must return unit type", linhas 4356 e
+>   29880), o que **reforça** a tese das duas cópias mas por uma via diferente: não é ausência,
+>   é o mesmo número com dois significados vivos. `TypeExprKind`, `TypeKnowledge` e `TyCondIndep`
+>   continuam, esses sim, com **0** ocorrências em `lean_single.sio`.
+> - **`tests/frontend/cond_indep_basic.sio`**: o texto diz "não contém uma única anotação
+>   `IndepKnowledge`". Continua verdadeiro como anotação; para quem for conferir com `grep`, o
+>   nome aparece uma vez — dentro de um comentário.
+>
+> Nota de escopo: existe um PR irmão, **#1758**, saído do **mesmo** merge-base `8d203709e1`, que
+> implementa os passos 1–7 desta recomendação (token, gramática, grafo causal declarável,
+> Bayes-Ball) dentro de `lean_single.sio`. Ele **não** é sucessor nem predecessor deste PR: são
+> dois ramos irmãos em camadas diferentes. Se #1758 entrar, o veredicto "não há o que ligar"
+> passa a descrever apenas a base, não a árvore.
+
 ## O que foi verificado, arquivo por arquivo
 
 | peça | estado |
 |---|---|
-| `check/types.sio:77` — variante `TyCondIndep` no enum | existe |
-| `check/types.sio:1770` — construtor `ty_cond_indep(...)` | existe, **ZERO chamadores** |
-| `check/epistemic.sio:1099` — `check_cond_indep_type` | existe, chamado **só** por `is_valid_cond_indep` |
-| `check/epistemic.sio:1119` — `is_valid_cond_indep` | existe, **ZERO chamadores** |
-| `check/epistemic.sio:1125` — `cond_indep_structurally_holds` | existe, **ZERO chamadores** |
-| `check/check.sio:1845` — impressão de `IndepKnowledge<` | existe (só imprime) |
-| `check/compat.sio:446` — compatibilidade entre dois `TyCondIndep` | existe |
+| `check/types.sio:78` — variante `TyCondIndep` no enum | existe |
+| `check/types.sio:2086` — construtor `ty_cond_indep(...)` | existe, **ZERO chamadores** |
+| `check/epistemic.sio:1110` — `check_cond_indep_type` | existe, chamado **só** por `is_valid_cond_indep` |
+| `check/epistemic.sio:1129` — `is_valid_cond_indep` | existe, **ZERO chamadores** |
+| `check/epistemic.sio:1138` — `cond_indep_structurally_holds` | existe, **ZERO chamadores** |
+| `check/check.sio:10939` — impressão de `IndepKnowledge<` | existe (só imprime) |
+| `check/compat.sio:580` — compatibilidade entre dois `TyCondIndep` | existe |
 | `parser/ast.sio` — variante `TypeCondIndep` em `TypeExprKind` | **NÃO EXISTE** |
 | `parser/types.sio` — função de parsing | **NÃO EXISTE** |
 | lexer — token para `IndepKnowledge` | **NÃO EXISTE** |
-| `check/check.sio:6449` — braço no despacho de lowering | **NÃO EXISTE** |
+| `check/check.sio:16602` — braço no despacho de lowering | **NÃO EXISTE** |
 
 Como não há variante no `TypeExprKind` nem token no lexer, **não existe sintaxe** que produza um
 `TyCondIndep`. O construtor nunca é chamado. O validador valida um valor que nada cria.
@@ -41,7 +74,7 @@ Não está ligado a `causal.sio`. A função retorna `true` em todos os caminhos
   structurally valid" — o programa nunca pede verificação nenhuma.
 - `tests/compile-fail/cond_indep_violation.sio` — a linha com o tipo está **comentada**
   (`//   let ci: IndepKnowledge<f64, x, y | {}> = ...`).
-- `tests/stdlib/autodiff/test_epistemic_bridge.sio` — marcado `//@ ignore`, nunca roda.
+- `tests/stdlib/autodiff/test_epistemic_bridge.sio` — **este item caducou.** Em `8d203709e1` estava `//@ ignore`; na base de hoje é um `run-pass` de três linhas que imprime `AUTODIFF_BRIDGE_OK` e não exercita nada. O recurso continua sem teste — mudou só a forma de não testá-lo.
 
 Ou seja: a alegação de "primeiro sistema de tipos a codificar independência condicional em tempo
 de compilação" (comentário do próprio teste, Sprint 20 Track CI) está sustentada por testes que
@@ -60,7 +93,7 @@ em `24aba6b9c` degrada para o limite conservador justamente por não ter testemu
 2. variante `TypeCondIndep` em `parser/ast.sio::TypeExprKind`;
 3. função de parsing em `parser/types.sio` — inclui aceitar `|` dentro de argumentos de tipo,
    sintaxe que **não existe** hoje em nenhum tipo;
-4. braço no despacho de lowering (`check/check.sio:6449`), no molde de
+4. braço no despacho de lowering (`check/check.sio:16602`), no molde de
    `TypeKnowledge => c.lower_knowledge_type(...)`;
 5. `lower_cond_indep_type`: constrói via `ty_cond_indep`, chama `check_cond_indep_type`, reporta
    E072;
