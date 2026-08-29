@@ -25,6 +25,12 @@ The first committed source is matcher-free. It contains no expected probe
 output, basis transcript, operator digest, IR digest, result transcript, or
 frozen matcher.
 
+The rich operator result is private to the Sounio authority module. The module
+emits the complete transcript while seed, IR, probes, basis witnesses, and
+digests are still local, then returns only a compact scalar summary. No nested
+operator aggregate crosses the module ABI and no external printer reconstructs
+semantic values.
+
 ## Parent admission
 
 v8 binds the exact v7 source, freeze receipt, and frozen Sounio process
@@ -124,7 +130,7 @@ The first Sounio execution emits:
 - all 256 basis witnesses;
 - three input pairs and both 16-lane outputs;
 - the generated candidate and bounded receipt;
-- 35 request/admission negatives;
+- an ordered 35-case request/admission refusal vector;
 - seven digests;
 - `claim_ready=false`.
 

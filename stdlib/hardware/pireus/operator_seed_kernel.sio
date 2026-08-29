@@ -273,7 +273,7 @@ pub struct PireusOskNegatives {
     pub passed: i64,
 }
 
-pub struct PireusOskResult {
+struct PireusOskResult {
     pub valid: bool,
     pub error: i64,
     pub lineage: PireusOskLineage,
@@ -293,6 +293,16 @@ pub struct PireusOskResult {
     pub receipt_digest: PireusOskDigest,
     pub forge_digest: PireusOskDigest,
     pub failure_groups: i64,
+}
+
+pub struct PireusOskSummary {
+    pub valid: bool,
+    pub error: i64,
+    pub failure_groups: i64,
+    pub structural_failures: i64,
+    pub negative_total: i64,
+    pub negative_failures: i64,
+    pub claim_ready: bool,
 }
 
 fn osk_parent_source_hash() -> [i64; 8] {
@@ -1599,10 +1609,345 @@ fn osk_digest_forge(
     osk_digest_finish(state)
 }
 
-pub fn pireus_operator_seed_kernel_evaluate(
+fn osk_bit(value: bool) -> i64 { if value { 1 } else { 0 } }
+
+fn osk_print_words(words: &[i64; 8]) with IO, Mut, Panic {
+    var word: i64 = 0
+    while word < PIREUS_OSK_WORDS {
+        if word > 0 { print(":") }
+        print_int(words[word])
+        word = word + 1
+    }
+}
+
+fn osk_print_digest(digest: &PireusOskDigest) with IO, Mut, Panic {
+    osk_print_words(&digest.words)
+}
+
+fn osk_print_vector(vector: &PireusOskVector) with IO, Mut, Panic {
+    var lane: i64 = 0
+    while lane < PIREUS_OSK_LANES {
+        if lane > 0 { print(":") }
+        print_int(vector.lanes[lane])
+        lane = lane + 1
+    }
+}
+
+fn osk_print_negative(name: string, refused: bool) with IO {
+    print("PIREUS_OSK_NEGATIVE name=")
+    print(name)
+    print(" refused=")
+    print_int(osk_bit(refused))
+    print("\n")
+}
+
+fn osk_emit_result(result: &PireusOskResult)
+with IO, Mut, Panic, Div {
+    print("SOUNIO_AUTHORITY schema=pireus-operator-seed-kernel.v8")
+    print(" role=SEMANTIC_AUTHORITY stage=SOUNIO_EXECUTABLE\n")
+
+    print("PIREUS_OSK_LINEAGE parent_valid=")
+    print_int(osk_bit(result.lineage.parent_valid))
+    print(" parent_frozen_match=")
+    print_int(osk_bit(result.lineage.parent_frozen_match))
+    print(" source_file_match=")
+    print_int(osk_bit(result.lineage.parent_source_file_match))
+    print(" semantics_receipt_match=")
+    print_int(osk_bit(result.lineage.parent_semantics_receipt_match))
+    print(" freeze_file_match=")
+    print_int(osk_bit(result.lineage.parent_freeze_file_match))
+    print(" evidence_file_match=")
+    print_int(osk_bit(result.lineage.parent_evidence_file_match))
+    print(" process_evidence_bound=")
+    print_int(osk_bit(result.lineage.parent_process_evidence_bound))
+    print(" process_evidence_externalized=")
+    print_int(osk_bit(result.lineage.parent_process_evidence_externalized))
+    print(" recursive_parent_evaluation=")
+    print_int(osk_bit(result.lineage.parent_recursive_evaluation_used))
+    print(" parent_outcome=")
+    print_int(result.lineage.parent_outcome_kind)
+    print(" parent_bridge=")
+    print_int(osk_bit(result.lineage.parent_existing_bridge))
+    print(" parent_seed=")
+    print_int(osk_bit(result.lineage.parent_operator_seed))
+    print(" parent_residual_weight=")
+    print_int(result.lineage.parent_residual_weight)
+    print(" word_cell_checks=")
+    print_int(result.lineage.seed_word_cell_checks)
+    print(" word_cell_failures=")
+    print_int(result.lineage.seed_word_cell_failures)
+    print(" complete=")
+    print_int(osk_bit(result.lineage.complete))
+    print("\n")
+    print("PIREUS_OSK_PARENT_HASH name=source value=")
+    osk_print_words(&result.lineage.parent_source_sha256); print("\n")
+    print("PIREUS_OSK_PARENT_HASH name=semantics value=")
+    osk_print_words(&result.lineage.parent_semantics_sha256); print("\n")
+    print("PIREUS_OSK_PARENT_HASH name=freeze value=")
+    osk_print_words(&result.lineage.parent_freeze_sha256); print("\n")
+
+    print("PIREUS_OSK_SEED words=")
+    osk_print_words(&result.seed_words)
+    print(" weight=")
+    print_int(result.lineage.parent_residual_weight)
+    print("\n")
+    var cell: i64 = 0
+    while cell < PIREUS_OSK_CELLS {
+        print("PIREUS_OSK_SEED_CELL id=")
+        print_int(cell)
+        print(" left="); print_int(cell / PIREUS_OSK_LANES)
+        print(" right=")
+        print_int(cell - (cell / PIREUS_OSK_LANES) * PIREUS_OSK_LANES)
+        print(" bit="); print_int(result.seed_cells[cell])
+        print("\n")
+        cell = cell + 1
+    }
+
+    print("PIREUS_OSK_KERNEL kind=")
+    print_int(result.operator_ir.operator_kind)
+    print(" bits="); print_int(result.operator_ir.bits)
+    print(" lanes="); print_int(result.operator_ir.lanes)
+    print(" destinations="); print_int(result.operator_ir.destination_count)
+    print(" terms_per_destination=")
+    print_int(result.operator_ir.terms_per_destination)
+    print(" terms="); print_int(result.operator_ir.term_count)
+    print(" unique_term_checks=")
+    print_int(result.operator_ir.unique_term_checks)
+    print(" unique_term_failures=")
+    print_int(result.operator_ir.unique_term_failures)
+    print(" unique_source_checks=")
+    print_int(result.operator_ir.unique_source_checks)
+    print(" unique_source_failures=")
+    print_int(result.operator_ir.unique_source_failures)
+    print(" group_checks=")
+    print_int(result.operator_ir.destination_group_checks)
+    print(" group_failures=")
+    print_int(result.operator_ir.destination_group_failures)
+    print(" xor_checks=")
+    print_int(result.operator_ir.xor_address_checks)
+    print(" xor_failures=")
+    print_int(result.operator_ir.xor_address_failures)
+    print(" coefficient_checks=")
+    print_int(result.operator_ir.coefficient_checks)
+    print(" coefficient_failures=")
+    print_int(result.operator_ir.coefficient_failures)
+    print(" roundtrip_checks=")
+    print_int(result.operator_ir.roundtrip_checks)
+    print(" roundtrip_failures=")
+    print_int(result.operator_ir.roundtrip_failures)
+    print(" complete="); print_int(osk_bit(result.operator_ir.complete))
+    print("\n")
+    var term: i64 = 0
+    while term < PIREUS_OSK_TERMS {
+        print("PIREUS_OSK_TERM id="); print_int(term)
+        print(" destination="); print_int(result.operator_ir.destinations[term])
+        print(" left="); print_int(result.operator_ir.left_indices[term])
+        print(" right="); print_int(result.operator_ir.right_indices[term])
+        print(" coefficient="); print_int(result.operator_ir.coefficients[term])
+        print(" source_cell="); print_int(result.operator_ir.source_cells[term])
+        print("\n")
+        term = term + 1
+    }
+
+    print("PIREUS_OSK_BASIS products=")
+    print_int(result.basis.products)
+    print(" lane_checks="); print_int(result.basis.lane_checks)
+    print(" path_checks="); print_int(result.basis.path_checks)
+    print(" destination_checks="); print_int(result.basis.destination_checks)
+    print(" coefficient_checks="); print_int(result.basis.coefficient_checks)
+    print(" single_support_checks=")
+    print_int(result.basis.single_support_checks)
+    print(" failures="); print_int(result.basis.failures)
+    print(" complete="); print_int(osk_bit(result.basis.complete))
+    print("\n")
+    var left: i64 = 0
+    while left < PIREUS_OSK_LANES {
+        var right: i64 = 0
+        while right < PIREUS_OSK_LANES {
+            let witness = pireus_osk_basis_witness(
+                &result.seed_cells, &result.operator_ir, left, right)
+            print("PIREUS_OSK_BASIS_PRODUCT left="); print_int(left)
+            print(" right="); print_int(right)
+            print(" destination="); print_int(witness.destination)
+            print(" coefficient="); print_int(witness.coefficient)
+            print(" table_value="); print_int(witness.table_value)
+            print(" ir_value="); print_int(witness.ir_value)
+            print(" table_nonzero="); print_int(witness.table_nonzero_lanes)
+            print(" ir_nonzero="); print_int(witness.ir_nonzero_lanes)
+            print(" lane_checks="); print_int(witness.lane_checks)
+            print(" failures="); print_int(witness.failures)
+            print(" complete="); print_int(osk_bit(witness.complete))
+            print("\n")
+            right = right + 1
+        }
+        left = left + 1
+    }
+
+    var probe: i64 = 0
+    while probe < PIREUS_OSK_PROBES {
+        print("PIREUS_OSK_PROBE id="); print_int(result.probes[probe].id)
+        print(" max_abs_a="); print_int(result.probes[probe].max_abs_a)
+        print(" max_abs_b="); print_int(result.probes[probe].max_abs_b)
+        print(" uniform_bound="); print_int(result.probes[probe].uniform_bound)
+        print(" lane_checks="); print_int(result.probes[probe].lane_checks)
+        print(" equality_failures=")
+        print_int(result.probes[probe].equality_failures)
+        print(" bound_checks="); print_int(result.probes[probe].bound_checks)
+        print(" bound_failures="); print_int(result.probes[probe].bound_failures)
+        print(" complete="); print_int(osk_bit(result.probes[probe].complete))
+        print("\n")
+        print("PIREUS_OSK_PROBE_VECTOR id="); print_int(probe)
+        print(" name=a values="); osk_print_vector(&result.probes[probe].a)
+        print("\n")
+        print("PIREUS_OSK_PROBE_VECTOR id="); print_int(probe)
+        print(" name=b values="); osk_print_vector(&result.probes[probe].b)
+        print("\n")
+        print("PIREUS_OSK_PROBE_OUTPUT id="); print_int(probe)
+        print(" path=table values=")
+        osk_print_vector(&result.probes[probe].table_output)
+        print("\n")
+        print("PIREUS_OSK_PROBE_OUTPUT id="); print_int(probe)
+        print(" path=ir values=")
+        osk_print_vector(&result.probes[probe].ir_output)
+        print("\n")
+        probe = probe + 1
+    }
+
+    print("PIREUS_OSK_CANDIDATE kind=")
+    print_int(result.candidate.kind)
+    print(" operator_kind="); print_int(result.candidate.operator_kind)
+    print(" parent_outcome="); print_int(result.candidate.parent_outcome_kind)
+    print(" parent_residual_weight=")
+    print_int(result.candidate.parent_residual_weight)
+    print(" generated="); print_int(osk_bit(result.candidate.generated))
+    print(" future_parent_eligible=")
+    print_int(osk_bit(result.candidate.future_parent_eligible))
+    print(" seed_words="); osk_print_words(&result.candidate.seed_words)
+    print(" kernel_digest=")
+    osk_print_digest(&result.candidate.kernel_digest)
+    print(" execution_digest=")
+    osk_print_digest(&result.candidate.execution_digest)
+    print("\n")
+
+    print("PIREUS_OSK_RECEIPT schema=")
+    print_int(result.receipt.schema)
+    print(" producer_language="); print_int(result.receipt.producer_language)
+    print(" producer_role="); print_int(result.receipt.producer_role)
+    print(" parent_lineage_bound=")
+    print_int(osk_bit(result.receipt.parent_lineage_bound))
+    print(" parent_frozen_match=")
+    print_int(osk_bit(result.receipt.parent_frozen_match))
+    print(" parent_process_evidence_bound=")
+    print_int(osk_bit(result.receipt.parent_process_evidence_bound))
+    print(" parent_process_evidence_externalized=")
+    print_int(osk_bit(result.receipt.parent_process_evidence_externalized))
+    print(" parent_recursive_evaluation_used=")
+    print_int(osk_bit(result.receipt.parent_recursive_evaluation_used))
+    print(" seed_admitted=")
+    print_int(osk_bit(result.receipt.operator_seed_admitted))
+    print(" table_evaluator=")
+    print_int(osk_bit(result.receipt.table_evaluator_validated))
+    print(" kernel_ir="); print_int(osk_bit(result.receipt.kernel_ir_complete))
+    print(" ir_evaluator=")
+    print_int(osk_bit(result.receipt.ir_evaluator_validated))
+    print(" basis="); print_int(osk_bit(result.receipt.basis_sweep_complete))
+    print(" probes="); print_int(osk_bit(result.receipt.dense_probes_complete))
+    print(" candidate=")
+    print_int(osk_bit(result.receipt.generated_operator_candidate))
+    print(" expected_result_used=")
+    print_int(osk_bit(result.receipt.expected_result_used))
+    print(" target_evidence_used=")
+    print_int(osk_bit(result.receipt.target_evidence_used))
+    print(" material_evidence_used=")
+    print_int(osk_bit(result.receipt.material_evidence_used))
+    print(" target_cost_used=")
+    print_int(osk_bit(result.receipt.target_cost_used))
+    print(" target_performance_used=")
+    print_int(osk_bit(result.receipt.target_performance_used))
+    print(" semantics_frozen=")
+    print_int(osk_bit(result.receipt.semantics_frozen))
+    print(" formal_parity_open=")
+    print_int(osk_bit(result.receipt.formal_parity_open))
+    print(" effect_parity_open=")
+    print_int(osk_bit(result.receipt.effect_parity_open))
+    print(" material_parity_open=")
+    print_int(osk_bit(result.receipt.material_parity_open))
+    print(" broad_novelty=")
+    print_int(osk_bit(result.receipt.broad_novelty))
+    print(" historical_novelty=")
+    print_int(osk_bit(result.receipt.historical_novelty))
+    print(" priority="); print_int(osk_bit(result.receipt.priority_claim))
+    print(" claim_ready="); print_int(osk_bit(result.receipt.claim_ready))
+    print("\n")
+
+    osk_print_negative("python_authority", result.negatives.cases[0])
+    osk_print_negative("rust_authority", result.negatives.cases[1])
+    osk_print_negative("cpp_authority", result.negatives.cases[2])
+    osk_print_negative("llm_authority", result.negatives.cases[3])
+    osk_print_negative("lean_authority", result.negatives.cases[4])
+    osk_print_negative("koka_authority", result.negatives.cases[5])
+    osk_print_negative("missing_policy", result.negatives.cases[6])
+    osk_print_negative("wrong_stage", result.negatives.cases[7])
+    osk_print_negative("missing_parent", result.negatives.cases[8])
+    osk_print_negative("unfrozen_parent", result.negatives.cases[9])
+    osk_print_negative("unbound_parent_source", result.negatives.cases[10])
+    osk_print_negative("unbound_parent_semantics", result.negatives.cases[11])
+    osk_print_negative("unbound_parent_freeze", result.negatives.cases[12])
+    osk_print_negative(
+        "missing_parent_process_evidence", result.negatives.cases[13])
+    osk_print_negative(
+        "recursive_parent_evaluation", result.negatives.cases[14])
+    osk_print_negative("prefilled_parent_seed", result.negatives.cases[15])
+    osk_print_negative("expected_probe_output", result.negatives.cases[16])
+    osk_print_negative("expected_basis_output", result.negatives.cases[17])
+    osk_print_negative("expected_digest", result.negatives.cases[18])
+    osk_print_negative("expected_transcript", result.negatives.cases[19])
+    osk_print_negative("target_evidence", result.negatives.cases[20])
+    osk_print_negative("material_evidence", result.negatives.cases[21])
+    osk_print_negative("target_cost", result.negatives.cases[22])
+    osk_print_negative("target_performance", result.negatives.cases[23])
+    osk_print_negative("semantic_write", result.negatives.cases[24])
+    osk_print_negative("expected_result_write", result.negatives.cases[25])
+    osk_print_negative("review_promotion", result.negatives.cases[26])
+    osk_print_negative("broad_novelty", result.negatives.cases[27])
+    osk_print_negative("historical_novelty", result.negatives.cases[28])
+    osk_print_negative("priority_claim", result.negatives.cases[29])
+    osk_print_negative("claim_ready", result.negatives.cases[30])
+    osk_print_negative("waiver", result.negatives.cases[31])
+    osk_print_negative("bridge_as_seed", result.negatives.cases[32])
+    osk_print_negative("zero_seed", result.negatives.cases[33])
+    osk_print_negative("malformed_seed", result.negatives.cases[34])
+    print("PIREUS_OSK_NEGATIVES total="); print_int(result.negatives.total)
+    print(" passed="); print_int(result.negatives.passed)
+    print("\n")
+
+    print("PIREUS_OSK_DIGEST name=lineage value=")
+    osk_print_digest(&result.lineage_digest); print("\n")
+    print("PIREUS_OSK_DIGEST name=seed value=")
+    osk_print_digest(&result.seed_digest); print("\n")
+    print("PIREUS_OSK_DIGEST name=kernel value=")
+    osk_print_digest(&result.kernel_digest); print("\n")
+    print("PIREUS_OSK_DIGEST name=probe value=")
+    osk_print_digest(&result.probe_digest); print("\n")
+    print("PIREUS_OSK_DIGEST name=basis value=")
+    osk_print_digest(&result.basis_digest); print("\n")
+    print("PIREUS_OSK_DIGEST name=receipt value=")
+    osk_print_digest(&result.receipt_digest); print("\n")
+    print("PIREUS_OSK_DIGEST name=forge value=")
+    osk_print_digest(&result.forge_digest); print("\n")
+
+    print("PIREUS_OSK_RESULT valid="); print_int(osk_bit(result.valid))
+    print(" error="); print_int(result.error)
+    print(" failure_groups="); print_int(result.failure_groups)
+    print(" claim_ready="); print_int(osk_bit(result.receipt.claim_ready))
+    print("\n")
+}
+
+pub fn pireus_operator_seed_kernel_execute(
     request: &PireusOskRequest,
     paths: &PireusOskParentPaths,
-) -> PireusOskResult with IO, Mut, Panic, Div, Alloc, Epistemic {
+    emit_transcript: bool,
+) -> PireusOskSummary with IO, Mut, Panic, Div, Alloc, Epistemic {
     let request_error = osk_request_error(request)
     let admission = osk_build_seed_admission(paths)
     let kernel = osk_build_kernel(&admission.seed_cells)
@@ -1736,5 +2081,14 @@ pub fn pireus_operator_seed_kernel_evaluate(
         forge_digest: forge_digest,
         failure_groups: failure_groups,
     }
-    result
+    if emit_transcript { osk_emit_result(&result) }
+    PireusOskSummary {
+        valid: result.valid,
+        error: result.error,
+        failure_groups: result.failure_groups,
+        structural_failures: if result.valid { 0 } else { 1 },
+        negative_total: result.negatives.total,
+        negative_failures: result.negatives.total - result.negatives.passed,
+        claim_ready: result.receipt.claim_ready,
+    }
 }

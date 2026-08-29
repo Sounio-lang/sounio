@@ -70,6 +70,12 @@ kernel digest, operator identity, transcript, or frozen matcher. Probe inputs,
 finite dimensions, and independent algorithms are part of this Garden;
 execution results are not.
 
+The first transcript is emitted inside the authority module before its rich
+result leaves local scope. Only a compact scalar summary may cross the public
+module ABI. This makes the transcript a streaming Sounio certificate and
+prevents a target, wrapper, or external printer from reconstructing operator
+values.
+
 ## Frozen parent
 
 v8 consumes exactly the frozen v7 Sounio lineage:
