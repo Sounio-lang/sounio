@@ -15045,6 +15045,9 @@ impl Lowerer {
                     if ir_name_is_measure(callee_struct_name) {
                         lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
                     }
+                    if name_eq(callee_struct_name, make_name("seq_len")) {
+                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                    }
                     if !callee_is_box {
                         let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
                         if ret_name.len > 0 {
@@ -17332,6 +17335,15 @@ impl Lowerer {
             let lo_call_sys = lo_dst_sys.emit(ir_call(dst_sys, fn_id_sys, callee_name, args_sys, argc_sys))
             return (lo_call_sys, dst_sys)
         }
+        if name_eq(callee_name, make_name("seq_len")) {
+            if count_expr_list_ref(&e.args) != 1 {
+                var lo_bad_seq_len = self
+                lowerer_mark_hard_error(&! lo_bad_seq_len)
+                return (lo_bad_seq_len, IR_INVALID_REG)
+            }
+            let pair_seq_len_base = self.lower_expr_args_first(&e.args)
+            return pair_seq_len_base.0.lower_seq_len_knowledge_from_base(pair_seq_len_base.1)
+        }
         if name_eq(callee_name, make_name("seq_new")) {
             match e.args {
                 None => {
@@ -18338,6 +18350,9 @@ impl Lowerer {
                 // return_struct_name (E), not an empty name that invents bare "get".
                 if (*recv).kind == ExprKind::ExprMethodCall {
                     let inner_recv = self.lower_method_recv_type(&(*recv).left)
+                    if ir_name_eq(inner_recv, make_name("Seq")) && ir_name_eq((*recv).name, make_name("len")) {
+                        return make_name("Knowledge")
+                    }
                     let inner_call = if inner_recv.len > 0 {
                         ir_mangle_method_name(inner_recv, (*recv).name)
                     } else {
@@ -18357,6 +18372,14 @@ impl Lowerer {
                 }
                 // Associated / free call as receiver: `E::of(3.0).get()`.
                 if (*recv).kind == ExprKind::ExprCall {
+                    match (*recv).left {
+                        Some(callee) => {
+                            if (*callee).kind == ExprKind::ExprIdent && name_eq((*callee).name, make_name("seq_len")) {
+                                return make_name("Knowledge")
+                            }
+                        }
+                        None => {}
+                    }
                     let ret = self.expr_call_return_struct_name_ref(&(*recv))
                     if ret.len > 0 {
                         return ret
@@ -18400,6 +18423,33 @@ impl Lowerer {
         }
     }
 
+    fn lower_seq_len_knowledge_from_base(self, base_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_len = self.fresh_reg()
+        var lo = pair_len.0
+        let len_reg = pair_len.1
+        lo = lo.emit(ir_array_len(len_reg, base_reg))
+
+        let pair_dst = lo.fresh_reg()
+        lo = pair_dst.0
+        let dst = pair_dst.1
+        lo = lo.emit(ir_alloc(dst, 0))
+        lo = lo.emit(ir_field_set(dst, 0, len_reg, make_name("value")))
+
+        let pair_variance = lo.fresh_reg()
+        lo = pair_variance.0
+        let variance_reg = pair_variance.1
+        lo = lo.emit(ir_load_float(variance_reg, 0.0))
+        lo = lo.emit(ir_field_set(dst, 1, variance_reg, make_name("variance")))
+
+        let pair_confidence = lo.fresh_reg()
+        lo = pair_confidence.0
+        let confidence_reg = pair_confidence.1
+        lo = lo.emit(ir_load_float(confidence_reg, 1.0))
+        lo = lo.emit(ir_field_set(dst, 2, confidence_reg, make_name("confidence")))
+        lo = lo.bind_variance_for_base_reg(dst, variance_reg)
+        (lo, dst)
+    }
+
     // GPU.sync() is a no-op on this backend, and it has to be recognised HERE.
     //
     // The checker already accepts it and types it as unit
@@ -18440,10 +18490,41 @@ impl Lowerer {
             lo_u = lo_u.emit(ir_load_imm(reg_u, 0))
             return (lo_u, reg_u)
         }
+        let recv_type = self.lower_method_recv_type(&e.left)
+        if ir_name_eq(recv_type, make_name("Knowledge")) && ir_name_eq(e.name, make_name("unwrap")) {
+            match e.args {
+                Some(reason_args) => {
+                    let has_extra_reason = match (*reason_args).tail {
+                        Some(_) => true,
+                        None => false,
+                    }
+                    if has_extra_reason || (*reason_args).head.kind != ExprKind::ExprStringLit {
+                        var lo_bad_unwrap = self
+                        lowerer_mark_hard_error(&! lo_bad_unwrap)
+                        return (lo_bad_unwrap, IR_INVALID_REG)
+                    }
+                }
+                None => {
+                    var lo_bad_unwrap_none = self
+                    lowerer_mark_hard_error(&! lo_bad_unwrap_none)
+                    return (lo_bad_unwrap_none, IR_INVALID_REG)
+                }
+            }
+            let pair_base_knowledge = self.lower_opt_expr_ref(&e.left)
+            var lo_knowledge = pair_base_knowledge.0
+            let pair_value = lo_knowledge.fresh_reg()
+            lo_knowledge = pair_value.0
+            let value_reg = pair_value.1
+            lo_knowledge = lo_knowledge.emit(ir_field_get(value_reg, pair_base_knowledge.1, 0, make_name("value")))
+            if lo_knowledge.expr_result_is_float_ref(e) {
+                lo_knowledge = lo_knowledge.emit(ir_mark_float_reg(value_reg))
+            }
+            return (lo_knowledge, value_reg)
+        }
         // `.len()` is intrinsic for strings, arrays, and open slices. It is
         // accepted by the checker, but lowering it as an ordinary method invents
         // a body-less `len` function and crashes the native path.
-        if ir_name_eq(e.name, make_name("len")) {
+        if ir_name_eq(e.name, make_name("len")) && !ir_name_eq(recv_type, make_name("Seq")) {
             match e.args {
                 None => {
                     match e.left {
@@ -18492,7 +18573,6 @@ impl Lowerer {
         // Impl methods are lowered as mangled free functions (ir_mangle_method_name).
         // A `recv.method()` call must resolve to that SAME mangled name; using the bare
         // method name finds/creates a body-less fn -> codegen crash.
-        let recv_type = self.lower_method_recv_type(&e.left)
         if ir_name_eq(recv_type, make_name("Seq")) {
             if ir_name_eq(e.name, make_name("count")) || ir_name_eq(e.name, make_name("len")) {
                 match e.args {
@@ -18500,6 +18580,9 @@ impl Lowerer {
                         let pair_b_seq = self.lower_opt_expr_ref(&e.left)
                         var lo_seq = pair_b_seq.0
                         let base_reg_seq = pair_b_seq.1
+                        if ir_name_eq(e.name, make_name("len")) {
+                            return lo_seq.lower_seq_len_knowledge_from_base(base_reg_seq)
+                        }
                         let pair_d_seq = lo_seq.fresh_reg()
                         lo_seq = pair_d_seq.0
                         let dst_seq = pair_d_seq.1
