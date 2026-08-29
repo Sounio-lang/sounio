@@ -11640,6 +11640,31 @@ let usage () =
   Printf.eprintf
     "\nFleet catalog v3:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--mode new|resume] [--provider-session S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n  fleet-transfer --slot S --session-id S --provider-session S --source-lane L [--source-agent A] [--source-session S] --coord-dir DIR (--prompt TEXT|--prompt-file PATH) [--deadline-seconds N]\n  fleet-transfer-recover --slot S [--deadline-seconds N]\n  fleet-transfer-reset --slot S\n"
 
+let durable_lane_canary_child () =
+  if Sys.getenv_opt "SOUNIO_LOOM_DURABLE_LANE_CANARY" <> Some "1" then
+    failf "durable lane canary is test-only";
+  let boot_id = trim (read_file "/proc/sys/kernel/random/boot_id") in
+  Printf.printf
+    "LOOM_DURABLE_LANE_CHILD READY pid=%d start_tick=%s boot_id=%s language=OCaml role=MATERIAL_WITNESS semantic_authority=false\n%!"
+    (Unix.getpid ()) (process_start (Unix.getpid ())) boot_id;
+  let sequence = ref 0 in
+  let running = ref true in
+  while !running do
+    match input_line Stdlib.stdin with
+    | line when line = "LOOM_DURABLE_LANE_EXIT" ->
+        Printf.printf
+          "LOOM_DURABLE_LANE_CHILD EXIT sequence=%d semantic_authority=false\n%!"
+          !sequence;
+        running := false
+    | line ->
+        incr sequence;
+        Printf.printf
+          "LOOM_DURABLE_LANE_CHILD ACK sequence=%d input_sha256=%s pid=%d semantic_authority=false\n%!"
+          !sequence (sha256 line) (Unix.getpid ())
+    | exception End_of_file -> running := false
+  done;
+  0
+
 let arguments_after_command () =
   let values = Array.to_list Sys.argv in
   match values with _program :: _command :: tail -> tail | _ -> []
@@ -11652,6 +11677,8 @@ let main () =
       provider_exec_command (arguments_after_command ())
     else if command = "_provider-tui" then
       provider_tui_command (arguments_after_command ())
+    else if command = "_durable-lane-canary" then
+      durable_lane_canary_child ()
     else if command = "agent-hook" then
       Loom_hook.run (arguments_after_command ())
     else if command = "exec-capability" then
