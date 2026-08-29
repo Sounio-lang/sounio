@@ -112,6 +112,14 @@ pub struct PireusOskLineage {
     pub complete: bool,
 }
 
+struct PireusOskSeedAdmission {
+    lineage: PireusOskLineage,
+    seed_words: [i64; 8],
+    seed_cells: [i64; 256],
+    seed_admitted: bool,
+    seed_cells_valid: bool,
+}
+
 pub struct PireusOskVector {
     pub lanes: [i64; 16],
 }
@@ -467,6 +475,68 @@ fn osk_seed_cells_valid(
         cell = cell + 1
     }
     nonzero == expected_nonzero && nonzero > 0
+}
+
+fn osk_build_seed_admission() -> PireusOskSeedAdmission
+with Mut, Panic, Div, Epistemic {
+    let parent_request = pireus_operator_novelty_feedback_request()
+    let challenge = pireus_operator_novelty_cd16_challenge()
+    let parent = pireus_operator_novelty_feedback_evaluate(
+        &parent_request, &challenge)
+    let parent_frozen_match =
+        pireus_operator_novelty_feedback_frozen_mismatch_code(&parent) == 0
+    var seed_words: [i64; 8] = [0; 8]
+    var seed_cells: [i64; 256] = [0; 256]
+    var word: i64 = 0
+    while word < PIREUS_OSK_WORDS {
+        seed_words[word] = parent.atlas.best_residual_words[word]
+        word = word + 1
+    }
+    var cell: i64 = 0
+    while cell < PIREUS_OSK_CELLS {
+        seed_cells[cell] = parent.atlas.best_residual_cells[cell]
+        cell = cell + 1
+    }
+    let seed_cells_valid = osk_seed_cells_valid(
+        &seed_words, &seed_cells, parent.atlas.best_residual_nonzero_cells)
+    let seed_admitted = osk_seed_admitted(
+        parent_frozen_match,
+        parent.atlas.operator_seed_generated,
+        parent.atlas.existing_class_bridge,
+        parent.atlas.best_residual_nonzero_cells,
+        seed_cells_valid)
+    var seed_word_cell_failures: i64 = 0
+    cell = 0
+    while cell < PIREUS_OSK_CELLS {
+        if seed_cells[cell] != osk_seed_word_bit(&seed_words, cell) {
+            seed_word_cell_failures = seed_word_cell_failures + 1
+        }
+        cell = cell + 1
+    }
+    let lineage = PireusOskLineage {
+        parent_source_sha256: osk_parent_source_hash(),
+        parent_semantics_sha256: osk_parent_semantics_hash(),
+        parent_freeze_sha256: osk_parent_freeze_hash(),
+        parent_valid: parent.valid && parent.error == PIREUS_ONF_OK &&
+            parent.failures == 0,
+        parent_frozen_match: parent_frozen_match,
+        parent_outcome_kind: parent.atlas.outcome_kind,
+        parent_existing_bridge: parent.atlas.existing_class_bridge,
+        parent_operator_seed: parent.atlas.operator_seed_generated,
+        parent_residual_nonzero: parent.atlas.best_residual_nonzero_cells,
+        seed_word_cell_checks: PIREUS_OSK_CELLS,
+        seed_word_cell_failures: seed_word_cell_failures,
+        complete: parent.valid && parent.error == PIREUS_ONF_OK &&
+            parent.failures == 0 && parent_frozen_match && seed_admitted &&
+            seed_word_cell_failures == 0,
+    }
+    PireusOskSeedAdmission {
+        lineage: lineage,
+        seed_words: seed_words,
+        seed_cells: seed_cells,
+        seed_admitted: seed_admitted,
+        seed_cells_valid: seed_cells_valid,
+    }
 }
 
 fn osk_build_kernel(seed: &[i64; 256]) -> PireusOskKernel
@@ -1261,76 +1331,26 @@ pub fn pireus_operator_seed_kernel_evaluate(
     request: &PireusOskRequest,
 ) -> PireusOskResult with Mut, Panic, Div, Epistemic {
     let request_error = osk_request_error(request)
-    let parent_request = pireus_operator_novelty_feedback_request()
-    let challenge = pireus_operator_novelty_cd16_challenge()
-    let parent = pireus_operator_novelty_feedback_evaluate(
-        &parent_request, &challenge)
-    let parent_frozen_match =
-        pireus_operator_novelty_feedback_frozen_mismatch_code(&parent) == 0
-    var seed_words: [i64; 8] = [0; 8]
-    var seed_cells: [i64; 256] = [0; 256]
-    var word: i64 = 0
-    while word < PIREUS_OSK_WORDS {
-        seed_words[word] = parent.atlas.best_residual_words[word]
-        word = word + 1
-    }
-    var cell: i64 = 0
-    while cell < PIREUS_OSK_CELLS {
-        seed_cells[cell] = parent.atlas.best_residual_cells[cell]
-        cell = cell + 1
-    }
-    let seed_cells_valid = osk_seed_cells_valid(
-        &seed_words, &seed_cells, parent.atlas.best_residual_nonzero_cells)
-    let seed_admitted = osk_seed_admitted(
-        parent_frozen_match,
-        parent.atlas.operator_seed_generated,
-        parent.atlas.existing_class_bridge,
-        parent.atlas.best_residual_nonzero_cells,
-        seed_cells_valid)
-    var seed_word_cell_failures: i64 = 0
-    cell = 0
-    while cell < PIREUS_OSK_CELLS {
-        if seed_cells[cell] != osk_seed_word_bit(&seed_words, cell) {
-            seed_word_cell_failures = seed_word_cell_failures + 1
-        }
-        cell = cell + 1
-    }
-    let lineage = PireusOskLineage {
-        parent_source_sha256: osk_parent_source_hash(),
-        parent_semantics_sha256: osk_parent_semantics_hash(),
-        parent_freeze_sha256: osk_parent_freeze_hash(),
-        parent_valid: parent.valid && parent.error == PIREUS_ONF_OK &&
-            parent.failures == 0,
-        parent_frozen_match: parent_frozen_match,
-        parent_outcome_kind: parent.atlas.outcome_kind,
-        parent_existing_bridge: parent.atlas.existing_class_bridge,
-        parent_operator_seed: parent.atlas.operator_seed_generated,
-        parent_residual_nonzero: parent.atlas.best_residual_nonzero_cells,
-        seed_word_cell_checks: PIREUS_OSK_CELLS,
-        seed_word_cell_failures: seed_word_cell_failures,
-        complete: parent.valid && parent.error == PIREUS_ONF_OK &&
-            parent.failures == 0 && parent_frozen_match && seed_admitted &&
-            seed_word_cell_failures == 0,
-    }
-    let kernel = osk_build_kernel(&seed_cells)
-    let probes = osk_build_probes(&seed_cells, &kernel)
+    let admission = osk_build_seed_admission()
+    let kernel = osk_build_kernel(&admission.seed_cells)
+    let probes = osk_build_probes(&admission.seed_cells, &kernel)
     let probes_complete = osk_all_probes_complete(&probes)
-    let basis = osk_build_basis_certificate(&seed_cells, &kernel)
+    let basis = osk_build_basis_certificate(&admission.seed_cells, &kernel)
     let negatives = osk_build_negatives()
     let receipt = PireusOskReceipt {
         schema: PIREUS_OSK_SCHEMA,
         producer_language: PIREUS_ONF_LANGUAGE_SOUNIO,
         producer_role: PIREUS_ONF_ROLE_SEMANTIC_AUTHORITY,
-        parent_lineage_bound: lineage.complete,
-        parent_frozen_match: parent_frozen_match,
-        operator_seed_admitted: seed_admitted,
+        parent_lineage_bound: admission.lineage.complete,
+        parent_frozen_match: admission.lineage.parent_frozen_match,
+        operator_seed_admitted: admission.seed_admitted,
         table_evaluator_complete: probes_complete && basis.complete,
         kernel_ir_complete: kernel.complete,
         ir_evaluator_complete: probes_complete && basis.complete,
         basis_sweep_complete: basis.complete,
         dense_probes_complete: probes_complete,
-        generated_operator_candidate: lineage.complete && kernel.complete &&
-            probes_complete && basis.complete,
+        generated_operator_candidate: admission.lineage.complete &&
+            kernel.complete && probes_complete && basis.complete,
         expected_result_used: false,
         target_evidence_used: false,
         material_evidence_used: false,
@@ -1345,11 +1365,11 @@ pub fn pireus_operator_seed_kernel_evaluate(
         priority_claim: false,
         claim_ready: false,
     }
-    let lineage_digest = osk_digest_lineage(&lineage)
-    let seed_digest = osk_digest_seed(&seed_cells)
+    let lineage_digest = osk_digest_lineage(&admission.lineage)
+    let seed_digest = osk_digest_seed(&admission.seed_cells)
     let kernel_digest = osk_digest_kernel(&kernel)
     let probe_digest = osk_digest_probes(&probes)
-    let basis_digest = osk_digest_basis(&seed_cells, &kernel, &basis)
+    let basis_digest = osk_digest_basis(&admission.seed_cells, &kernel, &basis)
     let receipt_digest = osk_digest_receipt(&receipt, &negatives)
     let execution_digest = osk_digest_execution(&probe_digest, &basis_digest)
     let forge_digest = osk_digest_forge(
@@ -1358,9 +1378,9 @@ pub fn pireus_operator_seed_kernel_evaluate(
     let candidate = PireusOskGenomeCandidate {
         kind: PIREUS_OSK_CANDIDATE_GENERATED_OPERATOR,
         operator_kind: PIREUS_OSK_OPERATOR_TWISTED_XOR_4,
-        parent_outcome_kind: parent.atlas.outcome_kind,
-        parent_residual_nonzero: parent.atlas.best_residual_nonzero_cells,
-        seed_words: seed_words,
+        parent_outcome_kind: admission.lineage.parent_outcome_kind,
+        parent_residual_nonzero: admission.lineage.parent_residual_nonzero,
+        seed_words: admission.seed_words,
         kernel_digest: kernel_digest,
         execution_digest: execution_digest,
         generated: receipt.generated_operator_candidate,
@@ -1370,7 +1390,8 @@ pub fn pireus_operator_seed_kernel_evaluate(
     }
     var failures: i64 = 0
     if request_error != PIREUS_OSK_OK { failures = failures + 1 }
-    if !lineage.complete || !seed_admitted || !kernel.complete ||
+    if !admission.lineage.complete || !admission.seed_admitted ||
+        !admission.seed_cells_valid || !kernel.complete ||
         !probes_complete || !basis.complete ||
         negatives.passed != negatives.total ||
         !receipt.generated_operator_candidate ||
@@ -1396,13 +1417,15 @@ pub fn pireus_operator_seed_kernel_evaluate(
         valid: failures == 0,
         error: if failures == 0 { PIREUS_OSK_OK }
             else if request_error != PIREUS_OSK_OK { request_error }
-            else if !lineage.complete { PIREUS_OSK_ERR_LINEAGE }
-            else if !seed_admitted { PIREUS_OSK_ERR_SEED }
+            else if !admission.seed_admitted || !admission.seed_cells_valid {
+                PIREUS_OSK_ERR_SEED
+            }
+            else if !admission.lineage.complete { PIREUS_OSK_ERR_LINEAGE }
             else if !kernel.complete { PIREUS_OSK_ERR_IR }
             else { PIREUS_OSK_ERR_EXECUTION },
-        lineage: lineage,
-        seed_words: seed_words,
-        seed_cells: seed_cells,
+        lineage: admission.lineage,
+        seed_words: admission.seed_words,
+        seed_cells: admission.seed_cells,
         operator_ir: kernel,
         probes: probes,
         basis: basis,
