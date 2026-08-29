@@ -48,7 +48,7 @@ process_evidence.result_valid == true
 process_evidence.frozen_match == true
 parent.outcome == OperatorSeed
 parent.existing_bridge == false
-parent.residual_nonzero > 0
+parent.residual_weight > 0
 all 256 seed cells are bits
 all 256 packed-word/cell replays match
 ```
