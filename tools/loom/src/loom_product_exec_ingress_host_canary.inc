@@ -18,8 +18,10 @@ struct ProductIngressHostRun {
   gid_t main_gid = 0;
   std::uint64_t main_start_tick = 0;
   pid_t descriptor_peer_pid = 0;
+  pid_t descriptor_peer_parent_pid = 0;
   uid_t descriptor_peer_uid = 0;
   gid_t descriptor_peer_gid = 0;
+  std::uint64_t descriptor_peer_start_tick = 0;
   bool identity_authenticated = false;
   bool dynamic_user = false;
 };
@@ -92,6 +94,23 @@ std::string product_read_output(int descriptor,
 
 std::string product_process_environment(pid_t pid) {
   return read_file("/proc/" + std::to_string(pid) + "/environ");
+}
+
+pid_t product_process_parent(pid_t pid) {
+  const std::string record =
+      read_file("/proc/" + std::to_string(pid) + "/stat");
+  const std::size_t closing = record.rfind(')');
+  if (closing == std::string::npos || closing + 2 >= record.size()) {
+    throw Error("product connector process stat malformed");
+  }
+  std::istringstream input(record.substr(closing + 2));
+  char state = 0;
+  std::int64_t parent = 0;
+  if (!(input >> state >> parent) || parent <= 0 ||
+      parent > std::numeric_limits<pid_t>::max()) {
+    throw Error("product connector parent PID missing");
+  }
+  return static_cast<pid_t>(parent);
 }
 
 bool product_environment_has(const std::string& environment,
@@ -328,11 +347,20 @@ class ProductExecIngressHostCase {
     descriptor_peer_pid_ = peer.pid;
     descriptor_peer_uid_ = peer.uid;
     descriptor_peer_gid_ = peer.gid;
-    if (peer.pid != 1 || peer.uid != 0 || peer.gid != 0) {
-      throw Error("product OpenFile connector identity diverged: pid=" +
+    if (peer.pid <= 1 || peer.uid != 0 || peer.gid != 0) {
+      throw Error("product OpenFile connector is not a root executor: pid=" +
                   std::to_string(peer.pid) + " uid=" +
                   std::to_string(peer.uid) + " gid=" +
                   std::to_string(peer.gid));
+    }
+    descriptor_peer_parent_pid_ = product_process_parent(peer.pid);
+    descriptor_peer_start_tick_ = process_start_tick(peer.pid);
+    descriptor_peer_cgroup_sha256_ = sha256(process_cgroup(peer.pid));
+    if (descriptor_peer_parent_pid_ != 1 ||
+        process_cgroup(peer.pid).find(unit_) == std::string::npos) {
+      throw Error("product OpenFile root executor lacks PID1/unit ancestry: pid=" +
+                  std::to_string(peer.pid) + " parent=" +
+                  std::to_string(descriptor_peer_parent_pid_));
     }
   }
 
@@ -389,7 +417,12 @@ class ProductExecIngressHostCase {
                         main_gid_ != 0
                   : property("DynamicUser") == "no" && main_uid_ == 0 &&
                         main_gid_ == 0;
-          identity_authenticated_ = identity && principal;
+          const bool connector_transition =
+              descriptor_peer_pid_ == main_pid_ &&
+              descriptor_peer_parent_pid_ == 1 &&
+              descriptor_peer_start_tick_ == main_start_tick_ &&
+              descriptor_peer_cgroup_sha256_ == cgroup_sha256_;
+          identity_authenticated_ = identity && principal && connector_transition;
           if (!identity_authenticated_) {
             throw Error("product lane principal identity admission failed");
           }
@@ -483,8 +516,10 @@ class ProductExecIngressHostCase {
     result.main_gid = main_gid_;
     result.main_start_tick = main_start_tick_;
     result.descriptor_peer_pid = descriptor_peer_pid_;
+    result.descriptor_peer_parent_pid = descriptor_peer_parent_pid_;
     result.descriptor_peer_uid = descriptor_peer_uid_;
     result.descriptor_peer_gid = descriptor_peer_gid_;
+    result.descriptor_peer_start_tick = descriptor_peer_start_tick_;
     result.identity_authenticated = identity_authenticated_;
     result.dynamic_user = dynamic_user_;
     return result;
@@ -530,6 +565,7 @@ class ProductExecIngressHostCase {
   std::string runtime_path_;
   std::string socket_path_;
   std::string cgroup_sha256_;
+  std::string descriptor_peer_cgroup_sha256_;
   std::string output_text_;
   UniqueFd listener_;
   UniqueFd connection_;
@@ -542,8 +578,10 @@ class ProductExecIngressHostCase {
   gid_t main_gid_ = 0;
   std::uint64_t main_start_tick_ = 0;
   pid_t descriptor_peer_pid_ = 0;
+  pid_t descriptor_peer_parent_pid_ = 0;
   uid_t descriptor_peer_uid_ = 0;
   gid_t descriptor_peer_gid_ = 0;
+  std::uint64_t descriptor_peer_start_tick_ = 0;
   int client_status_ = 0;
   int hook_code_ = 255;
   bool client_reaped_ = false;
@@ -584,8 +622,12 @@ int selftest_product_exec_ingress_host(
   require_product_case(
       treatment.hook_code == 0 && treatment.identity_authenticated &&
           treatment.dynamic_user && treatment.main_uid != 0 &&
-          treatment.main_gid != 0 && treatment.descriptor_peer_pid == 1 &&
+          treatment.main_gid != 0 &&
+          treatment.descriptor_peer_pid == treatment.main_pid &&
+          treatment.descriptor_peer_parent_pid == 1 &&
+          treatment.descriptor_peer_start_tick == treatment.main_start_tick &&
           treatment.descriptor_peer_uid == 0 &&
+          treatment.descriptor_peer_gid == 0 &&
           product_contains(treatment.ingress_log, "decision=DENY\t") &&
           product_contains(treatment.ingress_log,
                            "reason=descriptor-bound-action-9031\t") &&
@@ -684,14 +726,20 @@ int selftest_product_exec_ingress_host(
       << " operational_attachment=OCaml"
       << " material_layer=C++20+Linux+systemd"
       << " material_role=MATERIAL_PARITY transitory=true"
-      << " hostguardian=PID1-root dynamic_user=true"
+      << " hostguardian=root-owned-broker service_manager=PID1-systemd"
+      << " descriptor_connector=systemd-root-executor"
+      << " descriptor_connector_authenticated=true dynamic_user=true"
       << " lane_cell_canary_attached=true"
       << " lane_cell_uid=" << treatment.main_uid
       << " lane_cell_gid=" << treatment.main_gid
       << " lane_cell_pidfd=bound lane_cell_start_tick=bound"
       << " lane_cell_executable=bound lane_cell_cgroup=bound"
       << " inherited_descriptor=true descriptor_open=systemd-OpenFile"
-      << " descriptor_fd=3 descriptor_peer_pid=1 descriptor_peer_uid=0"
+      << " descriptor_fd=3 descriptor_peer_pid=lane-main"
+      << " descriptor_peer_parent_pid=1 descriptor_peer_uid=0"
+      << " descriptor_peer_gid=0 connector_start_tick=lane-main"
+      << " connector_cgroup=lane-main"
+      << " connector_credential_transition=root-to-DynamicUser"
       << " descriptor_is_bearer=false event_hash=bound command_hash=bound"
       << " treatment=Sounio-DENY+hook-continues"
       << " sounio_allow_sabotage=hook-refused"

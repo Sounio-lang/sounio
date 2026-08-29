@@ -202,12 +202,17 @@ set -e
 for expectation in \
   'semantic_authority=Sounio' 'action=9031' \
   'operational_attachment=OCaml' 'material_role=MATERIAL_PARITY' \
-  'hostguardian=PID1-root' 'dynamic_user=true' \
+  'hostguardian=root-owned-broker' 'service_manager=PID1-systemd' \
+  'descriptor_connector=systemd-root-executor' \
+  'descriptor_connector_authenticated=true' 'dynamic_user=true' \
   'lane_cell_canary_attached=true' 'lane_cell_pidfd=bound' \
   'lane_cell_start_tick=bound' 'lane_cell_executable=bound' \
   'lane_cell_cgroup=bound' 'inherited_descriptor=true' \
   'descriptor_open=systemd-OpenFile' 'descriptor_fd=3' \
-  'descriptor_peer_pid=1' 'descriptor_peer_uid=0' \
+  'descriptor_peer_pid=lane-main' 'descriptor_peer_parent_pid=1' \
+  'descriptor_peer_uid=0' 'descriptor_peer_gid=0' \
+  'connector_start_tick=lane-main' 'connector_cgroup=lane-main' \
+  'connector_credential_transition=root-to-DynamicUser' \
   'descriptor_is_bearer=false' 'event_hash=bound' 'command_hash=bound' \
   'treatment=Sounio-DENY+hook-continues' \
   'sounio_allow_sabotage=hook-refused' 'binding_sabotage=refused' \

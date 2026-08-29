@@ -48,13 +48,22 @@ with:
 - the actual native `agent-hook --agent codex` entrypoint;
 - the frozen Sounio language-authority and resident action-9031 runtimes;
 - no bearer-token file;
-- one connected Unix-stream descriptor created by PID 1 through systemd
-  `OpenFile=` and inherited as descriptor 3.
+- one connected Unix-stream descriptor created during the root execution setup
+  that PID 1 authorizes through systemd `OpenFile=`, then inherited as
+  descriptor 3 across the credential drop and `execve` into the hook.
 
-`OpenFile=` is transport only. The hook verifies `SO_PEERCRED`, binds the event
-and command SHA-256 values, requires EOF after the exact response, and invokes
-the resident Sounio action 9031. The host broker also authenticates the live
-hook with pidfd, process start tick, executable identity, cgroup, UID, GID, and
+`OpenFile=` is transport only. On the measured systemd 255 path, the connection
+is created by the root execution child of PID 1 before that same process becomes
+the service `MainPID`. Linux freezes its root UID/GID in `SO_PEERCRED` at
+connect time. The broker therefore requires the connector to have parent PID 1,
+root peer credentials, the transient unit cgroup, and then the same PID, process
+start tick, and cgroup as the live `DynamicUser` hook after `execve`. This is an
+authenticated root-to-`DynamicUser` identity transition, not a blanket rule
+that any root peer may authorize.
+
+The hook binds the event and command SHA-256 values, requires EOF after the
+exact response, and invokes the resident Sounio action 9031. The host broker
+also authenticates the live hook with pidfd, executable identity, UID, GID, and
 service hardening properties before responding.
 
 The descriptor is non-bearer in the relevant sense: a pathname, copied JSON,
@@ -66,7 +75,7 @@ not recreate its open file description.
 Treatment:
 
 - start the genuine hook as a distinct `DynamicUser`;
-- inherit the PID-1-created descriptor;
+- inherit the descriptor created by the PID-1-owned service transition;
 - bind the exact event and command hashes;
 - evaluate the frozen current-material action 9031 projection;
 - require the Sounio DENY receipt, hook continuation in `PROBE_ONLY`, and an
@@ -78,8 +87,8 @@ Sabotage controls:
    hook rule itself must refuse this unexpected ALLOW before execution.
 2. Echo a different command hash. The hook must refuse the response binding.
 3. Close the guardian endpoint without a response. The hook must fail closed.
-4. Run the hook as root, matching the PID-1 guardian UID. The hook must refuse
-   the non-distinct peer.
+4. Run the hook as root, matching the connector's root credential. The hook
+   must refuse the non-distinct peer.
 5. Omit the inherited descriptor. Required mode must refuse before any Sounio
    grant lookup or command materialization. This fast-exit structural control
    is not relabeled as a Sounio decision.
@@ -88,8 +97,10 @@ Sabotage controls:
 
 The experiment fails if a command sentinel exists, a sabotage returns through
 the treatment path, a material component authors a semantic decision, the
-guardian descriptor comes from a non-root or non-PID-1 peer, the treatment UID
-equals the guardian UID, or any mutable or bearer-token authority is present.
+connector is not a PID-1 child with root connect-time credentials, does not
+become the exact lane `MainPID`, changes start tick or cgroup across the
+transition, the treatment UID equals the connector credential, or any mutable
+or bearer-token authority is present.
 
 ## Receipt Boundary
 
