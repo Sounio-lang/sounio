@@ -51,8 +51,8 @@ gate_name "diagnostic_identity"
 # only evidence of where the boundary of "one identity" is unclear. Whoever
 # reconciles them should record which route was right per code, and lower these
 # lines accordingly.
-COLLISION_CEILING="${SOUNIO_DIAG_COLLISION_CEILING:-25}"
-UNDOCUMENTED_CEILING="${SOUNIO_DIAG_UNDOCUMENTED_CEILING:-140}"
+COLLISION_CEILING="${SOUNIO_DIAG_COLLISION_CEILING:-34}"
+UNDOCUMENTED_CEILING="${SOUNIO_DIAG_UNDOCUMENTED_CEILING:-141}"
 # 20 -> 21, and this one RISES on purpose.
 #
 # Repairing a collision necessarily orphans the vacated catalogue row: E220 and
@@ -66,7 +66,7 @@ UNDOCUMENTED_CEILING="${SOUNIO_DIAG_UNDOCUMENTED_CEILING:-140}"
 # silently, so it is written here rather than adjusted quietly: every collision
 # fixed by moving an emitter will push this number up by one until the untagged
 # lean_single prints are tagged, at which point it falls by all of them at once.
-ORPHANED_CEILING="${SOUNIO_DIAG_ORPHANED_CEILING:-21}"
+ORPHANED_CEILING="${SOUNIO_DIAG_ORPHANED_CEILING:-14}"
 
 ART_DIR="$ROOT_DIR/artifacts/gates"; mkdir -p "$ART_DIR"
 ART="$ART_DIR/diagnostic_identity.json"
@@ -81,7 +81,19 @@ python3 - "$CHECK" "$CAT" "$ART" "$COLLISION_CEILING" "$UNDOCUMENTED_CEILING" "$
 import re, sys, json, os
 check, cat, art, c_ceil, u_ceil, o_ceil = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6])
 
-src = open(check, errors='replace').read()
+# APERTURE. This gate read ONE file until 2026-08-28: self-hosted/check/check.sio.
+# It nevertheless reported "a catalogue row no emitter ever produces" -- a claim
+# about the whole compiler drawn from a survey of one file. Measured on main the
+# day this changed: 20 distinct codes are emitted from OUTSIDE check.sio, in
+# lean_single.sio, parser/types.sio, parser/stmts.sio, parser/exprs.sio and
+# lexer/mod.sio. Seven of the twenty-one "orphans" were among them.
+#
+# It now reads every self-hosted/**/*.sio. The gate's own warning applies to the
+# gate: "a survey of one mechanism reports the other as free".
+import glob as _glob
+_files = [check] + sorted(f for f in _glob.glob('self-hosted/**/*.sio', recursive=True)
+                          if os.path.abspath(f) != os.path.abspath(check))
+src = '\n'.join(open(f, errors='replace').read() for f in _files)
 
 # The message row is the identity: `else if code == N { print("...") }`.
 # Taken from the printer rather than from call sites, because a call site says
