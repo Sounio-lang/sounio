@@ -93,6 +93,9 @@ verify_binding() {
 BROKER="$(verify_binding broker_path broker_sha256 555)"
 CONTROLLER_MANIFEST="$(verify_binding controller_manifest_path controller_manifest_sha256 444)"
 CONTROLLER_RUNTIME="$(verify_binding controller_runtime_path controller_runtime_sha256 555)"
+CONTROLLER_FROZEN_RESIDENT="$(verify_binding controller_frozen_resident_path controller_frozen_resident_sha256 444)"
+CONTROLLER_FROZEN_CELL="$(verify_binding controller_frozen_cell_path controller_frozen_cell_sha256 444)"
+CONTROLLER_FROZEN_SOURCE="$(verify_binding controller_frozen_source_path controller_frozen_source_sha256 444)"
 FIXTURE_MANIFEST="$(verify_binding fixture_manifest_path fixture_manifest_sha256 444)"
 FIXTURE_BUNDLE="$(verify_binding fixture_bundle_path fixture_bundle_sha256 444)"
 RESIDENT_RUNTIME="$(verify_binding resident_runtime_path resident_runtime_sha256 555)"
@@ -102,6 +105,22 @@ PROCESS_WITNESS_CELL="$(verify_binding process_witness_cell_path process_witness
 PROCESS_WITNESS_PAYLOAD="$(verify_binding process_witness_payload_path process_witness_payload_sha256 555)"
 PROCESS_WITNESS_MANIFEST="$(verify_binding process_witness_manifest_path process_witness_manifest_sha256 444)"
 PROCESS_WITNESS_GARDEN="$(verify_binding process_witness_garden_path process_witness_garden_sha256 444)"
+PRODUCT_RUNTIME="$(verify_binding product_exec_ingress_runtime_path product_exec_ingress_runtime_sha256 555)"
+PRODUCT_LANGUAGE_RUNTIME="$(verify_binding product_language_runtime_path product_language_runtime_sha256 555)"
+PRODUCT_RESIDENT_RUNTIME="$(verify_binding product_resident_runtime_path product_resident_runtime_sha256 555)"
+PRODUCT_INGRESS_MANIFEST="$(verify_binding product_exec_ingress_manifest_path product_exec_ingress_manifest_sha256 444)"
+PRODUCT_INGRESS_CONTRACT="$(verify_binding product_exec_ingress_contract_path product_exec_ingress_contract_sha256 444)"
+PRODUCT_INGRESS_EVIDENCE="$(verify_binding product_exec_ingress_evidence_path product_exec_ingress_evidence_sha256 444)"
+PRODUCT_LANE_CELL_CANARY_CONTRACT="$(verify_binding product_lane_cell_canary_contract_path product_lane_cell_canary_contract_sha256 444)"
+[[ "$(record_value "$MANIFEST" controller_frozen_commit)" =~ ^[0-9a-f]{40}$ && \
+   "$(record_value "$MANIFEST" resident_v4_frozen_commit)" =~ ^[0-9a-f]{40}$ && \
+   "$(sha256_file "$CONTROLLER_FROZEN_RESIDENT")" == \
+     "$(record_value "$CONTROLLER_MANIFEST" resident_source_sha256)" && \
+   "$(sha256_file "$CONTROLLER_FROZEN_CELL")" == \
+     "$(record_value "$CONTROLLER_MANIFEST" cell_source_sha256)" && \
+   "$(sha256_file "$CONTROLLER_FROZEN_SOURCE")" == \
+     "$(record_value "$CONTROLLER_MANIFEST" controller_source_sha256)" ]] ||
+  fail 'frozen action-9030 controller provenance drifted'
 [[ "$(record_value "$MANIFEST" process_witness_core)" == false && \
    "$(record_value "$MANIFEST" complete_effects)" == false ]] ||
   fail 'release preclaimed ProcessWitness completion'
@@ -109,11 +128,23 @@ PROCESS_WITNESS_GARDEN="$(verify_binding process_witness_garden_path process_wit
 AUTHORITY_ROOT="$RELEASE/$(record_value "$MANIFEST" authority_root_path)"
 [[ -d "$AUTHORITY_ROOT" && ! -L "$AUTHORITY_ROOT" && -d "$AUTHORITY_ROOT/.git" ]] ||
   fail 'authority root topology is incomplete'
+PRODUCT_ROOT="$RELEASE/$(record_value "$MANIFEST" product_authority_root_path)"
+[[ "$PRODUCT_ROOT" == "$AUTHORITY_ROOT" && -d "$PRODUCT_ROOT/.git" && \
+   "$(record_value "$MANIFEST" product_exec_ingress_action)" == 9031 && \
+   "$(record_value "$MANIFEST" product_lane_cell_canary)" == false && \
+   "$(record_value "$MANIFEST" distinct_uid_product_broker_canary)" == false ]] ||
+  fail 'product ExecIngress release posture drifted'
+[[ -s "$PRODUCT_INGRESS_MANIFEST" && -s "$PRODUCT_INGRESS_CONTRACT" && \
+   -s "$PRODUCT_INGRESS_EVIDENCE" && -s "$PRODUCT_LANE_CELL_CANARY_CONTRACT" ]] ||
+  fail 'product ExecIngress proof capsule is incomplete'
 
 SYSTEMD_RUN="$(readlink -f "$(command -v systemd-run)")"
 SYSTEMCTL="$(readlink -f "$(command -v systemctl)")"
 [[ "$SYSTEMD_RUN" == /* && -x "$SYSTEMD_RUN" && "$SYSTEMCTL" == /* && -x "$SYSTEMCTL" ]] ||
   unavailable 'canonical systemd tools are unavailable'
+read -r _ SYSTEMD_VERSION _ < <(systemctl --version | sed -n '1p')
+[[ "$SYSTEMD_VERSION" =~ ^[0-9]+$ ]] || fail 'systemd version is not canonical'
+(( SYSTEMD_VERSION >= 253 )) || unavailable 'systemd OpenFile transport requires version 253 or newer'
 
 set +e
 host_output="$(timeout --signal=TERM --kill-after=5s 150s \
@@ -152,6 +183,46 @@ for expectation in \
   'exec_attached=false' 'commit_attached=false' 'ci_attached=false' \
   'parity_open=false' 'claim_ready=false'; do
   [[ " $host_output " == *" $expectation "* ]] || fail "host broker receipt omitted $expectation"
+done
+
+set +e
+product_output="$(timeout --signal=TERM --kill-after=5s 240s \
+  "$BROKER" --selftest-product-exec-ingress-host \
+  --product-root "$PRODUCT_ROOT" \
+  --product-runtime "$PRODUCT_RUNTIME" \
+  --product-language-runtime "$PRODUCT_LANGUAGE_RUNTIME" \
+  --product-resident-runtime "$PRODUCT_RESIDENT_RUNTIME" \
+  --systemd-run "$SYSTEMD_RUN" --systemctl "$SYSTEMCTL" 2>&1)"
+product_status=$?
+set -e
+[[ $product_status -eq 0 ]] ||
+  fail "product DynamicUser ExecIngress matrix failed or timed out status=$product_status output=$product_output"
+[[ "$product_output" == 'LOOM_PRODUCT_EXEC_INGRESS_DYNAMIC_USER_HOST_GATE PASS '* ]] ||
+  fail 'product DynamicUser ExecIngress receipt prefix diverged'
+for expectation in \
+  'semantic_authority=Sounio' 'action=9031' \
+  'operational_attachment=OCaml' 'material_role=MATERIAL_PARITY' \
+  'hostguardian=PID1-root' 'dynamic_user=true' \
+  'lane_cell_canary_attached=true' 'lane_cell_pidfd=bound' \
+  'lane_cell_start_tick=bound' 'lane_cell_executable=bound' \
+  'lane_cell_cgroup=bound' 'inherited_descriptor=true' \
+  'descriptor_open=systemd-OpenFile' 'descriptor_fd=3' \
+  'descriptor_peer_pid=1' 'descriptor_peer_uid=0' \
+  'descriptor_is_bearer=false' 'event_hash=bound' 'command_hash=bound' \
+  'treatment=Sounio-DENY+hook-continues' \
+  'sounio_allow_sabotage=hook-refused' 'binding_sabotage=refused' \
+  'guardian_death=refused' 'same_uid=refused' \
+  'missing_descriptor=refused' \
+  'python_oracle=refused-before-execution' \
+  'rust_oracle=refused-before-execution' 'causal_sabotage=PASS' \
+  'command_executed=false' 'distinct_uid_product_broker_canary=true' \
+  'fleet_lane_cell_attached=false' 'exec_cell_attached=false' \
+  'material_execution=false' 'production_activation=false' \
+  'launch_open=false' 'recycle_open=false' 'exec_attached=false' \
+  'commit_attached=false' 'ci_attached=false' 'parity_open=false' \
+  'claim_ready=false'; do
+  [[ " $product_output " == *" $expectation "* ]] ||
+    fail "product DynamicUser receipt omitted $expectation"
 done
 
 set +e
@@ -199,11 +270,10 @@ for expectation in \
     fail "host ProcessWitness receipt omitted $expectation"
 done
 
-read -r _ SYSTEMD_VERSION _ < <(systemctl --version | sed -n '1p')
-[[ "$SYSTEMD_VERSION" =~ ^[0-9]+$ ]] || fail 'systemd version is not canonical'
-printf 'sounio-loom-host-exec-quorum-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio controller_language=OCaml controller_role=EFFECT_PARITY material_language=C++20+Linux+systemd material_role=MATERIAL_PARITY transitory=true host=%s kernel=%s architecture=%s systemd_version=%s systemd_run_sha256=%s systemctl_sha256=%s release_manifest_sha256=%s broker_output_sha256=%s process_witness_output_sha256=%s dynamic_user=true principal_distinct_uid=true non_bearer_exec_quorum=true descriptor_barrier_causal=true linear_grant_consumption=true positive_open_sentinels=1 sabotage_open_sentinels=1 total_open_sentinels=2 process_witness_core=true same_pid_execveat=true affirmative_extinction=true complete_effects=false material_grant=true material_execution=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false\n%s\n%s\n' \
+printf 'sounio-loom-host-exec-quorum-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio controller_language=OCaml controller_role=EFFECT_PARITY material_language=C++20+Linux+systemd material_role=MATERIAL_PARITY transitory=true host=%s kernel=%s architecture=%s systemd_version=%s systemd_run_sha256=%s systemctl_sha256=%s release_manifest_sha256=%s broker_output_sha256=%s process_witness_output_sha256=%s product_exec_ingress_output_sha256=%s dynamic_user=true principal_distinct_uid=true non_bearer_exec_quorum=true descriptor_barrier_causal=true linear_grant_consumption=true positive_open_sentinels=1 sabotage_open_sentinels=1 total_open_sentinels=2 process_witness_core=true same_pid_execveat=true affirmative_extinction=true complete_effects=false product_lane_cell_canary=true distinct_uid_product_broker_canary=true fleet_lane_cell_attached=false exec_cell_attached=false material_grant=true material_execution=false production_activation=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false\n%s\n%s\n%s\n' \
   "$(hostname)" "$(uname -r)" "$(uname -m)" "$SYSTEMD_VERSION" \
   "$(sha256_file "$SYSTEMD_RUN")" "$(sha256_file "$SYSTEMCTL")" \
   "$EXPECTED_MANIFEST_SHA256" "$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1)" \
   "$(printf '%s\n' "$process_witness_output" | sha256sum | cut -d ' ' -f 1)" \
-  "$host_output" "$process_witness_output"
+  "$(printf '%s\n' "$product_output" | sha256sum | cut -d ' ' -f 1)" \
+  "$host_output" "$process_witness_output" "$product_output"

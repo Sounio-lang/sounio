@@ -22,6 +22,14 @@ sha256_file() {
   sha256sum "$1" | cut -d ' ' -f 1
 }
 
+manifest_value() {
+  local manifest="$1" key="$2" line count
+  count="$(grep -c "^${key}=" "$manifest" || true)"
+  [[ "$count" == 1 ]] || fail "manifest field $key occurs $count times: $manifest"
+  line="$(grep -m1 "^${key}=" "$manifest")"
+  printf '%s' "${line#*=}"
+}
+
 OUTPUT=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,7 +43,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$OUTPUT" == /* && ! -L "$OUTPUT" ]] || usage
 
-for tool in git sha256sum stat install mktemp tar find sort chmod sync mv; do
+for tool in git sha256sum stat install mktemp tar find sort chmod sync mv dune flock; do
   command -v "$tool" >/dev/null 2>&1 || fail "required packaging tool is absent: $tool"
 done
 for input in "$PROMOTER" "$HOST_GATE"; do
@@ -65,12 +73,27 @@ META="$CAPSULE/meta"
 mkdir -p "$BIN" "$DATA" "$AUTHORITY_ROOT/.git" "$META"
 chmod 0700 "$AUTHORITY_ROOT/.git"
 
+CONTROLLER_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/exec_grant_controller.runtime.v1"
+RESIDENT_V4_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
+FROZEN_CONTROLLER_COMMIT="$(manifest_value "$CONTROLLER_MANIFEST_SOURCE" controller_commit)"
+FROZEN_RESIDENT_V4_COMMIT="$(manifest_value "$RESIDENT_V4_MANIFEST_SOURCE" sounio_resident_v4_commit)"
+[[ "$FROZEN_CONTROLLER_COMMIT" =~ ^[0-9a-f]{40}$ && \
+   "$FROZEN_RESIDENT_V4_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+  fail 'frozen controller or resident commit is not canonical'
+FROZEN_CONTROLLER_ROOT="$WORK/frozen-controller"
+FROZEN_RESIDENT_V4_ROOT="$WORK/frozen-resident-v4"
+mkdir -p "$FROZEN_CONTROLLER_ROOT" "$FROZEN_RESIDENT_V4_ROOT"
+git -C "$ROOT_DIR" archive "$FROZEN_CONTROLLER_COMMIT" |
+  tar -x -C "$FROZEN_CONTROLLER_ROOT"
+git -C "$ROOT_DIR" archive "$FROZEN_RESIDENT_V4_COMMIT" |
+  tar -x -C "$FROZEN_RESIDENT_V4_ROOT"
+
 SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT="$BIN/loom-kernel-principal-broker" \
   bash "$ROOT_DIR/scripts/dev/build_loom_kernel_principal_broker.sh" >/dev/null
 SOUNIO_LOOM_EXEC_GRANT_CONTROLLER_OUTPUT="$BIN/loom-exec-grant-controller" \
-  bash "$ROOT_DIR/scripts/dev/build_loom_exec_grant_controller.sh" >/dev/null
+  bash "$FROZEN_CONTROLLER_ROOT/scripts/dev/build_loom_exec_grant_controller.sh" >/dev/null
 SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_OUTPUT="$BIN/sounio-loom-resident-membrane-runtime-v4" \
-  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v4.sh" >/dev/null
+  bash "$FROZEN_RESIDENT_V4_ROOT/scripts/dev/build_sounio_loom_resident_membrane_v4.sh" >/dev/null
 SOUNIO_LOOM_PRINCIPAL_CELL_BARRIER_INTEGRATED_OUTPUT="$BIN/loom-principal-cell-barrier-integrated" \
   bash "$ROOT_DIR/scripts/dev/build_loom_principal_cell_barrier_integrated.sh" >/dev/null
 SOUNIO_LOOM_HOST_EXEC_QUORUM_PRINCIPAL_CELL_OUTPUT="$BIN/loom-host-exec-quorum-principal-cell" \
@@ -79,6 +102,16 @@ SOUNIO_LOOM_PROCESS_WITNESS_PRINCIPAL_CELL_OUTPUT="$BIN/loom-process-witness-pri
   bash "$ROOT_DIR/scripts/dev/build_loom_process_witness_principal_cell.sh" >/dev/null
 SOUNIO_LOOM_PROCESS_WITNESS_HANDSHAKE_OUTPUT="$BIN/sounio-loom-process-witness-handshake-v1" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_process_witness_handshake_payload.sh" >/dev/null
+SOUNIO_LOOM_LANGUAGE_AUTHORITY_OUTPUT="$BIN/sounio-loom-language-authority-runtime" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" >/dev/null
+SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_OUTPUT="$BIN/sounio-loom-resident-membrane-runtime-v5" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v5.sh" >/dev/null
+(
+  flock -x 9
+  dune build --root "$ROOT_DIR/tools/loom" src/loom.exe >/dev/null
+) 9>"$ROOT_DIR/tools/loom/_build/.dune-build.lock"
+install -m 0555 "$ROOT_DIR/tools/loom/_build/default/src/loom.exe" \
+  "$BIN/sounio-loom-runtime"
 fixture_runtime="$WORK/sounio-loom-host-exec-quorum-fixture"
 SOUNIO_LOOM_HOST_EXEC_QUORUM_FIXTURE_OUTPUT="$fixture_runtime" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_host_exec_quorum_fixture.sh" >/dev/null
@@ -118,10 +151,51 @@ AUTHORITY_FILES=(
   tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md
   tools/loom/process_witness_handshake_payload_main.sio
   scripts/dev/build_sounio_loom_process_witness_handshake_payload.sh
+  tools/loom/language_authority.freeze.v1
+  stdlib/coordination/loom_language_authority.sio
+  tools/loom/language_authority_main.sio
+  tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md
+  stdlib/coordination/loom_kernel_peer_activation_capsule_authority.sio
+  tools/loom/kernel_peer_activation_capsule_authority_main.sio
+  tools/loom/kernel_peer_activation_capsule_authority.freeze.v1
+  tools/loom/kernel_peer_activation_capsule.runtime.v1
+  tools/loom/kernel_peer_activation_capsule.current.v1
+  tools/loom/kernel_peer_material_judgment_v13.freeze.v1
+  tools/loom/resident_membrane.runtime.v5
+  tools/loom/resident_membrane_v5_main.sio
+  scripts/dev/build_sounio_loom_resident_membrane_v5.sh
+  scripts/ci/sounio_loom_resident_transport_v5_selftest.sh
+  tools/loom/product_exec_ingress_dark.runtime.v1
+  tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md
+  tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt
+  tools/loom/GARDEN_PRODUCT_DYNAMIC_USER_EXEC_ATTACHMENT_V1.md
+  tools/loom/PRODUCT_DYNAMIC_USER_EXEC_COUNTEREXAMPLE_V1.md
+  tools/loom/PRODUCT_DYNAMIC_USER_LANE_CELL_CANARY_V1.md
+  tools/loom/evidence/loom-product-dynamic-user-exec-counterexample-v1-20260829.txt
+  tools/loom/src/loom_exec_ingress.ml
+  tools/loom/src/loom_hook.ml
+  tools/loom/src/loom_membrane.ml
+  tools/loom/src/loom.ml
+  tools/loom/src/loom_pty_stubs.c
+  tools/loom/src/dune
 )
 for relative in "${AUTHORITY_FILES[@]}"; do
   install_root_file "$relative"
 done
+FROZEN_CONTROLLER_PROOF="$AUTHORITY_ROOT/frozen/action-9030-controller"
+install -d -m 0755 "$FROZEN_CONTROLLER_PROOF/tools/loom/src" \
+  "$FROZEN_CONTROLLER_PROOF/scripts/dev"
+for relative in tools/loom/src/loom_resident.ml \
+  tools/loom/src/loom_exec_grant_cell.ml \
+  tools/loom/src/loom_exec_grant_controller.ml; do
+  install -m 0444 "$FROZEN_CONTROLLER_ROOT/$relative" \
+    "$FROZEN_CONTROLLER_PROOF/$relative"
+done
+install -m 0555 \
+  "$FROZEN_CONTROLLER_ROOT/scripts/dev/build_loom_exec_grant_controller.sh" \
+  "$FROZEN_CONTROLLER_PROOF/scripts/dev/build_loom_exec_grant_controller.sh"
+git init -q --initial-branch=loom "$AUTHORITY_ROOT"
+find "$AUTHORITY_ROOT/.git" -type f -exec chmod 0444 {} +
 while IFS= read -r -d '' directory; do
   [[ "$directory" == "$AUTHORITY_ROOT/.git" ]] || chmod 0555 "$directory"
 done < <(find "$AUTHORITY_ROOT" -type d -print0)
@@ -134,11 +208,21 @@ HOST_BARRIER_SHA256="$(sha256_file "$BIN/loom-host-exec-quorum-principal-cell")"
 PROCESS_WITNESS_CELL_SHA256="$(sha256_file "$BIN/loom-process-witness-principal-cell")"
 PROCESS_WITNESS_PAYLOAD_SHA256="$(sha256_file "$BIN/sounio-loom-process-witness-handshake-v1")"
 PROCESS_WITNESS_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/process_witness_handshake_payload.freeze.v1")"
+PRODUCT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-runtime")"
+PRODUCT_LANGUAGE_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-language-authority-runtime")"
+PRODUCT_RESIDENT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-resident-membrane-runtime-v5")"
+PRODUCT_INGRESS_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/product_exec_ingress_dark.runtime.v1")"
+PRODUCT_INGRESS_CONTRACT_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md")"
+PRODUCT_INGRESS_EVIDENCE_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt")"
+PRODUCT_LANE_CELL_CANARY_CONTRACT_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/PRODUCT_DYNAMIC_USER_LANE_CELL_CANARY_V1.md")"
+FROZEN_CONTROLLER_RESIDENT_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_resident.ml")"
+FROZEN_CONTROLLER_CELL_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_exec_grant_cell.ml")"
+FROZEN_CONTROLLER_SOURCE_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_exec_grant_controller.ml")"
 FIXTURE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/host_exec_quorum_fixture.freeze.v1")"
 CONTROLLER_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_grant_controller.runtime.v1")"
 DERIVED_GARDEN_SHA256="$(sha256_file "$ROOT_DIR/tools/loom/GARDEN_HOST_EXEC_QUORUM_DYNAMIC_PRINCIPAL_V1.md")"
 PROCESS_WITNESS_GARDEN_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md")"
-RELEASE_DIGEST="$(printf '%s\n' "$SOURCE_COMMIT" "$BROKER_SHA256" "$CONTROLLER_SHA256" "$RESIDENT_SHA256" "$LOCAL_BARRIER_SHA256" "$HOST_BARRIER_SHA256" "$DERIVED_GARDEN_SHA256" "$PROCESS_WITNESS_CELL_SHA256" "$PROCESS_WITNESS_PAYLOAD_SHA256" "$PROCESS_WITNESS_MANIFEST_SHA256" "$PROCESS_WITNESS_GARDEN_SHA256" | sha256sum | cut -d ' ' -f 1)"
+RELEASE_DIGEST="$(printf '%s\n' "$SOURCE_COMMIT" "$BROKER_SHA256" "$CONTROLLER_SHA256" "$RESIDENT_SHA256" "$LOCAL_BARRIER_SHA256" "$HOST_BARRIER_SHA256" "$DERIVED_GARDEN_SHA256" "$PROCESS_WITNESS_CELL_SHA256" "$PROCESS_WITNESS_PAYLOAD_SHA256" "$PROCESS_WITNESS_MANIFEST_SHA256" "$PROCESS_WITNESS_GARDEN_SHA256" "$PRODUCT_RUNTIME_SHA256" "$PRODUCT_LANGUAGE_RUNTIME_SHA256" "$PRODUCT_RESIDENT_RUNTIME_SHA256" "$PRODUCT_INGRESS_MANIFEST_SHA256" "$PRODUCT_LANE_CELL_CANARY_CONTRACT_SHA256" | sha256sum | cut -d ' ' -f 1)"
 RELEASE_ID="9030-hostq-${RELEASE_DIGEST:0:32}"
 
 cat > "$RELEASE_STAGE/release.manifest.v1" <<EOF
@@ -164,6 +248,14 @@ controller_manifest_path=authority-root/tools/loom/exec_grant_controller.runtime
 controller_manifest_sha256=$CONTROLLER_MANIFEST_SHA256
 controller_runtime_path=bin/loom-exec-grant-controller
 controller_runtime_sha256=$CONTROLLER_SHA256
+controller_frozen_commit=$FROZEN_CONTROLLER_COMMIT
+controller_frozen_resident_path=authority-root/frozen/action-9030-controller/tools/loom/src/loom_resident.ml
+controller_frozen_resident_sha256=$FROZEN_CONTROLLER_RESIDENT_SHA256
+controller_frozen_cell_path=authority-root/frozen/action-9030-controller/tools/loom/src/loom_exec_grant_cell.ml
+controller_frozen_cell_sha256=$FROZEN_CONTROLLER_CELL_SHA256
+controller_frozen_source_path=authority-root/frozen/action-9030-controller/tools/loom/src/loom_exec_grant_controller.ml
+controller_frozen_source_sha256=$FROZEN_CONTROLLER_SOURCE_SHA256
+resident_v4_frozen_commit=$FROZEN_RESIDENT_V4_COMMIT
 fixture_manifest_path=authority-root/tools/loom/host_exec_quorum_fixture.freeze.v1
 fixture_manifest_sha256=$FIXTURE_MANIFEST_SHA256
 fixture_bundle_path=data/host-exec-quorum-fixtures.v1
@@ -184,6 +276,24 @@ process_witness_garden_path=authority-root/tools/loom/GARDEN_PROCESS_WITNESS_EXE
 process_witness_garden_sha256=$PROCESS_WITNESS_GARDEN_SHA256
 process_witness_core=false
 complete_effects=false
+product_exec_ingress_action=9031
+product_exec_ingress_manifest_path=authority-root/tools/loom/product_exec_ingress_dark.runtime.v1
+product_exec_ingress_manifest_sha256=$PRODUCT_INGRESS_MANIFEST_SHA256
+product_exec_ingress_contract_path=authority-root/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md
+product_exec_ingress_contract_sha256=$PRODUCT_INGRESS_CONTRACT_SHA256
+product_exec_ingress_evidence_path=authority-root/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt
+product_exec_ingress_evidence_sha256=$PRODUCT_INGRESS_EVIDENCE_SHA256
+product_lane_cell_canary_contract_path=authority-root/tools/loom/PRODUCT_DYNAMIC_USER_LANE_CELL_CANARY_V1.md
+product_lane_cell_canary_contract_sha256=$PRODUCT_LANE_CELL_CANARY_CONTRACT_SHA256
+product_exec_ingress_runtime_path=bin/sounio-loom-runtime
+product_exec_ingress_runtime_sha256=$PRODUCT_RUNTIME_SHA256
+product_language_runtime_path=bin/sounio-loom-language-authority-runtime
+product_language_runtime_sha256=$PRODUCT_LANGUAGE_RUNTIME_SHA256
+product_resident_runtime_path=bin/sounio-loom-resident-membrane-runtime-v5
+product_resident_runtime_sha256=$PRODUCT_RESIDENT_RUNTIME_SHA256
+product_authority_root_path=authority-root
+product_lane_cell_canary=false
+distinct_uid_product_broker_canary=false
 non_bearer_transport=host-measurement-pending
 material_grant=false
 material_execution=false
@@ -212,6 +322,8 @@ source_tree_state=$SOURCE_TREE_STATE
 promoter_sha256=$(sha256_file "$META/promote_loom_host_exec_quorum_capsule.sh")
 host_gate_sha256=$(sha256_file "$META/sounio_loom_host_exec_quorum_host_gate.sh")
 production_activation=false
+product_lane_cell_canary=false
+distinct_uid_product_broker_canary=false
 material_grant=false
 material_execution=false
 EOF
@@ -230,5 +342,5 @@ mv -fT "$output_stage" "$OUTPUT"
 printf '%s  %s\n' "$ARCHIVE_SHA256" "$(basename "$OUTPUT")" > "$OUTPUT.sha256"
 chmod 0600 "$OUTPUT.sha256"
 
-printf 'LOOM_HOST_EXEC_QUORUM_CAPSULE_BUILD PASS archive=%s archive_sha256=%s release_id=%s release_manifest_sha256=%s source_commit=%s source_tree_state=%s semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_payload=Sounio process_witness_core=false complete_effects=false production_activation=false material_grant=false material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
+printf 'LOOM_HOST_EXEC_QUORUM_CAPSULE_BUILD PASS archive=%s archive_sha256=%s release_id=%s release_manifest_sha256=%s source_commit=%s source_tree_state=%s semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_payload=Sounio process_witness_core=false complete_effects=false product_exec_ingress_action=9031 product_lane_cell_canary=false distinct_uid_product_broker_canary=false production_activation=false material_grant=false material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
   "$OUTPUT" "$ARCHIVE_SHA256" "$RELEASE_ID" "$MANIFEST_SHA256" "$SOURCE_COMMIT" "$SOURCE_TREE_STATE"

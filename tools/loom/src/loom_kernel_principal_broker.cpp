@@ -25,6 +25,7 @@
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -1937,6 +1938,7 @@ int serve(const std::string& manifest_path, const std::string& authority_path,
 
 #include "loom_exec_quorum_lab.inc"
 #include "loom_process_witness_lab.inc"
+#include "loom_product_exec_ingress_host_canary.inc"
 
 struct Options {
   std::string mode;
@@ -1959,6 +1961,10 @@ struct Options {
   std::string process_witness_runtime;
   std::string process_witness_payload;
   std::string process_witness_manifest;
+  std::string product_root;
+  std::string product_runtime;
+  std::string product_language_runtime;
+  std::string product_resident_runtime;
   std::string systemd_run;
   std::string systemctl;
   std::string frame;
@@ -2013,6 +2019,14 @@ Options parse_options(int argc, char** argv) {
       options.process_witness_payload = value;
     } else if (argument == "--process-witness-manifest") {
       options.process_witness_manifest = value;
+    } else if (argument == "--product-root") {
+      options.product_root = value;
+    } else if (argument == "--product-runtime") {
+      options.product_runtime = value;
+    } else if (argument == "--product-language-runtime") {
+      options.product_language_runtime = value;
+    } else if (argument == "--product-resident-runtime") {
+      options.product_resident_runtime = value;
     } else if (argument == "--systemd-run") {
       options.systemd_run = value;
     } else if (argument == "--systemctl") {
@@ -2095,6 +2109,15 @@ void require_host_process_witness_selftest_artifacts(const Options& options) {
   }
 }
 
+void require_product_exec_ingress_host_artifacts(const Options& options) {
+  if (options.product_root.empty() || options.product_runtime.empty() ||
+      options.product_language_runtime.empty() ||
+      options.product_resident_runtime.empty() || options.systemd_run.empty() ||
+      options.systemctl.empty()) {
+    throw Error("product root, product runtime, language runtime, resident runtime, systemd-run, and systemctl are required");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2152,6 +2175,13 @@ int main(int argc, char** argv) {
           options.process_witness_runtime, options.process_witness_payload,
           options.process_witness_manifest, options.systemd_run,
           options.systemctl);
+    }
+    if (options.mode == "--selftest-product-exec-ingress-host") {
+      require_product_exec_ingress_host_artifacts(options);
+      return selftest_product_exec_ingress_host(
+          options.product_root, options.product_runtime,
+          options.product_language_runtime, options.product_resident_runtime,
+          options.systemd_run, options.systemctl);
     }
     if (options.mode == "--selftest-journal") {
       if (options.journal.empty()) throw Error("journal is required");
