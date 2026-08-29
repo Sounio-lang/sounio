@@ -1366,6 +1366,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_str_char_at((*func).name) { return 20 }
     if name_is_str_eq((*func).name) { return 7 }
     if name_is_str_slice((*func).name) { return 8 }
+    if name_is_str_slice3((*func).name) { return 51 }
     if name_is_starts_with((*func).name) { return 9 }
     if name_is_str_concat((*func).name) { return 10 }
     if name_is_read_file((*func).name) { return 11 }
@@ -1546,6 +1547,24 @@ fn name_is_str_slice(n: Name) -> bool with Mut, Panic, Div {
     if n.buf[6] != 105 as i8 { return false }     // 'i'
     if n.buf[7] != 99 as i8 { return false }      // 'c'
     if n.buf[8] != 101 as i8 { return false }     // 'e'
+    true
+}
+
+// #2244: the arity-tagged 3-argument spelling. See emit_builtin_str_slice3.
+fn name_is_str_slice3(n: Name) -> bool with Mut, Panic, Div {
+    // "str_slice.3" = 11 chars
+    if n.len != 11 { return false }
+    if n.buf[0] != 115 as i8 { return false }
+    if n.buf[1] != 116 as i8 { return false }
+    if n.buf[2] != 114 as i8 { return false }
+    if n.buf[3] != 95 as i8 { return false }
+    if n.buf[4] != 115 as i8 { return false }
+    if n.buf[5] != 108 as i8 { return false }
+    if n.buf[6] != 105 as i8 { return false }
+    if n.buf[7] != 99 as i8 { return false }
+    if n.buf[8] != 101 as i8 { return false }
+    if n.buf[9] != 46 as i8 { return false }
+    if n.buf[10] != 51 as i8 { return false }
     true
 }
 
@@ -4571,7 +4590,8 @@ fn emit_builtin_str_eq(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Di
     c
 }
 
-// str_slice(s: *u8, start: i64) -> *u8
+// str_slice(s: *u8, start: i64) -> *u8 -- the 2-argument spelling only.
+// The 3-argument spelling is retagged to str_slice.3 (emit_builtin_str_slice3).
 // Returns s + start (pointer arithmetic — string is null-terminated)
 fn emit_builtin_str_slice(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
@@ -4579,6 +4599,108 @@ fn emit_builtin_str_slice(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     // result = rdi + rsi
     c.code = emit_add_reg_reg(c.code, 7, 6)  // add rdi, rsi
     c.code = emit_mov_reg_reg(c.code, 0, 7)  // mov rax, rdi
+    c.code = emit_ret(c.code)
+    c
+}
+
+// str_slice.3(s: *u8, start: i64, end: i64) -> *u8 -- the 3-argument spelling.
+// Returns a fresh NUL-terminated copy of s[start, end). #2244: the single
+// str_slice stub took only (s, start) and returned s + start, so every 3-arg
+// call site silently got the whole suffix. lean_single has always emitted this
+// range copy (emit_str_slice_range_slots_x86), dispatched on arity at parse time.
+//
+// rdi = s, rsi = start, rdx = end. len = max(end - start, 0), and the copy also
+// stops at the source NUL, so an out-of-range end yields the rest of the string
+// instead of reading past it. lean_single clamps neither: a negative length
+// there hands rep movsb a huge count.
+fn emit_builtin_str_slice3(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+
+    // Prologue. rbx is callee-saved and the RuntimeContext helpers below use it.
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 48)
+    c.code = emit_store_reg_rbp_disp32(c.code, 0 - 32, 3)
+
+    // [rbp-8] = s + start (copy source)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)              // mov rax, rdi
+    c.code = emit_add_reg_reg(c.code, 0, 6)              // add rax, rsi
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 8)
+
+    // [rbp-16] = max(end - start, 0)
+    c.code = emit_xor_rcx_rcx(c.code)                    // rcx = 0
+    c.code = emit_mov_reg_reg(c.code, 0, 2)              // mov rax, rdx (end)
+    c.code = emit_sub_reg_reg(c.code, 0, 6)              // sub rax, rsi (start)
+    var cm = c.code                                      // cmovs rax, rcx
+    cm = emit_byte(cm, 0x48)
+    cm = emit_byte(cm, 0x0f)
+    cm = emit_byte(cm, 0x48)
+    cm = emit_byte(cm, 0xc1)
+    c.code = cm
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 16)
+
+    // Allocate len + 1 from RuntimeContext.heap_cursor; [rbp-24] = result
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 24)
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 16)    // rax = len
+    var ab = c.code                                      // add rax, 1
+    ab = emit_byte(ab, 0x48)
+    ab = emit_byte(ab, 0x83)
+    ab = emit_byte(ab, 0xc0)
+    ab = emit_byte(ab, 0x01)
+    c.code = ab
+    c.code = emit_mov_rcx_rax(c.code)                    // rcx = total
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
+    c.code = emit_add_reg_reg(c.code, 0, 1)              // rax = cursor + total
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
+
+    // rdi = source, rsi = dest, rcx = bytes remaining
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 8)
+    c.code = emit_mov_rdi_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 24)
+    c.code = emit_mov_rsi_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 16)
+    c.code = emit_mov_rcx_rax(c.code)
+
+    // copy_loop, byte offsets from the top of the loop:
+    //   0:  test rcx, rcx          3   (48 85 c9)
+    //   3:  jz done                2   rel8 = 29 - 5  = 24
+    //   5:  movzx rax, byte [rdi]  4
+    //   9:  test al, al            2
+    //   11: jz done                2   rel8 = 29 - 13 = 16
+    //   13: mov rdx, rax           3
+    //   16: mov [rsi], dl          2
+    //   18: inc rdi                3
+    //   21: inc rsi                3
+    //   24: dec rcx                3   (48 ff c9)
+    //   27: jmp copy_loop          2   rel8 = 0 - 29
+    //   29: done
+    var lp = c.code                                      // test rcx, rcx
+    lp = emit_byte(lp, 0x48)
+    lp = emit_byte(lp, 0x85)
+    lp = emit_byte(lp, 0xc9)
+    c.code = lp
+    c.code = emit_jz_rel8(c.code, 24)
+    c.code = emit_movzx_rax_byte_rdi(c.code)
+    c.code = emit_test_al_al(c.code)
+    c.code = emit_jz_rel8(c.code, 16)
+    c.code = emit_mov_reg_reg(c.code, 2, 0)              // mov rdx, rax
+    c.code = emit_mov_byte_mem_rsi_dl(c.code)
+    c.code = emit_inc_rdi(c.code)
+    c.code = emit_inc_rsi(c.code)
+    var dc = c.code                                      // dec rcx
+    dc = emit_byte(dc, 0x48)
+    dc = emit_byte(dc, 0xff)
+    dc = emit_byte(dc, 0xc9)
+    c.code = dc
+    c.code = emit_jmp_rel8(c.code, 0 - 29)
+
+    // done: NUL-terminate, restore rbx, return the result pointer
+    c.code = emit_mov_byte_mem_rsi_imm8(c.code, 0)
+    c.code = emit_load_rbp_disp32_rbx(c.code, 0 - 32)
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 24)
+    c.code = emit_mov_rsp_rbp(c.code)
+    c.code = emit_pop_rbp(c.code)
     c.code = emit_ret(c.code)
     c
 }
@@ -6362,6 +6484,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
         if name_is_str_char_at(func.name) { return emit_builtin_str_char_at(c) }
         if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
         if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
+        if name_is_str_slice3(func.name) { return emit_builtin_str_slice3(c) }
         if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
         if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
         if name_is_str_from_bytes(func.name) { return emit_builtin_str_from_bytes(c) }
@@ -7230,6 +7353,7 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_str_char_at(name) { return 20 }
     if name_is_str_eq(name) { return 7 }
     if name_is_str_slice(name) { return 8 }
+    if name_is_str_slice3(name) { return 51 }
     if name_is_starts_with(name) { return 9 }
     if name_is_str_concat(name) { return 10 }
     if name_is_read_file(name) { return 11 }
@@ -7339,6 +7463,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 20 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_char_at((*nc))); return }
     if builtin_id == 7 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_eq((*nc))); return }
     if builtin_id == 8 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_slice((*nc))); return }
+    if builtin_id == 51 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_slice3((*nc))); return }
     if builtin_id == 9 { native_v2_persist_builtin_emit_into(nc, emit_builtin_starts_with((*nc))); return }
     if builtin_id == 10 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_concat((*nc))); return }
     if builtin_id == 11 { native_v2_persist_builtin_emit_into(nc, emit_builtin_read_file((*nc))); return }
@@ -7411,6 +7536,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         if name_is_str_char_at(func.name) { return emit_builtin_str_char_at(c) }
         if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
         if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
+        if name_is_str_slice3(func.name) { return emit_builtin_str_slice3(c) }
         if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
         if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
         if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
@@ -9678,6 +9804,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         if name_is_str_len(func.name) { (*nc) = emit_builtin_str_len((*nc)); return }
         if name_is_str_eq(func.name) { (*nc) = emit_builtin_str_eq((*nc)); return }
         if name_is_str_slice(func.name) { (*nc) = emit_builtin_str_slice((*nc)); return }
+        if name_is_str_slice3(func.name) { (*nc) = emit_builtin_str_slice3((*nc)); return }
         if name_is_starts_with(func.name) { (*nc) = emit_builtin_starts_with((*nc)); return }
         if name_is_str_concat(func.name) { (*nc) = emit_builtin_str_concat((*nc)); return }
         if name_is_read_file(func.name) { (*nc) = emit_builtin_read_file((*nc)); return }
