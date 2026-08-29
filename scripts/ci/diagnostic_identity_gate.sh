@@ -53,20 +53,23 @@ gate_name "diagnostic_identity"
 # lines accordingly.
 COLLISION_CEILING="${SOUNIO_DIAG_COLLISION_CEILING:-34}"
 UNDOCUMENTED_CEILING="${SOUNIO_DIAG_UNDOCUMENTED_CEILING:-141}"
-# 20 -> 21, and this one RISES on purpose.
+# 20 -> 21 -> 14 -> 1. The comment that used to stand here said:
 #
-# Repairing a collision necessarily orphans the vacated catalogue row: E220 and
-# E210 kept their published identities and their emitters moved to E245/E246, so
-# both rows now describe a diagnostic check.sio no longer prints. They are not
-# dead -- lean_single still emits their message text, untagged, which is the
-# systemic cause of the whole collision family (#2170). They are "documented,
-# emitted without the tag", and this gate cannot yet tell that from truly dead.
+#   "every collision fixed by moving an emitter will push this number up by one
+#    until the untagged lean_single prints are tagged, at which point it falls by
+#    all of them at once."
 #
-# Raising the ceiling to absorb a repair is exactly what a ratchet must not do
-# silently, so it is written here rather than adjusted quietly: every collision
-# fixed by moving an emitter will push this number up by one until the untagged
-# lean_single prints are tagged, at which point it falls by all of them at once.
-ORPHANED_CEILING="${SOUNIO_DIAG_ORPHANED_CEILING:-14}"
+# That is what just happened, and it is the point of this change. Repairing a
+# collision orphans the vacated catalogue row (E220 and E210 kept their published
+# identities while their emitters moved to E245/E246), so the row described a
+# diagnostic check.sio no longer prints -- but lean_single still emitted its text,
+# untagged, and this gate could not tell "documented, emitted without the tag"
+# from truly dead. Widening the aperture to every self-hosted/**/*.sio took 21 to
+# 14. Tagging lean_single's 42 bare `error:` prints takes 14 to ONE.
+#
+# The survivor is E223, the Windows PE path -- documented, emitted by nothing on
+# a Linux-only toolchain. That is a real orphan and the only one.
+ORPHANED_CEILING="${SOUNIO_DIAG_ORPHANED_CEILING:-1}"
 
 ART_DIR="$ROOT_DIR/artifacts/gates"; mkdir -p "$ART_DIR"
 ART="$ART_DIR/diagnostic_identity.json"
@@ -94,6 +97,16 @@ import glob as _glob
 _files = [check] + sorted(f for f in _glob.glob('self-hosted/**/*.sio', recursive=True)
                           if os.path.abspath(f) != os.path.abspath(check))
 src = '\n'.join(open(f, errors='replace').read() for f in _files)
+
+# lean_single is the OTHER owner of this namespace and needs its own control
+# floor (below). Until #2212 it printed 42 of its diagnostics as a bare
+# `error: <text>`: the number lived only in the catalogue and in
+# explanations/E<N>.md, so every code lean_single owned read as FREE from
+# inside check.sio, and ten of them were re-allocated by hand. It now
+# pronounces them. A survey that silently stops seeing this file would report
+# a namespace that got tidier; it did not, the gate went half-blind again.
+_lean = 'self-hosted/compiler/lean_single.sio'
+lean_src = open(_lean, errors='replace').read() if os.path.exists(_lean) else ''
 
 # The message row is the identity: `else if code == N { print("...") }`.
 # Taken from the printer rather than from call sites, because a call site says
@@ -130,12 +143,26 @@ for n, msg in _first.items():
 #   (2) bespoke emitters:  print("error[EN]") inside a dedicated function.
 #       The identity is the first message-looking string printed after the tag;
 #       a bare punctuation print (" in ", "::", ": ") is scaffolding, not identity.
+#       The tag comes in TWO shapes and a survey of one shape misses the other,
+#       which is how this gate came to read a single engine. check.sio splits the
+#       tag from its text (`print("error[E")` ... `print_error_message(code)`),
+#       while lean_single writes both in one literal
+#       (`print("error[E040]: Sounio uses 'var' ...")`). Take the inline text as
+#       the identity when there is one; otherwise fall through to the next
+#       message-looking print, as before. Without this arm the forward scan walks
+#       past the end of one emitter into the NEXT one and files its text under
+#       the wrong number -- measured before this arm existed: E220 reported as
+#       "error e221 no main", E225 as "error e226 import path table full".
 lines = src.split('\n')
 for i, line in enumerate(lines):
-    m = re.search(r'print\("error\[E(\d+)\]', line)
+    m = re.search(r'print\("error\[E(\d+)\](.*?)"', line)
     if not m:
         continue
     n = int(m.group(1))
+    inline = m.group(2).lstrip(': ').strip()
+    if len(inline) >= 5 and not _is_continuation(inline):
+        emitted.setdefault(n, set()).add(inline)
+        continue
     for j in range(i + 1, min(i + 40, len(lines))):
         t = re.search(r'print\("([^"]{5,200})"', lines[j])
         if not t:
@@ -168,10 +195,16 @@ for line in open(cat, errors='replace'):
 mech1 = len(_first)
 mech2 = len(emitted) - len(set(_first) - set())
 tagged = len(re.findall(r'print\("error\[E\d+\]', src))
-if mech1 < 50 or tagged < 20 or len(emitted) < 100:
-    print(f"  CONTROL-FAIL  extraction saw message_rows={mech1} tagged_prints={tagged} total={len(emitted)}")
-    print("                the compiler is known to emit well over 100 codes by two mechanisms;")
-    print("                a low count here is the pattern, not the tree")
+# The third mechanism -- the other engine -- needs its own floor for the same
+# reason the second one does. Verified in both directions when it was added:
+# with lean_single restored to its untagged state the gate REFUSES to report
+# (rc=3, lean_tagged=18); intact it passes.
+lean_tagged = len(re.findall(r'print\("error\[E\d+\]', lean_src))
+if mech1 < 50 or tagged < 20 or lean_tagged < 40 or len(emitted) < 100:
+    print(f"  CONTROL-FAIL  extraction saw message_rows={mech1} tagged_prints={tagged} "
+          f"lean_tagged={lean_tagged} total={len(emitted)}")
+    print("                the two engines are known to emit well over 100 codes by three")
+    print("                mechanisms; a low count here is the pattern, not the tree")
     sys.exit(3)
 
 def norm(s):
