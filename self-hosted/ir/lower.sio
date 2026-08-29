@@ -34,8 +34,8 @@ struct LowerLocalStack {
     // Tuple-typed local: bit k set iff element k of the tuple is f64. 0 = not a
     // tuple / no float elements. See lower_opt_type_tuple_float_mask (issue #1502).
     tuple_float_mask: [i64; 4096],
-    // Layout index of the named struct element inside tuple slot 0 when that
-    // slot is a fixed array. -1 for every other local shape.
+    // Layout index for an aggregate element carried by a local: tuple slot-0
+    // fixed arrays and Seq<T> share this slot because those shapes are disjoint.
     tuple0_array_elem_layout: [i64; 4096],
     // f64 register carrying the GUM variance shadow for scalar locals, or -1 when absent.
     variance_regs: [i64; 4096],
@@ -1668,7 +1668,14 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
     // multi-MiB each) then Box::new again.
     (*lo.enum_variants).count = 0
     var vi: i64 = 0
-    while vi < (*summary.enum_variants).count && vi < 1024 {
+    // Bound raised with the table. NOT made loud, and the reason is worth keeping:
+    // `lowerer_seed_metadata_from_summary` has no callers anywhere in self-hosted/
+    // -- grep finds its definition and nothing else. A refusal printed here would
+    // never execute, and adding the IO effect its signature lacks would be effect
+    // churn on dead code. (I added one, and the compiler refused the build with
+    // E035 missing IO, which is how the deadness surfaced.) The live enum-capacity
+    // guard is the one at the preseed site below.
+    while vi < (*summary.enum_variants).count && vi < 4096 {
         (*lo.enum_variants).entries[vi as usize] = (*summary.enum_variants).entries[vi as usize]
         vi = vi + 1
     }
@@ -2552,7 +2559,7 @@ fn lowerer_register_enum_variants_mut(
     while true {
         match *current {
             Some(list) => {
-                if (*(*lo).enum_variants).count < 1024 {
+                if (*(*lo).enum_variants).count < 4096 {
                     // Extract the Box pointer to a local first, then store through it
                     // once: the two-level nested store
                     // `(*(*lo).enum_variants).entries[idx] = ...` is discarded by the
@@ -2594,6 +2601,24 @@ fn lowerer_preseed_external_struct_items_mut(
         match *current {
             Some(list) => {
                 let head_owned = (*list).head
+                // Enums, seeded here for the same reason structs are, and missing
+                // from this function alone. Its sibling
+                // lowerer_preseed_external_struct_items_into_acc has carried this
+                // branch — and a comment naming the exact symptom — since the day
+                // 3140 unresolved identifiers were traced to it. The seed path
+                // never got the fix, so a seed-module body could not resolve a
+                // dep-module enum variant: `IrBinOp`, `OpAdd`, `TypeKnowledge`,
+                // `ItemFn`. Measured on main before this line: 3740 lowering
+                // errors, 3725 of them unresolved identifiers. After: 15, none of
+                // them unresolved.
+                if head_owned.kind == ItemKind::ItemEnum {
+                    match head_owned.enum_def {
+                        Some(ed) => {
+                            lowerer_register_enum_variants_mut(lo, head_owned.name, &(*ed).variants, 0)
+                        }
+                        _ => {}
+                    }
+                }
                 if head_owned.kind == ItemKind::ItemStruct {
                     match head_owned.struct_def {
                         Some(sd) => {
@@ -4257,6 +4282,24 @@ fn lowerer_bind_local_struct_type_mut(
     }
 }
 
+fn lowerer_bind_local_index_elem_layout_mut(
+    lo: &! Lowerer,
+    name: Name,
+    layout_idx: i64
+) with Mut, Alloc, Panic, Div {
+    if layout_idx < 0 { return }
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).tuple0_array_elem_layout[i as usize] = layout_idx
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 fn lowerer_mark_local_global_mut(
     lo: &! Lowerer,
     name: Name,
@@ -4365,6 +4408,12 @@ fn lowerer_lower_fn_params_mut(
                     lowerer_mark_local_array_copy_word_scalar_mut(lo, (*list).head.name)
                 }
                 lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
+                let param_seq_elem = lower_type_expr_seq_named_elem_name(&(*list).head.ty)
+                lowerer_bind_local_index_elem_layout_mut(
+                    lo,
+                    (*list).head.name,
+                    lower_struct_layout_index_of(&(*(*lo).struct_layouts), param_seq_elem),
+                )
                 // D5+D1 (#986+#983): path-A param scalar_kind must use the single-level
                 // Box store. The by-value `(*lo) = (*lo).bind_local_scalar_kind(...)`
                 // RMW is dropped by the by-value-aggregate-store miscompile, leaving
@@ -5458,6 +5507,23 @@ fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Pani
 
 fn lower_opt_type_is_seq(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
     ir_name_eq(lower_opt_type_named_name(opt), make_name("Seq"))
+}
+
+fn lower_type_expr_seq_named_elem_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeNamed { return ir_empty_name() }
+    if !ir_name_eq(ir_path_first_name((*ty).path), make_name("Seq")) { return ir_empty_name() }
+    match (*ty).type_args {
+        Some(types) => {
+            if (*types).head.kind == TypeExprKind::TypeNamed {
+                return ir_path_first_name((*types).head.path)
+            }
+            if (*types).head.kind == TypeExprKind::TypeKnowledge {
+                return make_name("Knowledge")
+            }
+            ir_empty_name()
+        }
+        None => ir_empty_name(),
+    }
 }
 
 fn lower_type_expr_array_named_elem_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
@@ -7821,6 +7887,14 @@ impl Lowerer {
             i = i - 1
         }
         0 - 1
+    }
+
+    fn lookup_local_index_elem_struct_type(self, name: Name) -> Name with Mut, Panic, Div, Alloc {
+        let layout_idx = self.lookup_local_tuple0_array_elem_layout(name)
+        if layout_idx >= 0 && layout_idx < (*self.struct_layouts).count {
+            return (*self.struct_layouts).entries[layout_idx as usize].type_name
+        }
+        ir_empty_name()
     }
 
     fn bind_local_fixed_array_len(self, name: Name, array_len: i64) -> Lowerer with Mut, Alloc, Panic, Div {
@@ -12283,7 +12357,11 @@ impl Lowerer {
             match (*expr).left {
                 Some(indexed) => {
                     if (*indexed).kind == ExprKind::ExprIdent {
-                        return self.lookup_local_struct_type((*indexed).name)
+                        let indexed_type = self.lookup_local_struct_type((*indexed).name)
+                        if ir_name_eq(indexed_type, make_name("Seq")) {
+                            return self.lookup_local_index_elem_struct_type((*indexed).name)
+                        }
+                        return indexed_type
                     }
                     if (*indexed).kind == ExprKind::ExprFieldAccess {
                         return self.field_array_elem_type_name_for_base_ref(&(*indexed).left, (*indexed).name)
@@ -12298,6 +12376,11 @@ impl Lowerer {
     fn index_base_elem_struct_type_ref(self, base_opt: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    if ir_name_eq(self.lookup_local_struct_type((*base_expr).name), make_name("Seq")) {
+                        return self.lookup_local_index_elem_struct_type((*base_expr).name)
+                    }
+                }
                 if (*base_expr).kind == ExprKind::ExprFieldAccess {
                     return self.field_array_elem_type_name_for_base_ref(&(*base_expr).left, (*base_expr).name)
                 }
@@ -14854,6 +14937,16 @@ impl Lowerer {
         }
         if lower_opt_type_is_seq(&s.ty) {
             lo = lo.bind_local_struct_type(s.name, make_name("Seq"))
+            match s.ty {
+                Some(seq_ty) => {
+                    let seq_elem = lower_type_expr_seq_named_elem_name(&(*seq_ty))
+                    lo = lo.bind_local_tuple0_array_elem_layout(
+                        s.name,
+                        lower_struct_layout_index_of(&(*lo.struct_layouts), seq_elem),
+                    )
+                }
+                None => {}
+            }
         }
         // An ARRAY local records its ELEMENT type, so `arr[i].field` can be
         // resolved by (layout, field) instead of by scanning every layout for
@@ -15009,6 +15102,10 @@ impl Lowerer {
                     if src_st.len > 0 {
                         lo = lo.bind_local_struct_type(s.name, src_st)
                     }
+                    let src_elem_layout = lo.lookup_local_tuple0_array_elem_layout((*expr_box).name)
+                    if src_elem_layout >= 0 {
+                        lo = lo.bind_local_tuple0_array_elem_layout(s.name, src_elem_layout)
+                    }
                 }
             }
             _ => {}
@@ -15141,6 +15238,10 @@ impl Lowerer {
                             _ => (lo.report_error_at(12033), rhs),
                         }
                 } else if (*target_expr).kind == ExprKind::ExprIndex {
+                        let target_base_is_seq = ir_name_eq(
+                            lo.lower_method_recv_type(&(*target_expr).left),
+                            make_name("Seq"),
+                        )
                         let target_global_elem_size = match (*target_expr).left {
                             Some(target_base_expr) => {
                                 if (*target_base_expr).kind == ExprKind::ExprIdent {
@@ -15175,6 +15276,22 @@ impl Lowerer {
                         let pair_idx = lo.lower_opt_expr_ref(&(*target_expr).right)
                         lo = pair_idx.0
                         let idx_reg = pair_idx.1
+                        if target_base_is_seq {
+                            let call_name_seq_set = make_name("__sounio_seq_set")
+                            let fn_id_seq_set = lowerer_find_or_add_fn_id_mut(&! lo, call_name_seq_set)
+                            let call_args_seq_set: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                                base_reg,
+                                Some(Box::new(ir_reg_list_cons(
+                                    idx_reg,
+                                    Some(Box::new(ir_reg_list_single(rhs))),
+                                ))),
+                            )))
+                            let pair_d_seq_set = lo.fresh_reg()
+                            lo = pair_d_seq_set.0
+                            let dst_seq_set = pair_d_seq_set.1
+                            lo = lo.emit(ir_call(dst_seq_set, fn_id_seq_set, call_name_seq_set, call_args_seq_set, 3))
+                            return (lo, rhs)
+                        }
                         var index_set_instr = ir_index_set(base_reg, idx_reg, rhs)
                         if target_base_is_string {
                             index_set_instr.label_id = 3
@@ -17880,6 +17997,7 @@ impl Lowerer {
 
     fn lower_index_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let index_elem_is_float_pre = self.index_base_elem_is_float_ref(&e.left)
+        let base_is_seq = ir_name_eq(self.lower_method_recv_type(&e.left), make_name("Seq"))
         // Detect packed-string bases BEFORE consuming self (string lit, scalar_kind
         // 3 local, or packed-string producer call). Must win over the default
         // local-array IndexGet path — see lower_name_is_packed_string_producer.
@@ -17928,6 +18046,19 @@ impl Lowerer {
         let pair_i = lo1.lower_opt_expr_ref(&e.right)
         let lo2 = pair_i.0
         let idx = pair_i.1
+        if base_is_seq {
+            var lo_seq_get = lo2
+            let call_name_seq_get = make_name("__sounio_seq_get")
+            let fn_id_seq_get = lowerer_find_or_add_fn_id_mut(&! lo_seq_get, call_name_seq_get)
+            let call_args_seq_get: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                base,
+                Some(Box::new(ir_reg_list_single(idx))),
+            )))
+            let pair_d_seq_get = lo_seq_get.fresh_reg()
+            lo_seq_get = pair_d_seq_get.0
+            let dst_seq_get = pair_d_seq_get.1
+            return (lo_seq_get.emit(ir_call(dst_seq_get, fn_id_seq_get, call_name_seq_get, call_args_seq_get, 2)), dst_seq_get)
+        }
         let pair_d = lo2.fresh_reg()
         let lo3 = pair_d.0
         let dst = pair_d.1
@@ -18372,7 +18503,40 @@ impl Lowerer {
                 let dst_seq_push = pair_d_seq_push.1
                 return (lo_seq_push.emit(ir_call(dst_seq_push, fn_id_seq_push, call_name_seq_push, call_args_seq_push, 2)), dst_seq_push)
             }
-            if ir_name_eq(e.name, make_name("push_uncertain")) || ir_name_eq(e.name, make_name("get")) || ir_name_eq(e.name, make_name("set")) {
+            if ir_name_eq(e.name, make_name("get")) || ir_name_eq(e.name, make_name("set")) {
+                let pair_b_seq_access = self.lower_opt_expr_ref(&e.left)
+                var lo_seq_access = pair_b_seq_access.0
+                let base_reg_seq_access = pair_b_seq_access.1
+                let pair_args_seq_access: LowerExprArgsResult = lo_seq_access.lower_expr_args_raw_ref(&e.args)
+                lo_seq_access = pair_args_seq_access.lowerer
+                let is_seq_get = ir_name_eq(e.name, make_name("get"))
+                let expected_seq_args: i64 = if is_seq_get { 1 } else { 2 }
+                if pair_args_seq_access.count != expected_seq_args {
+                    lowerer_mark_hard_error(&! lo_seq_access)
+                    return (lo_seq_access, IR_INVALID_REG)
+                }
+                let call_name_seq_access = if is_seq_get {
+                    make_name("__sounio_seq_get")
+                } else {
+                    make_name("__sounio_seq_set")
+                }
+                let fn_id_seq_access = lowerer_find_or_add_fn_id_mut(&! lo_seq_access, call_name_seq_access)
+                let call_args_seq_access: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                    base_reg_seq_access,
+                    Some(Box::new(pair_args_seq_access.regs)),
+                )))
+                let pair_d_seq_access = lo_seq_access.fresh_reg()
+                lo_seq_access = pair_d_seq_access.0
+                let dst_seq_access = pair_d_seq_access.1
+                return (lo_seq_access.emit(ir_call(
+                    dst_seq_access,
+                    fn_id_seq_access,
+                    call_name_seq_access,
+                    call_args_seq_access,
+                    expected_seq_args + 1,
+                )), dst_seq_access)
+            }
+            if ir_name_eq(e.name, make_name("push_uncertain")) {
                 print("error: native-v2 Seq method lowering is not implemented for this method; refusing generic method call\\n")
                 var lo_bad_seq_method = self
                 lowerer_mark_hard_error(&! lo_bad_seq_method)

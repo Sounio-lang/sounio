@@ -108,14 +108,29 @@ if grep -qE '^//@ known-failure' "$src" 2>/dev/null; then exit 0; fi
 "$MADAROS" compile "$src" -o "$elf" >/dev/null 2>&1
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
-  # 137 = 128+9: the kernel killed the compiler, it did not reject the program.
-  # Under SOUNIO_TEST_JOBS=nproc on this pod the OOM killer takes compiler
-  # processes, and recording those as `<name> compile` produces a plausible,
-  # entirely fictional regression list -- measured 2026-08-28: a FAIL naming 21
-  # programs, every one of them an OOM artefact. A gate that invents its own
-  # findings is worse than one that stops.
-  if [ "$_rc" -eq 137 ] || [ "$_rc" -eq 139 ]; then
+  # Three different things exit non-zero here, and they are not interchangeable.
+  #
+  #   137 = 128+SIGKILL(9)   the kernel killed the compiler from outside. Under
+  #                          SOUNIO_TEST_JOBS=nproc on this pod the OOM killer
+  #                          takes compiler processes. Nothing is wrong with the
+  #                          program; the measurement did not happen.
+  #   139 = 128+SIGSEGV(11)  the compiler CRASHED on this program. That is the
+  #                          most serious finding this gate can make, and it is
+  #                          about the compiler, not the environment.
+  #   other                  the compiler rejected the program.
+  #
+  # An earlier version of this guard collapsed 137 and 139 into "killed by the
+  # kernel" and voided the whole run for either. A new regression that made
+  # Madaros segfault would have been reported as "no verdict -- raise your JOBS
+  # setting". Suppressing a compiler crash to avoid a false regression trades
+  # one wrong answer for a worse one.
+  if [ "$_rc" -eq 137 ]; then
     printf '%s %s\n' "$name" "$_rc" >> "$WORK/killed.txt"
+    exit 0
+  fi
+  if [ "$_rc" -eq 139 ]; then
+    printf '%s\n' "$name" >> "$WORK/crashed.txt"
+    echo "$name compile"
     exit 0
   fi
   echo "$name compile"
@@ -149,6 +164,7 @@ export MADAROS WORK
 
 : > "$WORK/ran.txt"
 : > "$WORK/killed.txt"
+: > "$WORK/crashed.txt"
 printf '%s\n' "${PROGRAMS[@]}" \
   | xargs -P "$JOBS" -I{} "$WORK/run_one.sh" {} \
   | sort > "$WORK/actual.txt"
@@ -166,6 +182,40 @@ fi
 
 ACTUAL_COUNT="$(wc -l < "$WORK/actual.txt" | tr -d ' ')"
 echo "[madaros-corpus] failures observed: $ACTUAL_COUNT / ${#PROGRAMS[@]}"
+
+# Ordered BEFORE the refresh path deliberately. `SOUNIO_MADAROS_CORPUS_REFRESH=1`
+# rewrites the baseline and exits, so with this check after it a run whose
+# compilers were killed could persist its own damage as the new authority --
+# the corrupted measurement becoming the thing every later run is compared
+# against. A refresh is the one operation that must not proceed on an
+# incomplete run.
+# A run in which the kernel killed compiler processes cannot be compared to a
+# baseline at all: the programs it killed are indistinguishable, in actual.txt,
+# from programs this change broke. Refuse the comparison rather than report it.
+KILLED_COUNT="$(grep -c . "$WORK/killed.txt" 2>/dev/null || true)"
+if [ "${KILLED_COUNT:-0}" -gt 0 ]; then
+  echo "[madaros-corpus] $KILLED_COUNT compiler process(es) were KILLED by the kernel:" >&2
+  sed 's/^/    ! /' "$WORK/killed.txt" >&2
+  echo "" >&2
+  echo "This run cannot be compared against the baseline. A killed compile is" >&2
+  echo "indistinguishable from a broken program once it reaches actual.txt, so" >&2
+  echo "the regression list would name programs nothing is wrong with." >&2
+  echo "" >&2
+  echo "JOBS was $JOBS. On this pod, SOUNIO_TEST_JOBS=6 completes; nproc does not." >&2
+  fail "the instrument was killed mid-run -- no verdict, not a regression"
+fi
+
+# Crashes are reported by name and still flow into the ordinary comparison, so
+# a NEW one fails the gate as a regression -- which is what it is. They are
+# surfaced here as well because "<name> compile" in a regression list reads as
+# "the compiler rejected this program", and a segfault is a different and worse
+# statement about the compiler.
+CRASHED_COUNT="$(grep -c . "$WORK/crashed.txt" 2>/dev/null || true)"
+if [ "${CRASHED_COUNT:-0}" -gt 0 ]; then
+  echo "[madaros-corpus] $CRASHED_COUNT program(s) SEGFAULTED the compiler (exit 139):" >&2
+  sed 's/^/    !! /' "$WORK/crashed.txt" >&2
+  echo "    these are counted as compile failures below, not excused" >&2
+fi
 
 if [[ "$REFRESH" == "1" ]]; then
   {
@@ -188,21 +238,6 @@ if [[ "$REFRESH" == "1" ]]; then
   exit 0
 fi
 
-# A run in which the kernel killed compiler processes cannot be compared to a
-# baseline at all: the programs it killed are indistinguishable, in actual.txt,
-# from programs this change broke. Refuse the comparison rather than report it.
-KILLED_COUNT="$(grep -c . "$WORK/killed.txt" 2>/dev/null || true)"
-if [ "${KILLED_COUNT:-0}" -gt 0 ]; then
-  echo "[madaros-corpus] $KILLED_COUNT compiler process(es) were KILLED by the kernel:" >&2
-  sed 's/^/    ! /' "$WORK/killed.txt" >&2
-  echo "" >&2
-  echo "This run cannot be compared against the baseline. A killed compile is" >&2
-  echo "indistinguishable from a broken program once it reaches actual.txt, so" >&2
-  echo "the regression list would name programs nothing is wrong with." >&2
-  echo "" >&2
-  echo "JOBS was $JOBS. On this pod, SOUNIO_TEST_JOBS=6 completes; nproc does not." >&2
-  fail "the instrument was killed mid-run -- no verdict, not a regression"
-fi
 
 [[ -f "$BASELINE" ]] || fail "missing baseline $BASELINE -- generate it with SOUNIO_MADAROS_CORPUS_REFRESH=1"
 
