@@ -408,6 +408,12 @@ At `SOUNIO_EXECUTABLE`, the receipt may establish only that:
 - four unresolved target envelopes are emitted;
 - hardware has not modified semantic identity.
 
+`Complete` in this list means every declared cell and wiring obligation is
+present and internally consistent. It does not establish a composition-algebra
+law, norm multiplicativity, alternativity, associativity, or algebra
+isomorphism. Any later observed mask, negative count, fixture output, or digest
+is a hash-bound Sounio execution golden, not a symbolic closed form.
+
 The receipt must keep all of these false:
 
 ```text
