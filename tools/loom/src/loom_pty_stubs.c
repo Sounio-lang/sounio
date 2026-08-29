@@ -68,6 +68,24 @@ CAMLprim value sounio_loom_peer_credentials(value fd_value) {
 #endif
 }
 
+CAMLprim value sounio_loom_file_descr_of_int(value fd_value) {
+  CAMLparam1(fd_value);
+  const int descriptor = Int_val(fd_value);
+  if (descriptor < 0 || fcntl(descriptor, F_GETFD) < 0) {
+    caml_failwith("invalid inherited descriptor");
+  }
+  CAMLreturn(Val_int(descriptor));
+}
+
+CAMLprim value sounio_loom_int_of_file_descr(value fd_value) {
+  CAMLparam1(fd_value);
+  const int descriptor = Int_val(fd_value);
+  if (descriptor < 0 || fcntl(descriptor, F_GETFD) < 0) {
+    caml_failwith("invalid inherited descriptor");
+  }
+  CAMLreturn(Val_int(descriptor));
+}
+
 CAMLprim value sounio_loom_pidfd_open(value pid_value) {
   CAMLparam1(pid_value);
   CAMLlocal1(result);

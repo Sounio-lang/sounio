@@ -1004,7 +1004,8 @@ let notify_conflict tool_root root agent lane paths output =
              String.concat ", " paths ])
   | _ -> ()
 
-let execute_event tool_root root event agent lane raw_session_id file_capability_fixture =
+let execute_event tool_root root event agent lane raw_session_id
+    file_capability_fixture event_sha256 =
   let event_name = string_field event "hook_event_name" in
   if event_name = "" then failf "hook-event-name-missing";
   let intent = "active " ^ agent ^ " session" in
@@ -1062,13 +1063,18 @@ let execute_event tool_root root event agent lane raw_session_id file_capability
       in
       let field, command = execution_command input in
       let cwd = execution_cwd event input root in
-      refresh_presence tool_root presence_root root agent lane raw_session_id;
-      refresh_hook_capability tool_root presence_root agent lane raw_session_id;
-      refresh_endpoint tool_root presence_root agent lane raw_session_id;
-      let replacement =
-        Loom_exec.authorize_and_issue ~file_capability_fixture ~root ~cwd ~command
-      in
-      Some (execution_hook_output input field replacement))
+      ignore
+        (Loom_exec_ingress.observe ~root ~agent ~lane ~session_id:raw_session_id
+           ~cwd ~event_sha256 ~command_sha256:(sha256 command));
+      if Loom_exec_ingress.probe_only () then None
+      else (
+        refresh_presence tool_root presence_root root agent lane raw_session_id;
+        refresh_hook_capability tool_root presence_root agent lane raw_session_id;
+        refresh_endpoint tool_root presence_root agent lane raw_session_id;
+        let replacement =
+          Loom_exec.authorize_and_issue ~file_capability_fixture ~root ~cwd ~command
+        in
+        Some (execution_hook_output input field replacement)))
     else None)
   else (
     let claim =
@@ -1139,7 +1145,7 @@ let run arguments =
     receipt := Some authorized_receipt;
     let hook_output =
       execute_event current_root current_root event !agent !lane raw_session_id
-        file_capability_fixture
+        file_capability_fixture (sha256 raw_event)
     in
     append_decision_log current_root "ALLOW" authorized_receipt.result !agent !lane
       !event_name authorized_receipt;
@@ -1148,6 +1154,8 @@ let run arguments =
   with
   | Error message
   | Loom_exec.Error message
+  | Loom_exec_ingress.Error message
+  | Loom_membrane.Error message
   | Sys_error message ->
       (match !root, !receipt with
       | Some current_root, Some current_receipt ->

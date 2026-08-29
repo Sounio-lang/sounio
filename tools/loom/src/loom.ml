@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.29.40"
+let runtime_version = "2026.08.29.41"
 let max_control_bytes = 16 * 1024
 let max_kernel_control_bytes = 2 * 1024 * 1024
 let max_snapshot_bytes = 1024 * 1024
@@ -17,6 +17,7 @@ external forkpty : unit -> int * file_descr = "sounio_loom_forkpty"
 external set_winsize : file_descr -> int -> int -> unit = "sounio_loom_set_winsize"
 external peer_credentials : file_descr -> int * int * int = "sounio_loom_peer_credentials"
 external pidfd_open : int -> file_descr option = "sounio_loom_pidfd_open"
+external int_of_file_descr : file_descr -> int = "sounio_loom_int_of_file_descr"
 
 let failf format = Printf.ksprintf (fun value -> raise (Loom_error value)) format
 
@@ -11463,10 +11464,164 @@ let peer_activation_capsule_probe_command cli =
       else failf "unknown peer-activation-capsule probe mode: %s" mode);
   0
 
+let exec_ingress_probe_command cli =
+  if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
+    failf "exec-ingress-probe requires SOUNIO_LOOM_HOOK_TEST_MODE=1";
+  let root = required cli "--root" |> Unix.realpath in
+  let mode = required cli "--mode" in
+  let event_path = required cli "--event" in
+  if mode <> "inherited" && mode <> "forged" && mode <> "missing"
+     && mode <> "fixture-escape"
+  then
+    failf
+      "exec-ingress-probe mode must be inherited, forged, missing, or fixture-escape";
+  let event = read_file event_path in
+  if event = "" then failf "exec-ingress-probe event is empty";
+  let channel =
+    if mode = "missing" then None else Some (Unix.socketpair PF_UNIX SOCK_STREAM 0)
+  in
+  let broker_pid =
+    match channel with
+    | None -> None
+    | Some (server, client) ->
+        Some
+          (match Unix.fork () with
+          | 0 ->
+              Unix.close client;
+              let code =
+                try
+                  let request = read_line_fd server in
+                  match String.split_on_char '\t' request with
+                  | [ "LOOM_EXEC_INGRESS/1"; event_sha256; command_sha256 ]
+                    when String.length event_sha256 = 64
+                         && String.length command_sha256 = 64 ->
+                      write_all server
+                        (String.concat "\t"
+                           [ "LOOM_EXEC_INGRESS_BOUND/1"; event_sha256;
+                             command_sha256 ] ^ "\n");
+                      Unix.shutdown server SHUTDOWN_ALL;
+                      0
+                  | _ -> 91
+                with _ -> 90
+              in
+              Unix.close server;
+              Unix._exit code
+          | pid ->
+              Unix.close server;
+              pid)
+  in
+  let client = Option.map snd channel in
+  let input_read, input_write = Unix.pipe () in
+  let output_read, output_write = Unix.pipe () in
+  Unix.set_close_on_exec input_write;
+  Unix.set_close_on_exec output_read;
+  let set_environment name value environment =
+    let prefix = name ^ "=" in
+    environment |> Array.to_list
+    |> List.filter (fun binding -> not (starts_with binding prefix))
+    |> fun bindings -> Array.of_list ((prefix ^ value) :: bindings)
+  in
+  let environment =
+    Unix.environment ()
+    |> set_environment "SOUNIO_LOOM_HOOK_TEST_MODE" "1"
+    |> set_environment "SOUNIO_LOOM_EXEC_INGRESS_REQUIRED" "1"
+    |> set_environment "SOUNIO_COORD_NATIVE_HOOK_SELFTEST" "1"
+  in
+  let environment =
+    if mode = "fixture-escape" then
+      environment |> Array.to_list
+      |> List.filter (fun binding ->
+             not (starts_with binding "SOUNIO_LOOM_EXEC_INGRESS_PROBE_ONLY="))
+      |> Array.of_list
+    else
+      set_environment "SOUNIO_LOOM_EXEC_INGRESS_PROBE_ONLY" "1" environment
+  in
+  let environment =
+    match client with
+    | None ->
+        environment |> Array.to_list
+        |> List.filter (fun binding ->
+               not (starts_with binding "SOUNIO_LOOM_EXEC_INGRESS_FD=")
+               && not
+                    (starts_with binding
+                       "SOUNIO_LOOM_EXEC_INGRESS_ALLOW_SAME_UID_TEST="))
+        |> Array.of_list
+    | Some descriptor ->
+        let environment =
+          set_environment "SOUNIO_LOOM_EXEC_INGRESS_FD"
+            (string_of_int (int_of_file_descr descriptor)) environment
+        in
+        if mode = "inherited" || mode = "fixture-escape" then
+          set_environment "SOUNIO_LOOM_EXEC_INGRESS_ALLOW_SAME_UID_TEST" "1"
+            environment
+        else
+          environment |> Array.to_list
+          |> List.filter (fun binding ->
+                 not
+                   (starts_with binding
+                      "SOUNIO_LOOM_EXEC_INGRESS_ALLOW_SAME_UID_TEST="))
+          |> Array.of_list
+  in
+  let hook_pid =
+    match Unix.fork () with
+    | 0 ->
+        Unix.close input_write;
+        Unix.close output_read;
+        Unix.dup2 input_read Unix.stdin;
+        Unix.dup2 output_write Unix.stdout;
+        Unix.dup2 output_write Unix.stderr;
+        if input_read <> Unix.stdin then Unix.close input_read;
+        if output_write <> Unix.stdout && output_write <> Unix.stderr then
+          Unix.close output_write;
+        Option.iter Unix.clear_close_on_exec client;
+        (try
+           Unix.chdir root;
+           let executable = Unix.realpath Sys.executable_name in
+           Unix.execve executable
+             [| executable; "agent-hook"; "--agent"; "codex" |]
+             environment
+         with _ -> Unix._exit 127)
+    | pid -> pid
+  in
+  Unix.close input_read;
+  Unix.close output_write;
+  Option.iter Unix.close client;
+  write_all input_write event;
+  write_all input_write "\n";
+  Unix.close input_write;
+  let output = Buffer.create 4096 in
+  let bytes = Bytes.create 16384 in
+  let rec drain () =
+    match Unix.read output_read bytes 0 (Bytes.length bytes) with
+    | 0 -> ()
+    | count -> Buffer.add_subbytes output bytes 0 count; drain ()
+    | exception Unix_error (EINTR, _, _) -> drain ()
+  in
+  Fun.protect ~finally:(fun () -> Unix.close output_read) drain;
+  let status_code = function
+    | WEXITED code -> code
+    | WSIGNALED signal | WSTOPPED signal -> 128 + signal
+  in
+  let _, hook_status = Unix.waitpid [] hook_pid in
+  let broker_code =
+    match broker_pid with
+    | None -> -1
+    | Some pid ->
+        let _, status = Unix.waitpid [] pid in
+        status_code status
+  in
+  let hook_output = Buffer.contents output in
+  Printf.printf
+    "LOOM_PRODUCT_EXEC_INGRESS_PROBE mode=%s hook_code=%d broker_code=%d output_sha256=%s production_activation=false exec_attached=false\n%s%!"
+    mode (status_code hook_status) broker_code (sha256 hook_output) hook_output;
+  0
+
 let usage () =
   Printf.eprintf
     "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
+  Printf.eprintf
+    "  exec-ingress-probe --root DIR --mode inherited|forged|missing|fixture-escape --event FILE (test mode only)\n";
   Printf.eprintf
     "  peer-activation-capsule-probe --root DIR --mode current|python|happy|deny-preserves|poison|replay|mismatch|timeout|eof --seal FILE [--consume FILE] [--extinguish FILE] [--poison FILE] [--deny FILE] --deadline-ms N (test mode only)\n";
   Printf.eprintf "  provider-open persistent providers: claude, codex, kimi\n";
@@ -11517,6 +11672,7 @@ let main () =
     | "resident-authority-probe" -> resident_authority_probe_command cli
     | "invocation-cell-probe" -> invocation_cell_probe_command cli
     | "exec-grant-cell-probe" -> exec_grant_cell_probe_command cli
+    | "exec-ingress-probe" -> exec_ingress_probe_command cli
     | "peer-activation-capsule-probe" ->
         peer_activation_capsule_probe_command cli
     | "start" -> start_command cli; 0

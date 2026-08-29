@@ -87,6 +87,12 @@ type product_launch_observation = {
   launch_authority_sequence : int;
 }
 
+type activation_dark_evaluation = {
+  activation_policy : activation_dark_policy;
+  activation_decision : Loom_resident.decision;
+  activation_capsule_state : string;
+}
+
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 
 let starts_with value prefix =
@@ -756,21 +762,11 @@ let authority_environment () =
          not (List.exists (starts_with binding) prohibited_prefixes))
   |> Array.of_list
 
-let observe_product_launch ~policy_root ~audit_root ~operation ~launch_source
-    ~agent ~lane ~session_id ~cwd ~command_sha256 ~deadline_ms =
-  if operation <> "start" && operation <> "recover" then
-    failf "product-launch-dark-operation-invalid";
-  if not (valid_launch_source launch_source) then
-    failf "product-launch-dark-source-invalid";
-  if agent = "" || lane = "" || session_id = "" then
-    failf "product-launch-dark-identity-missing";
-  if not (valid_sha256 command_sha256) then
-    failf "product-launch-dark-command-digest-invalid";
+let evaluate_product_activation_dark ~policy_root ~audit_root ~deadline_ms =
   if deadline_ms < 1 || deadline_ms > 120_000 then
-    failf "product-launch-dark-deadline-out-of-range";
+    failf "product-activation-dark-deadline-out-of-range";
   let policy_root = Unix.realpath policy_root in
   let audit_root = Unix.realpath audit_root in
-  let cwd = Unix.realpath cwd in
   let policy = load_activation_dark_policy policy_root in
   let environment = authority_environment () in
   let decision, capsule_state =
@@ -783,7 +779,7 @@ let observe_product_launch ~policy_root ~audit_root ~operation ~launch_source
                 <> policy.semantics_sha256
            || Loom_peer_activation_capsule.resident_v5_sha256 capsule
                 <> policy.resident_manifest_sha256
-        then failf "product-launch-dark-capsule-binding-mismatch";
+        then failf "product-activation-dark-capsule-binding-mismatch";
         let decision =
           Loom_peer_activation_capsule.seal capsule policy.frame
         in
@@ -793,6 +789,27 @@ let observe_product_launch ~policy_root ~audit_root ~operation ~launch_source
         in
         (decision, capsule_state))
   in
+  { activation_policy = policy;
+    activation_decision = decision;
+    activation_capsule_state = capsule_state }
+
+let observe_product_launch ~policy_root ~audit_root ~operation ~launch_source
+    ~agent ~lane ~session_id ~cwd ~command_sha256 ~deadline_ms =
+  if operation <> "start" && operation <> "recover" then
+    failf "product-launch-dark-operation-invalid";
+  if not (valid_launch_source launch_source) then
+    failf "product-launch-dark-source-invalid";
+  if agent = "" || lane = "" || session_id = "" then
+    failf "product-launch-dark-identity-missing";
+  if not (valid_sha256 command_sha256) then
+    failf "product-launch-dark-command-digest-invalid";
+  let cwd = Unix.realpath cwd in
+  let evaluation =
+    evaluate_product_activation_dark ~policy_root ~audit_root ~deadline_ms
+  in
+  let policy = evaluation.activation_policy in
+  let decision = evaluation.activation_decision in
+  let capsule_state = evaluation.activation_capsule_state in
   append_product_launch_dark_decision ~audit_root ~policy ~operation
     ~launch_source ~agent ~lane ~session_id ~cwd ~command_sha256 ~capsule_state
     decision;
