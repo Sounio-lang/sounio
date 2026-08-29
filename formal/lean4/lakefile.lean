@@ -148,6 +148,11 @@ lean_lib «SounioSedenionAutomorphism» where
 lean_lib «SounioPireusQuotientNoveltyForge» where
   moreLeanArgs := #["-j", "1"]
 
+-- FORMAL_PARITY for the Sounio-owned Pireus Operator-Lowering Forge v6.
+-- Non-default: checks the frozen 1120-cell finite grammar and its typed debt.
+lean_lib «SounioPireusOperatorLoweringForge» where
+  moreLeanArgs := #["-j", "1"]
+
 -- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
 -- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
 -- sweeps (16x16 complex greedy over 1..15) build in ~10s, so kept as a default_target.
