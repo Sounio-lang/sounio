@@ -208,10 +208,13 @@ Consequently
 h is an exact coboundary iff remainder is the zero table.
 ```
 
-The triangular pivot certificate, the complete 2048-word round trip, and the
-256-cell reconstruction together make this a complete decision procedure for
-the declared basis-sign gauge. It is not a numerical approximation, hash-only
-comparison, SAT answer, or external theorem-prover result.
+The triangular pivot certificate and complete 2048-word round trip make this a
+complete decision procedure for the declared basis-sign gauge. The 256-cell
+reconstruction is retained as implementation-integrity evidence, but it is not
+misrepresented as an independent theorem: once `remainder = h XOR dq` is
+defined, reconstructing `h` is algebraically tautological. This procedure is
+not a numerical approximation, hash-only comparison, SAT answer, or external
+theorem-prover result.
 
 ## Parent-relative action group
 
@@ -240,11 +243,19 @@ The action must also normalize the gauge image. For every `q`, linearity of
 A_(M,s).dq = d(q compose M).
 ```
 
-The swap bit does not change the right side because `dq(i,j)=dq(j,i)`. v5
-must certify this independently of the 48-child relation: for every admitted
+The swap bit does not change the right side because `dq(i,j)=dq(j,i)`. The
+pullback `q compose M` need not satisfy the canonical zero-on-basis section, so
+the executable removes its linear character and serializes
+
+```text
+q*_M(v) = q(Mv) XOR sum_(r=0..3) v_r * q(M e_r).
+```
+
+Because the removed term is linear, `d q*_M = d(q compose M)`. v5 must certify
+this transport independently of the 48-child relation: for every admitted
 action, every one of the 11 canonical gauge basis functions, and every one of
-the 256 cells, Sounio compares both sides extensionally and requires zero
-failures.
+the 256 cells, Sounio compares the pulled-back coboundary with `d q*_M` and
+requires zero failures.
 
 Sounio must scan all 40320 actions, emit a nonzero digest over the admitted
 action list, require the identity, and for every admitted action:
@@ -253,16 +264,26 @@ action list, require the identity, and for every admitted action:
 2. replay the parent displacement on all 256 cells;
 3. compute the packed inverse matrix;
 4. require the inverse action to be admitted;
-5. replay the inverse parent displacement on all 256 cells.
+5. replay the inverse parent displacement on all 256 cells;
+6. require the composition of every ordered pair of admitted actions to be
+   present in the admitted census, and check its packed matrix action on all
+   16 vectors.
 
 No expected admitted cardinality or swap distribution is fixed in this
 Garden. Algebraically, closure follows from the gauge-equivariance identity:
 composing two parent displacements then remains a coboundary. The executable
 certificate re-establishes that identity for the admitted finite census; it is
 evidence for the implementation, not a premise that makes the algebra true.
+The executable also checks all ordered action pairs extensionally so a bug in
+the implemented admission or composition cannot hide behind that derivation.
 The emitted 48-child relation is additionally checked extensionally for
 reflexivity, symmetry, and transitivity; those finite relation checks do not
 replace gauge equivariance.
+
+This is the projected action group on sign tables modulo gauge. v5 does not
+choose or claim a lifted group law on triples `(M,swap,q)`: the canonical
+gauge attached to each action is an equality witness, not an additional group
+coordinate with a separately certified cocycle law.
 
 ## Three nested novelty quotients
 
@@ -496,16 +517,19 @@ The first Sounio executable must prove extensionally:
 6. every admitted parent action has a 256-cell canonical gauge replay;
 7. every admitted action preserves all 11 gauge basis coboundaries on all 256
    cells;
-8. the identity parent action is admitted;
+8. packed matrix `33825` acts as identity on all 16 vectors and the identity
+   parent action is admitted;
 9. every admitted parent action has an admitted packed inverse;
-10. Q0, Q1, and Q2 each cover all 48 children exactly once;
-11. every emitted membership witness replays on all 256 cells;
-12. each relation is reflexive, symmetric, and transitive;
-13. Q0 refines Q1 and Q1 refines Q2;
-14. distinct classes in a profile have no admitted relation edge;
-15. each representative is the smallest member ID, not a ranked winner;
-16. every class and profile digest is nonzero and lineage-bound;
-17. all target facts remain unresolved and no child is selected.
+10. every ordered pair of admitted actions composes to an admitted action and
+    its packed composition agrees with nested `matrix_apply` on all 16 vectors;
+11. Q0, Q1, and Q2 each cover all 48 children exactly once;
+12. every emitted membership witness replays on all 256 cells;
+13. each relation is reflexive, symmetric, and transitive;
+14. Q0 refines Q1 and Q1 refines Q2;
+15. distinct classes in a profile have no admitted relation edge;
+16. each representative is the smallest member ID, not a ranked winner;
+17. every class and profile digest is nonzero and lineage-bound;
+18. all target facts remain unresolved and no child is selected.
 
 The executable may use digests for identity after it has performed the exact
 cell comparisons. A digest collision assumption may not replace extensional
