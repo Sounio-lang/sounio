@@ -6848,6 +6848,32 @@ impl Lowerer {
         0 - 1
     }
 
+    // The declared named type of `<type_name>.<field_name>`, or an empty name.
+    // struct_layout_field_pos resolves by SLOT INDEX; a field access carries a
+    // NAME, so this is the by-name sibling. The data was already recorded --
+    // `named_type_name_id` is written at every site that builds a
+    // StructFieldEntry -- and nothing read it for this purpose.
+    fn struct_layout_field_named_type(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div, Alloc {
+        if type_name.len <= 0 { return ir_empty_name() }
+        if field_name.len <= 0 { return ir_empty_name() }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                let fc = (*self.struct_layouts).entries[si as usize].field_count
+                while fi < fc && fi < 64 {
+                    if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        return ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id)
+                    }
+                    fi = fi + 1
+                }
+                return ir_empty_name()
+            }
+            si = si + 1
+        }
+        ir_empty_name()
+    }
+
     fn struct_layout_pos_field_name(self, pos: i64) -> Name with Mut, Panic, Div, Alloc {
         if pos < 0 { return ir_empty_name() }
         let si = pos / 64
@@ -12311,6 +12337,29 @@ impl Lowerer {
             // `&string` therefore remain positive evidence, not kind-0 guesses.
             return lower_name_is_string_type(self.lookup_local_struct_type((*e).name))
         }
+        // `base.field` where the field is declared `string`. Ten of the fifteen
+        // println-poison refusals in a self-compile are this shape --
+        // `frontend_result.error_msg`, `trace.last_stage`, `opts.output_file`,
+        // `closure.parse_failed_path`, `lowered.unsupported_detail` -- and the
+        // classifier had no case for it at all, so a plainly-typed string field
+        // reached the print dispatcher with scalar kind 0 and the lowering
+        // refused rather than guess.
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            match (*e).left {
+                Some(base_expr) => {
+                    if (*base_expr).kind == ExprKind::ExprIdent {
+                        let base_type = self.lookup_local_struct_type((*base_expr).name)
+                        if lower_name_is_string_type(self.struct_layout_field_named_type(base_type, (*e).name)) {
+                            return true
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        if (*e).kind == ExprKind::ExprIf {
+            return self.opt_block_tail_is_string_ref(&(*e).block) || self.opt_expr_result_is_string_ref(&(*e).else_expr)
+        }
         if (*e).kind == ExprKind::ExprBinary {
             if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpConcat {
                 return self.opt_expr_result_is_string_ref(&(*e).left) || self.opt_expr_result_is_string_ref(&(*e).right)
@@ -12518,6 +12567,37 @@ impl Lowerer {
             }
         }
         result
+    }
+
+    // The string twin of block_tail_is_float_ref, written the same way on purpose:
+    // an if-expression yields the value of its block's trailing expression, and
+    // `let s = if c { "true" } else { "false" }` had no case anywhere, so `s`
+    // reached the print dispatcher as kind 0.
+    fn block_tail_is_string_ref(self, blk: &Block) -> bool with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result = false
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_result_is_string_ref(&stmt_ref.expr)
+                    } else {
+                        result = false
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    fn opt_block_tail_is_string_ref(self, blk_opt: &Option<Box<Block>>) -> bool with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_is_string_ref(&(*blk)),
+            _ => false,
+        }
     }
 
     fn expr_result_scalar_kind_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
