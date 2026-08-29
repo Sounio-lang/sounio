@@ -15141,6 +15141,10 @@ impl Lowerer {
                             _ => (lo.report_error_at(12033), rhs),
                         }
                 } else if (*target_expr).kind == ExprKind::ExprIndex {
+                        let target_base_is_seq = ir_name_eq(
+                            lo.lower_method_recv_type(&(*target_expr).left),
+                            make_name("Seq"),
+                        )
                         let target_global_elem_size = match (*target_expr).left {
                             Some(target_base_expr) => {
                                 if (*target_base_expr).kind == ExprKind::ExprIdent {
@@ -15175,6 +15179,22 @@ impl Lowerer {
                         let pair_idx = lo.lower_opt_expr_ref(&(*target_expr).right)
                         lo = pair_idx.0
                         let idx_reg = pair_idx.1
+                        if target_base_is_seq {
+                            let call_name_seq_set = make_name("__sounio_seq_set")
+                            let fn_id_seq_set = lowerer_find_or_add_fn_id_mut(&! lo, call_name_seq_set)
+                            let call_args_seq_set: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                                base_reg,
+                                Some(Box::new(ir_reg_list_cons(
+                                    idx_reg,
+                                    Some(Box::new(ir_reg_list_single(rhs))),
+                                ))),
+                            )))
+                            let pair_d_seq_set = lo.fresh_reg()
+                            lo = pair_d_seq_set.0
+                            let dst_seq_set = pair_d_seq_set.1
+                            lo = lo.emit(ir_call(dst_seq_set, fn_id_seq_set, call_name_seq_set, call_args_seq_set, 3))
+                            return (lo, rhs)
+                        }
                         var index_set_instr = ir_index_set(base_reg, idx_reg, rhs)
                         if target_base_is_string {
                             index_set_instr.label_id = 3
@@ -17880,6 +17900,7 @@ impl Lowerer {
 
     fn lower_index_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let index_elem_is_float_pre = self.index_base_elem_is_float_ref(&e.left)
+        let base_is_seq = ir_name_eq(self.lower_method_recv_type(&e.left), make_name("Seq"))
         // Detect packed-string bases BEFORE consuming self (string lit, scalar_kind
         // 3 local, or packed-string producer call). Must win over the default
         // local-array IndexGet path — see lower_name_is_packed_string_producer.
@@ -17928,6 +17949,19 @@ impl Lowerer {
         let pair_i = lo1.lower_opt_expr_ref(&e.right)
         let lo2 = pair_i.0
         let idx = pair_i.1
+        if base_is_seq {
+            var lo_seq_get = lo2
+            let call_name_seq_get = make_name("__sounio_seq_get")
+            let fn_id_seq_get = lowerer_find_or_add_fn_id_mut(&! lo_seq_get, call_name_seq_get)
+            let call_args_seq_get: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                base,
+                Some(Box::new(ir_reg_list_single(idx))),
+            )))
+            let pair_d_seq_get = lo_seq_get.fresh_reg()
+            lo_seq_get = pair_d_seq_get.0
+            let dst_seq_get = pair_d_seq_get.1
+            return (lo_seq_get.emit(ir_call(dst_seq_get, fn_id_seq_get, call_name_seq_get, call_args_seq_get, 2)), dst_seq_get)
+        }
         let pair_d = lo2.fresh_reg()
         let lo3 = pair_d.0
         let dst = pair_d.1
@@ -18372,7 +18406,40 @@ impl Lowerer {
                 let dst_seq_push = pair_d_seq_push.1
                 return (lo_seq_push.emit(ir_call(dst_seq_push, fn_id_seq_push, call_name_seq_push, call_args_seq_push, 2)), dst_seq_push)
             }
-            if ir_name_eq(e.name, make_name("push_uncertain")) || ir_name_eq(e.name, make_name("get")) || ir_name_eq(e.name, make_name("set")) {
+            if ir_name_eq(e.name, make_name("get")) || ir_name_eq(e.name, make_name("set")) {
+                let pair_b_seq_access = self.lower_opt_expr_ref(&e.left)
+                var lo_seq_access = pair_b_seq_access.0
+                let base_reg_seq_access = pair_b_seq_access.1
+                let pair_args_seq_access: LowerExprArgsResult = lo_seq_access.lower_expr_args_raw_ref(&e.args)
+                lo_seq_access = pair_args_seq_access.lowerer
+                let is_seq_get = ir_name_eq(e.name, make_name("get"))
+                let expected_seq_args: i64 = if is_seq_get { 1 } else { 2 }
+                if pair_args_seq_access.count != expected_seq_args {
+                    lowerer_mark_hard_error(&! lo_seq_access)
+                    return (lo_seq_access, IR_INVALID_REG)
+                }
+                let call_name_seq_access = if is_seq_get {
+                    make_name("__sounio_seq_get")
+                } else {
+                    make_name("__sounio_seq_set")
+                }
+                let fn_id_seq_access = lowerer_find_or_add_fn_id_mut(&! lo_seq_access, call_name_seq_access)
+                let call_args_seq_access: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                    base_reg_seq_access,
+                    Some(Box::new(pair_args_seq_access.regs)),
+                )))
+                let pair_d_seq_access = lo_seq_access.fresh_reg()
+                lo_seq_access = pair_d_seq_access.0
+                let dst_seq_access = pair_d_seq_access.1
+                return (lo_seq_access.emit(ir_call(
+                    dst_seq_access,
+                    fn_id_seq_access,
+                    call_name_seq_access,
+                    call_args_seq_access,
+                    expected_seq_args + 1,
+                )), dst_seq_access)
+            }
+            if ir_name_eq(e.name, make_name("push_uncertain")) {
                 print("error: native-v2 Seq method lowering is not implemented for this method; refusing generic method call\\n")
                 var lo_bad_seq_method = self
                 lowerer_mark_hard_error(&! lo_bad_seq_method)

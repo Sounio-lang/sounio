@@ -77,9 +77,34 @@ expect_compile_ok_and_run_output() {
   return 0
 }
 
+expect_compile_ok_and_run_rc() {
+  local label="$1"
+  local src="$2"
+  local expected_rc="$3"
+  expect_compile_ok "$label" "$src" || return 1
+  local out="$OUT_DIR/$label.elf"
+  local run_log="$OUT_DIR/$label.run.log"
+  chmod +x "$out" 2>/dev/null || true
+  set +e
+  "$out" >"$run_log" 2>&1
+  local rc=$?
+  set -e
+  printf '%s_run_rc=%s\n' "$label" "$rc"
+  printf '%s_run_log=%s\n' "$label" "$run_log"
+  if [[ "$rc" -ne "$expected_rc" ]]; then
+    echo "FAIL $label expected run rc=$expected_rc"
+    tail -n 80 "$run_log"
+    return 1
+  fi
+  echo "FIXED $label deterministic_runtime_rc=$expected_rc"
+  return 0
+}
+
 status=0
 expect_compile_ok_and_run_output imported_seq_count tests/compiler/imported_seed_lowering/seq_count_main.sio "0" || status=1
 expect_compile_ok_and_run_output imported_seq_push tests/compiler/imported_seed_lowering/seq_push_main.sio "5" || status=1
+expect_compile_ok_and_run_output imported_seq_access tests/compiler/imported_seed_lowering/seq_access_main.sio "11" || status=1
+expect_compile_ok_and_run_rc imported_seq_oob_get tests/compiler/imported_seed_lowering/seq_oob_get_main.sio 1 || status=1
 
 if [[ "$status" -eq 0 ]]; then
   echo "PASS madaros_imported_seed_lowering_gate Seq<T> lowering SIGSEGV reduced"
