@@ -229,7 +229,8 @@ for expectation in \
   'descriptor_connector_authenticated=true' 'dynamic_user=true' \
   'lane_cell_canary_attached=true' 'lane_cell_pidfd=bound' \
   'lane_cell_start_tick=bound' 'lane_cell_executable=bound' \
-  'lane_cell_cgroup=bound' 'inherited_descriptor=true' \
+  'lane_cell_cgroup=bound' 'lane_cell_user_namespace=host' \
+  'inherited_descriptor=true' \
   'descriptor_open=systemd-OpenFile' 'descriptor_fd=3' \
   'descriptor_peer_pid=lane-main' 'descriptor_peer_parent_pid=1' \
   'descriptor_peer_uid=0' 'descriptor_peer_gid=0' \

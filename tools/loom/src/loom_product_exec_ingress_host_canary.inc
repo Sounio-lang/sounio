@@ -138,6 +138,14 @@ bool product_environment_has(const std::string& environment,
   return false;
 }
 
+bool product_same_user_namespace(pid_t pid) {
+  struct stat broker {};
+  struct stat lane {};
+  return stat("/proc/self/ns/user", &broker) == 0 &&
+         stat(("/proc/" + std::to_string(pid) + "/ns/user").c_str(), &lane) == 0 &&
+         broker.st_dev == lane.st_dev && broker.st_ino == lane.st_ino;
+}
+
 class ProductExecIngressHostCase {
  public:
   ProductExecIngressHostCase(
@@ -275,6 +283,7 @@ class ProductExecIngressHostCase {
           "--property=PrivateTmp=yes",
           "--property=PrivateDevices=yes",
           "--property=PrivateNetwork=yes",
+          "--property=PrivateUsers=no",
           "--property=ProtectSystem=strict",
           "--property=ProtectHome=yes",
           "--property=ProtectKernelTunables=yes",
@@ -433,6 +442,8 @@ class ProductExecIngressHostCase {
               property("NoNewPrivileges") == "yes" &&
               property("ProtectSystem") == "strict" &&
               property("PrivateNetwork") == "yes" &&
+              property("PrivateUsers") == "no" &&
+              product_same_user_namespace(main_pid_) &&
               product_environment_has(
                   environment, "SOUNIO_LOOM_EXEC_INGRESS_REQUIRED=1") &&
               product_environment_has(
@@ -770,6 +781,7 @@ int selftest_product_exec_ingress_host(
       << " lane_cell_gid=" << treatment.main_gid
       << " lane_cell_pidfd=bound lane_cell_start_tick=bound"
       << " lane_cell_executable=bound lane_cell_cgroup=bound"
+      << " lane_cell_user_namespace=host"
       << " inherited_descriptor=true descriptor_open=systemd-OpenFile"
       << " descriptor_fd=3 descriptor_peer_pid=lane-main"
       << " descriptor_peer_parent_pid=1 descriptor_peer_uid=0"

@@ -42,6 +42,8 @@ runtimes. The host broker then starts the product hook in a transient service
 with:
 
 - `DynamicUser=yes` for the treatment principal;
+- `PrivateUsers=no`, so the hook and guardian compare UIDs in the same host
+  user namespace rather than through a namespace-relative fake root;
 - a dedicated cgroup and runtime directory;
 - `NoNewPrivileges=yes`, an empty capability set, private devices, private
   network, private temporary storage, and a read-only system view;
