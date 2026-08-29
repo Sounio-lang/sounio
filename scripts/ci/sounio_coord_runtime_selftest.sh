@@ -16,6 +16,10 @@ CAPSULE_STATE="$TEST_ROOT/policyless-state"
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
 export SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-authority-runtime"
 export SOUNIO_LOOM_EXECUTION_OUTCOME_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-outcome-runtime"
+export SOUNIO_LOOM_SUBPROCESS_MEMBRANE_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-subprocess-membrane-runtime"
+export SOUNIO_LOOM_RESIDENT_MEMBRANE_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime"
+export SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v2"
+export SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v3"
 export SOUNIO_LOOM_CUSTODY_TRANSFER_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-custody-transfer-runtime"
 export SOUNIO_LOOM_LANE_HEALTH_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-runtime"
 export SOUNIO_LOOM_LANE_HEALTH_PARITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-parity-runtime"
@@ -37,6 +41,7 @@ cleanup() {
   [[ -z "${failing_supervisor_pid:-}" ]] || \
     kill "$failing_supervisor_pid" 2>/dev/null || true
   git -C "$REPO" worktree remove --force "$SECOND" >/dev/null 2>&1 || true
+  chmod -R u+w "$TEST_ROOT" 2>/dev/null || true
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
@@ -68,7 +73,8 @@ snapshot_coord_state() {
   )
 }
 
-mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$REPO/formal/tla" "$REPO/tools"
+mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$REPO/scripts/ci" \
+  "$REPO/formal/tla" "$REPO/tools"
 cp "$ROOT_DIR/bin/sounio-coord" "$ROOT_DIR/bin/sounio-agentd" \
   "$ROOT_DIR/bin/sounio-fleet" "$ROOT_DIR/bin/sounio-loom" "$REPO/bin/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
@@ -100,11 +106,17 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_v1_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_handoff_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_transparency_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_peer_activation_capsule_authority.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_peer_activation_capsule_current_frame.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v5.sh" \
   "$REPO/scripts/dev/"
+cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
+  "$REPO/scripts/ci/"
 mkdir -p "$REPO/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
-  "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$REPO/tools/loom/"
+  "$ROOT_DIR/tools/loom/language_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/execution_authority.freeze.v2" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
   "$ROOT_DIR/tools/loom/custody_transfer.freeze.v1" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/execution_outcome_main.sio" \
@@ -126,17 +138,48 @@ cp "$ROOT_DIR/tools/loom/witness_epoch_handoff_adapter_main.sio" \
   "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
   "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/subprocess_membrane_main.sio" \
+  "$ROOT_DIR/tools/loom/resident_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/effect_closure_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority_main.sio" \
+  "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md" \
+  "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule.runtime.v1" \
+  "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule.current.v1" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v5" \
+  "$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1" \
+  "$ROOT_DIR/tools/loom/resident_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v1" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v1" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v3" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4" \
+  "$ROOT_DIR/tools/loom/resident_membrane_v5_main.sio" \
+  "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_effect_closure.ml" \
   "$ROOT_DIR/tools/loom/src/loom_exec.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_grant_cell.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_invocation_cell.ml" \
   "$ROOT_DIR/tools/loom/src/loom_lane_health.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_membrane.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_peer_activation_capsule.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_resident.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
   "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
+  "$ROOT_DIR/tools/loom/src/loom_membrane_stubs.c" \
   "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
   "$ROOT_DIR/tools/loom/src/loom_nanoarrow.c" \
   "$ROOT_DIR/tools/loom/src/loom_nanoarrow_ipc.c" \
@@ -173,14 +216,28 @@ cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_handoff.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_transparency.sio" \
   "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_kernel_peer_activation_capsule_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_subprocess_membrane_authority.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_resident_authority.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_effect_closure_authority.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_kernel_invocation_cell_authority.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_kernel_exec_grant_cell_authority.sio" \
+  "$REPO/stdlib/coordination/"
 mkdir -p "$REPO/stdlib/crypto"
 cp "$ROOT_DIR/stdlib/crypto/sha256.sio" "$REPO/stdlib/crypto/"
-chmod +x "$REPO/bin/"* "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py
+chmod +x "$REPO/bin/"* "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py \
+  "$REPO/scripts/ci/"*.sh
 git -C "$REPO" init -q
 git -C "$REPO" config user.name 'Sounio Runtime Selftest'
 git -C "$REPO" config user.email 'coord-runtime-selftest@sounio.local'
 git -C "$REPO" add .
 git -C "$REPO" commit -qm seed
+subprocess_toolchain_commit="$(sed -n 's/^sounio_executable_commit=//p' \
+  "$REPO/tools/loom/subprocess_membrane.freeze.v1")"
+[[ "$subprocess_toolchain_commit" =~ ^[0-9a-f]{40}$ ]] || \
+  fail 'subprocess membrane fixture has no frozen toolchain commit'
+git -C "$REPO" fetch -q "$ROOT_DIR" "$subprocess_toolchain_commit"
 git -C "$REPO" worktree add -q -b second-lane "$SECOND"
 RUNTIME_ROOT="$REPO/.git/sounio-coord-runtime"
 
@@ -535,7 +592,7 @@ output="$(cd "$SECOND" && bin/sounio-loom runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'Loom launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'Loom selected a different runtime id'
 grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the OCaml kernel'
-grep -q '^runtime_version=2026.08.27.39$' <<< "$output" || \
+grep -q '^runtime_version=2026.08.29.40$' <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
 
 mkdir -p "$POLICYLESS/bin"
@@ -944,115 +1001,17 @@ grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=started ' <<< "$output" || \
   fail 'pre-upgrade control service did not start'
 supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
 
-mkdir -p "$ALT/scripts/dev" "$ALT/formal/tla" "$ALT/tools"
-cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_custody_transfer.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_execution_outcome.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health_parity.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_attention_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_portfolio_attention_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_contingent_policy_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_outcome_authority_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_v1_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_handoff_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_transparency_adapter.sh" \
-  "$ALT/scripts/dev/"
-mkdir -p "$ALT/tools/loom/src"
-cp "$ROOT_DIR/tools/loom/dune-project" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
-  "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
-  "$ROOT_DIR/tools/loom/custody_transfer.freeze.v1" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/execution_outcome_main.sio" \
-  "$ROOT_DIR/tools/loom/execution_outcome.freeze.v1" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/lane_health_main.sio" \
-  "$ROOT_DIR/tools/loom/lane_health_parity_main.sio" \
-  "$ROOT_DIR/tools/loom/lane_health.freeze.v1" \
-  "$ROOT_DIR/tools/loom/lane_health.ocaml.v1" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/attention_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/portfolio_attention_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/contingent_policy_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/outcome_authority_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/witness_mesh_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/witness_mesh_v1_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/witness_epoch_handoff_adapter_main.sio" \
-  "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
-  "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_exec.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_lane_health.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
-  "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
-  "$ROOT_DIR/tools/loom/src/loom_nanoarrow.c" \
-  "$ROOT_DIR/tools/loom/src/loom_nanoarrow_ipc.c" \
-  "$ROOT_DIR/tools/loom/src/loom_flatcc.c" "$ALT/tools/loom/src/"
-cp -R "$ROOT_DIR/tools/loom/src/vendor" "$ALT/tools/loom/src/"
-mkdir -p "$ALT/stdlib/coordination"
-cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_custody_transfer.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_execution_outcome_authority.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_lane_health.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_epistemic_machine.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_attention_compiler.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_portfolio_attention.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_contingent_policy.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_outcome_authority.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_witness_mesh.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_witness_mesh_v1.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_handoff.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_transparency.sio" \
-  "$ALT/stdlib/coordination/"
-mkdir -p "$ALT/stdlib/crypto"
-cp "$ROOT_DIR/stdlib/crypto/sha256.sio" "$ALT/stdlib/crypto/"
-cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
-  "$ALT/formal/tla/"
+git clone --local --no-hardlinks --quiet "$REPO" "$ALT"
+git -C "$ALT" fetch -q "$ROOT_DIR" "$subprocess_toolchain_commit"
 sed -i 's/^SOUNIO_COORD_RUNTIME_VERSION=.*/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8-test/' \
   "$ALT/scripts/dev/sounio_coord_runtime.sh"
 sed -i 's/^let runtime_version = .*/let runtime_version = "2026.08.23.8-test"/' \
   "$ALT/tools/loom/src/loom.ml"
 chmod +x "$ALT/scripts/dev/"*
+git -C "$ALT" config user.name 'Sounio Runtime Upgrade Selftest'
+git -C "$ALT" config user.email 'coord-runtime-upgrade@sounio.local'
+git -C "$ALT" add scripts/dev/sounio_coord_runtime.sh tools/loom/src/loom.ml
+git -C "$ALT" commit -qm 'test runtime upgrade'
 output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord install-runtime --source-root "$ALT")"
 upgrade_output="$output"
