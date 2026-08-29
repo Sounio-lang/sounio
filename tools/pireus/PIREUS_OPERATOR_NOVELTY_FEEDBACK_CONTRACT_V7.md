@@ -191,6 +191,22 @@ The matcher-free example prints:
 No target observation, material receipt, cost, performance record, parity
 result, or LLM answer enters the decision.
 
+## Post-first freeze matcher
+
+Only after the matcher-free source and its first Sounio transcript were
+committed, the Sounio module gained an exact mismatch classifier. It binds:
+
+- all nine parent/challenge lineage identities;
+- the 256-cell challenge table and independent address census;
+- the complete normalizer and admitted parent-action certificates;
+- the 14 representatives and all 168 class/action separations;
+- the canonical outcome tuple, 96-bit residual, and 256-cell replay;
+- all request refusals, receipt flags, and seven result digests.
+
+The matcher returns a nonzero category code for any drift. Its success freezes
+the already-produced finite result; it does not mutate the result, open parity,
+admit target evidence, or promote relative separation to a broad novelty claim.
+
 ## Negative contract
 
 The executable refuses or detects:
