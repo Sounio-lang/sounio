@@ -34,8 +34,8 @@ struct LowerLocalStack {
     // Tuple-typed local: bit k set iff element k of the tuple is f64. 0 = not a
     // tuple / no float elements. See lower_opt_type_tuple_float_mask (issue #1502).
     tuple_float_mask: [i64; 4096],
-    // Layout index of the named struct element inside tuple slot 0 when that
-    // slot is a fixed array. -1 for every other local shape.
+    // Layout index for an aggregate element carried by a local: tuple slot-0
+    // fixed arrays and Seq<T> share this slot because those shapes are disjoint.
     tuple0_array_elem_layout: [i64; 4096],
     // f64 register carrying the GUM variance shadow for scalar locals, or -1 when absent.
     variance_regs: [i64; 4096],
@@ -4257,6 +4257,24 @@ fn lowerer_bind_local_struct_type_mut(
     }
 }
 
+fn lowerer_bind_local_index_elem_layout_mut(
+    lo: &! Lowerer,
+    name: Name,
+    layout_idx: i64
+) with Mut, Alloc, Panic, Div {
+    if layout_idx < 0 { return }
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).tuple0_array_elem_layout[i as usize] = layout_idx
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 fn lowerer_mark_local_global_mut(
     lo: &! Lowerer,
     name: Name,
@@ -4365,6 +4383,12 @@ fn lowerer_lower_fn_params_mut(
                     lowerer_mark_local_array_copy_word_scalar_mut(lo, (*list).head.name)
                 }
                 lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
+                let param_seq_elem = lower_type_expr_seq_named_elem_name(&(*list).head.ty)
+                lowerer_bind_local_index_elem_layout_mut(
+                    lo,
+                    (*list).head.name,
+                    lower_struct_layout_index_of(&(*(*lo).struct_layouts), param_seq_elem),
+                )
                 // D5+D1 (#986+#983): path-A param scalar_kind must use the single-level
                 // Box store. The by-value `(*lo) = (*lo).bind_local_scalar_kind(...)`
                 // RMW is dropped by the by-value-aggregate-store miscompile, leaving
@@ -5458,6 +5482,23 @@ fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Pani
 
 fn lower_opt_type_is_seq(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
     ir_name_eq(lower_opt_type_named_name(opt), make_name("Seq"))
+}
+
+fn lower_type_expr_seq_named_elem_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeNamed { return ir_empty_name() }
+    if !ir_name_eq(ir_path_first_name((*ty).path), make_name("Seq")) { return ir_empty_name() }
+    match (*ty).type_args {
+        Some(types) => {
+            if (*types).head.kind == TypeExprKind::TypeNamed {
+                return ir_path_first_name((*types).head.path)
+            }
+            if (*types).head.kind == TypeExprKind::TypeKnowledge {
+                return make_name("Knowledge")
+            }
+            ir_empty_name()
+        }
+        None => ir_empty_name(),
+    }
 }
 
 fn lower_type_expr_array_named_elem_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
@@ -7821,6 +7862,14 @@ impl Lowerer {
             i = i - 1
         }
         0 - 1
+    }
+
+    fn lookup_local_index_elem_struct_type(self, name: Name) -> Name with Mut, Panic, Div, Alloc {
+        let layout_idx = self.lookup_local_tuple0_array_elem_layout(name)
+        if layout_idx >= 0 && layout_idx < (*self.struct_layouts).count {
+            return (*self.struct_layouts).entries[layout_idx as usize].type_name
+        }
+        ir_empty_name()
     }
 
     fn bind_local_fixed_array_len(self, name: Name, array_len: i64) -> Lowerer with Mut, Alloc, Panic, Div {
@@ -12283,7 +12332,11 @@ impl Lowerer {
             match (*expr).left {
                 Some(indexed) => {
                     if (*indexed).kind == ExprKind::ExprIdent {
-                        return self.lookup_local_struct_type((*indexed).name)
+                        let indexed_type = self.lookup_local_struct_type((*indexed).name)
+                        if ir_name_eq(indexed_type, make_name("Seq")) {
+                            return self.lookup_local_index_elem_struct_type((*indexed).name)
+                        }
+                        return indexed_type
                     }
                     if (*indexed).kind == ExprKind::ExprFieldAccess {
                         return self.field_array_elem_type_name_for_base_ref(&(*indexed).left, (*indexed).name)
@@ -12298,6 +12351,11 @@ impl Lowerer {
     fn index_base_elem_struct_type_ref(self, base_opt: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    if ir_name_eq(self.lookup_local_struct_type((*base_expr).name), make_name("Seq")) {
+                        return self.lookup_local_index_elem_struct_type((*base_expr).name)
+                    }
+                }
                 if (*base_expr).kind == ExprKind::ExprFieldAccess {
                     return self.field_array_elem_type_name_for_base_ref(&(*base_expr).left, (*base_expr).name)
                 }
@@ -14854,6 +14912,16 @@ impl Lowerer {
         }
         if lower_opt_type_is_seq(&s.ty) {
             lo = lo.bind_local_struct_type(s.name, make_name("Seq"))
+            match s.ty {
+                Some(seq_ty) => {
+                    let seq_elem = lower_type_expr_seq_named_elem_name(&(*seq_ty))
+                    lo = lo.bind_local_tuple0_array_elem_layout(
+                        s.name,
+                        lower_struct_layout_index_of(&(*lo.struct_layouts), seq_elem),
+                    )
+                }
+                None => {}
+            }
         }
         // An ARRAY local records its ELEMENT type, so `arr[i].field` can be
         // resolved by (layout, field) instead of by scanning every layout for
@@ -15008,6 +15076,10 @@ impl Lowerer {
                     let src_st = lo.lookup_local_struct_type((*expr_box).name)
                     if src_st.len > 0 {
                         lo = lo.bind_local_struct_type(s.name, src_st)
+                    }
+                    let src_elem_layout = lo.lookup_local_tuple0_array_elem_layout((*expr_box).name)
+                    if src_elem_layout >= 0 {
+                        lo = lo.bind_local_tuple0_array_elem_layout(s.name, src_elem_layout)
                     }
                 }
             }
