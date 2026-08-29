@@ -119,6 +119,10 @@ before any request. EOF before a request is admissible evidence only for an
 explicit pre-request refusal control, such as the same-UID principal. The same
 EOF in the treatment or a binding case fails the experiment.
 
+The descriptor-absence control removes both `OpenFile=` and the inherited-FD
+environment declaration. A declared but invalid descriptor is a separate
+failure class and cannot satisfy the absence control.
+
 A passing host receipt may set only:
 
 ```text

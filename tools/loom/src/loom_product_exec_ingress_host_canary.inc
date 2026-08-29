@@ -326,7 +326,6 @@ class ProductExecIngressHostCase {
           "--setenv=SOUNIO_LOOM_HOOK_TEST_MODE=1",
           "--setenv=SOUNIO_LOOM_EXEC_INGRESS_REQUIRED=1",
           "--setenv=SOUNIO_LOOM_EXEC_INGRESS_PROBE_ONLY=1",
-          "--setenv=SOUNIO_LOOM_EXEC_INGRESS_FD=3",
           "--setenv=GIT_CONFIG_COUNT=1",
           "--setenv=GIT_CONFIG_KEY_0=safe.directory",
           "--setenv=GIT_CONFIG_VALUE_0=" + product_root_,
@@ -350,6 +349,7 @@ class ProductExecIngressHostCase {
         arguments.push_back("--property=Group=root");
       }
       if (descriptor_present_) {
+        arguments.push_back("--setenv=SOUNIO_LOOM_EXEC_INGRESS_FD=3");
         arguments.push_back("--property=OpenFile=" + socket_path_ +
                             ":loom-exec-ingress");
       }
