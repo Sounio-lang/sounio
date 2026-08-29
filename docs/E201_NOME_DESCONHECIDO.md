@@ -71,3 +71,48 @@ existe: o teste que "verifica" propagação GUM nunca imprimiu nada.
 Os 13 programas precisam de triagem individual: para cada chamada, implementar a função que
 falta ou remover a chamada. **Não afrouxar o E201 para fazer a suíte ficar verde** — o verde
 anterior era o problema.
+
+---
+
+# Triagem dos 13 — resultado
+
+Suíte final: **638 passam, 3 falham, 223 pulados**. As 3 são as pré-existentes
+(`g2_abide_sounio`, `test_integral_eq`, `test_heap_vec_generic`), verificadas uma a uma como
+falhando também com o stdlib revertido.
+
+| programa | causa | conserto |
+|---|---|---|
+| `gum_h1_native` | `print_float` não existe | helper local sem divisão (para não forçar `Div` nas assinaturas). **O teste agora imprime: Sounio U = 66,361 contra 67 nm publicado no GUM — dentro dos ±5%.** Estava certo e nunca mostrou. |
+| `gum_iso_budget`, `gum_iso_budget_ode`, `knowledge_octonion_structure`, `rapamycin_epistemic_adaptive`, `rapamycin_iso_budget`, `rapamycin_rk4_budget` | `budget_of` é intrínseco **nunca implementado** | orçamento computado com o que EXISTE: `variance_of` (sombra β⁴) + `sensitivity_of(x,k)` (sombra β⁶), oito chamadas literais. ⚠️ **Achado ao ligar: as sensibilidades saem todas ZERO** — o orçamento por canal não é rastreado, só a variância total, que confere (5,25 = 4,0+1,0+0,25). Fica visível. |
+| `ontology_transitive`, `ontology_roles_hierarchy`, `ontology_type_bridge` | `make_mammal` / `make_rapamycin` não existiam | construtores no idioma já usado por `make_dog` em `ontology_complex_hierarchy.sio` |
+| `test_dissertation_e2e` | `print_i64` não existe | `print_int`, o builtin do compilador |
+| `test_types` | **não era Sounio** | reescrito. O anterior usava `import`, `-> void`, `std::print("{}", …)`, `Point2D::new`, `.value()` em campos `f64`, e `Vec2`/`Vec3`, que não existem. Comentários próprios: "assume assert_eq". Agora testa a API real (`point2d_*`, `point3d_cross`, `matrix3_*`) com asserções que valem. |
+| `test_pipeline_real_e2e` | **bloqueado por defeito de compilador** | ver abaixo |
+
+## O caso fMRI — três camadas, duas consertadas
+
+O teste passava imprimindo `SCIENCE_FMRI_OK` **sem jamais abrir um arquivo**:
+`run_fmri_pipeline_gate` não existia e o compilador devolvia 0. Escrito o gate real
+(`stdlib/fmri/pipeline_real.sio`, carrega os dois volumes e confere a grade), a cadeia apareceu:
+
+1. ✅ `nifti_read_file_buffer_into` rejeitava **todo binário** como truncado: checava
+   `read_file(path).len()`, que é `strlen` e para no primeiro NUL — offset **2** nesta fixture.
+   Limite passa a vir de `file_size` (stat).
+2. ✅ `nifti_str_byte_u8` limitava o índice pelo mesmo `strlen`. Novo `nifti_byte_at(src, idx,
+   limit)` com limite explícito.
+3. 🔴 **Não consertado.** `read_file` devolve `string`; os acessores declaram `[i8; 0]`. A chamada
+   é **erro de tipo (E001)** e o que o compilador emite lê ZEROS. *A pista NIfTI nativa nunca foi
+   bem-tipada.* Consertar exige decisão de linguagem: uma primitiva de indexação de bytes sobre
+   `string`, ou `read_file` devolvendo um tipo de bytes.
+
+A fixture está **perfeita**, verificada byte a byte: NIfTI-1, magic `n+1`, dim 2×2×2×4, uint8,
+`vox_offset` 352, 384 bytes exatos — precisa de 384 e tem 384. O defeito nunca foi dela.
+
+O teste ficou `//@ ignore` **com o motivo nomeado no cabeçalho**, não para ficar verde.
+
+## Dois achados laterais, para não se perderem
+
+- `sensitivity_of` existe, compila e **devolve zero** — o orçamento por canal do GUM não está
+  rastreado.
+- `arity mismatch` e `assignment type mismatch` ainda são **warnings** (`tc_error`), não erros.
+  São o próximo E201: mesma classe de buraco, mesma função de reporte.
