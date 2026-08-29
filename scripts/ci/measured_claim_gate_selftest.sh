@@ -20,6 +20,7 @@ GATE="$ROOT_DIR/scripts/ci/measured_claim_gate.sh"
 W="$(mktemp -d /tmp/measured_claim_selftest.XXXXXX)"
 trap 'rm -rf "$W"' EXIT
 printf 'id\tdescription\tclaim_cmd\tmeasure_cmd\n' > "$W/hdr"
+printf 'id\tdescription\tclaim_cmd\tmeasure_cmd\tfix_cmd\n' > "$W/hdr5"
 
 run_case() {  # run_case <name> <expect pass|fail> <claims-file> <baseline-file> [needle]
   local name="$1" expect="$2" claims="$3" base="$4" needle="${5:-}" out rc
@@ -68,8 +69,18 @@ run_case "baseline does not excuse unreadable" fail "$W/c_silent" "$W/base_silen
 printf 'fixed\n' > "$W/base_fixed"
 run_case "fixed row tells you to prune the baseline" pass "$W/c_fixed" "$W/base_fixed" "FIXED" || exit 1
 
+# RED — a drift must print the command that repairs it. A gate that says a
+# number is wrong and leaves the reader to find the regeneration flag is why
+# seven pull requests and three agents each ran the same search on 2026-08-28.
+{ cat "$W/hdr5"; printf 'withfix\tdrift with a fix\techo 471\techo 468\tbash scripts/ci/regen_me.sh --refresh\n'; } > "$W/c_fix"
+run_case "drift names its fix command" fail "$W/c_fix" "$W/empty_baseline" "FIX:     bash scripts/ci/regen_me.sh --refresh" || exit 1
+
+# RED — a four-column row still works, and says the fix is missing rather than
+# printing an empty FIX line that reads as "no action needed".
+run_case "legacy row admits it has no fix" fail "$W/c_drift" "$W/empty_baseline" "no fix_cmd recorded" || exit 1
+
 # RED — a table that parses to zero rows is not a green gate.
 cat "$W/hdr" > "$W/c_empty"
 run_case "empty table fails" fail "$W/c_empty" "$W/empty_baseline" "zero rows" || exit 1
 
-echo "MEASURED_CLAIM_GATE_SELFTEST_OK: 7 controls, 4 of them RED, each behaved as stated"
+echo "MEASURED_CLAIM_GATE_SELFTEST_OK: 9 controls, 6 of them RED, each behaved as stated"

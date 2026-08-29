@@ -4936,6 +4936,14 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
+                // The implicit tail return carries the same obligation as an
+                // explicit one: `fn f() -> T { 2000000000 }` and
+                // `fn f() -> T { return 2000000000 }` are the same claim. AFTER
+                // the compatibility call above, which reads last_literal_kind for
+                // its int-literal narrowing; this helper zeroes that flag, and the
+                // zeroing is also what stops an explicit `return` inside the body
+                // from being reported a second time here.
+                checker_check_refinement_literal_inplace(c, (*fd).span, sig2.return_type)
             }
             if (*c).multitest_count > 1 && !(*c).multitest_corrected {
                 checker_report_multitest_correction_required_inplace(c, (*fd).span, (*c).multitest_count)
@@ -5283,6 +5291,10 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
+                // Free-function implicit tail return. Same obligation and same
+                // ordering constraint as the impl-method site above; see the
+                // comment there.
+                checker_check_refinement_literal_inplace(c, (*fd).span, sig2.return_type)
             }
             // Raw-reference escape: the body tail yields a reference rooted in a
             // frame-local (e.g. `let r = &x; r` or `Holder { p: &x }`) → dangling.
@@ -5611,6 +5623,29 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
             if !checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type) {
                 checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
             }
+            // A refinement must hold at the RETURN too, not only at a binding.
+            //
+            // Measured on main@88c2ab8ee8: checker_check_refinement_literal_inplace
+            // had exactly two callers (9627, 9687), both in the let/var handlers,
+            // and check/compat.sio has zero references to refinement_id. So under
+            // Madaros a refinement was enforced where a value is BOUND and nowhere
+            // else, and
+            //
+            //     fn f() -> { n: i64 | n >= 0 } { return 0 - 5 }
+            //
+            // was accepted. lean_single rejects it; tests/known_failures/
+            // hardened_diagnostics_full_suite.txt records the split and calls the
+            // Madaros side "a compiler defect, not a manifest one" (2026-08-23).
+            //
+            // Scope: the helper only acts when last_literal_kind is 1 or 2, so
+            // this closes the LITERAL return. `return x` for an ident, and a
+            // literal propagated through a let, are still accepted here -- they
+            // need dataflow this site does not have.
+            //
+            // Placed AFTER the compatibility check on purpose: this helper zeroes
+            // last_literal_kind on exit, and checker_fn_body_return_compatible_inplace
+            // reads that same flag for its int-literal return narrowing.
+            checker_check_refinement_literal_inplace(c, e.span, (*c).current_return_type)
             // Raw-reference escape: `return &local` / `return r` where r is rooted
             // in a frame-local → dangling reference.
             if checker_expr_provenance(c, *val_expr) == 1 {
@@ -15388,6 +15423,9 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     // that a call no longer fabricates 0.
     if name_eq(n, make_name("pow")) { return true }              // id 49
     if name_eq(n, make_name("tgamma")) { return true }           // id 50
+    if name_eq(n, make_name("__sounio_seq_push")) { return true } // id 51
+    if name_eq(n, make_name("__sounio_seq_get")) { return true }  // id 52
+    if name_eq(n, make_name("__sounio_seq_set")) { return true }  // id 53
     false
 }
 
