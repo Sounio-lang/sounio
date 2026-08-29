@@ -8,6 +8,18 @@ let pinned_manifest_sha256 =
 let pinned_sandbox_sha256 =
   "52231e1caf55bcbc667b269f49c63599a6f7db4767ae6a039580d0ff853db712"
 
+let pinned_activation_manifest_sha256 =
+  "f2da55138bcfe5a8a2c65ebd79c1e534f152b33af5c6cc3d1f2b4eb3b4af6e7e"
+
+let pinned_activation_runtime_sha256 =
+  "d7521e8fb60501dc8192ebbeade4a09649164c5b509a2dda8af5c465bf3de793"
+
+let pinned_resident_v5_manifest_sha256 =
+  "b3cf8c1e0524be35fc67b2b5a779bad9a9291195d65dc82dbc87595396fb5353"
+
+let pinned_activation_projection_sha256 =
+  "8a72e9bcd510a751b856cf29960b7389486defcc4d13d7614546023d3d355014"
+
 let authority_timeout_seconds = 5.0
 let max_file_bytes = 8 * 1024 * 1024
 
@@ -31,6 +43,17 @@ type policy = {
   runtime_sha256 : string;
 }
 
+type activation_dark_policy = {
+  action_manifest_sha256 : string;
+  semantics_sha256 : string;
+  operational_manifest_sha256 : string;
+  resident_manifest_sha256 : string;
+  projection_sha256 : string;
+  frame : string;
+  frame_sha256 : string;
+  label : string;
+}
+
 type outcome = {
   kind : int;
   exit_code : int;
@@ -46,6 +69,10 @@ type outcome = {
   authority_generation_sha256 : string;
   authority_pid : int;
   authority_sequence : int;
+  activation_dark_code : int;
+  activation_dark_result_sha256 : string;
+  activation_dark_projection_sha256 : string;
+  activation_dark_capsule_state : string;
   closure_code : int;
   closure_result_sha256 : string;
 }
@@ -215,6 +242,117 @@ let load_policy root =
     semantics_u32 = digest_u32_field manifest "semantics_sha256_u32";
     runtime;
     runtime_sha256 }
+
+let find_substring value marker =
+  let rec loop offset =
+    if offset + String.length marker > String.length value then None
+    else if String.sub value offset (String.length marker) = marker then
+      Some offset
+    else loop (offset + 1)
+  in
+  loop 0
+
+let load_activation_dark_policy root =
+  let action_path =
+    match test_override "SOUNIO_LOOM_ACTIVATION_DARK_ACTION_MANIFEST" with
+    | Some path -> path
+    | None ->
+        Filename.concat root
+          "tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
+  in
+  let operational_path =
+    match test_override "SOUNIO_LOOM_ACTIVATION_DARK_OPERATIONAL_MANIFEST" with
+    | Some path -> path
+    | None ->
+        Filename.concat root "tools/loom/kernel_peer_activation_capsule.runtime.v1"
+  in
+  let resident_path =
+    match test_override "SOUNIO_LOOM_ACTIVATION_DARK_RESIDENT_MANIFEST" with
+    | Some path -> path
+    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v5"
+  in
+  let projection_path =
+    match test_override "SOUNIO_LOOM_ACTIVATION_DARK_PROJECTION" with
+    | Some path -> path
+    | None ->
+        Filename.concat root
+          "tools/loom/kernel_peer_activation_capsule.current.v1"
+  in
+  if sha256_file action_path <> pinned_activation_manifest_sha256 then
+    failf "activation-dark-action-manifest-hash-mismatch";
+  if sha256_file operational_path <> pinned_activation_runtime_sha256 then
+    failf "activation-dark-operational-manifest-hash-mismatch";
+  if sha256_file resident_path <> pinned_resident_v5_manifest_sha256 then
+    failf "activation-dark-resident-manifest-hash-mismatch";
+  if sha256_file projection_path <> pinned_activation_projection_sha256 then
+    failf "activation-dark-projection-hash-mismatch";
+  let action = parse_manifest action_path in
+  let operational = parse_manifest operational_path in
+  let resident = parse_manifest resident_path in
+  if required action "schema"
+       <> "loom-kernel-peer-activation-capsule-authority-freeze-v1"
+     || required action "stage" <> "SEMANTICS_FROZEN"
+     || required action "producing_language" <> "Sounio"
+     || required action "language_role" <> "SEMANTIC_AUTHORITY"
+     || required action "action" <> "9031"
+     || required action "operational_realization" <> "false"
+     || required action "production_activation" <> "false"
+     || required action "capsule_is_bearer" <> "false"
+  then failf "activation-dark-action-state-invalid";
+  if required operational "schema"
+       <> "loom-kernel-peer-activation-capsule-ocaml-runtime-v1"
+     || required operational "stage" <> "OPERATIONAL_REALIZATION_FROZEN"
+     || required operational "producing_language" <> "OCaml"
+     || required operational "language_role" <> "OPERATIONAL_REALIZATION"
+     || required operational "semantic_authority" <> "Sounio"
+     || required operational "operational_realization" <> "true"
+     || required operational "production_activation" <> "false"
+     || required operational "parent_9031_manifest_sha256"
+          <> pinned_activation_manifest_sha256
+     || required operational "parent_resident_v5_manifest_sha256"
+          <> pinned_resident_v5_manifest_sha256
+  then failf "activation-dark-operational-state-invalid";
+  if required resident "schema" <> "loom-resident-membrane-runtime-v5"
+     || required resident "runtime_frozen" <> "true"
+     || required resident "process_model" <> "single-resident-sounio-pid"
+     || required resident "parent_9031_sha256"
+          <> pinned_activation_manifest_sha256
+     || required resident "route_9031" <> "6"
+     || required resident "production_activation" <> "false"
+  then failf "activation-dark-resident-state-invalid";
+  let label =
+    match test_override "SOUNIO_LOOM_ACTIVATION_DARK_LABEL" with
+    | Some label -> label
+    | None -> "current_material"
+  in
+  if label <> "current_material" && label <> "seal" then
+    failf "activation-dark-label-invalid";
+  let prefix = "CASE label=" ^ label ^ " EXPECT code=" in
+  let matches =
+    read_file projection_path |> String.split_on_char '\n'
+    |> List.filter (fun line -> starts_with line prefix)
+  in
+  let line =
+    match matches with
+    | [ line ] -> line
+    | [] -> failf "activation-dark-projection-label-missing"
+    | _ -> failf "activation-dark-projection-label-duplicate"
+  in
+  let marker = " FRAME " in
+  let offset =
+    match find_substring line marker with
+    | Some offset -> offset + String.length marker
+    | None -> failf "activation-dark-projection-frame-missing"
+  in
+  let frame = String.sub line offset (String.length line - offset) in
+  if frame = "" || not (starts_with frame "9031 3 1 ") then
+    failf "activation-dark-projection-frame-invalid";
+  { action_manifest_sha256 = pinned_activation_manifest_sha256;
+    semantics_sha256 = required action "semantics_sha256";
+    operational_manifest_sha256 = pinned_activation_runtime_sha256;
+    resident_manifest_sha256 = pinned_resident_v5_manifest_sha256;
+    projection_sha256 = pinned_activation_projection_sha256;
+    frame; frame_sha256 = sha256 frame; label }
 
 let normalize_absolute cwd value =
   let raw = if Filename.is_relative value then Filename.concat cwd value else value in
@@ -487,6 +625,52 @@ let append_decision ~root ~policy ~sandbox_sha256 ~effect_kind ~target ~frame
       Unix.fsync descriptor;
       Unix.lockf descriptor F_ULOCK 0)
 
+let activation_dark_log_path root =
+  match test_override "SOUNIO_LOOM_ACTIVATION_DARK_LOG" with
+  | Some path -> path
+  | None ->
+      Filename.concat (git_common_dir root)
+        "sounio-loom-product-activation-dark.tsv"
+
+let append_activation_dark_decision ~root ~policy ~capsule_state
+    (decision : Loom_resident.decision) =
+  let path = activation_dark_log_path root in
+  let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      let line =
+        String.concat "\t"
+          [ "schema=loom-product-activation-dark-decision-v1";
+            "utc=" ^ utc_now ();
+            "decision=" ^ (if decision.code = 0 then "ALLOW" else "DENY");
+            "code=" ^ string_of_int decision.code;
+            "authorizing=false";
+            "production_activation=false";
+            "producing_language=Sounio";
+            "language_role=SEMANTIC_AUTHORITY";
+            "operational_language=OCaml";
+            "operational_role=OPERATIONAL_REALIZATION";
+            "action_manifest_sha256=" ^ policy.action_manifest_sha256;
+            "semantics_sha256=" ^ policy.semantics_sha256;
+            "operational_manifest_sha256="
+              ^ policy.operational_manifest_sha256;
+            "resident_manifest_sha256=" ^ policy.resident_manifest_sha256;
+            "projection_sha256=" ^ policy.projection_sha256;
+            "projection_label=" ^ policy.label;
+            "capsule_state_after=" ^ capsule_state;
+            "frame_sha256=" ^ policy.frame_sha256;
+            "authority_result_sha256=" ^ sha256 decision.output;
+            "authority_generation_sha256=" ^ decision.generation_sha256;
+            "authority_pid=" ^ string_of_int decision.resident_pid;
+            "authority_sequence=" ^ string_of_int decision.sequence;
+            "authority_latency_us=" ^ Int64.to_string decision.latency_us ] ^ "\n"
+      in
+      write_all descriptor line;
+      Unix.fsync descriptor;
+      Unix.lockf descriptor F_ULOCK 0)
+
 let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
   if Array.length argv = 0 then failf "subprocess-membrane-command-missing";
   if deadline_ms < 1 || deadline_ms > 120_000 then
@@ -512,6 +696,7 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
   let argv = Array.copy argv in
   argv.(0) <- executable;
   let policy = load_policy root in
+  let activation_policy = load_activation_dark_policy root in
   let environment = Unix.environment () in
   let authority_environment =
     let prohibited_prefixes =
@@ -542,8 +727,28 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
   in
   let deadline_hash = sha256 ("deadline_us=" ^ Int64.to_string deadline_us ^ "\n") in
   let surface = surface_for_argv argv in
-  Loom_resident.with_generation_v2 ~root ~environment:authority_environment
-    ~deadline_ms:(remaining_deadline_ms ()) (fun resident ->
+  Loom_peer_activation_capsule.with_cell ~root
+    ~environment:authority_environment ~deadline_ms:(remaining_deadline_ms ())
+    (fun capsule ->
+  if Loom_peer_activation_capsule.manifest_sha256 capsule
+       <> activation_policy.action_manifest_sha256
+     || Loom_peer_activation_capsule.semantics_sha256 capsule
+          <> activation_policy.semantics_sha256
+     || Loom_peer_activation_capsule.resident_v5_sha256 capsule
+          <> activation_policy.resident_manifest_sha256
+  then failf "activation-dark-capsule-binding-mismatch";
+  let resident = Loom_peer_activation_capsule.resident capsule in
+  let activation_decision =
+    Loom_peer_activation_capsule.seal capsule activation_policy.frame
+  in
+  let activation_capsule_state =
+    Loom_peer_activation_capsule.state capsule
+    |> Loom_peer_activation_capsule.state_name
+  in
+  append_activation_dark_decision ~root ~policy:activation_policy
+    ~capsule_state:activation_capsule_state activation_decision;
+  if activation_decision.code = 0 then
+    failf "activation-dark-unexpected-allow";
   let decide_closure () =
     let frame = Loom_effect_closure.current_material_frame root in
     let decision =
@@ -605,6 +810,10 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
       authority_generation_sha256 = Loom_resident.generation resident;
       authority_pid = Loom_resident.pid resident;
       authority_sequence = Loom_resident.sequence resident;
+      activation_dark_code = activation_decision.code;
+      activation_dark_result_sha256 = sha256 activation_decision.output;
+      activation_dark_projection_sha256 = activation_policy.projection_sha256;
+      activation_dark_capsule_state = activation_capsule_state;
       closure_code; closure_result_sha256 }
   else
     let callback (effect_kind, _pid, _syscall, target, active_count) =
@@ -664,6 +873,10 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
       authority_generation_sha256 = Loom_resident.generation resident;
       authority_pid = Loom_resident.pid resident;
       authority_sequence = Loom_resident.sequence resident;
+      activation_dark_code = activation_decision.code;
+      activation_dark_result_sha256 = sha256 activation_decision.output;
+      activation_dark_projection_sha256 = activation_policy.projection_sha256;
+      activation_dark_capsule_state = activation_capsule_state;
       closure_code; closure_result_sha256 })
 
 let exit_status outcome =

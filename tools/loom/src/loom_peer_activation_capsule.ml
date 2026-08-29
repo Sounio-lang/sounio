@@ -292,6 +292,7 @@ let test_eof cell frame =
 
 let state cell = cell.state
 let is_poisoned cell = cell.authority_poisoned
+let resident cell = cell.resident
 let generation cell = Loom_resident.generation cell.resident
 let resident_pid cell = Loom_resident.pid cell.resident
 let sequence cell = Loom_resident.sequence cell.resident

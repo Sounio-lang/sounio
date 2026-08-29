@@ -10809,13 +10809,16 @@ let subprocess_membrane_probe_command cli =
     Loom_membrane.run_probe ~root ~cwd ~scope ~deadline_ms ~argv
   in
   Printf.printf
-    "LOOM_SUBPROCESS_MEMBRANE_PROBE kind=%d exit=%d signal=%d elapsed_us=%Ld events=%d decision_code=%d timed_out=%s policy_error=%s authority=resident-Sounio-v2 authority_pid=%d authority_generation_sha256=%s authority_sequence=%d closure_authority=Sounio closure_code=%d closure_result_sha256=%s closure_material=refused sandbox=bubblewrap sandbox_sha256=%s sandbox_ready=%s rootfs=readonly scope=readwrite tmp=ephemeral network=isolated pidns=isolated landlock_abi=%d inherited_fds=closed attachment=refused\n%!"
+    "LOOM_SUBPROCESS_MEMBRANE_PROBE kind=%d exit=%d signal=%d elapsed_us=%Ld events=%d decision_code=%d timed_out=%s policy_error=%s authority=resident-Sounio-v5 authority_pid=%d authority_generation_sha256=%s authority_sequence=%d activation_authority=Sounio activation_code=%d activation_result_sha256=%s activation_projection_sha256=%s activation_capsule_state=%s activation_mode=dark activation_authorizing=false production_activation=false closure_authority=Sounio closure_code=%d closure_result_sha256=%s closure_material=refused sandbox=bubblewrap sandbox_sha256=%s sandbox_ready=%s rootfs=readonly scope=readwrite tmp=ephemeral network=isolated pidns=isolated landlock_abi=%d inherited_fds=closed attachment=refused\n%!"
     outcome.kind outcome.exit_code outcome.signal outcome.elapsed_us
     outcome.event_count outcome.decision_code
     (if outcome.timed_out then "true" else "false")
     (if outcome.policy_error then "true" else "false")
     outcome.authority_pid outcome.authority_generation_sha256
-    outcome.authority_sequence outcome.closure_code
+    outcome.authority_sequence outcome.activation_dark_code
+    outcome.activation_dark_result_sha256
+    outcome.activation_dark_projection_sha256
+    outcome.activation_dark_capsule_state outcome.closure_code
     outcome.closure_result_sha256 outcome.sandbox_sha256
     (if outcome.sandbox_ready then "true" else "false") outcome.landlock_abi;
   Loom_membrane.exit_status outcome
