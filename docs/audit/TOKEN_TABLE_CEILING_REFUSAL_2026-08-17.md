@@ -148,6 +148,59 @@ MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros bash scripts/ci/token_table_c
 # TOKEN_TABLE_CEILING_GATE_OK: E229 refusal on source-byte and token-table ceilings
 ```
 
+### Re-measured again on the second rebase (2026-08-29, base `origin/main@64db7167f8`)
+
+Every line above was re-run, not republished, on a Madaros built from **this**
+tree (`scripts/ci/build_modular_madaros.sh`, `chmod +x`, `MADAROS_RAW_BIN=`).
+
+Baseline, both engines the tree actually ships:
+
+```
+# env -u SOUC_BIN TOKEN_CEILING_EXPECT=baseline_silent bash scripts/ci/token_table_ceiling_gate.sh
+#   (committed bin/souc -> Madaros ELF, which predates the refusal)
+  W1 source-clip: rc=0
+  W1 baseline CONFIRMED: rc=0 while file contains bytes past 2097152 (silent clip)
+  W2 token-table: rc=139
+TOKEN_TABLE_CEILING_GATE_OK: baseline: silent clip / non-E229 failure still present (W1 rc=0 W2 rc=139)
+
+# SOUNIO_SOUC_ENGINE=lean_single, same command
+  W1 source-clip: rc=0
+  W1 baseline CONFIRMED: rc=0 while file contains bytes past 2097152 (silent clip)
+  W2 token-table: rc=1
+TOKEN_TABLE_CEILING_GATE_OK: baseline: silent clip / non-E229 failure still present (W1 rc=0 W2 rc=1)
+```
+
+W1 rc=0 reproduces on both. **W2 on the committed Madaros is rc=139, a
+segmentation fault, not the rc=1 parse-error flood recorded on 2026-08-17.** A
+crash is not a refusal either, so the baseline claim is unaffected — but the
+2097152-comma input SEGVs the shipped compiler, which the earlier note did not
+say and a reader would not guess.
+
+Two invocation traps, both hit while producing the table above:
+
+- The baseline must be taken through `bin/souc` (with `SOUNIO_SOUC_ENGINE=lean_single`
+  where the seed is the subject), **not** by pointing `SOUC_BIN` at
+  `bin/souc-lean-single-x86_64` directly. The raw seed ELF returns rc=1 on W1
+  where the wrapper returns rc=0; only the wrapper path is the compiler a user
+  invokes, and only it shows the silent clip.
+- `MADAROS_RAW_BIN` pointing at a non-executable ELF used to fall through to the
+  committed compiler in silence. It aborts loudly now; `chmod +x` anyway.
+
+After, on the Madaros built from this rebased source:
+
+```
+  W1 source-clip: rc=1  ...  W1 OK: E229 on source past byte wall
+  W2 token-table: rc=1  ...  W2 OK: E229 on token table full
+TOKEN_TABLE_CEILING_GATE_OK: E229 refusal on source-byte and token-table ceilings
+```
+
+The identifier slot was the one merge decision in this rebase: `main` moved it to
+`parser_set_token_scalar` + `keyword_lookup` (#2229, so a new keyword needs no arm
+in `parser_set_token_flat`'s dispatch). That is kept, with the fail-closed guard
+inlined around it — the guard is about the token slot, not about which setter
+writes it. The refusal above is measured through that resolution.
+
+
 **Scope limit, stated plainly.** This patch changes `self-hosted/lexer/mod.sio`
 only, i.e. **Madaros**. `lean_single` — still the bootstrap seed, still reachable
 via `SOUNIO_SOUC_ENGINE=lean_single`, and the engine several dissertation gates
@@ -155,34 +208,49 @@ force — retains the silent clip (the baseline run above *is* that engine, at t
 base). E229 is not yet a whole-toolchain guarantee; closing lean_single is
 follow-up work, not something this note may claim.
 
-### Open CI finding: `diagnostic_identity_gate.sh` reports E229 as orphaned
+### Resolved: `diagnostic_identity_gate.sh` — orphan gone, collision found and fixed
 
-Measured on the rebase base, **this is not a defect in E229 and must not be
-"fixed" by raising a ceiling**:
+The version of this note written on 2026-08-17 recorded an **open** finding and
+left a gate red on purpose: `diagnostic_identity_gate.sh` set
+`CHECK="self-hosted/check/check.sio"` and surveyed that **one file** for
+emitters, so E229 — emitted from `self-hosted/lexer/mod.sio`
+(`lexer_report_token_overflow_if_any`) — read as a catalogue row with no
+emitter, `orphaned=22` against a ceiling of 21. The note argued the correct
+repair was to widen the survey, in its own change with its own measurement, and
+explicitly refused to raise `SOUNIO_DIAG_ORPHANED_CEILING` to absorb it.
 
-| Tree | Result |
-|------|--------|
-| `origin/main@055825a3f9` | `collisions=25 (25) undocumented=140 (140) orphaned=21 (21)` → **pass** |
-| this branch | `orphaned=22 (ceiling 21)` → **fail** |
+**That is exactly what happened, upstream and independently.** #2260 widened the
+aperture to every `self-hosted/**/*.sio` and re-derived all three populations
+from the wider scan:
 
-Cause: `scripts/ci/diagnostic_identity_gate.sh:74` sets `CHECK="self-hosted/check/check.sio"`
-and surveys **that one file** for emitters. E229 is emitted from
-`self-hosted/lexer/mod.sio` (`lexer_report_token_overflow_if_any`), so the gate
-sees a catalogue row with no emitter and calls it orphaned. This is verbatim the
-blindness the gate's own header warns about — *"There are TWO emission mechanisms
-and a survey of one reports the other as free"* — now with a third mechanism
-(the lexer) outside its input.
+| population | narrow (one file) | wide (`self-hosted/**/*.sio`) |
+|---|---:|---:|
+| collisions | 25 | **34** |
+| undocumented | 140 | **141** |
+| orphaned | 21 | **14** |
 
-Two ways forward, and only one is honest:
+Orphaned *fell* by seven: seven of the twenty-one "orphans" were emitted all
+along, from `lean_single.sio`, `parser/types.sio`, `parser/stmts.sio`,
+`parser/exprs.sio` and `lexer/mod.sio`. E229 is not an orphan under the wide
+aperture, and the section this replaces no longer describes any state of the
+repository.
 
-- **Extend the survey** to the lexer's emitter file, and re-freeze the three
-  populations from the wider scan. Correct, but it moves a frozen ratchet
-  globally and belongs in its own change with its own measurement.
-- **Raise `SOUNIO_DIAG_ORPHANED_CEILING` 21 → 22.** Rejected here. A ceiling
-  raised so a new row goes green is the same move this note rejects for the
-  2097152 wall; doing it in the E229 change would be self-refuting.
+**One real defect surfaced when the aperture widened, and it is fixed here.**
+Under the wide scan E229 read as a **collision**, not an orphan: the catalogue
+row said `token table / source byte buffer full (fail-closed)` while
+`lexer/mod.sio` prints `source exceeds lexer byte buffer (capacity 2097152
+bytes)`. Two texts, one number — precisely what the gate exists to catch. The
+row now reads `source exceeds lexer byte buffer, or token table full
+(fail-closed)`, which is what the emitter says and covers both walls.
 
-Left failing and reported, deliberately.
+Measured on this tree, and identical to `origin/main` at the rebase point:
+
+```
+diagnostic_identity: status=pass collisions=34 (ceiling 34) undocumented=141 (ceiling 141) orphaned=14 (ceiling 14)
+DIAGNOSTIC_IDENTITY_OK: no ratchet moved
+```
+
+No ceiling was raised for E229. All three ratchets are where `main` left them.
 
 Witnesses avoid brace-bisect traps: W1 is a complete valid prefix plus pad plus a
 complete trailing item past the wall; W2 is only commas (complete punctuation
