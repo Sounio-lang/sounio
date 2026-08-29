@@ -153,6 +153,72 @@ lean_lib «SounioPireusQuotientNoveltyForge» where
 lean_lib «SounioPireusOperatorLoweringForge» where
   moreLeanArgs := #["-j", "1"]
 
+-- FORMAL_PARITY for the Sounio-owned Pireus Operator Novelty Feedback v7.
+-- Non-default: the chained shards reconstruct all 14x12 normalized
+-- bridge-or-seed residuals without retaining the complete census in one kernel.
+lean_lib «SounioPireusOperatorNoveltyFeedbackCore» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard00» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard01» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard02» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard03» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard04» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard05» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard06» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard07» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard08» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard09» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard10» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard11» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard12» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackShard13» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackChallenge» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParentAction00» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParentAction01» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParentAction02» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParentAction03» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParentAction04» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParentAction05» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParentAction06» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParentAction07» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParentAction08» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParentAction09» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParentAction10» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParentAction11» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackParent» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedbackAtlas» where
+  moreLeanArgs := #["-j", "1"]
+lean_lib «SounioPireusOperatorNoveltyFeedback» where
+  moreLeanArgs := #["-j", "1"]
+
 -- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
 -- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
 -- sweeps (16x16 complex greedy over 1..15) build in ~10s, so kept as a default_target.
