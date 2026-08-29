@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 ## Status
 
-Preregistered. The canonical semantic surface will be Sounio action `9031` in
+Sounio executable; semantics are not yet frozen. The canonical semantic surface is action `9031` in
 `stdlib/coordination/loom_kernel_peer_activation_capsule_authority.sio`.
 
 ## Concept
