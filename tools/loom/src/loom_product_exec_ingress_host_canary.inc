@@ -168,12 +168,12 @@ class ProductExecIngressHostCase {
   ProductIngressHostRun execute() {
     if (descriptor_present_) create_listener();
     spawn_systemd_client();
+    close_input();
     if (descriptor_present_) {
       accept_guardian_connection();
       await_identity();
       exchange_binding();
     }
-    close_input();
     collect_client();
     ProductIngressHostRun result = observation();
     cleanup_noexcept();
