@@ -260,6 +260,7 @@ set -e
   fail 'rebuilt Sounio authority lost the causal sabotage'
 
 REBUILT_CAPSULE="$WORK/capsule.tar"
+mkdir -p "$SOURCE_ROOT/tools/loom/_build"
 bash "$SOURCE_ROOT/$(field capsule_builder_path)" --output "$REBUILT_CAPSULE" >/dev/null
 [[ "$(file_hash "$REBUILT_CAPSULE")" == "$(field capsule_sha256)" ]] ||
   fail 'measured host capsule is not reproducible from its source commit'
