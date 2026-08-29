@@ -655,8 +655,27 @@ bool product_contains(const std::string& value, std::string_view marker) {
   return value.find(marker) != std::string::npos;
 }
 
-void require_product_case(bool condition, std::string_view reason) {
-  if (!condition) throw Error(std::string(reason));
+std::string product_case_diagnostic(const ProductIngressHostRun& run) {
+  return " hook_code=" + std::to_string(run.hook_code) +
+         " main_pid=" + std::to_string(run.main_pid) +
+         " main_uid=" + std::to_string(run.main_uid) +
+         " main_gid=" + std::to_string(run.main_gid) +
+         " descriptor_peer_pid=" +
+         std::to_string(run.descriptor_peer_pid) +
+         " descriptor_peer_uid=" +
+         std::to_string(run.descriptor_peer_uid) +
+         " identity_authenticated=" +
+         (run.identity_authenticated ? "true" : "false") +
+         " output=" + product_compact_diagnostic(run.output) +
+         " ingress_log=" + product_compact_diagnostic(run.ingress_log) +
+         " hook_log=" + product_compact_diagnostic(run.hook_log);
+}
+
+void require_product_case(bool condition, std::string_view reason,
+                          const ProductIngressHostRun& run) {
+  if (!condition) {
+    throw Error(std::string(reason) + product_case_diagnostic(run));
+  }
 }
 
 int selftest_product_exec_ingress_host(
@@ -722,7 +741,8 @@ int selftest_product_exec_ingress_host(
           product_contains(treatment.ingress_log,
                            "production_activation=false\t") &&
           !std::filesystem::exists(sentinel_prefix),
-      "dynamic-user treatment did not reach the frozen Sounio denial");
+      "dynamic-user treatment did not reach the frozen Sounio denial",
+      treatment);
 
   const ProductIngressHostRun authority_sabotage =
       run("seal", "/usr/bin/touch " + sentinel_prefix + "-allow", true, true,
@@ -734,7 +754,8 @@ int selftest_product_exec_ingress_host(
           product_contains(authority_sabotage.output,
                            "product-exec-ingress-dark-unexpected-allow") &&
           !std::filesystem::exists(sentinel_prefix + "-allow"),
-      "Sounio authority sabotage did not causally refuse at ExecIngress");
+      "Sounio authority sabotage did not causally refuse at ExecIngress",
+      authority_sabotage);
 
   const ProductIngressHostRun binding_sabotage =
       run("current_material", "/usr/bin/touch " + sentinel_prefix + "-bind",
@@ -745,7 +766,7 @@ int selftest_product_exec_ingress_host(
           product_contains(binding_sabotage.output,
                            "product-exec-ingress-response-binding-mismatch") &&
           !std::filesystem::exists(sentinel_prefix + "-bind"),
-      "descriptor binding sabotage was not refused");
+      "descriptor binding sabotage was not refused", binding_sabotage);
 
   const ProductIngressHostRun guardian_death =
       run("current_material", "/usr/bin/touch " + sentinel_prefix + "-death",
@@ -755,7 +776,7 @@ int selftest_product_exec_ingress_host(
           product_contains(guardian_death.output,
                            "product-exec-ingress-response-eof") &&
           !std::filesystem::exists(sentinel_prefix + "-death"),
-      "HostGuardian death did not fail closed");
+      "HostGuardian death did not fail closed", guardian_death);
 
   const ProductIngressHostRun same_uid =
       run("current_material", "/usr/bin/touch " + sentinel_prefix + "-same",
@@ -770,7 +791,7 @@ int selftest_product_exec_ingress_host(
           product_contains(same_uid.ingress_log,
                            "reason=peer-not-distinct\t") &&
           !std::filesystem::exists(sentinel_prefix + "-same"),
-      "same-UID host control was not refused");
+      "same-UID host control was not refused", same_uid);
 
   const ProductIngressHostRun missing =
       run("current_material", "/usr/bin/touch " + sentinel_prefix + "-missing",
@@ -782,7 +803,7 @@ int selftest_product_exec_ingress_host(
                            "product-exec-ingress-descriptor-absent") &&
           product_contains(missing.ingress_log, "reason=descriptor-absent\t") &&
           !std::filesystem::exists(sentinel_prefix + "-missing"),
-      "descriptor absence did not fail closed");
+      "descriptor absence did not fail closed", missing);
 
   const ProductIngressHostRun python =
       run("current_material",
@@ -799,7 +820,7 @@ int selftest_product_exec_ingress_host(
           product_contains(rust.ingress_log, "decision_authority=Sounio\t") &&
           !std::filesystem::exists(sentinel_prefix + "-python") &&
           !std::filesystem::exists(sentinel_prefix + "-rust"),
-      "prohibited oracle attempt crossed the dark product ingress");
+      "prohibited oracle attempt crossed the dark product ingress", python);
 
   std::cout
       << "LOOM_PRODUCT_EXEC_INGRESS_DYNAMIC_USER_HOST_GATE PASS"
