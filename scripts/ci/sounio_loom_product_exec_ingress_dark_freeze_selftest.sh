@@ -55,7 +55,7 @@ expect_field semantic_action 9031
 expect_field parent_exec_grant_action 9030
 expect_field operational_language OCaml
 expect_field operational_role OPERATIONAL_ATTACHMENT
-expect_field runtime_version 2026.08.29.41
+expect_field runtime_version 2026.08.29.40
 expect_field descriptor_transport unix-stream-inherited
 expect_field descriptor_is_bearer false
 expect_field descriptor_dark_attached true
@@ -143,7 +143,7 @@ runtime_sha256="$(sha256sum "$runtime" | cut -d ' ' -f 1)"
 [[ "$runtime_sha256" == "$(record_value "$MANIFEST" runtime_sha256)" ]] ||
   fail 'native runtime hash drifted'
 runtime_info="$($runtime runtime-version)"
-[[ "$runtime_info" == *'runtime_version=2026.08.29.41'* && \
+[[ "$runtime_info" == *'runtime_version=2026.08.29.40'* && \
    "$runtime_info" == *'language=OCaml'* ]] ||
   fail "native runtime identity drifted: $runtime_info"
 
@@ -155,4 +155,4 @@ if rg -n 'DENY50[2-9]|DENY510|ALLOW code=0 reason=allow' \
 fi
 
 printf '%s\n' \
-  "sounio-loom-product-exec-ingress-dark-freeze-selftest: PASS semantic_authority=Sounio action=9031 parent_action=9030 operational_attachment=OCaml implementation_commit=$implementation_commit runtime_version=2026.08.29.41 runtime_sha256=$runtime_sha256 descriptor_dark_attached=true same_uid_self_broker=refused same_uid_fixture_escape=refused historical_counterexample=preserved causal_sabotage=PASS python_executed=false rust_executed=false distinct_uid_product_broker=false material_execution=false production_activation=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false"
+  "sounio-loom-product-exec-ingress-dark-freeze-selftest: PASS semantic_authority=Sounio action=9031 parent_action=9030 operational_attachment=OCaml implementation_commit=$implementation_commit runtime_version=2026.08.29.40 runtime_sha256=$runtime_sha256 descriptor_dark_attached=true same_uid_self_broker=refused same_uid_fixture_escape=refused historical_counterexample=preserved causal_sabotage=PASS python_executed=false rust_executed=false distinct_uid_product_broker=false material_execution=false production_activation=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false"
