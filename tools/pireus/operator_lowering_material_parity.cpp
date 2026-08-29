@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
       platform.kernel == "Linux" && platform.arch == "x86_64" &&
       lower(platform.cpu_model).find("xeon") != std::string::npos;
 
-  std::cout << "schema=pireus-operator-lowering-material-parity-evidence-v6\n";
+  std::cout << "schema=pireus-operator-lowering-material-identity-evidence-v6.1\n";
   std::cout << "producing_language=C++\n";
   std::cout << "producing_role=MATERIAL_PARITY\n";
   std::cout << "authority_language=Sounio\n";
@@ -190,8 +190,16 @@ int main(int argc, char** argv) {
   std::cout << "semantic_write=false\n";
   std::cout << "expected_result_write=false\n";
   std::cout << "parent_material_receipts_promotable_to_semantic_authority=false\n";
+  std::cout << "material_identity_accounting_recorded=true\n";
+  std::cout << "material_parity_complete=false\n";
+  std::cout << "material_parity_incomplete_reason=NO_GENERATED_LOWERING_EXECUTED\n";
   std::cout << "material_target_coverage_complete=false\n";
   std::cout << "material_lowering_coverage_complete=false\n";
+  std::cout << "observer_check_01=receipt_hash_shapes status=CHECKED\n";
+  std::cout << "observer_check_02=candidate_program_quotient status=CHECKED\n";
+  std::cout << "observer_check_03=target_population_partition status=CHECKED\n";
+  std::cout << "observer_check_04=xeon_identity status=CHECKED\n";
+  std::cout << "checked_observer_predicates=4\n";
   std::cout << "selected_candidate=-1\n";
   std::cout << "claim_ready=false\n";
 
