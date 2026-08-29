@@ -173,6 +173,10 @@ pub struct GL4SearchCertificate {
     pub candidate_swaps: [bool; 16],
     pub candidate_nearest_corpus: [i64; 16],
     pub candidate_equivalent: [bool; 16],
+    pub candidate_equivalence_classes: [i64; 16],
+    pub candidate_equivalence_class_count: i64,
+    pub candidate_canonical_digest_words: [i64; 128],
+    pub corpus_canonical_digest_words: [i64; 24],
     pub selected: GL4GeneratedCandidate,
 }
 
@@ -913,7 +917,7 @@ with Mut, Panic, Div {
 }
 
 fn run_search(universe: &GL4MatrixUniverse) -> GL4SearchWork
-with Mut, Panic, Div {
+with Mut, Panic, Div, Epistemic {
     let corpus = build_corpus_keys(universe)
     var masks: [i64; 16] = [0; 16]
     var distances: [i64; 16] = [0; 16]
@@ -921,6 +925,23 @@ with Mut, Panic, Div {
     var swaps: [bool; 16] = [false; 16]
     var nearest_corpus: [i64; 16] = [0; 16]
     var equivalents: [bool; 16] = [false; 16]
+    var declared_equivalence_classes: [i64; 16] = [0; 16]
+    var declared_equivalence_class_count: i64 = 0
+    var canonical_tables: [i64; 4096] = [0; 4096]
+    var candidate_digest_words: [i64; 128] = [0; 128]
+    var corpus_digest_words: [i64; 24] = [0; 24]
+    var corpus_id: i64 = 1
+    while corpus_id <= PIREUS_GL4_CORPUS_COUNT {
+        let corpus_key = corpus_key_by_id(&corpus, corpus_id)
+        let corpus_key_digest = digest_canonical(&corpus_key)
+        var word: i64 = 0
+        while word < 8 {
+            corpus_digest_words[(corpus_id - 1) * 8 + word] =
+                corpus_key_digest.words[word]
+            word = word + 1
+        }
+        corpus_id = corpus_id + 1
+    }
     var selected = empty_candidate()
     var selected_raw = GL4SignTable { cells: [0; 256] }
     var selected_key = empty_canonical_key()
@@ -955,6 +976,39 @@ with Mut, Panic, Div {
             equivalent_to_corpus: equivalent,
             declared_gl4_gauge_inequivalence: !equivalent && score > 0,
         }
+        var declared_equivalence_class: i64 = 0 - 1
+        var prior: i64 = 0
+        while prior < ordinal && declared_equivalence_class < 0 {
+            var same: bool = true
+            var cell: i64 = 0
+            while cell < 256 && same {
+                if key.table[cell] != canonical_tables[prior * 256 + cell] {
+                    same = false
+                }
+                cell = cell + 1
+            }
+            if same {
+                declared_equivalence_class = declared_equivalence_classes[prior]
+            }
+            prior = prior + 1
+        }
+        if declared_equivalence_class < 0 {
+            declared_equivalence_class = declared_equivalence_class_count
+            declared_equivalence_class_count =
+                declared_equivalence_class_count + 1
+        }
+        declared_equivalence_classes[ordinal] = declared_equivalence_class
+        var cell: i64 = 0
+        while cell < 256 {
+            canonical_tables[ordinal * 256 + cell] = key.table[cell]
+            cell = cell + 1
+        }
+        let key_digest = digest_canonical(&key)
+        var word: i64 = 0
+        while word < 8 {
+            candidate_digest_words[ordinal * 8 + word] = key_digest.words[word]
+            word = word + 1
+        }
         masks[ordinal] = mask
         distances[ordinal] = score
         matrices[ordinal] = key.matrix_code
@@ -982,6 +1036,10 @@ with Mut, Panic, Div {
             candidate_swaps: swaps,
             candidate_nearest_corpus: nearest_corpus,
             candidate_equivalent: equivalents,
+            candidate_equivalence_classes: declared_equivalence_classes,
+            candidate_equivalence_class_count: declared_equivalence_class_count,
+            candidate_canonical_digest_words: candidate_digest_words,
+            corpus_canonical_digest_words: corpus_digest_words,
             selected: selected,
         },
         selected_raw: selected_raw,
@@ -1531,7 +1589,22 @@ fn digest_search(search: &GL4SearchCertificate)
         state = digest_add_bool(state, search.candidate_swaps[ordinal])
         state = digest_add_i64(state, search.candidate_nearest_corpus[ordinal])
         state = digest_add_bool(state, search.candidate_equivalent[ordinal])
+        state = digest_add_i64(
+            state, search.candidate_equivalence_classes[ordinal])
+        var word: i64 = 0
+        while word < 8 {
+            state = digest_add_i64(
+                state, search.candidate_canonical_digest_words[ordinal * 8 + word])
+            word = word + 1
+        }
         ordinal = ordinal + 1
+    }
+    state = digest_add_i64(state, search.candidate_equivalence_class_count)
+    var corpus_word: i64 = 0
+    while corpus_word < 24 {
+        state = digest_add_i64(
+            state, search.corpus_canonical_digest_words[corpus_word])
+        corpus_word = corpus_word + 1
     }
     state = digest_add_i64(state, search.selected.generation_ordinal)
     state = digest_add_i64(state, search.selected.phase_mask)
@@ -1748,6 +1821,11 @@ pub fn pireus_operator_genesis_gl4_evaluate(
         work.search.matrices_per_table != PIREUS_GL4_MATRIX_COUNT ||
         work.search.linear_swap_actions_per_table !=
             PIREUS_GL4_LINEAR_SWAP_ACTIONS || !work.selected_key.valid {
+        failures = failures + 1
+    }
+    if work.search.candidate_equivalence_class_count <= 0 ||
+        work.search.candidate_equivalence_class_count >
+            PIREUS_GL4_CANDIDATE_COUNT {
         failures = failures + 1
     }
     if gauge_failures != 0 || generator_failures != 0 {
