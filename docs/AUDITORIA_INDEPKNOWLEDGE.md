@@ -80,3 +80,66 @@ fachada, uma camada acima — e desta vez com a minha assinatura no commit.
 Enquanto não existir, a Fase 1 sustenta o rigor por outra via, declarada em `24aba6b9c`: o padrão
 é o limite conservador, e toda alegação de independência não provada é **grepável**
 (`indep_declared`, `_independent`). É mais fraco que tipo, e é honesto sobre ser.
+
+---
+
+# ADENDO — por que os passos 1–5 NÃO foram feitos
+
+Ao começar os passos 1–5 (lexer, AST, parser, despacho, lowering), a primeira coisa a verificar
+era se editar `self-hosted/parser` e `self-hosted/check` muda o compilador que roda. **Não muda.**
+
+## O compilador que roda não é o que foi auditado
+
+`bin/souc` é um script que executa `bin/souc-linux-x86_64`. Esse binário é produzido por
+`self-hosted/compiler/lean_single.sio` — **30.049 linhas, um arquivo só**, cujo próprio cabeçalho
+diz "keep lean_single aligned with the 1M-token modular parser/lexer path".
+
+Contagem em `lean_single.sio`:
+
+| símbolo | ocorrências |
+|---|---|
+| `TypeExprKind` | **0** |
+| `TypeKnowledge` | **0** |
+| `TyCondIndep` | **0** |
+| `IndepKnowledge` | **0** |
+| `ty_cond_indep` | **0** |
+| `check_cond_indep_type` | **0** |
+
+E a prova direta: `E072` aparece 2× em `self-hosted/check/epistemic.sio` e **0×** dentro de
+`bin/souc-linux-x86_64`. O checador epistêmico modular **não está no compilador que roda**.
+
+Logo, implementar os passos 1–5 no caminho modular produziria código que parece implementar o
+recurso, num caminho que não é o compilador. Fachada, com a minha assinatura.
+
+## E há um buraco anterior que torna qualquer garantia de tipo inexequível
+
+Testado contra o binário real:
+
+```
+fn f(x: TipoQueNaoExiste<f64>) -> f64 { 1.0 }     → aceito, sem erro nem warning
+fn f(x: IndepKnowledge<f64, a, b | z>) -> f64 {…} → aceito, rc=0
+fn main() -> i64 { let x: i64 = funcao_inexistente(42); x }
+                                                   → COMPILA E RODA, rc=0
+```
+
+Um programa que chama função inexistente compila e executa em silêncio. Enquanto isso for
+verdade, **nenhuma garantia de tipo é executável**: um erro de digitação no nome do tipo-testemunha
+passa direto, e a testemunha "existe" sem existir.
+
+Isto estende o que a memória do projeto já registrava ("nome inexistente = warning +
+`xor eax,eax`"): hoje não é nem warning.
+
+## Ordem honesta do trabalho
+
+1. **Resolução de nomes**: nome desconhecido — de tipo ou de função — passa a ser erro em
+   `lean_single.sio`. É a fundação; sem ela o resto é decorativo. Blast radius desconhecido: parte
+   dos 639 testes que passam pode depender da permissividade, e medir isso É o resultado.
+2. **`IndepKnowledge` em `lean_single.sio`**, que é onde tem efeito — não no caminho modular.
+3. **Reconciliar** o caminho modular com o `lean_single`, ou aposentar um dos dois. Manter duas
+   cópias divergentes do compilador é a causa raiz desta auditoria inteira.
+
+## O que joga a favor
+
+A cadeia de bootstrap **fecha e é reprodutível**, verificado agora:
+`gen1` é byte-idêntico a `bin/souc-linux-x86_64`; `gen1 == gen2`; a reconstrução leva **0,95 s**.
+Qualquer mudança no compilador é verificável em um segundo, com ponto fixo checável por `cmp`.
