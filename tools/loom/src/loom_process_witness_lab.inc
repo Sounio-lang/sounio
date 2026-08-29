@@ -172,6 +172,9 @@ class HostProcessWitnessCell {
     return uid_ != 0 && gid_ != 0 && uid_ != getuid() && gid_ != getgid();
   }
 
+  uid_t uid() const { return uid_; }
+  gid_t gid() const { return gid_; }
+
   ProcessWitnessObservation execute(bool semantic_consumed,
                                     std::string_view close_frame) {
     if (finished_) throw Error("ProcessWitness cell already consumed");

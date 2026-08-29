@@ -125,8 +125,15 @@ SOUNIO_LOOM_HOST_EXEC_QUORUM_FIXTURE_OUTPUT="$fixture_runtime" \
 "$fixture_runtime" > "$DATA/host-exec-quorum-fixtures.v1"
 [[ "$(sha256_file "$DATA/host-exec-quorum-fixtures.v1")" == 523e132c4ab6a41ade56c2421472b092171627087fe4cf55ba4c74ac1f5d98fe ]] ||
   fail 'source-fresh Sounio fixture bundle drifted'
+product_exec_cell_fixture_runtime="$WORK/sounio-loom-product-exec-cell-fixture"
+SOUNIO_LOOM_PRODUCT_EXEC_CELL_FIXTURE_OUTPUT="$product_exec_cell_fixture_runtime" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_product_exec_cell_fixture.sh" >/dev/null
+"$product_exec_cell_fixture_runtime" > "$DATA/product-exec-cell-fixtures.v1"
+[[ "$(sha256_file "$DATA/product-exec-cell-fixtures.v1")" == 08fbe4b2526bd1bdabc587b11fbe69838c97baf00ca34222fb2ca5f248f574b6 ]] ||
+  fail 'source-fresh product ExecCell Sounio fixture bundle drifted'
 chmod 0555 "$BIN"/*
-chmod 0444 "$DATA/host-exec-quorum-fixtures.v1"
+chmod 0444 "$DATA/host-exec-quorum-fixtures.v1" \
+  "$DATA/product-exec-cell-fixtures.v1"
 
 install_root_file() {
   local relative="$1" source="$ROOT_DIR/$1" destination="$AUTHORITY_ROOT/$1" mode=0444
@@ -179,6 +186,14 @@ AUTHORITY_FILES=(
   tools/loom/PRODUCT_DYNAMIC_USER_EXEC_COUNTEREXAMPLE_V1.md
   tools/loom/PRODUCT_DYNAMIC_USER_LANE_CELL_CANARY_V1.md
   tools/loom/evidence/loom-product-dynamic-user-exec-counterexample-v1-20260829.txt
+  tools/loom/product_dynamic_user_lane_cell_host_canary.runtime.v1
+  tools/loom/evidence/loom-product-dynamic-user-lane-cell-host-canary-v1-20260829.txt
+  tools/loom/product_exec_cell_fixture.freeze.v1
+  tools/loom/product_exec_cell_fixture_main.sio
+  scripts/dev/build_sounio_loom_product_exec_cell_fixture.sh
+  scripts/ci/sounio_loom_product_exec_cell_fixture_selftest.sh
+  scripts/ci/sounio_loom_product_exec_cell_fixture_freeze_selftest.sh
+  tools/loom/evidence/loom-product-exec-cell-fixture-v1-20260829.txt
   tools/loom/src/loom_exec_ingress.ml
   tools/loom/src/loom_hook.ml
   tools/loom/src/loom_membrane.ml
@@ -242,6 +257,10 @@ PRODUCT_INGRESS_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/produ
 PRODUCT_INGRESS_CONTRACT_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md")"
 PRODUCT_INGRESS_EVIDENCE_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt")"
 PRODUCT_LANE_CELL_CANARY_CONTRACT_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/PRODUCT_DYNAMIC_USER_LANE_CELL_CANARY_V1.md")"
+PRODUCT_LANE_CELL_CANARY_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/product_dynamic_user_lane_cell_host_canary.runtime.v1")"
+PRODUCT_LANE_CELL_CANARY_EVIDENCE_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/evidence/loom-product-dynamic-user-lane-cell-host-canary-v1-20260829.txt")"
+PRODUCT_EXEC_CELL_FIXTURE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/product_exec_cell_fixture.freeze.v1")"
+PRODUCT_EXEC_CELL_FIXTURE_BUNDLE_SHA256="$(sha256_file "$DATA/product-exec-cell-fixtures.v1")"
 FROZEN_CONTROLLER_RESIDENT_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_resident.ml")"
 FROZEN_CONTROLLER_CELL_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_exec_grant_cell.ml")"
 FROZEN_CONTROLLER_SOURCE_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_exec_grant_controller.ml")"
@@ -254,7 +273,7 @@ FIXTURE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/host_exec_quo
 CONTROLLER_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_grant_controller.runtime.v1")"
 DERIVED_GARDEN_SHA256="$(sha256_file "$ROOT_DIR/tools/loom/GARDEN_HOST_EXEC_QUORUM_DYNAMIC_PRINCIPAL_V1.md")"
 PROCESS_WITNESS_GARDEN_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md")"
-RELEASE_DIGEST="$(printf '%s\n' "$SOURCE_COMMIT" "$BROKER_SHA256" "$CONTROLLER_SHA256" "$RESIDENT_SHA256" "$LOCAL_BARRIER_SHA256" "$HOST_BARRIER_SHA256" "$DERIVED_GARDEN_SHA256" "$PROCESS_WITNESS_CELL_SHA256" "$PROCESS_WITNESS_PAYLOAD_SHA256" "$PROCESS_WITNESS_MANIFEST_SHA256" "$PROCESS_WITNESS_GARDEN_SHA256" "$PRODUCT_RUNTIME_SHA256" "$PRODUCT_LANGUAGE_RUNTIME_SHA256" "$PRODUCT_RESIDENT_RUNTIME_SHA256" "$PRODUCT_INGRESS_MANIFEST_SHA256" "$PRODUCT_LANE_CELL_CANARY_CONTRACT_SHA256" | sha256sum | cut -d ' ' -f 1)"
+RELEASE_DIGEST="$(printf '%s\n' "$SOURCE_COMMIT" "$BROKER_SHA256" "$CONTROLLER_SHA256" "$RESIDENT_SHA256" "$LOCAL_BARRIER_SHA256" "$HOST_BARRIER_SHA256" "$DERIVED_GARDEN_SHA256" "$PROCESS_WITNESS_CELL_SHA256" "$PROCESS_WITNESS_PAYLOAD_SHA256" "$PROCESS_WITNESS_MANIFEST_SHA256" "$PROCESS_WITNESS_GARDEN_SHA256" "$PRODUCT_RUNTIME_SHA256" "$PRODUCT_LANGUAGE_RUNTIME_SHA256" "$PRODUCT_RESIDENT_RUNTIME_SHA256" "$PRODUCT_INGRESS_MANIFEST_SHA256" "$PRODUCT_LANE_CELL_CANARY_CONTRACT_SHA256" "$PRODUCT_LANE_CELL_CANARY_MANIFEST_SHA256" "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST_SHA256" "$PRODUCT_EXEC_CELL_FIXTURE_BUNDLE_SHA256" | sha256sum | cut -d ' ' -f 1)"
 RELEASE_ID="9030-hostq-${RELEASE_DIGEST:0:32}"
 
 cat > "$RELEASE_STAGE/release.manifest.v1" <<EOF
@@ -317,6 +336,14 @@ product_exec_ingress_evidence_path=authority-root/tools/loom/evidence/loom-produ
 product_exec_ingress_evidence_sha256=$PRODUCT_INGRESS_EVIDENCE_SHA256
 product_lane_cell_canary_contract_path=authority-root/tools/loom/PRODUCT_DYNAMIC_USER_LANE_CELL_CANARY_V1.md
 product_lane_cell_canary_contract_sha256=$PRODUCT_LANE_CELL_CANARY_CONTRACT_SHA256
+product_lane_cell_canary_manifest_path=authority-root/tools/loom/product_dynamic_user_lane_cell_host_canary.runtime.v1
+product_lane_cell_canary_manifest_sha256=$PRODUCT_LANE_CELL_CANARY_MANIFEST_SHA256
+product_lane_cell_canary_evidence_path=authority-root/tools/loom/evidence/loom-product-dynamic-user-lane-cell-host-canary-v1-20260829.txt
+product_lane_cell_canary_evidence_sha256=$PRODUCT_LANE_CELL_CANARY_EVIDENCE_SHA256
+product_exec_cell_fixture_manifest_path=authority-root/tools/loom/product_exec_cell_fixture.freeze.v1
+product_exec_cell_fixture_manifest_sha256=$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST_SHA256
+product_exec_cell_fixture_bundle_path=data/product-exec-cell-fixtures.v1
+product_exec_cell_fixture_bundle_sha256=$PRODUCT_EXEC_CELL_FIXTURE_BUNDLE_SHA256
 product_exec_ingress_runtime_path=bin/sounio-loom-runtime
 product_exec_ingress_runtime_sha256=$PRODUCT_RUNTIME_SHA256
 product_language_runtime_path=bin/sounio-loom-language-authority-runtime
@@ -339,6 +366,7 @@ product_resident_runtime_sha256=$PRODUCT_RESIDENT_RUNTIME_SHA256
 product_authority_root_path=authority-root
 product_lane_cell_canary=false
 distinct_uid_product_broker_canary=false
+product_exec_cell_canary=false
 non_bearer_transport=host-measurement-pending
 material_grant=false
 material_execution=false
@@ -369,6 +397,7 @@ host_gate_sha256=$(sha256_file "$META/sounio_loom_host_exec_quorum_host_gate.sh"
 production_activation=false
 product_lane_cell_canary=false
 distinct_uid_product_broker_canary=false
+product_exec_cell_canary=false
 material_grant=false
 material_execution=false
 EOF
@@ -387,5 +416,5 @@ mv -fT "$output_stage" "$OUTPUT"
 printf '%s  %s\n' "$ARCHIVE_SHA256" "$(basename "$OUTPUT")" > "$OUTPUT.sha256"
 chmod 0600 "$OUTPUT.sha256"
 
-printf 'LOOM_HOST_EXEC_QUORUM_CAPSULE_BUILD PASS archive=%s archive_sha256=%s release_id=%s release_manifest_sha256=%s source_commit=%s source_tree_state=%s semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_payload=Sounio process_witness_core=false complete_effects=false product_exec_ingress_action=9031 product_lane_cell_canary=false distinct_uid_product_broker_canary=false production_activation=false material_grant=false material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
+printf 'LOOM_HOST_EXEC_QUORUM_CAPSULE_BUILD PASS archive=%s archive_sha256=%s release_id=%s release_manifest_sha256=%s source_commit=%s source_tree_state=%s semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_payload=Sounio process_witness_core=false complete_effects=false product_exec_ingress_action=9031 product_lane_cell_canary=false distinct_uid_product_broker_canary=false product_exec_cell_canary=false production_activation=false material_grant=false material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
   "$OUTPUT" "$ARCHIVE_SHA256" "$RELEASE_ID" "$MANIFEST_SHA256" "$SOURCE_COMMIT" "$SOURCE_TREE_STATE"

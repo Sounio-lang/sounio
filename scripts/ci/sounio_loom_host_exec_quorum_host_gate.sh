@@ -118,6 +118,10 @@ PRODUCT_INGRESS_MANIFEST="$(verify_binding product_exec_ingress_manifest_path pr
 PRODUCT_INGRESS_CONTRACT="$(verify_binding product_exec_ingress_contract_path product_exec_ingress_contract_sha256 444)"
 PRODUCT_INGRESS_EVIDENCE="$(verify_binding product_exec_ingress_evidence_path product_exec_ingress_evidence_sha256 444)"
 PRODUCT_LANE_CELL_CANARY_CONTRACT="$(verify_binding product_lane_cell_canary_contract_path product_lane_cell_canary_contract_sha256 444)"
+PRODUCT_LANE_CELL_CANARY_MANIFEST="$(verify_binding product_lane_cell_canary_manifest_path product_lane_cell_canary_manifest_sha256 444)"
+PRODUCT_LANE_CELL_CANARY_EVIDENCE="$(verify_binding product_lane_cell_canary_evidence_path product_lane_cell_canary_evidence_sha256 444)"
+PRODUCT_EXEC_CELL_FIXTURE_MANIFEST="$(verify_binding product_exec_cell_fixture_manifest_path product_exec_cell_fixture_manifest_sha256 444)"
+PRODUCT_EXEC_CELL_FIXTURE_BUNDLE="$(verify_binding product_exec_cell_fixture_bundle_path product_exec_cell_fixture_bundle_sha256 444)"
 [[ "$(record_value "$MANIFEST" controller_frozen_commit)" =~ ^[0-9a-f]{40}$ && \
    "$(record_value "$MANIFEST" resident_v4_frozen_commit)" =~ ^[0-9a-f]{40}$ && \
    "$(sha256_file "$CONTROLLER_FROZEN_RESIDENT")" == \
@@ -154,10 +158,21 @@ PRODUCT_ROOT="$RELEASE/$(record_value "$MANIFEST" product_authority_root_path)"
    "$(stat -c '%u:%g:%a' "$PRODUCT_ROOT/.git")" == 0:0:555 && \
    "$(record_value "$MANIFEST" product_exec_ingress_action)" == 9031 && \
    "$(record_value "$MANIFEST" product_lane_cell_canary)" == false && \
-   "$(record_value "$MANIFEST" distinct_uid_product_broker_canary)" == false ]] ||
+   "$(record_value "$MANIFEST" distinct_uid_product_broker_canary)" == false && \
+   "$(record_value "$MANIFEST" product_exec_cell_canary)" == false ]] ||
   fail 'product ExecIngress release posture drifted'
 [[ -s "$PRODUCT_INGRESS_MANIFEST" && -s "$PRODUCT_INGRESS_CONTRACT" && \
-   -s "$PRODUCT_INGRESS_EVIDENCE" && -s "$PRODUCT_LANE_CELL_CANARY_CONTRACT" ]] ||
+   -s "$PRODUCT_INGRESS_EVIDENCE" && -s "$PRODUCT_LANE_CELL_CANARY_CONTRACT" && \
+   -s "$PRODUCT_LANE_CELL_CANARY_MANIFEST" && \
+   -s "$PRODUCT_LANE_CELL_CANARY_EVIDENCE" && \
+   "$(record_value "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST" stage)" == SEMANTICS_FROZEN && \
+   "$(record_value "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST" producing_language)" == Sounio && \
+   "$(record_value "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST" semantic_authority)" == Sounio && \
+   "$(record_value "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST" action)" == 9030 && \
+   "$(record_value "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST" bundle_sha256)" == \
+     "$(sha256_file "$PRODUCT_EXEC_CELL_FIXTURE_BUNDLE")" && \
+   "$(record_value "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST" payload_sha256)" == \
+     "$(sha256_file "$PROCESS_WITNESS_PAYLOAD")" ]] ||
   fail 'product ExecIngress proof capsule is incomplete'
 
 SYSTEMD_RUN="$(readlink -f "$(command -v systemd-run)")"
@@ -205,6 +220,47 @@ for expectation in \
   'exec_attached=false' 'commit_attached=false' 'ci_attached=false' \
   'parity_open=false' 'claim_ready=false'; do
   [[ " $host_output " == *" $expectation "* ]] || fail "host broker receipt omitted $expectation"
+done
+
+set +e
+product_exec_cell_output="$(timeout --signal=TERM --kill-after=5s 180s \
+  "$BROKER" --selftest-product-exec-cell-host \
+  --controller-manifest "$CONTROLLER_MANIFEST" \
+  --controller-runtime "$CONTROLLER_RUNTIME" \
+  --controller-root "$AUTHORITY_ROOT" \
+  --resident-runtime "$RESIDENT_RUNTIME" \
+  --process-witness-runtime "$PROCESS_WITNESS_CELL" \
+  --process-witness-payload "$PROCESS_WITNESS_PAYLOAD" \
+  --process-witness-manifest "$PROCESS_WITNESS_MANIFEST" \
+  --product-root "$PRODUCT_ROOT" \
+  --product-runtime "$PRODUCT_RUNTIME" \
+  --product-language-runtime "$PRODUCT_LANGUAGE_RUNTIME" \
+  --product-resident-runtime "$PRODUCT_RESIDENT_RUNTIME" \
+  --product-exec-cell-fixture-manifest "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST" \
+  --product-exec-cell-fixture-bundle "$PRODUCT_EXEC_CELL_FIXTURE_BUNDLE" \
+  --systemd-run "$SYSTEMD_RUN" --systemctl "$SYSTEMCTL" 2>&1)"
+product_exec_cell_status=$?
+set -e
+[[ $product_exec_cell_status -eq 0 ]] ||
+  fail "product ExecCell material composition failed or timed out status=$product_exec_cell_status output=$product_exec_cell_output"
+[[ "$product_exec_cell_output" == 'loom-product-exec-cell-host: PASS '* ]] ||
+  fail 'product ExecCell material receipt prefix diverged'
+for expectation in \
+  'semantic_authority=Sounio' 'action=9030' 'lane_action=9031' \
+  'simultaneous_distinct_dynamic_users=true' \
+  'same_pid_exec_transition=true' 'outcome=DONE' \
+  'extinction_complete=true' 'controller_extinct=true' \
+  'command_mismatch=DENY492' 'causal_sabotage=PASS' \
+  'sabotage_exec_cell_created=false' \
+  'sabotage_payload_executed=false' \
+  'python_executed=false' 'rust_executed=false' \
+  'exec_cell_attached=true' 'material_execution=true' \
+  'test_only=true' 'production_activation=false' \
+  'launch_open=false' 'recycle_open=false' \
+  'commit_attached=false' 'ci_attached=false' \
+  'parity_open=false' 'claim_ready=false'; do
+  [[ " $product_exec_cell_output " == *" $expectation "* ]] ||
+    fail "product ExecCell material receipt omitted $expectation"
 done
 
 set +e
@@ -298,10 +354,12 @@ for expectation in \
     fail "host ProcessWitness receipt omitted $expectation"
 done
 
-printf 'sounio-loom-host-exec-quorum-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio controller_language=OCaml controller_role=EFFECT_PARITY material_language=C++20+Linux+systemd material_role=MATERIAL_PARITY transitory=true host=%s kernel=%s architecture=%s systemd_version=%s systemd_run_sha256=%s systemctl_sha256=%s release_manifest_sha256=%s broker_output_sha256=%s process_witness_output_sha256=%s product_exec_ingress_output_sha256=%s dynamic_user=true principal_distinct_uid=true non_bearer_exec_quorum=true descriptor_barrier_causal=true linear_grant_consumption=true positive_open_sentinels=1 sabotage_open_sentinels=1 total_open_sentinels=2 process_witness_core=true same_pid_execveat=true affirmative_extinction=true complete_effects=false product_lane_cell_canary=true distinct_uid_product_broker_canary=true fleet_lane_cell_attached=false exec_cell_attached=false material_grant=true material_execution=false production_activation=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false\n%s\n%s\n%s\n' \
+printf 'sounio-loom-host-exec-quorum-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio controller_language=OCaml controller_role=EFFECT_PARITY material_language=C++20+Linux+systemd material_role=MATERIAL_PARITY transitory=true host=%s kernel=%s architecture=%s systemd_version=%s systemd_run_sha256=%s systemctl_sha256=%s release_manifest_sha256=%s broker_output_sha256=%s process_witness_output_sha256=%s product_exec_ingress_output_sha256=%s product_exec_cell_output_sha256=%s dynamic_user=true principal_distinct_uid=true non_bearer_exec_quorum=true descriptor_barrier_causal=true linear_grant_consumption=true positive_open_sentinels=1 sabotage_open_sentinels=1 total_open_sentinels=2 process_witness_core=true same_pid_execveat=true affirmative_extinction=true complete_effects=false product_lane_cell_canary=true distinct_uid_product_broker_canary=true fleet_lane_cell_attached=false product_exec_cell_canary=true exec_cell_attached=true material_grant=true material_execution=true test_only=true production_activation=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false\n%s\n%s\n%s\n%s\n' \
   "$(hostname)" "$(uname -r)" "$(uname -m)" "$SYSTEMD_VERSION" \
   "$(sha256_file "$SYSTEMD_RUN")" "$(sha256_file "$SYSTEMCTL")" \
   "$EXPECTED_MANIFEST_SHA256" "$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1)" \
   "$(printf '%s\n' "$process_witness_output" | sha256sum | cut -d ' ' -f 1)" \
   "$(printf '%s\n' "$product_output" | sha256sum | cut -d ' ' -f 1)" \
-  "$host_output" "$process_witness_output" "$product_output"
+  "$(printf '%s\n' "$product_exec_cell_output" | sha256sum | cut -d ' ' -f 1)" \
+  "$host_output" "$process_witness_output" "$product_output" \
+  "$product_exec_cell_output"

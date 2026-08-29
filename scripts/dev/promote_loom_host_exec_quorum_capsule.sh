@@ -131,7 +131,8 @@ done
 [[ "$(record_value "$CAPSULE_MANIFEST" source_tree_state)" == CLEAN ]] || fail 'dirty-source capsule cannot reach host'
 [[ "$(record_value "$CAPSULE_MANIFEST" production_activation)" == false ]] || fail 'capsule requested production activation'
 [[ "$(record_value "$CAPSULE_MANIFEST" product_lane_cell_canary)" == false && \
-   "$(record_value "$CAPSULE_MANIFEST" distinct_uid_product_broker_canary)" == false ]] ||
+   "$(record_value "$CAPSULE_MANIFEST" distinct_uid_product_broker_canary)" == false && \
+   "$(record_value "$CAPSULE_MANIFEST" product_exec_cell_canary)" == false ]] ||
   fail 'capsule preclaimed a product lane-cell canary'
 [[ "$(record_value "$CAPSULE_MANIFEST" material_grant)" == false ]] || fail 'capsule preclaimed a material grant'
 [[ "$(sha256_file "$RELEASE_MANIFEST")" == "$(record_value "$CAPSULE_MANIFEST" release_manifest_sha256)" ]] || fail 'release manifest hash drifted'
@@ -149,7 +150,7 @@ RELEASE_ID="$(record_value "$RELEASE_MANIFEST" release_id)"
 [[ "$RELEASE_ID" =~ ^9030-hostq-[0-9a-f]{32}$ && "$RELEASE_ID" == "$(record_value "$CAPSULE_MANIFEST" release_id)" ]] || fail 'release identity drifted'
 RELEASE_MANIFEST_SHA256="$(sha256_file "$RELEASE_MANIFEST")"
 if [[ "$MODE" == verify ]]; then
-  printf 'LOOM_HOST_EXEC_QUORUM_CAPSULE_VERIFY PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY product_lane_cell_canary=false distinct_uid_product_broker_canary=false production_activation=false material_grant=false material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
+  printf 'LOOM_HOST_EXEC_QUORUM_CAPSULE_VERIFY PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY product_lane_cell_canary=false distinct_uid_product_broker_canary=false product_exec_cell_canary=false production_activation=false material_grant=false material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
     "$EXPECTED_SHA256" "$RELEASE_ID" "$RELEASE_MANIFEST_SHA256"
   exit 0
 fi
@@ -192,6 +193,15 @@ set -e
    "$host_output" == *' exec_cell_attached=false '* && \
    "$host_output" == *' production_activation=false '* ]] ||
   fail 'host product DynamicUser ExecIngress measurement is absent'
+[[ "$host_output" == *'loom-product-exec-cell-host: PASS '* && \
+   "$host_output" == *' simultaneous_distinct_dynamic_users=true '* && \
+   "$host_output" == *' command_mismatch=DENY492 '* && \
+   "$host_output" == *' sabotage_exec_cell_created=false '* && \
+   "$host_output" == *' sabotage_payload_executed=false '* && \
+   "$host_output" == *' exec_cell_attached=true '* && \
+   "$host_output" == *' material_execution=true '* && \
+   "$host_output" == *' test_only=true '* ]] ||
+  fail 'host product ExecCell material measurement is absent'
 [[ "$(stable_identity /usr/lib/sounio/loom/current)" == "$stable_current_before" ]] || fail 'production current target moved during experiment'
 [[ "$(stable_identity /usr/libexec/sounio/loom-kernel-principal-broker)" == "$stable_broker_before" ]] || fail 'production broker target moved during experiment'
 
@@ -199,5 +209,5 @@ created_release=false
 cleanup
 trap - EXIT
 printf '%s\n' "$host_output"
-printf 'LOOM_HOST_EXEC_QUORUM_EXPERIMENT_INSTALL PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s experimental_release=%s production_current_unchanged=true production_broker_unchanged=true rollback=identity-operation semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_core=true affirmative_extinction=true complete_effects=false product_lane_cell_canary=true distinct_uid_product_broker_canary=true fleet_lane_cell_attached=false exec_cell_attached=false material_grant=true material_execution=false production_activation=false launch_open=false parity_open=false claim_ready=false\n' \
+printf 'LOOM_HOST_EXEC_QUORUM_EXPERIMENT_INSTALL PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s experimental_release=%s production_current_unchanged=true production_broker_unchanged=true rollback=identity-operation semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_core=true affirmative_extinction=true complete_effects=false product_lane_cell_canary=true distinct_uid_product_broker_canary=true fleet_lane_cell_attached=false product_exec_cell_canary=true exec_cell_attached=true material_grant=true material_execution=true test_only=true production_activation=false launch_open=false parity_open=false claim_ready=false\n' \
   "$EXPECTED_SHA256" "$RELEASE_ID" "$RELEASE_MANIFEST_SHA256" "$HOST_RELEASE"

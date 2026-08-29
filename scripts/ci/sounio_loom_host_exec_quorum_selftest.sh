@@ -156,6 +156,10 @@ if rg -n 'DENY49[1-9]|DENY500|DENY501|ALLOW code=0 reason=allow|code=491|code=49
   "$ROOT_DIR/tools/loom/src/loom_product_exec_ingress_host_canary.inc" >/dev/null; then
   fail 'product material canary copied a Sounio expected result'
 fi
+if rg -n 'DENY49[1-9]|DENY500|DENY501|ALLOW code=0 reason=allow|code=491|code=499' \
+  "$ROOT_DIR/tools/loom/src/loom_product_exec_cell_host_canary.inc" >/dev/null; then
+  fail 'product ExecCell material canary copied a Sounio expected result'
+fi
 [[ "$(rg -c '/usr/bin/python3 --version' \
   "$ROOT_DIR/tools/loom/src/loom_product_exec_ingress_host_canary.inc")" == 1 && \
    "$(rg -c '/usr/bin/rustc --version' \
@@ -222,12 +226,13 @@ refusal="$(run_refusal barrier-runtime-tamper run_quorum \
 [[ "$refusal" == *'integrated PrincipalCell runtime hash mismatch'* ]] ||
   fail 'barrier runtime mutation reached the transaction'
 
-printf 'sounio-loom-host-exec-quorum-selftest: PASS semantic_authority=Sounio controller=OCaml controller_role=EFFECT_PARITY material_layer=C++20+Linux material_role=MATERIAL_PARITY transitory=true single_resident_controller=true source_fixtures=Sounio frozen_commits_rehydrated=true controller_commit=%s resident_v4_commit=%s language_authority_commit=%s inherited_descriptor=true deterministic_rebuilds=broker+barrier+controller+resident+language-authority+fixtures treatment=closed positive_semantics=ready positive_local=closed positive_local_reason=same-uid-principal exact_write_sabotage=open causal_rule=three-object-quorum replay=closed controller_death=closed resident_death=closed wrong_generation=closed python=closed textual_receipt=closed controller_manifest_tamper=refused controller_runtime_tamper=refused fixture_manifest_tamper=refused fixture_bundle_tamper=refused barrier_runtime_tamper=refused principal_pidfd=bound principal_start_tick=bound principal_executable=bound principal_cgroup=bound principal_distinct_uid=false non_bearer_transport=measured same_uid_peer_isolation=false public_protocol=closed expected_results_encoded_in_material_layer=false prohibited_oracle_controls=python+rust runtime_dependencies=clean material_threshold_measured=true descriptor_barrier_causal=true material_grant=false material_execution=false barrier_release=false launch_open=false exec_attached=false parity_open=false claim_ready=false language_authority_binary_sha256=%s broker_source_sha256=%s quorum_module_sha256=%s product_canary_source_sha256=%s barrier_source_sha256=%s broker_binary_sha256=%s barrier_binary_sha256=%s\n' \
+printf 'sounio-loom-host-exec-quorum-selftest: PASS semantic_authority=Sounio controller=OCaml controller_role=EFFECT_PARITY material_layer=C++20+Linux material_role=MATERIAL_PARITY transitory=true single_resident_controller=true source_fixtures=Sounio frozen_commits_rehydrated=true controller_commit=%s resident_v4_commit=%s language_authority_commit=%s inherited_descriptor=true deterministic_rebuilds=broker+barrier+controller+resident+language-authority+fixtures treatment=closed positive_semantics=ready positive_local=closed positive_local_reason=same-uid-principal exact_write_sabotage=open causal_rule=three-object-quorum replay=closed controller_death=closed resident_death=closed wrong_generation=closed python=closed textual_receipt=closed controller_manifest_tamper=refused controller_runtime_tamper=refused fixture_manifest_tamper=refused fixture_bundle_tamper=refused barrier_runtime_tamper=refused principal_pidfd=bound principal_start_tick=bound principal_executable=bound principal_cgroup=bound principal_distinct_uid=false non_bearer_transport=measured same_uid_peer_isolation=false public_protocol=closed expected_results_encoded_in_material_layer=false prohibited_oracle_controls=python+rust runtime_dependencies=clean material_threshold_measured=true descriptor_barrier_causal=true material_grant=false material_execution=false barrier_release=false launch_open=false exec_attached=false parity_open=false claim_ready=false language_authority_binary_sha256=%s broker_source_sha256=%s quorum_module_sha256=%s product_canary_source_sha256=%s product_exec_cell_canary_source_sha256=%s barrier_source_sha256=%s broker_binary_sha256=%s barrier_binary_sha256=%s\n' \
   "$FROZEN_CONTROLLER_COMMIT" "$FROZEN_RESIDENT_V4_COMMIT" \
   "$FROZEN_LANGUAGE_COMMIT" "$(sha256sum "$LANGUAGE_ONE" | cut -d ' ' -f 1)" \
   "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_kernel_principal_broker.cpp" | cut -d ' ' -f 1)" \
   "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_exec_quorum_lab.inc" | cut -d ' ' -f 1)" \
   "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_product_exec_ingress_host_canary.inc" | cut -d ' ' -f 1)" \
+  "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_product_exec_cell_host_canary.inc" | cut -d ' ' -f 1)" \
   "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_principal_cell_barrier_integrated.cpp" | cut -d ' ' -f 1)" \
   "$(sha256sum "$BROKER_ONE" | cut -d ' ' -f 1)" \
   "$(sha256sum "$BARRIER_ONE" | cut -d ' ' -f 1)"

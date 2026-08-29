@@ -29,7 +29,12 @@ struct ProductIngressHostRun {
   std::uint64_t descriptor_peer_start_tick = 0;
   bool identity_authenticated = false;
   bool dynamic_user = false;
+  std::string event_sha256;
+  std::string command_sha256;
 };
+
+using ProductIngressBoundCallback =
+    std::function<void(const ProductIngressHostRun&)>;
 
 std::string product_json_string(std::string_view value) {
   std::ostringstream output;
@@ -159,7 +164,8 @@ class ProductExecIngressHostCase {
       std::string systemd_run, std::string systemctl, std::string label,
       std::string command, bool dynamic_user, bool descriptor_present,
       ProductIngressReply reply,
-      ProductIngressExchangeExpectation exchange_expectation)
+      ProductIngressExchangeExpectation exchange_expectation,
+      ProductIngressBoundCallback on_bound = {})
       : product_root_(canonical_path(product_root)),
         product_runtime_(canonical_path(product_runtime)),
         language_runtime_(canonical_path(language_runtime)),
@@ -172,6 +178,7 @@ class ProductExecIngressHostCase {
         descriptor_present_(descriptor_present),
         reply_(reply),
         exchange_expectation_(exchange_expectation),
+        on_bound_(std::move(on_bound)),
         nonce_(random_generation_sha256().substr(0, 16)),
         unit_("sounio-loom-product-ingress-" + std::to_string(getpid()) + "-" +
               nonce_ + ".service"),
@@ -520,6 +527,9 @@ class ProductExecIngressHostCase {
     if (!lowercase_digest(event_sha) || !lowercase_digest(command_sha)) {
       throw Error("product ExecIngress request digest malformed");
     }
+    event_sha256_ = event_sha;
+    command_sha256_ = command_sha;
+    if (on_bound_) on_bound_(observation());
     if (reply_ == ProductIngressReply::CloseWithoutReply) {
       connection_ = UniqueFd();
       return;
@@ -583,6 +593,8 @@ class ProductExecIngressHostCase {
     result.descriptor_peer_start_tick = descriptor_peer_start_tick_;
     result.identity_authenticated = identity_authenticated_;
     result.dynamic_user = dynamic_user_;
+    result.event_sha256 = event_sha256_;
+    result.command_sha256 = command_sha256_;
     return result;
   }
 
@@ -622,6 +634,7 @@ class ProductExecIngressHostCase {
   ProductIngressReply reply_ = ProductIngressReply::Exact;
   ProductIngressExchangeExpectation exchange_expectation_ =
       ProductIngressExchangeExpectation::Request;
+  ProductIngressBoundCallback on_bound_;
   std::string nonce_;
   std::string unit_;
   std::string runtime_directory_;
@@ -649,6 +662,8 @@ class ProductExecIngressHostCase {
   int hook_code_ = 255;
   bool client_reaped_ = false;
   bool identity_authenticated_ = false;
+  std::string event_sha256_;
+  std::string command_sha256_;
 };
 
 bool product_contains(const std::string& value, std::string_view marker) {

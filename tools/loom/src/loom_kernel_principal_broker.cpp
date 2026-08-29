@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -1939,6 +1940,7 @@ int serve(const std::string& manifest_path, const std::string& authority_path,
 #include "loom_exec_quorum_lab.inc"
 #include "loom_process_witness_lab.inc"
 #include "loom_product_exec_ingress_host_canary.inc"
+#include "loom_product_exec_cell_host_canary.inc"
 
 struct Options {
   std::string mode;
@@ -1965,6 +1967,8 @@ struct Options {
   std::string product_runtime;
   std::string product_language_runtime;
   std::string product_resident_runtime;
+  std::string product_exec_cell_fixture_manifest;
+  std::string product_exec_cell_fixture_bundle;
   std::string systemd_run;
   std::string systemctl;
   std::string frame;
@@ -2027,6 +2031,10 @@ Options parse_options(int argc, char** argv) {
       options.product_language_runtime = value;
     } else if (argument == "--product-resident-runtime") {
       options.product_resident_runtime = value;
+    } else if (argument == "--product-exec-cell-fixture-manifest") {
+      options.product_exec_cell_fixture_manifest = value;
+    } else if (argument == "--product-exec-cell-fixture-bundle") {
+      options.product_exec_cell_fixture_bundle = value;
     } else if (argument == "--systemd-run") {
       options.systemd_run = value;
     } else if (argument == "--systemctl") {
@@ -2118,6 +2126,19 @@ void require_product_exec_ingress_host_artifacts(const Options& options) {
   }
 }
 
+void require_product_exec_cell_host_artifacts(const Options& options) {
+  require_product_exec_ingress_host_artifacts(options);
+  if (options.controller_manifest.empty() || options.controller_runtime.empty() ||
+      options.controller_root.empty() || options.resident_runtime.empty() ||
+      options.process_witness_runtime.empty() ||
+      options.process_witness_payload.empty() ||
+      options.process_witness_manifest.empty() ||
+      options.product_exec_cell_fixture_manifest.empty() ||
+      options.product_exec_cell_fixture_bundle.empty()) {
+    throw Error("product ExecCell controller, resident, witness, fixture manifest, and bundle are required");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2182,6 +2203,19 @@ int main(int argc, char** argv) {
           options.product_root, options.product_runtime,
           options.product_language_runtime, options.product_resident_runtime,
           options.systemd_run, options.systemctl);
+    }
+    if (options.mode == "--selftest-product-exec-cell-host") {
+      require_product_exec_cell_host_artifacts(options);
+      return selftest_product_exec_cell_host(
+          options.controller_root, options.controller_manifest,
+          options.controller_runtime, options.resident_runtime,
+          options.process_witness_runtime, options.process_witness_payload,
+          options.process_witness_manifest, options.product_root,
+          options.product_runtime, options.product_language_runtime,
+          options.product_resident_runtime,
+          options.product_exec_cell_fixture_manifest,
+          options.product_exec_cell_fixture_bundle, options.systemd_run,
+          options.systemctl);
     }
     if (options.mode == "--selftest-journal") {
       if (options.journal.empty()) throw Error("journal is required");
