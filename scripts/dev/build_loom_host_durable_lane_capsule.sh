@@ -86,7 +86,8 @@ for input in "$RELEASE_MANIFEST" "$CAPSULE_MANIFEST" "$RUNTIME"; do
 done
 [[ -z "$(find "$CAPSULE" -type l -print -quit)" ]] || fail 'base capsule contains a symlink'
 
-chmod u+w "$(dirname "$RUNTIME")" "$RUNTIME" "$RELEASE_MANIFEST" "$CAPSULE_MANIFEST"
+chmod u+w "$RELEASE" "$(dirname "$RUNTIME")" "$RUNTIME" \
+  "$RELEASE_MANIFEST" "$CAPSULE_MANIFEST"
 strip --strip-debug "$RUNTIME"
 CANONICAL_RUNTIME="$WORK/sounio-loom-runtime.canonical"
 objcopy --remove-section=.note.gnu.build-id "$RUNTIME" "$CANONICAL_RUNTIME"
@@ -109,6 +110,7 @@ replace_field "$RELEASE_MANIFEST" product_exec_ingress_runtime_sha256 "$RUNTIME_
 printf 'product_exec_ingress_runtime_canonicalization=strip-debug+remove-.note.gnu.build-id\n' \
   >> "$RELEASE_MANIFEST"
 chmod 0444 "$RELEASE_MANIFEST"
+chmod 0555 "$RELEASE"
 RELEASE_MANIFEST_SHA256="$(sha256_file "$RELEASE_MANIFEST")"
 replace_field "$CAPSULE_MANIFEST" release_id "$RELEASE_ID"
 replace_field "$CAPSULE_MANIFEST" release_manifest_sha256 "$RELEASE_MANIFEST_SHA256"
