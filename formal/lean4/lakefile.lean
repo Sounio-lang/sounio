@@ -74,6 +74,7 @@ lean_lib «SounioSedenionMeasurement» where
 
 @[default_target]
 lean_lib «SounioCDCocycle» where
+  moreLeanArgs := #["-j", "1"]
 
 @[default_target]
 lean_lib «SounioCDTowerSeam» where
@@ -141,6 +142,11 @@ lean_lib «SounioSedenionDynamics» where
 -- Frente B: the sedenion signed-automorphism group = 168 = |PSL(2,7)|, fixing e8. NOT a
 -- default_target: 3 native_decide sweeps over GL(4,2)=65536 take ~1 min; `lake build SounioSedenionAutomorphism`.
 lean_lib «SounioSedenionAutomorphism» where
+
+-- FORMAL_PARITY for the Sounio-owned Pireus Quotient Novelty Forge v5.
+-- Non-default: exhaustively scans GL(4,2) x C2 and the frozen 48-child atlas.
+lean_lib «SounioPireusQuotientNoveltyForge» where
+  moreLeanArgs := #["-j", "1"]
 
 -- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
 -- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
