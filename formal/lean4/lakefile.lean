@@ -232,6 +232,11 @@ lean_lib «SounioPireusOperatorNoveltyFrontier» where
 lean_lib «SounioPireusOperatorMorphogenesis» where
   moreLeanArgs := #["-j", "1"]
 
+-- FORMAL_PARITY for frozen Sounio Pireus Operator Orbit Canonicalization v13.
+-- Non-default: exhaustively scans all 65536 4x4 binary matrix codes.
+lean_lib «SounioPireusOperatorOrbitCanonicalization» where
+  moreLeanArgs := #["-j", "1"]
+
 -- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
 -- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
 -- sweeps (16x16 complex greedy over 1..15) build in ~10s, so kept as a default_target.
