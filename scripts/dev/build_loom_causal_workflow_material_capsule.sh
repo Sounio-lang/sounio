@@ -36,6 +36,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ "$OUTPUT" == /* && ! -e "$OUTPUT" && ! -L "$OUTPUT" ]] || usage
+parent="$(dirname "$OUTPUT")"
+mkdir -p "$parent"
+[[ -d "$parent" && ! -L "$parent" ]] || fail 'capsule output parent is absent or linked'
 
 for tool in git sha256sum stat install mktemp find sort chmod mv cp c++ ocamlfind; do
   command -v "$tool" >/dev/null 2>&1 || fail "required build tool is absent: $tool"
@@ -78,13 +81,17 @@ RESIDENT_RUNTIME_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
   fail 'controller no longer binds the selected resident runtime manifest'
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/loom-causal-workflow-material-capsule.XXXXXX")"
+STAGE="$(mktemp -d "$parent/.loom-causal-workflow-material-capsule.stage.XXXXXX")"
 cleanup() {
   chmod -R u+rwX "$WORK" 2>/dev/null || true
   rm -rf "$WORK"
+  if [[ -n "${STAGE:-}" ]]; then
+    chmod -R u+rwX "$STAGE" 2>/dev/null || true
+    rm -rf "$STAGE"
+  fi
 }
 trap cleanup EXIT
 
-STAGE="$WORK/capsule-v1"
 RELEASE="$STAGE/release"
 BIN="$RELEASE/bin"
 DATA="$RELEASE/data"
@@ -311,8 +318,7 @@ EOF
 chmod 0444 "$MANIFEST"
 chmod 0555 "$META" "$STAGE"
 
-parent="$(dirname "$OUTPUT")"
-mkdir -p "$parent"
 mv "$STAGE" "$OUTPUT"
+STAGE=''
 printf 'LOOM_CAUSAL_WORKFLOW_MATERIAL_CAPSULE_BUILD PASS capsule=%s manifest_sha256=%s source_commit=%s layout=unpacked-directory-v1 semantic_authority=Sounio workflow_action=9037 launch_action=9030 production_activation=false parity_open=false claim_ready=false\n' \
   "$OUTPUT" "$(sha256_file "$OUTPUT/capsule.manifest.v1")" "$SOURCE_COMMIT"
