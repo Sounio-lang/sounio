@@ -9,6 +9,7 @@ INSTALL_ROOT=/
 PREFIX=/opt/sounio/loom-hostd
 STATE_DIR=/var/lib/sounio/loom
 UNIT_DIR=/etc/systemd/system
+UNIT_NAME=sounio-loom-hostd.service
 SERVICE_USER="$(id -un)"
 RUNTIME=''
 AUTHORITY=''
@@ -22,7 +23,7 @@ fail() {
 usage() {
   cat >&2 <<'EOF'
 usage: install_loom_hostd.sh [--install-root DIR] [--prefix ABS]
-       [--state-dir ABS] [--unit-dir ABS] [--user USER]
+       [--state-dir ABS] [--unit-dir ABS] [--unit-name NAME.service] [--user USER]
        [--runtime PATH] [--authority PATH] [--activate]
 
 Installation is disabled by default. --activate is accepted only for the real
@@ -37,6 +38,7 @@ while (($#)); do
     --prefix) [[ $# -ge 2 ]] || usage; PREFIX="$2"; shift 2 ;;
     --state-dir) [[ $# -ge 2 ]] || usage; STATE_DIR="$2"; shift 2 ;;
     --unit-dir) [[ $# -ge 2 ]] || usage; UNIT_DIR="$2"; shift 2 ;;
+    --unit-name) [[ $# -ge 2 ]] || usage; UNIT_NAME="$2"; shift 2 ;;
     --user) [[ $# -ge 2 ]] || usage; SERVICE_USER="$2"; shift 2 ;;
     --runtime) [[ $# -ge 2 ]] || usage; RUNTIME="$2"; shift 2 ;;
     --authority) [[ $# -ge 2 ]] || usage; AUTHORITY="$2"; shift 2 ;;
@@ -50,6 +52,7 @@ done
 [[ "$PREFIX" != / && "$STATE_DIR" != / && "$UNIT_DIR" != / ]] ||
   fail 'prefix, state directory, and unit directory cannot be the filesystem root'
 [[ "$SERVICE_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*$ ]] || fail 'service user is invalid'
+[[ "$UNIT_NAME" =~ ^[a-zA-Z0-9_.@-]+\.service$ ]] || fail 'systemd unit name is invalid'
 INSTALL_ROOT="$(cd "$INSTALL_ROOT" && pwd -P)"
 if [[ $ACTIVATE -eq 1 && "$INSTALL_ROOT" != / ]]; then
   fail '--activate is forbidden for a staged install root'
@@ -91,8 +94,8 @@ install -d -m 0700 "$dest_state"
 install -m 0755 "$RUNTIME" "$dest_prefix/bin/sounio-loom-runtime"
 install -m 0755 "$AUTHORITY" "$dest_prefix/bin/sounio-loom-host-boot-reconciler"
 
-unit="$dest_unit_dir/sounio-loom-hostd.service"
-unit_stage="$(mktemp "$dest_unit_dir/.sounio-loom-hostd.service.XXXXXX")"
+unit="$dest_unit_dir/$UNIT_NAME"
+unit_stage="$(mktemp "$dest_unit_dir/.${UNIT_NAME}.XXXXXX")"
 cat > "$unit_stage" <<EOF
 [Unit]
 Description=Sounio Loom host lane reconciler
@@ -133,7 +136,7 @@ authority_runtime_sha256=$authority_sha256
 ocaml_runtime_sha256=$runtime_sha256
 prefix=$PREFIX
 state_dir=$STATE_DIR
-unit_path=$UNIT_DIR/sounio-loom-hostd.service
+unit_path=$UNIT_DIR/$UNIT_NAME
 service_user=$SERVICE_USER
 install_default=disabled
 service_enabled=false
@@ -148,7 +151,7 @@ mv -f "$manifest_stage" "$manifest"
 activated=false
 if [[ $ACTIVATE -eq 1 ]]; then
   systemctl daemon-reload
-  systemctl enable --now sounio-loom-hostd.service
+  systemctl enable --now "$UNIT_NAME"
   activated=true
   manifest_stage="$(mktemp "$dest_prefix/.manifest.v1.XXXXXX")"
   sed -e 's/^service_enabled=false$/service_enabled=true/' \
@@ -159,6 +162,6 @@ if [[ $ACTIVATE -eq 1 ]]; then
 fi
 
 printf 'LOOM_HOSTD_INSTALLED prefix=%s state_dir=%s unit=%s language=OCaml role=EFFECT_PARITY semantic_authority=Sounio action=9041 semantics_sha256=%s authority_runtime_sha256=%s ocaml_runtime_sha256=%s activated=%s automatic_lineage_resurrection=false python_executed=false rust_executed=false\n' \
-  "$PREFIX" "$STATE_DIR" "$UNIT_DIR/sounio-loom-hostd.service" \
+  "$PREFIX" "$STATE_DIR" "$UNIT_DIR/$UNIT_NAME" \
   '0d5174cd87b8c18b5f3bbfa7ed44d0258795a96f146730c879c46167abdddf7d' \
   "$authority_sha256" "$runtime_sha256" "$activated"
