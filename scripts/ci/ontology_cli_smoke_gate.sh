@@ -6,8 +6,20 @@
 # subcommand tests covering resolve, search, list, count, stats, validate,
 # ancestors, is-subclass, fuzzy, batch, and format/limit flags.
 #
-# Exit 0 = all tests passed.
-# Exit 1 = at least one test failed.
+# Exit 0 = all 18 tests passed, OR the subject is absent and that absence is
+#          inventoried in scripts/ci/fixtures/vacuous_gate_debt.txt.
+# Exit 1 = at least one test failed, or the subject is absent and NOT inventoried.
+#
+# 2026-08-26: this gate has been reporting green while running zero of its
+# eighteen tests. It patches main() to dispatch to `ontology_run_cli()`, and
+# that function does not exist anywhere in self-hosted/ -- the compile dies with
+# `unknown identifier ontology_run_cli`, and the handler printed SKIP and
+# returned 0. The environment was never the problem; the subject is missing.
+#
+# A skip whose reason is "no GPU" is a fact about the machine. A skip whose
+# reason is "the thing under test does not exist" is a fact about the compiler,
+# and reporting it as a pass is how a hole stays invisible. The two are now
+# distinguished, and the second kind must be written down to be tolerated.
 
 set -euo pipefail
 
@@ -75,6 +87,45 @@ with open('$PATCHED_SRC', 'w') as f:
 PYEOF
 }
 
+# ── Absent subject ───────────────────────────────────────────────────────────
+# Eighteen tests exist below. When the entry point they all go through is not in
+# the tree, none of them runs. Say that in the artifact rather than in a word
+# that reads like a pass, and refuse unless the absence is written down.
+TOTAL_TESTS=18
+DEBT_FILE="$ROOT_DIR/scripts/ci/fixtures/vacuous_gate_debt.txt"
+
+report_absent_subject() {
+    local absent="$1"
+    local art_dir="$ROOT_DIR/artifacts/gates"
+    mkdir -p "$art_dir"
+    local art="$art_dir/ontology_cli_smoke.json"
+    local payload
+    payload="$(printf '{"status": "not_run", "metrics": {"total": %d, "passed": 0, "failed": 0, "not_run": %d}, "absent_subject": "%s"}' \
+        "$TOTAL_TESTS" "$TOTAL_TESTS" "$absent")"
+    # Write only when the bytes differ: a gate must not dirty the tree it, or the
+    # next gate, then inspects.
+    if [[ ! -f "$art" ]] || [[ "$(cat "$art")" != "$payload" ]]; then
+        printf '%s' "$payload" >"$art"
+    fi
+
+    echo "[ontology-smoke] THIS GATE VERIFIED NOTHING."
+    echo "[ontology-smoke]   subject absent: \`$absent\` is in no file under self-hosted/"
+    echo "[ontology-smoke]   $TOTAL_TESTS tests defined, 0 run, 0 passed."
+    echo "[ontology-smoke]   The environment is fine. The thing under test is missing."
+
+    if [[ -r "$DEBT_FILE" ]] && grep -qP "^\\Qscripts/ci/ontology_cli_smoke_gate.sh\\E\\t\\Q$absent\\E$" "$DEBT_FILE"; then
+        echo "[ontology-smoke]   Inventoried in scripts/ci/fixtures/vacuous_gate_debt.txt."
+        echo "[ontology-smoke]   Tolerated as debt. Delete that line when the subject lands."
+        exit 0
+    fi
+    echo "[ontology-smoke] FAIL: this absence is not inventoried." >&2
+    echo "                 Either implement \`$absent\`, or add the line" >&2
+    echo "                   scripts/ci/ontology_cli_smoke_gate.sh<TAB>$absent" >&2
+    echo "                 to scripts/ci/fixtures/vacuous_gate_debt.txt, which makes the" >&2
+    echo "                 hole visible in a diff instead of green in a check." >&2
+    exit 1
+}
+
 # ── Compile test binary ──────────────────────────────────────────────────────
 compile_test_binary() {
     if [[ ! -x "$SOUC_BIN" ]]; then
@@ -94,9 +145,20 @@ compile_test_binary() {
         compile_cmd=( "$SOUC_BIN" "$PATCHED_SRC" "$TEST_BIN" )
     fi
     if ! "${compile_cmd[@]}" >"$TMP_DIR/build.log" 2>&1; then
-        echo "[ontology-smoke] SKIP: selected compiler could not build patched ontology CLI source"
-        tail -n 20 "$TMP_DIR/build.log" || true
-        exit 0
+        # WHY it could not build decides whether this is a skip or a failure.
+        # An absent subject is not an environment limitation.
+        local absent=""
+        if grep -qE "unknown identifier .?ontology_run_cli" "$TMP_DIR/build.log"; then
+            absent="ontology_run_cli"
+        fi
+        if [[ -z "$absent" ]]; then
+            echo "[ontology-smoke] FAIL: the patched ontology CLI source did not build," >&2
+            echo "                 and not because its entry point is missing. The build" >&2
+            echo "                 log is below; this is a real failure, not a skip." >&2
+            tail -n 20 "$TMP_DIR/build.log" >&2 || true
+            exit 1
+        fi
+        report_absent_subject "$absent"
     fi
     chmod +x "$TEST_BIN"
 }

@@ -9,7 +9,7 @@
 # (epsilon propagation, validity tracking, provenance merge).
 #
 # Usage:
-#   bash scripts/ptx_ablation_runner.sh
+#   bash scripts/gpu/ptx_ablation_runner.sh
 #
 # Requires:
 #   - SSH access to gpu-appliance-l4 (10.100.100.215)

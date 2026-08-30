@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # llm-offload — Fan-out a prompt to multiple LLM providers
-# Usage: ./scripts/llm-offload.sh <prompt-file> [providers...]
+# Usage: ./scripts/mcp/llm-offload.sh <prompt-file> [providers...]
 # If no providers specified, fans out to the default 5 (diverse consensus set).
 #
 # Available providers:

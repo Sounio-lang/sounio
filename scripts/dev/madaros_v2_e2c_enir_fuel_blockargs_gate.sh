@@ -41,7 +41,7 @@ else
   scripts/dev/souc-build-lock.sh "$SEED" self-hosted/enir/driver.sio "$DRIVER" >"$TMP_DIR/driver-build.log" 2>&1
 fi
 [[ -s "$DRIVER" ]] || fail "native ENIR driver build produced no ELF"
-if grep -Eq '^error:|unknown identifier|typecheck: failed|assignment type mismatch' "$TMP_DIR/driver-build.log"; then
+if grep -Eq '^error(\[E[0-9]+\])?:|unknown identifier|typecheck: failed|assignment type mismatch' "$TMP_DIR/driver-build.log"; then
   tail -100 "$TMP_DIR/driver-build.log" >&2
   fail "Stage0 reported diagnostics while building ENIR driver"
 fi
@@ -54,7 +54,7 @@ else
   scripts/dev/souc-build-lock.sh "$SEED" tools/eisa/eisa_enir_v1_loop_oracle.sio "$ORACLE" >"$TMP_DIR/oracle-build.log" 2>&1
 fi
 [[ -s "$ORACLE" ]] || fail "source-fresh EISA/METRON oracle build produced no ELF"
-if grep -Eq '^error:|unknown identifier|typecheck: failed|assignment type mismatch' "$TMP_DIR/oracle-build.log"; then
+if grep -Eq '^error(\[E[0-9]+\])?:|unknown identifier|typecheck: failed|assignment type mismatch' "$TMP_DIR/oracle-build.log"; then
   tail -100 "$TMP_DIR/oracle-build.log" >&2
   fail "Stage0 reported diagnostics while building EISA/METRON oracle"
 fi

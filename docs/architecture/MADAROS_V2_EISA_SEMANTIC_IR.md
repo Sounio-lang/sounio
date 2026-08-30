@@ -382,9 +382,12 @@ The current implementation has real **runtime conformance evidence**:
   poison propagation, and receipt text.
 - `tools/eisa/eisa_evm_run.sio` contains 30 programs producing 39 gate/fuel
   observations.
-- `scripts/ci/eisa_madaros_native_conformance_gate.sh` proves those 39 lines are
-  byte-identical between Metron VM and Madaros-generated ELF, checks a source
-  tamper, rejects baked output, and forbids compact/full fallback.
+- `scripts/ci/eisa_bridge_conformance_gate_madaros.sh` proves those receipt lines
+  are byte-identical between the Metron VM reference and Madaros-generated ELFs,
+  checks a source tamper, and rejects baked output. The stricter
+  `eisa_madaros_native_conformance_gate.sh` — which additionally forbade the
+  compact/full fallback lowering path — was written on a branch that never landed
+  on `main`, so that prohibition is currently ungated.
 
 That evidence establishes behavior for the named corpus and executors; it does
 not establish a compiler-owned semantic stage or universal preservation. Today

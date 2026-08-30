@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 SESSION_NAME="${PLAN_BIG_TMUX_SESSION_NAME:-sounio_big_ops_24h}"
@@ -28,7 +28,7 @@ CANARY_LOOP_SEC="${PLAN_BIG_TMUX_CANARY_LOOP_SEC:-600}"
 
 usage() {
   cat <<USAGE
-Usage: scripts/tmux_big_ops_default.sh <command> [options]
+Usage: scripts/overnight/tmux_big_ops_default.sh <command> [options]
 
 Commands:
   up [--reset]            Apply tmux defaults, ensure runner+burn-in, start/refresh session
@@ -185,7 +185,7 @@ case "$cmd" in
   attach)
     require_tmux
     if ! session_exists; then
-      echo "error: session not found: $SESSION_NAME (run: scripts/tmux_big_ops_default.sh up)" >&2
+      echo "error: session not found: $SESSION_NAME (run: scripts/overnight/tmux_big_ops_default.sh up)" >&2
       exit 1
     fi
     exec tmux attach -t "$SESSION_NAME"
