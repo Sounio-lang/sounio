@@ -280,11 +280,16 @@ if [[ "$PHASE" == prepare ]]; then
   install_status=$?
   set -e
   if [[ $install_status -ne 0 ]]; then
+    exec_gate_unit="${HOSTD_UNIT%.service}-exec-cell-gate.service"
     unit_diagnostic="$({ systemctl status "$HOSTD_UNIT" --no-pager 2>&1 || true; } |
       tail -n 30 | tr '\n' ',')"
     journal_diagnostic="$(journalctl --unit "$HOSTD_UNIT" --no-pager \
       --output=cat -n 80 2>&1 | tr '\n' ',')"
-    fail "activated installer refused status=$install_status stdout=$(tr '\n' ',' < "$ROOT/install.out") stderr=$(tr '\n' ',' < "$ROOT/install.err") unit=$unit_diagnostic journal=$journal_diagnostic"
+    exec_gate_diagnostic="$({ systemctl status "$exec_gate_unit" --no-pager \
+      2>&1 || true; } | tail -n 30 | tr '\n' ',')"
+    exec_gate_journal="$(journalctl --unit "$exec_gate_unit" --no-pager \
+      --output=cat -n 80 2>&1 | tr '\n' ',')"
+    fail "activated installer refused status=$install_status stdout=$(tr '\n' ',' < "$ROOT/install.out") stderr=$(tr '\n' ',' < "$ROOT/install.err") unit=$unit_diagnostic journal=$journal_diagnostic exec_gate=$exec_gate_diagnostic exec_gate_journal=$exec_gate_journal"
   fi
   mkdir -m 0700 "$WORK_DIR"
   [[ "$(systemctl is-enabled "$HOSTD_UNIT")" == enabled ]] ||
