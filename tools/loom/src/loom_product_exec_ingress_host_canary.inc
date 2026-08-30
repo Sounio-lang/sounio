@@ -380,8 +380,7 @@ class ProductExecIngressHostCase {
           "--setenv=SOUNIO_LOOM_RESIDENT_RECEIPT_LOG=" + runtime_path_ +
               "/resident.tsv"};
       if (!result_event_sha256_.empty()) {
-        arguments.push_back("--setenv=SOUNIO_LOOM_EXEC_RESULT_EVENT_SHA256=" +
-                            result_event_sha256_);
+        arguments.push_back("--setenv=SOUNIO_LOOM_EXEC_INTENT_PROJECTION=1");
       }
       if (dynamic_user_) {
         arguments.push_back("--property=DynamicUser=yes");
@@ -511,8 +510,7 @@ class ProductExecIngressHostCase {
                                       "GIT_CONFIG_VALUE_0=" + product_root_) &&
               (result_event_sha256_.empty() ||
                product_environment_has(
-                   environment, "SOUNIO_LOOM_EXEC_RESULT_EVENT_SHA256=" +
-                                    result_event_sha256_)) &&
+                   environment, "SOUNIO_LOOM_EXEC_INTENT_PROJECTION=1")) &&
               (!descriptor_present_ ||
                (product_environment_has(environment, "LISTEN_FDS=1") &&
                 product_environment_has(

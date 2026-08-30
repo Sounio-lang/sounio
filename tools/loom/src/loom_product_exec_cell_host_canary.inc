@@ -369,7 +369,11 @@ int selftest_product_exec_cell_host(
           positive_lane.command_sha256 == fixtures.command_sha256 &&
           product_contains(positive_lane.ingress_log, "decision=DENY\t") &&
           product_contains(positive_lane.ingress_log,
-                           "reason=descriptor-result-bound-actions-9030+9031+9033\t") &&
+                           "reason=descriptor-result-bound-actions-9030+9031+9033+9034\t") &&
+          product_contains(positive_lane.ingress_log,
+                           "exec_intent_projected=true\t") &&
+          product_contains(positive_lane.ingress_log,
+                           "exec_intent_action=9034\t") &&
           product_contains(positive_lane.ingress_log, "result_returned=true\t") &&
           product_contains(positive_lane.ingress_log,
                            "raw_event_sha256=" + positive_lane.raw_event_sha256 +
@@ -460,9 +464,27 @@ int selftest_product_exec_cell_host(
     throw Error("product ExecResult transport sabotage did not fail closed");
   }
 
+  ProductExecIngressHostCase intent_mismatch_case(
+      product_root, product_runtime, product_language_runtime,
+      product_resident_runtime, systemd_run_path, systemctl_path,
+      "current_material", fixtures.command + "-intent-mismatch", true, true,
+      ProductIngressReply::Exact,
+      ProductIngressExchangeExpectation::RefusalBeforeRequest, {},
+      result_policy.event_sha256);
+  const ProductIngressHostRun intent_mismatch_lane = intent_mismatch_case.execute();
+  const bool intent_mismatch_closed =
+      intent_mismatch_lane.hook_code == 2 &&
+      product_contains(intent_mismatch_lane.output, "DENY555") &&
+      !product_contains(intent_mismatch_lane.output, "exec-result-present") &&
+      !product_contains(intent_mismatch_lane.output, "exec-capability");
+  if (!intent_mismatch_closed) {
+    throw Error("Sounio ExecIntent command mismatch did not fail closed" +
+                product_case_diagnostic(intent_mismatch_lane));
+  }
+
   std::cout
       << "loom-product-exec-cell-host: PASS semantic_authority=Sounio"
-      << " action=9030 lane_action=9031 result_action=9033"
+      << " action=9030 lane_action=9031 result_action=9033 intent_action=9034"
       << " intent_sha256=" << fixtures.intent_sha256
       << " command_sha256=" << fixtures.command_sha256
       << " product_event_sha256=" << product_event_sha256
@@ -485,7 +507,8 @@ int selftest_product_exec_cell_host(
       << " result_receipt_sabotage=closed"
       << " result_manifest_sabotage=closed"
       << " exact_fixture_hook_switched=true local_exec_capability_used=false"
-      << " raw_event_separate=true event_override=test-only+probe-only"
+      << " raw_event_separate=true event_projection=Sounio-9034"
+      << " event_override=false intent_command_mismatch=DENY555"
       << " python_executed=false rust_executed=false"
       << " exec_cell_attached=true material_execution=true"
       << " test_only=true production_activation=false launch_open=false"

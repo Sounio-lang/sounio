@@ -115,6 +115,8 @@ SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_OUTPUT="$BIN/sounio-loom-resident-membrane-runt
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v5.sh" >/dev/null
 SOUNIO_LOOM_EXEC_RESULT_HANDLE_OUTPUT="$BIN/sounio-loom-exec-result-handle" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_exec_result_handle_fixture.sh" >/dev/null
+SOUNIO_LOOM_EXEC_INTENT_ENVELOPE_OUTPUT="$BIN/sounio-loom-exec-intent-envelope" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_exec_intent_envelope_fixture.sh" >/dev/null
 (
   flock -x 9
   dune build --root "$ROOT_DIR/tools/loom" src/loom.exe >/dev/null
@@ -203,9 +205,20 @@ AUTHORITY_FILES=(
   scripts/dev/build_sounio_loom_exec_result_handle_fixture.sh
   scripts/ci/sounio_loom_exec_result_handle_selftest.sh
   tools/loom/evidence/loom-exec-result-handle-v1-20260830.txt
+  tools/loom/exec_intent_envelope.freeze.v1
+  tools/loom/GARDEN_EXEC_INTENT_ENVELOPE_V1.md
+  docs/internal/concepts/loom-exec-intent-envelope.md
+  stdlib/coordination/loom_exec_intent_envelope_authority.sio
+  tools/loom/exec_intent_envelope_authority_main.sio
+  scripts/dev/build_sounio_loom_exec_intent_envelope_fixture.sh
+  scripts/ci/sounio_loom_exec_intent_envelope_selftest.sh
+  scripts/ci/sounio_loom_exec_intent_projection_selftest.sh
+  tools/loom/evidence/loom-exec-intent-envelope-v1-20260830.txt
+  tools/loom/evidence/loom-exec-intent-projection-v1-20260830.txt
   bin/souc
   bin/souc-lean-single-x86_64
   tools/loom/src/loom_exec_ingress.ml
+  tools/loom/src/loom_exec_intent.ml
   tools/loom/src/loom_exec_result.ml
   tools/loom/src/loom_hook.ml
   tools/loom/src/loom_membrane.ml
@@ -280,6 +293,13 @@ PRODUCT_EXEC_RESULT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-exec-result-
    "$PRODUCT_EXEC_RESULT_RUNTIME_SHA256" == \
      "$(manifest_value "$AUTHORITY_ROOT/tools/loom/exec_result_handle.freeze.v1" executable_sha256)" ]] ||
   fail 'Sounio 9033 result authority manifest or runtime drifted'
+PRODUCT_EXEC_INTENT_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_intent_envelope.freeze.v1")"
+PRODUCT_EXEC_INTENT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-exec-intent-envelope")"
+[[ "$PRODUCT_EXEC_INTENT_MANIFEST_SHA256" == \
+     8a95e587ccc81c16da17d56b9649d04bc9c3e764d66fc938c195d95568e7608e &&
+   "$PRODUCT_EXEC_INTENT_RUNTIME_SHA256" == \
+     "$(manifest_value "$AUTHORITY_ROOT/tools/loom/exec_intent_envelope.freeze.v1" executable_sha256)" ]] ||
+  fail 'Sounio 9034 intent authority manifest or runtime drifted'
 FROZEN_CONTROLLER_RESIDENT_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_resident.ml")"
 FROZEN_CONTROLLER_CELL_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_exec_grant_cell.ml")"
 FROZEN_CONTROLLER_SOURCE_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_exec_grant_controller.ml")"
@@ -292,7 +312,7 @@ FIXTURE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/host_exec_quo
 CONTROLLER_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_grant_controller.runtime.v1")"
 DERIVED_GARDEN_SHA256="$(sha256_file "$ROOT_DIR/tools/loom/GARDEN_HOST_EXEC_QUORUM_DYNAMIC_PRINCIPAL_V1.md")"
 PROCESS_WITNESS_GARDEN_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md")"
-RELEASE_DIGEST="$(printf '%s\n' "$SOURCE_COMMIT" "$BROKER_SHA256" "$CONTROLLER_SHA256" "$RESIDENT_SHA256" "$LOCAL_BARRIER_SHA256" "$HOST_BARRIER_SHA256" "$DERIVED_GARDEN_SHA256" "$PROCESS_WITNESS_CELL_SHA256" "$PROCESS_WITNESS_PAYLOAD_SHA256" "$PROCESS_WITNESS_MANIFEST_SHA256" "$PROCESS_WITNESS_GARDEN_SHA256" "$PRODUCT_RUNTIME_SHA256" "$PRODUCT_LANGUAGE_RUNTIME_SHA256" "$PRODUCT_RESIDENT_RUNTIME_SHA256" "$PRODUCT_INGRESS_MANIFEST_SHA256" "$PRODUCT_LANE_CELL_CANARY_CONTRACT_SHA256" "$PRODUCT_LANE_CELL_CANARY_MANIFEST_SHA256" "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST_SHA256" "$PRODUCT_EXEC_CELL_FIXTURE_BUNDLE_SHA256" "$PRODUCT_EXEC_RESULT_MANIFEST_SHA256" "$PRODUCT_EXEC_RESULT_RUNTIME_SHA256" | sha256sum | cut -d ' ' -f 1)"
+RELEASE_DIGEST="$(printf '%s\n' "$SOURCE_COMMIT" "$BROKER_SHA256" "$CONTROLLER_SHA256" "$RESIDENT_SHA256" "$LOCAL_BARRIER_SHA256" "$HOST_BARRIER_SHA256" "$DERIVED_GARDEN_SHA256" "$PROCESS_WITNESS_CELL_SHA256" "$PROCESS_WITNESS_PAYLOAD_SHA256" "$PROCESS_WITNESS_MANIFEST_SHA256" "$PROCESS_WITNESS_GARDEN_SHA256" "$PRODUCT_RUNTIME_SHA256" "$PRODUCT_LANGUAGE_RUNTIME_SHA256" "$PRODUCT_RESIDENT_RUNTIME_SHA256" "$PRODUCT_INGRESS_MANIFEST_SHA256" "$PRODUCT_LANE_CELL_CANARY_CONTRACT_SHA256" "$PRODUCT_LANE_CELL_CANARY_MANIFEST_SHA256" "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST_SHA256" "$PRODUCT_EXEC_CELL_FIXTURE_BUNDLE_SHA256" "$PRODUCT_EXEC_RESULT_MANIFEST_SHA256" "$PRODUCT_EXEC_RESULT_RUNTIME_SHA256" "$PRODUCT_EXEC_INTENT_MANIFEST_SHA256" "$PRODUCT_EXEC_INTENT_RUNTIME_SHA256" | sha256sum | cut -d ' ' -f 1)"
 RELEASE_ID="9030-hostq-${RELEASE_DIGEST:0:32}"
 
 cat > "$RELEASE_STAGE/release.manifest.v1" <<EOF
@@ -368,6 +388,11 @@ product_exec_result_manifest_path=authority-root/tools/loom/exec_result_handle.f
 product_exec_result_manifest_sha256=$PRODUCT_EXEC_RESULT_MANIFEST_SHA256
 product_exec_result_runtime_path=bin/sounio-loom-exec-result-handle
 product_exec_result_runtime_sha256=$PRODUCT_EXEC_RESULT_RUNTIME_SHA256
+product_exec_intent_action=9034
+product_exec_intent_manifest_path=authority-root/tools/loom/exec_intent_envelope.freeze.v1
+product_exec_intent_manifest_sha256=$PRODUCT_EXEC_INTENT_MANIFEST_SHA256
+product_exec_intent_runtime_path=bin/sounio-loom-exec-intent-envelope
+product_exec_intent_runtime_sha256=$PRODUCT_EXEC_INTENT_RUNTIME_SHA256
 product_exec_ingress_runtime_path=bin/sounio-loom-runtime
 product_exec_ingress_runtime_sha256=$PRODUCT_RUNTIME_SHA256
 product_language_runtime_path=bin/sounio-loom-language-authority-runtime
@@ -442,5 +467,5 @@ mv -fT "$output_stage" "$OUTPUT"
 printf '%s  %s\n' "$ARCHIVE_SHA256" "$(basename "$OUTPUT")" > "$OUTPUT.sha256"
 chmod 0600 "$OUTPUT.sha256"
 
-printf 'LOOM_HOST_EXEC_QUORUM_CAPSULE_BUILD PASS archive=%s archive_sha256=%s release_id=%s release_manifest_sha256=%s source_commit=%s source_tree_state=%s semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_payload=Sounio process_witness_core=false complete_effects=false product_exec_ingress_action=9031 product_exec_result_action=9033 exact_fixture_hook_switched=true exact_fixture_result_attached=false product_lane_cell_canary=false distinct_uid_product_broker_canary=false product_exec_cell_canary=false production_activation=false material_grant=false material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
+printf 'LOOM_HOST_EXEC_QUORUM_CAPSULE_BUILD PASS archive=%s archive_sha256=%s release_id=%s release_manifest_sha256=%s source_commit=%s source_tree_state=%s semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_payload=Sounio process_witness_core=false complete_effects=false product_exec_ingress_action=9031 product_exec_result_action=9033 product_exec_intent_action=9034 event_projection=Sounio-9034 event_override=false exact_fixture_hook_switched=true exact_fixture_result_attached=false product_lane_cell_canary=false distinct_uid_product_broker_canary=false product_exec_cell_canary=false production_activation=false material_grant=false material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
   "$OUTPUT" "$ARCHIVE_SHA256" "$RELEASE_ID" "$MANIFEST_SHA256" "$SOURCE_COMMIT" "$SOURCE_TREE_STATE"
