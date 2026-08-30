@@ -225,9 +225,15 @@ if [[ "${SOUNIO_LOOM_EXEC_OPERATION_INGRESS_SKIP_EVIDENCE:-0}" == 1 ]]; then
   exit 0
 fi
 [[ -f "$EVIDENCE" ]] || fail 'checked-in evidence absent'
+IMPLEMENTATION_COMMIT="$(evidence_value implementation_commit)"
+[[ "$IMPLEMENTATION_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+  fail 'checked-in implementation commit is malformed'
+git -C "$ROOT_DIR" cat-file -e "${IMPLEMENTATION_COMMIT}^{commit}" 2>/dev/null ||
+  fail 'checked-in implementation commit is absent'
+git -C "$ROOT_DIR" merge-base --is-ancestor "$IMPLEMENTATION_COMMIT" HEAD ||
+  fail 'checked-in implementation commit is not an ancestor of HEAD'
 for binding in \
   "result:$RESULT" \
-  "implementation_commit:$(git -C "$ROOT_DIR" rev-parse HEAD)" \
   "sounio_operation_manifest_sha256:$(sha256sum "$ROOT_DIR/tools/loom/exec_operation_catalog.freeze.v1" | cut -d ' ' -f 1)" \
   "sounio_result_manifest_sha256:$(sha256sum "$ROOT_DIR/tools/loom/exec_result_record.freeze.v1" | cut -d ' ' -f 1)" \
   "sounio_grant_manifest_sha256:$(sha256sum "$ROOT_DIR/tools/loom/exec_operation_grant_fixture.freeze.v1" | cut -d ' ' -f 1)" \
