@@ -32,6 +32,8 @@ type policy = {
   unknown_operation_decision : string;
   invalid_argument_word0 : int;
   invalid_argument_decision : string;
+  toolchain_compiler_path : string;
+  toolchain_compiler_sha256 : string;
 }
 
 type projection = {
@@ -48,6 +50,25 @@ type projection = {
   authority_source_sha256 : string;
   authority_executable_sha256 : string;
   authority_output_sha256 : string;
+}
+
+type material_plan = {
+  projection : projection;
+  executable : string;
+  argv : string array;
+  argv_sha256 : string;
+  source_path : string;
+  output_path : string;
+  compiler_sha256 : string;
+}
+
+type material_result = {
+  plan : material_plan;
+  artifact_sha256 : string;
+  artifact_bytes : int;
+  stdout_sha256 : string;
+  stderr_sha256 : string;
+  diagnostics_sha256 : string;
 }
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
@@ -177,7 +198,10 @@ let load ~root =
     unknown_operation_decision = required manifest "unknown_operation_decision";
     invalid_argument_word0 =
       required manifest "invalid_argument_word0" |> decimal "invalid-argument-word0";
-    invalid_argument_decision = required manifest "invalid_argument_decision" }
+    invalid_argument_decision = required manifest "invalid_argument_decision";
+    toolchain_compiler_path = required manifest "toolchain_compiler_path";
+    toolchain_compiler_sha256 =
+      required manifest "toolchain_compiler_sha256" |> digest "toolchain-compiler" }
 
 let authority_frame policy word0 =
   Printf.sprintf "%d %d %d\n" policy.wire_schema word0 policy.common_word1
@@ -267,3 +291,163 @@ let project ~root ~operation ~source =
     authority_source_sha256 = policy.source_sha256;
     authority_executable_sha256 = policy.executable_sha256;
     authority_output_sha256 = sha256 output }
+
+let starts_with value prefix =
+  String.length value >= String.length prefix
+  && String.sub value 0 (String.length prefix) = prefix
+
+let unlink_noerr path = try Unix.unlink path with _ -> ()
+
+let expected_output_basename source_sha256 =
+  Printf.sprintf "loom-sounio-check-%s.elf"
+    (String.sub source_sha256 0 16)
+
+let require_absent path reason =
+  match Unix.lstat path with
+  | _ -> failf "%s" reason
+  | exception Unix_error (ENOENT, _, _) -> ()
+
+let prepare_sounio_check ~root ~source ~output =
+  let root = Unix.realpath root in
+  let projection = project ~root ~operation:"sounio-check" ~source:(Some source) in
+  let source_sha256 = Option.get projection.source_sha256 in
+  if Filename.is_relative output then failf "exec-catalog-output-not-absolute";
+  if String.length output > 4096 || String.contains output '\000' then
+    failf "exec-catalog-output-path-invalid";
+  let parent = Filename.dirname output in
+  let parent_stat = Unix.lstat parent in
+  if parent_stat.st_kind <> S_DIR then failf "exec-catalog-output-parent-not-directory";
+  let resolved_parent = Unix.realpath parent in
+  if resolved_parent <> parent then failf "exec-catalog-output-parent-not-canonical";
+  let basename = Filename.basename output in
+  if basename <> expected_output_basename source_sha256 then
+    failf "exec-catalog-output-name-mismatch";
+  if Filename.concat resolved_parent basename <> output then
+    failf "exec-catalog-output-path-not-canonical";
+  require_absent output "exec-catalog-output-exists";
+  require_absent (output ^ ".stdout") "exec-catalog-stdout-capture-exists";
+  require_absent (output ^ ".stderr") "exec-catalog-stderr-capture-exists";
+  let policy = load ~root in
+  let compiler = Filename.concat root policy.toolchain_compiler_path in
+  let compiler_stat = require_regular_file compiler in
+  if compiler_stat.st_perm land 0o111 = 0 then
+    failf "exec-catalog-toolchain-compiler-not-executable";
+  let compiler = Unix.realpath compiler in
+  let root_prefix = root ^ Filename.dir_sep in
+  if not (starts_with compiler root_prefix) then
+    failf "exec-catalog-toolchain-compiler-outside-worktree";
+  if sha256_file compiler <> policy.toolchain_compiler_sha256 then
+    failf "exec-catalog-toolchain-compiler-hash-mismatch";
+  let source_path = Unix.realpath (Filename.concat root source) in
+  let argv = [| compiler; source_path; output |] in
+  { projection; executable = compiler; argv;
+    argv_sha256 = sha256 (String.concat "\000" (Array.to_list argv));
+    source_path; output_path = output;
+    compiler_sha256 = policy.toolchain_compiler_sha256 }
+
+let open_exclusive path =
+  Unix.openfile path [ O_WRONLY; O_CREAT; O_EXCL; O_TRUNC ] 0o600
+
+let read_bounded path =
+  let channel = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+      let limit = 64 * 1024 in
+      let buffer = Buffer.create 4096 in
+      let bytes = Bytes.create 4096 in
+      let rec read total =
+        match input channel bytes 0 (Bytes.length bytes) with
+        | 0 -> Buffer.contents buffer
+        | count ->
+            let total = total + count in
+            if total > limit then failf "exec-catalog-compiler-output-too-large";
+            Buffer.add_subbytes buffer bytes 0 count;
+            read total
+      in
+      read 0)
+
+let wait_with_timeout pid =
+  let deadline = Unix.gettimeofday () +. 30.0 in
+  let rec wait () =
+    match Unix.waitpid [ WNOHANG ] pid with
+    | 0, _ ->
+        if Unix.gettimeofday () >= deadline then (
+          (try Unix.kill pid Sys.sigkill with _ -> ());
+          (try ignore (Unix.waitpid [] pid) with _ -> ());
+          failf "exec-catalog-compiler-timeout")
+        else (
+          ignore (Unix.select [] [] [] 0.02);
+          wait ())
+    | _, status -> status
+  in
+  wait ()
+
+let execute_sounio_check ~root ~source ~output =
+  let plan = prepare_sounio_check ~root ~source ~output in
+  let projected_source_sha256 = Option.get plan.projection.source_sha256 in
+  if sha256_file plan.source_path <> projected_source_sha256 then
+    failf "exec-catalog-source-changed-before-exec";
+  if sha256_file plan.executable <> plan.compiler_sha256 then
+    failf "exec-catalog-compiler-changed-before-exec";
+  let stdout_path = output ^ ".stdout" in
+  let stderr_path = output ^ ".stderr" in
+  let output_descriptor = open_exclusive output in
+  Unix.close output_descriptor;
+  let stdout_descriptor = open_exclusive stdout_path in
+  let stderr_descriptor =
+    try open_exclusive stderr_path
+    with error ->
+      Unix.close stdout_descriptor;
+      unlink_noerr stdout_path;
+      unlink_noerr output;
+      raise error
+  in
+  let stdin_descriptor = Unix.openfile "/dev/null" [ O_RDONLY ] 0 in
+  let descriptors_closed = ref false in
+  let close_descriptors () =
+    if not !descriptors_closed then (
+      descriptors_closed := true;
+      List.iter
+        (fun descriptor -> try Unix.close descriptor with _ -> ())
+        [ stdin_descriptor; stdout_descriptor; stderr_descriptor ])
+  in
+  let cleanup () =
+    close_descriptors ();
+    unlink_noerr stdout_path;
+    unlink_noerr stderr_path
+  in
+  try
+    let environment =
+      [| "LANG=C"; "LC_ALL=C"; "TZ=UTC"; "PATH=/usr/bin:/bin";
+         "HOME=/nonexistent"; "SOURCE_DATE_EPOCH=0" |]
+    in
+    let pid =
+      Unix.create_process_env plan.executable plan.argv environment
+        stdin_descriptor stdout_descriptor stderr_descriptor
+    in
+    close_descriptors ();
+    let status = wait_with_timeout pid in
+    let stdout = read_bounded stdout_path in
+    let stderr = read_bounded stderr_path in
+    if sha256_file plan.source_path <> projected_source_sha256 then
+      failf "exec-catalog-source-changed-during-exec";
+    if sha256_file plan.executable <> plan.compiler_sha256 then
+      failf "exec-catalog-compiler-changed-during-exec";
+    (match status with
+    | WEXITED 0 -> ()
+    | WEXITED code -> failf "exec-catalog-compiler-refused:%d:%s" code stderr
+    | WSIGNALED signal | WSTOPPED signal ->
+        failf "exec-catalog-compiler-signalled:%d" signal);
+    let artifact = require_regular_file output in
+    if artifact.st_size <= 0 then failf "exec-catalog-compiler-empty-artifact";
+    let result =
+      { plan; artifact_sha256 = sha256_file output;
+        artifact_bytes = artifact.st_size; stdout_sha256 = sha256 stdout;
+        stderr_sha256 = sha256 stderr;
+        diagnostics_sha256 = sha256 (stdout ^ "\000" ^ stderr) }
+    in
+    cleanup ();
+    result
+  with error ->
+    cleanup ();
+    unlink_noerr output;
+    raise error

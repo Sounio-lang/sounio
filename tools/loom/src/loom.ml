@@ -12420,6 +12420,27 @@ let exec_catalog_probe_command cli =
     projection.sandbox_profile_sha256 projection.authority_output_sha256;
   0
 
+let exec_catalog_material_probe_command cli =
+  if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
+    failf "exec-catalog-material-probe requires SOUNIO_LOOM_HOOK_TEST_MODE=1";
+  let result =
+    Loom_exec_catalog.execute_sounio_check
+      ~root:(required cli "--root" |> Unix.realpath)
+      ~source:(required cli "--source") ~output:(required cli "--output")
+  in
+  let plan = result.plan in
+  let projection = plan.projection in
+  Printf.printf
+    "LOOM_EXEC_OPERATION_MATERIAL_RESULT semantic_authority=Sounio action=9035 operational_kernel=OCaml material_selector=OCaml operation=%s source_path=%s source_sha256=%s catalog_sha256=%s manifest_sha256=%s command_template_sha256=%s result_schema_sha256=%s sandbox_profile_sha256=%s compiler_path=%s compiler_sha256=%s argv_sha256=%s output_path=%s artifact_sha256=%s artifact_bytes=%d stdout_sha256=%s stderr_sha256=%s diagnostics_sha256=%s direct_exec=true shell=false artifact_executed=false direct_exec_material_plan_attached=true host_payload_selection_attached=false provider_lifecycle_attached=false general_exec_attached=false production_activation=false\n%!"
+    projection.operation (Option.get projection.source_path)
+    (Option.get projection.source_sha256) projection.catalog_sha256
+    projection.manifest_sha256 projection.command_template_sha256
+    projection.result_schema_sha256 projection.sandbox_profile_sha256
+    plan.executable plan.compiler_sha256 plan.argv_sha256 plan.output_path
+    result.artifact_sha256 result.artifact_bytes result.stdout_sha256
+    result.stderr_sha256 result.diagnostics_sha256;
+  0
+
 let exec_result_present_command cli =
   let result =
     Loom_exec_result.validate_transport
@@ -12449,6 +12470,8 @@ let usage () =
     "  exec-intent-probe --root DIR --mode project|command-mismatch --raw-event SHA --command SHA (test mode only)\n";
   Printf.eprintf
     "  exec-catalog-probe --root DIR --operation calibration|sounio-check [--source RELATIVE.sio] (test mode only)\n";
+  Printf.eprintf
+    "  exec-catalog-material-probe --root DIR --source RELATIVE.sio --output ABSOLUTE.elf (test mode only)\n";
   Printf.eprintf
     "  exec-result-present --root DIR --event SHA --command SHA --handle HANDLE --receipt-sha256 SHA --receipt-hex HEX --manifest-sha256 SHA\n";
   Printf.eprintf
@@ -12531,6 +12554,8 @@ let main () =
     | "exec-ingress-probe" -> exec_ingress_probe_command cli
     | "exec-intent-probe" -> exec_intent_probe_command cli
     | "exec-catalog-probe" -> exec_catalog_probe_command cli
+    | "exec-catalog-material-probe" ->
+        exec_catalog_material_probe_command cli
     | "exec-result-probe" -> exec_result_probe_command cli
     | "exec-result-present" -> exec_result_present_command cli
     | "peer-activation-capsule-probe" ->
