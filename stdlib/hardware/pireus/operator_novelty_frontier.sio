@@ -114,13 +114,13 @@ struct PireusOnfLineage {
 
 struct PireusOnfParent {
     parent: PireusOnfTensor,
-    affine_address: PireusOnfTensor,
-    coefficient_lift: PireusOnfTensor,
+    pair_counts: [i64; 256],
     associator_failures: i64,
     commutator_failures: i64,
     first_i: i64,
     first_j: i64,
     first_k: i64,
+    residual_shape_match: bool,
     digest_matches: i64,
     failures: i64,
     complete: bool,
@@ -609,12 +609,57 @@ fn onf_rotl4(value: i64) -> i64 {
     ((value << 1) & 15) | ((value >> 3) & 1)
 }
 
+fn onf_parent_class_value_raw(
+    parent: &PireusOnfTensor,
+    pair_counts: &[i64; 256],
+    first_k: i64,
+    residual_shape_match: bool,
+    atlas_class: i64,
+    cell: i64,
+) -> i64 with Mut, Panic {
+    let output = onf_cell_output(cell)
+    let input_0 = onf_cell_input_0(cell)
+    let input_1 = onf_cell_input_1(cell)
+    let parent_output = input_0 ^ input_1
+    let parent_value = parent.coefficient[onf_tensor_index(
+        parent_output, input_0, input_1)]
+    if atlas_class == 0 {
+        if output == parent_output { parent_value } else { 0 }
+    } else if !residual_shape_match {
+        0
+    } else if atlas_class == 1 {
+        let affine_output = onf_rotl4(input_0) ^ input_1 ^ first_k
+        if output == affine_output { parent_value } else { 0 }
+    } else if atlas_class == 2 && output == parent_output {
+        parent_value * (1 + pair_counts[
+            input_0 * PIREUS_ONF_LANES + input_1])
+    } else { 0 }
+}
+
+fn onf_parent_class_digest_v10(
+    parent: &PireusOnfTensor,
+    pair_counts: &[i64; 256],
+    first_k: i64,
+    residual_shape_match: bool,
+    atlas_class: i64,
+) -> PireusOnfDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = onf_digest_add_i64(state, 730000)
+    state = onf_digest_add_i64(state, PIREUS_ONF_TENSOR_CELLS)
+    var cell: i64 = 0
+    while cell < PIREUS_ONF_TENSOR_CELLS {
+        state = onf_digest_add_i64(state, onf_parent_class_value_raw(
+            parent, pair_counts, first_k, residual_shape_match,
+            atlas_class, cell))
+        cell = cell + 1
+    }
+    onf_digest_finish(state)
+}
+
 fn onf_build_parent(emit_transcript: bool) -> PireusOnfParent
 with IO, Mut, Panic, Div, Epistemic {
     if emit_transcript { print("PIREUS_ONF_PARENT_PHASE phase=ENTER\n") }
     var parent = onf_empty_tensor()
-    var affine = onf_empty_tensor()
-    var lift = onf_empty_tensor()
     var pair_counts: [i64; 256] = [0; 256]
     if emit_transcript { print("PIREUS_ONF_PARENT_PHASE phase=ALLOCATED\n") }
     var associator_failures: i64 = 0
@@ -671,29 +716,16 @@ with IO, Mut, Panic, Div, Epistemic {
         first_k == 2
     if !residual_shape_match {
         failures = failures + 1
-    } else {
-        i = 0
-        while i < PIREUS_ONF_LANES {
-            var j: i64 = 0
-            while j < PIREUS_ONF_LANES {
-                let coefficient =
-                    parent.coefficient[onf_tensor_index(i ^ j, i, j)]
-                let affine_output = onf_rotl4(i) ^ j ^ first_k
-                affine.coefficient[onf_tensor_index(affine_output, i, j)] =
-                    coefficient
-                lift.coefficient[onf_tensor_index(i ^ j, i, j)] = coefficient *
-                    (1 + pair_counts[i * PIREUS_ONF_LANES + j])
-                j = j + 1
-            }
-            i = i + 1
-        }
     }
     if emit_transcript { print("PIREUS_ONF_PARENT_PHASE phase=DERIVED\n") }
-    let parent_digest = onf_tensor_digest_v10(&parent)
+    let parent_digest = onf_parent_class_digest_v10(
+        &parent, &pair_counts, first_k, residual_shape_match, 0)
     if emit_transcript { print("PIREUS_ONF_PARENT_PHASE phase=PARENT_DIGEST\n") }
-    let affine_digest = onf_tensor_digest_v10(&affine)
+    let affine_digest = onf_parent_class_digest_v10(
+        &parent, &pair_counts, first_k, residual_shape_match, 1)
     if emit_transcript { print("PIREUS_ONF_PARENT_PHASE phase=AFFINE_DIGEST\n") }
-    let lift_digest = onf_tensor_digest_v10(&lift)
+    let lift_digest = onf_parent_class_digest_v10(
+        &parent, &pair_counts, first_k, residual_shape_match, 2)
     if emit_transcript { print("PIREUS_ONF_PARENT_PHASE phase=LIFT_DIGEST\n") }
     let parent_expected = onf_parent_tensor_digest_expected(0)
     let affine_expected = onf_parent_tensor_digest_expected(1)
@@ -711,11 +743,11 @@ with IO, Mut, Panic, Div, Epistemic {
     if digest_matches != 3 { failures = failures + 1 }
     PireusOnfParent {
         parent: parent,
-        affine_address: affine,
-        coefficient_lift: lift,
+        pair_counts: pair_counts,
         associator_failures: associator_failures,
         commutator_failures: commutator_failures,
         first_i: first_i, first_j: first_j, first_k: first_k,
+        residual_shape_match: residual_shape_match,
         digest_matches: digest_matches,
         failures: failures,
         complete: failures == 0 && residual_shape_match && digest_matches == 3,
@@ -724,9 +756,9 @@ with IO, Mut, Panic, Div, Epistemic {
 
 fn onf_class_value(parent: &PireusOnfParent, atlas_class: i64, cell: i64)
 -> i64 with Mut, Panic {
-    if atlas_class == 0 { parent.parent.coefficient[cell] }
-    else if atlas_class == 1 { parent.affine_address.coefficient[cell] }
-    else { parent.coefficient_lift.coefficient[cell] }
+    onf_parent_class_value_raw(
+        &parent.parent, &parent.pair_counts, parent.first_k,
+        parent.residual_shape_match, atlas_class, cell)
 }
 
 fn onf_atlas_value(
