@@ -157,7 +157,7 @@ grep -Fxq 'ExecStart=/opt/sounio/loom-hostd/bin/sounio-loom-runtime host-supervi
   fail 'unit is not wired to the Sounio-authorized supervisor'
 grep -Fq 'ExecStartPre=/usr/bin/systemd-run --quiet --wait --pipe --collect ' \
   "$unit" || fail 'unit is not wired to an isolated ExecCell boot gate'
-grep -Fq ' --property=ReadWritePaths=/run ' "$unit" ||
+grep -Fq ' --property=ReadWritePaths=/run\x20/var/lib/sounio/loom ' "$unit" ||
   fail 'isolated ExecCell boot gate lacks its bounded transient write policy'
 grep -Fq ' --property=PrivateTmp=yes ' "$unit" ||
   fail 'isolated ExecCell boot gate lacks a private writable temporary root'
