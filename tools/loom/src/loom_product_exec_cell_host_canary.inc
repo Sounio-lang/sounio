@@ -668,10 +668,15 @@ class HostSounioCheckCell {
 
   void close(HostSounioCheckObservation& observation,
              const std::string& close_receipt_sha256) {
-    if (finished_ || !observation.artifact_measured ||
-        !lowercase_digest(close_receipt_sha256) ||
-        !authenticated_before_arm()) {
-      throw Error("operation ExecCell CLOSE boundary invalid");
+    if (finished_) throw Error("operation ExecCell CLOSE already consumed");
+    if (!observation.artifact_measured) {
+      throw Error("operation ExecCell CLOSE material unmeasured");
+    }
+    if (!lowercase_digest(close_receipt_sha256)) {
+      throw Error("operation ExecCell CLOSE receipt malformed");
+    }
+    if (!authenticated_before_arm()) {
+      throw Error("operation ExecCell CLOSE identity drifted");
     }
     const auto deadline =
         std::chrono::steady_clock::now() + kProductExecIngressHostDeadline;
@@ -1084,42 +1089,64 @@ class HostSounioCheckCell {
         source_sha256_.substr(0, 16) + ".elf";
     const auto measured_regular = [&](const std::string& path,
                                       const std::string& expected_sha256,
-                                      std::optional<std::uint64_t> expected_bytes) {
+                                      std::optional<std::uint64_t> expected_bytes,
+                                      std::string_view label) {
       struct stat info {};
-      return lstat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode) &&
-             info.st_uid == uid_ && info.st_gid == gid_ &&
-             (info.st_mode & 0777) == 0600 && info.st_size >= 0 &&
-             (!expected_bytes ||
-              static_cast<std::uint64_t>(info.st_size) == *expected_bytes) &&
-             file_sha256(path) == expected_sha256;
+      if (lstat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) {
+        throw Error("operation ExecCell " + std::string(label) +
+                    " is absent or non-regular");
+      }
+      if (info.st_uid != uid_ || info.st_gid != gid_) {
+        throw Error("operation ExecCell " + std::string(label) +
+                    " custody mismatch uid=" + std::to_string(info.st_uid) +
+                    " gid=" + std::to_string(info.st_gid));
+      }
+      if ((info.st_mode & 0777) != 0600) {
+        throw Error("operation ExecCell " + std::string(label) +
+                    " mode mismatch");
+      }
+      if (info.st_size < 0 ||
+          (expected_bytes &&
+           static_cast<std::uint64_t>(info.st_size) != *expected_bytes)) {
+        throw Error("operation ExecCell " + std::string(label) +
+                    " size mismatch");
+      }
+      if (file_sha256(path) != expected_sha256) {
+        throw Error("operation ExecCell " + std::string(label) +
+                    " hash mismatch");
+      }
     };
     const auto record = operation_record_fields(
         observation.record, result_policy_.record_schema);
     const auto artifact_bytes =
         parse_u64(operation_require(record, "artifact_bytes"));
-    if (!artifact_bytes ||
-        !measured_regular(artifact, observation.artifact_sha256,
-                          *artifact_bytes) ||
-        observation.artifact_sha256 != kFrozenOperationArtifactSha256) {
-      return false;
+    if (!artifact_bytes) {
+      throw Error("operation ExecCell artifact byte count malformed");
+    }
+    measured_regular(artifact, observation.artifact_sha256, *artifact_bytes,
+                     "artifact");
+    if (observation.artifact_sha256 != kFrozenOperationArtifactSha256) {
+      throw Error("operation ExecCell artifact differs from frozen result");
     }
     const std::string stdout_path = artifact + ".stdout";
     const std::string stderr_path = artifact + ".stderr";
-    if (!measured_regular(stdout_path,
-                          operation_require(record, "stdout_sha256"),
-                          std::nullopt) ||
-        !measured_regular(stderr_path,
-                          operation_require(record, "stderr_sha256"),
-                          std::nullopt)) {
-      return false;
-    }
+    measured_regular(stdout_path, operation_require(record, "stdout_sha256"),
+                     std::nullopt, "stdout");
+    measured_regular(stderr_path, operation_require(record, "stderr_sha256"),
+                     std::nullopt, "stderr");
     std::size_t entries = 0;
     for (const auto& entry :
          std::filesystem::directory_iterator(cell_storage_path())) {
-      if (!entry.is_regular_file()) return false;
+      if (!entry.is_regular_file()) {
+        throw Error("operation ExecCell runtime directory contains non-file");
+      }
       ++entries;
     }
-    return entries == 3;
+    if (entries != 3) {
+      throw Error("operation ExecCell runtime directory entry count mismatch=" +
+                  std::to_string(entries));
+    }
+    return true;
   }
 
   void finish_extinction(HostSounioCheckObservation& observation) {
