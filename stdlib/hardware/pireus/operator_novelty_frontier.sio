@@ -102,10 +102,6 @@ struct PireusOnfTensor {
     coefficient: [i64; 4096],
 }
 
-struct PireusOnfAtlas {
-    coefficient: [i64; 24576],
-}
-
 struct PireusOnfLineage {
     garden_match: bool,
     contract_match: bool,
@@ -718,31 +714,19 @@ fn onf_class_value(parent: &PireusOnfParent, atlas_class: i64, cell: i64)
     else { parent.coefficient_lift.coefficient[cell] }
 }
 
-fn onf_build_atlas(parent: &PireusOnfParent) -> PireusOnfAtlas
-with Mut, Panic {
-    var atlas = PireusOnfAtlas { coefficient: [0; 24576] }
-    var atlas_class: i64 = 0
-    while atlas_class < PIREUS_ONF_ATLAS_CLASSES {
-        var action: i64 = 0
-        while action < PIREUS_ONF_GROUP_ORDER {
-            let representative = atlas_class * PIREUS_ONF_GROUP_ORDER + action
-            var cell: i64 = 0
-            while cell < PIREUS_ONF_TENSOR_CELLS {
-                let source = if action == 0 { cell } else { onf_permute_cell(cell) }
-                let character = if action == 0 { 1 }
-                    else { onf_result_character(cell) }
-                atlas.coefficient[representative * PIREUS_ONF_TENSOR_CELLS + cell] =
-                    character * onf_class_value(parent, atlas_class, source)
-                cell = cell + 1
-            }
-            action = action + 1
-        }
-        atlas_class = atlas_class + 1
-    }
-    atlas
+fn onf_atlas_value(
+    parent: &PireusOnfParent, representative: i64, cell: i64,
+) -> i64 with Mut, Panic {
+    let atlas_class = representative / PIREUS_ONF_GROUP_ORDER
+    let action = representative -
+        atlas_class * PIREUS_ONF_GROUP_ORDER
+    let source = if action == 0 { cell } else { onf_permute_cell(cell) }
+    let character = if action == 0 { 1 }
+        else { onf_result_character(cell) }
+    character * onf_class_value(parent, atlas_class, source)
 }
 
-fn onf_build_profiles(parent: &PireusOnfTensor, atlas: &PireusOnfAtlas)
+fn onf_build_profiles(parent: &PireusOnfParent)
 -> PireusOnfProfiles with Mut, Panic {
     var mismatch_count: [i64; 6] = [0; 6]
     var first_cell: [i64; 6] = [-1; 6]
@@ -754,19 +738,18 @@ fn onf_build_profiles(parent: &PireusOnfTensor, atlas: &PireusOnfAtlas)
     while representative < PIREUS_ONF_REPRESENTATIVES {
         var cell: i64 = 0
         while cell < PIREUS_ONF_TENSOR_CELLS {
-            let atlas_value = atlas.coefficient[
-                representative * PIREUS_ONF_TENSOR_CELLS + cell]
-            if parent.coefficient[cell] != atlas_value {
+            let atlas_value = onf_atlas_value(parent, representative, cell)
+            if parent.parent.coefficient[cell] != atlas_value {
                 mismatch_count[representative] =
                     mismatch_count[representative] + 1
                 if first_cell[representative] < 0 {
                     first_cell[representative] = cell
                     first_delta[representative] =
-                        atlas_value - parent.coefficient[cell]
+                        atlas_value - parent.parent.coefficient[cell]
                 } else if second_cell[representative] < 0 {
                     second_cell[representative] = cell
                     second_delta[representative] =
-                        atlas_value - parent.coefficient[cell]
+                        atlas_value - parent.parent.coefficient[cell]
                 }
             }
             cells_scanned = cells_scanned + 1
@@ -819,14 +802,14 @@ fn onf_candidate_value(
 }
 
 fn onf_direct_atlas_compare(
-    parent: &PireusOnfTensor, atlas: &PireusOnfAtlas,
+    parent: &PireusOnfTensor, atlas_parent: &PireusOnfParent,
     candidate_id: i64, representative: i64,
 ) -> [i64; 2] with Mut, Panic {
     var first: i64 = -1
     var cell: i64 = 0
     while cell < PIREUS_ONF_TENSOR_CELLS {
         if first < 0 && onf_candidate_value(parent, candidate_id, cell) !=
-            atlas.coefficient[representative * PIREUS_ONF_TENSOR_CELLS + cell] {
+            onf_atlas_value(atlas_parent, representative, cell) {
             first = cell
         }
         cell = cell + 1
@@ -1036,7 +1019,7 @@ with IO, Mut, Panic {
 
 fn onf_build_frontier(
     parent: &PireusOnfTensor,
-    atlas: &PireusOnfAtlas,
+    atlas_parent: &PireusOnfParent,
     profiles: &PireusOnfProfiles,
     action: &PireusOnfActionProfile,
     emit_transcript: bool,
@@ -1169,8 +1152,7 @@ fn onf_build_frontier(
                 separators = separators + 1
                 if separator < 0 || separator >= PIREUS_ONF_TENSOR_CELLS ||
                     onf_candidate_value(parent, candidate_id, separator) ==
-                    atlas.coefficient[
-                        representative * PIREUS_ONF_TENSOR_CELLS + separator] {
+                    onf_atlas_value(atlas_parent, representative, separator) {
                     failures = failures + 1
                 }
             }
@@ -1182,8 +1164,7 @@ fn onf_build_frontier(
             if separator >= 0 {
                 separator_state = onf_digest_add_i64(separator_state,
                     onf_candidate_value(parent, candidate_id, separator) -
-                    atlas.coefficient[
-                        representative * PIREUS_ONF_TENSOR_CELLS + separator])
+                    onf_atlas_value(atlas_parent, representative, separator))
             } else {
                 separator_state = onf_digest_add_i64(separator_state, 0)
             }
@@ -1249,7 +1230,7 @@ fn onf_build_frontier(
         var representative: i64 = 0
         while representative < PIREUS_ONF_REPRESENTATIVES {
             let direct = onf_direct_atlas_compare(
-                parent, atlas, canary, representative)
+                parent, atlas_parent, canary, representative)
             let sparse_collision = onf_sparse_collision(
                 profiles, representative, onf_candidate_cell(canary),
                 onf_candidate_delta(canary))
@@ -1325,7 +1306,7 @@ fn onf_build_frontier(
         group_image.coefficient[cell] = onf_result_character(cell) *
             parent.coefficient[onf_permute_cell(cell)]
         if group_image.coefficient[cell] !=
-            atlas.coefficient[PIREUS_ONF_TENSOR_CELLS + cell] {
+            onf_atlas_value(atlas_parent, 1, cell) {
             failures = failures + 1
         }
         cell = cell + 1
@@ -1333,7 +1314,7 @@ fn onf_build_frontier(
     group_image.coefficient[0] = group_image.coefficient[0] + 1
     positive_collision_checks = positive_collision_checks + 1
     if group_image.coefficient[0] ==
-        atlas.coefficient[PIREUS_ONF_TENSOR_CELLS] {
+        onf_atlas_value(atlas_parent, 1, 0) {
         failures = failures + 1
     }
 
@@ -1460,11 +1441,10 @@ pub fn pireus_operator_novelty_frontier_execute(
     let request_error = onf_request_error(request)
     let lineage = onf_build_lineage(paths)
     let parent = onf_build_parent()
-    let atlas = onf_build_atlas(&parent)
-    let profiles = onf_build_profiles(&parent.parent, &atlas)
+    let profiles = onf_build_profiles(&parent)
     let action = onf_build_action_profile(&parent.parent)
     let frontier = onf_build_frontier(
-        &parent.parent, &atlas, &profiles, &action, emit_transcript)
+        &parent.parent, &parent, &profiles, &action, emit_transcript)
     let negative_cases = onf_negative_cases()
     var negative_passed: i64 = 0
     var negative: i64 = 0
