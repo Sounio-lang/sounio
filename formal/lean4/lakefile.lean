@@ -669,6 +669,15 @@ lean_lib «EpistemicEffects» where
 @[default_target]
 lean_lib «EpistemicEffectsV2» where
 
+-- NS-extended calculus: `Knowledge⟨T, N⟩` with a noise-symbol source-set and the
+-- E230 disjointness premise on kadd/kmul (Paper A §5–§6). Runtime values carry their
+-- true affine form; proves Lemma 1 (general, Mathlib-free), Lemma 2 (support
+-- over-approximation), NS progress + preservation, exactness preservation, and
+-- Theorem 6.4 (no reached operator is an anti-garbling); x+x sabotage witness in
+-- the kernel. No sorry; axioms ⊆ {propext, Quot.sound, Classical.choice}.
+@[default_target]
+lean_lib «EpistemicEffectsNS» where
+
 -- First Lean importer of V2: the V1 `preservation_is_false` witness,
 -- inverted. `measure (lit_nat 0)` stays `Knowledge<Nat>` after reduction.
 @[default_target]
