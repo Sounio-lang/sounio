@@ -13,4 +13,5 @@ open SounioPireusGL4ActionEnumeration
 #print axioms swappedViewOf
 #print axioms each_scan_entry_has_both_concrete_actions
 #print axioms the_two_views_have_the_same_matrix_witness
+#print axioms gl4ActionEnumerationBoundary
 #print axioms gl4_action_enumeration_does_not_close_v13_target03
