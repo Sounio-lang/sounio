@@ -287,6 +287,11 @@ lean_lib «SounioPireusBasisFixedGaugeRebase» where
 lean_lib «SounioPireusMatrixCodeXorEquiv» where
   moreLeanArgs := #["-j", "1"]
 
+-- Exact subtype of admitted V13 matrix witnesses and both swap views.
+-- Non-default: materialized 20160/40320 lists and analytic census remain open.
+lean_lib «SounioPireusGL4ActionEnumeration» where
+  moreLeanArgs := #["-j", "1"]
+
 -- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
 -- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
 -- sweeps (16x16 complex greedy over 1..15) build in ~10s, so kept as a default_target.
