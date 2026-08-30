@@ -721,7 +721,9 @@ class HostSounioCheckCell {
 
   bool runtime_storage_authenticated() const {
     struct stat link {};
-    struct stat directory {};
+    struct stat host_private {};
+    struct stat host_directory {};
+    struct stat cell_directory {};
     std::array<char, PATH_MAX> target{};
     const ssize_t target_size =
         readlink(runtime_path_.c_str(), target.data(), target.size() - 1);
@@ -731,9 +733,22 @@ class HostSounioCheckCell {
            target_size == static_cast<ssize_t>(expected_target.size()) &&
            std::string(target.data(), static_cast<std::size_t>(target_size)) ==
                expected_target &&
-           lstat(runtime_storage_path_.c_str(), &directory) == 0 &&
-           S_ISDIR(directory.st_mode) && directory.st_uid == uid_ &&
-           directory.st_gid == gid_ && (directory.st_mode & 0777) == 0700;
+           lstat("/run/private", &host_private) == 0 &&
+           S_ISDIR(host_private.st_mode) && host_private.st_uid == 0 &&
+           host_private.st_gid == 0 &&
+           (host_private.st_mode & 0777) == 0700 &&
+           lstat(runtime_storage_path_.c_str(), &host_directory) == 0 &&
+           S_ISDIR(host_directory.st_mode) &&
+           (host_directory.st_mode & 0777) == 0700 &&
+           lstat(cell_storage_path().c_str(), &cell_directory) == 0 &&
+           S_ISDIR(cell_directory.st_mode) && cell_directory.st_uid == uid_ &&
+           cell_directory.st_gid == gid_ &&
+           (cell_directory.st_mode & 0777) == 0700;
+  }
+
+  std::string cell_storage_path() const {
+    return "/proc/" + std::to_string(pid_) + "/root" +
+           runtime_storage_path_;
   }
 
   std::string property(const std::string& name) const {
@@ -1063,7 +1078,7 @@ class HostSounioCheckCell {
   bool verify_material_artifacts(
       const HostSounioCheckObservation& observation) const {
     const std::string artifact =
-        runtime_storage_path_ + "/loom-sounio-check-" +
+        cell_storage_path() + "/loom-sounio-check-" +
         source_sha256_.substr(0, 16) + ".elf";
     const auto measured_regular = [&](const std::string& path,
                                       const std::string& expected_sha256,
@@ -1098,7 +1113,7 @@ class HostSounioCheckCell {
     }
     std::size_t entries = 0;
     for (const auto& entry :
-         std::filesystem::directory_iterator(runtime_storage_path_)) {
+         std::filesystem::directory_iterator(cell_storage_path())) {
       if (!entry.is_regular_file()) return false;
       ++entries;
     }
