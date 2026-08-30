@@ -106,7 +106,7 @@ wait_unit_pid() {
 }
 
 exec_cell_boot_receipt_count() {
-  journalctl --unit "$HOSTD_UNIT" --no-pager --output=cat 2>/dev/null |
+  journalctl --unit "$EXEC_CELL_GATE_UNIT" --no-pager --output=cat 2>/dev/null |
     grep -c '^loom-product-exec-cell-host: PASS ' || true
 }
 
@@ -115,7 +115,7 @@ wait_exec_cell_boot_receipts() {
   for attempt in $(seq 1 2400); do
     count="$(exec_cell_boot_receipt_count)"
     if [[ "$count" =~ ^[0-9]+$ ]] && (( count >= minimum )); then
-      latest="$(journalctl --unit "$HOSTD_UNIT" --no-pager --output=cat \
+      latest="$(journalctl --unit "$EXEC_CELL_GATE_UNIT" --no-pager --output=cat \
         2>/dev/null | grep '^loom-product-exec-cell-host: PASS ' | tail -n 1)"
       [[ "$latest" == *'semantic_authority=Sounio action=9030 lane_action=9031 '* &&
          "$latest" == *'simultaneous_distinct_dynamic_users=true '* &&
@@ -197,6 +197,7 @@ for tool in systemctl systemd-run journalctl sha256sum tar stat find sed cut hea
 done
 
 HOSTD_UNIT="sounio-loom-hostd-canary-${RUN_ID}.service"
+EXEC_CELL_GATE_UNIT="${HOSTD_UNIT%.service}-exec-cell-gate.service"
 START_UNIT="sounio-loom-hostd-lane-${RUN_ID}.service"
 PREFIX="/opt/sounio/loom-hostd-canary-$RUN_ID"
 STATE_DIR="/var/lib/sounio/loom-canary-$RUN_ID"
@@ -280,14 +281,13 @@ if [[ "$PHASE" == prepare ]]; then
   install_status=$?
   set -e
   if [[ $install_status -ne 0 ]]; then
-    exec_gate_unit="${HOSTD_UNIT%.service}-exec-cell-gate.service"
     unit_diagnostic="$({ systemctl status "$HOSTD_UNIT" --no-pager 2>&1 || true; } |
       tail -n 30 | tr '\n' ',')"
     journal_diagnostic="$(journalctl --unit "$HOSTD_UNIT" --no-pager \
       --output=cat -n 80 2>&1 | tr '\n' ',')"
-    exec_gate_diagnostic="$({ systemctl status "$exec_gate_unit" --no-pager \
+    exec_gate_diagnostic="$({ systemctl status "$EXEC_CELL_GATE_UNIT" --no-pager \
       2>&1 || true; } | tail -n 30 | tr '\n' ',')"
-    exec_gate_journal="$(journalctl --unit "$exec_gate_unit" --no-pager \
+    exec_gate_journal="$(journalctl --unit "$EXEC_CELL_GATE_UNIT" --no-pager \
       --output=cat -n 80 2>&1 | tr '\n' ',')"
     fail "activated installer refused status=$install_status stdout=$(tr '\n' ',' < "$ROOT/install.out") stderr=$(tr '\n' ',' < "$ROOT/install.err") unit=$unit_diagnostic journal=$journal_diagnostic exec_gate=$exec_gate_diagnostic exec_gate_journal=$exec_gate_journal"
   fi
