@@ -355,7 +355,8 @@ class ProductExecIngressHostCase {
           "--property=ProtectControlGroups=yes",
           "--property=ProtectClock=yes",
           "--property=ProtectProc=invisible",
-          "--property=ProcSubset=pid",
+          "--property=ProcSubset=" +
+              std::string(provider_fixture_.empty() ? "pid" : "all"),
           "--property=RestrictNamespaces=yes",
           "--property=RestrictSUIDSGID=yes",
           "--property=LockPersonality=yes",
@@ -538,6 +539,8 @@ class ProductExecIngressHostCase {
               property("ProtectSystem") == "strict" &&
               property("PrivateNetwork") == "yes" &&
               property("PrivateUsers") == "no" &&
+              property("ProcSubset") ==
+                  (provider_fixture_.empty() ? "pid" : "all") &&
               product_same_user_namespace(main_pid_) &&
               product_environment_has(
                   environment, "SOUNIO_LOOM_EXEC_INGRESS_REQUIRED=1") &&
