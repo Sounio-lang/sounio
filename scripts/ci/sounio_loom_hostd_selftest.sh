@@ -9,6 +9,7 @@ AGENT=loom-hostd-test
 LANE=durable-lane
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-hostd.XXXXXX")"
 STATE_DIR="$TEST_ROOT/state"
+LIVE_SUPERVISOR_PID=''
 export SOUNIO_COORD_RUNTIME_MODE=local
 
 fail() {
@@ -22,6 +23,10 @@ field() {
 }
 
 cleanup() {
+  if [[ -n "$LIVE_SUPERVISOR_PID" ]]; then
+    kill "$LIVE_SUPERVISOR_PID" >/dev/null 2>&1 || true
+    wait "$LIVE_SUPERVISOR_PID" >/dev/null 2>&1 || true
+  fi
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
     --agent "$AGENT" --lane "$LANE" >/dev/null 2>&1 || true
   if [[ "${SOUNIO_LOOM_KEEP_TEST_ROOT:-0}" != 1 ]]; then
@@ -72,10 +77,33 @@ harness="$(field harness_pid "$initial")"
 [[ -n "$instance" && -n "$kernel_before" && -n "$guardian" && -n "$harness" ]] ||
   fail 'initial physical identity is incomplete'
 
+"$LOOM" host-supervise --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+  --service-enabled --apply --interval-seconds 1 \
+  >"$TEST_ROOT/live-supervisor.out" 2>"$TEST_ROOT/live-supervisor.err" &
+LIVE_SUPERVISOR_PID=$!
+for _ in $(seq 1 160); do
+  [[ -f "$STATE_DIR/hostd/supervisor.state" ]] &&
+    [[ "$(sed -n 's/^state=//p' "$STATE_DIR/hostd/supervisor.state")" == active ]] && break
+  sleep 0.05
+done
+kill -0 "$LIVE_SUPERVISOR_PID" 2>/dev/null ||
+  fail 'live supervisor exited before concurrent enrollment'
+if "$LOOM" host-supervise --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+  --service-enabled --apply --once \
+  >"$TEST_ROOT/duplicate-supervisor.out" 2>"$TEST_ROOT/duplicate-supervisor.err"; then
+  fail 'second live supervisor was admitted'
+fi
+grep -q 'loom-hostd-supervisor-already-active' \
+  "$TEST_ROOT/duplicate-supervisor.err" ||
+  fail 'second live supervisor was refused by the wrong lock boundary'
+
 enroll="$($LOOM host-enroll --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
   --agent "$AGENT" --lane "$LANE")"
 [[ "$enroll" == *'authority=Sounio action=9041 service_enabled=false'* ]] ||
   fail "host enrollment omitted authority boundary: $enroll"
+kill "$LIVE_SUPERVISOR_PID"
+wait "$LIVE_SUPERVISOR_PID" >/dev/null 2>&1 || true
+LIVE_SUPERVISOR_PID=''
 
 active="$($LOOM host-reconcile --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
   --agent "$AGENT" --lane "$LANE" --service-enabled)"
@@ -166,5 +194,5 @@ receipt_count="$(field receipts "$verified")"
 [[ "$verified" == *'hash_chain=PASS semantic_authority=Sounio action=9041'* && \
    "$receipt_count" -ge 8 ]] || fail "receipt chain did not verify: $verified"
 
-printf 'sounio-loom-hostd-selftest: PASS semantic_authority=Sounio action=9041 language=OCaml role=EFFECT_PARITY active=NOOP_ACTIVE supervisor_restart=PASS python_oracle=DENIED_PRE_EXEC recover_plan=PASS guardian_start_sabotage=DENY545 same_physical_recovery=PASS guardian_loss=HOLD_LINEAGE_REQUIRED same_pty_claim=false receipts=%s hash_chain=PASS python_executed=false rust_executed=false production_activation=false\n' \
+printf 'sounio-loom-hostd-selftest: PASS semantic_authority=Sounio action=9041 language=OCaml role=EFFECT_PARITY active=NOOP_ACTIVE concurrent_enroll=PASS supervisor_singleton=DENIED supervisor_restart=PASS python_oracle=DENIED_PRE_EXEC recover_plan=PASS guardian_start_sabotage=DENY545 same_physical_recovery=PASS guardian_loss=HOLD_LINEAGE_REQUIRED same_pty_claim=false receipts=%s hash_chain=PASS python_executed=false rust_executed=false production_activation=false\n' \
   "$receipt_count"

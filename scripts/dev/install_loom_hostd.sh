@@ -110,7 +110,7 @@ POLICY_ROOT="$(readlink -f "$POLICY_ROOT")"
 
 runtime_identity="$($RUNTIME runtime-version)"
 grep -Fxq 'language=OCaml' <<< "$runtime_identity" || fail 'runtime is not OCaml'
-grep -Fxq 'runtime_version=2026.08.30.41' <<< "$runtime_identity" ||
+grep -Fxq 'runtime_version=2026.08.30.42' <<< "$runtime_identity" ||
   fail 'runtime version does not implement loom-hostd v1'
 runtime_sha256="$(sha256sum "$RUNTIME" | cut -d ' ' -f 1)"
 authority_sha256="$(sha256sum "$AUTHORITY" | cut -d ' ' -f 1)"

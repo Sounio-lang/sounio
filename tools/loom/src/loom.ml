@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.30.41"
+let runtime_version = "2026.08.30.42"
 let max_control_bytes = 16 * 1024
 let max_kernel_control_bytes = 2 * 1024 * 1024
 let max_snapshot_bytes = 1024 * 1024
@@ -11012,6 +11012,8 @@ let hostd_lanes_directory root = Filename.concat (hostd_directory root) "lanes"
 let hostd_receipts_directory root = Filename.concat (hostd_directory root) "receipts"
 let hostd_root_identity_path root = Filename.concat (hostd_directory root) "root.identity"
 let hostd_lock_path root = Filename.concat (hostd_directory root) "hostd.lock"
+let hostd_supervisor_lock_path root =
+  Filename.concat (hostd_directory root) "supervisor.lock"
 let hostd_supervisor_state_path root = Filename.concat (hostd_directory root) "supervisor.state"
 
 let hostd_desired_path root agent lane =
@@ -11024,17 +11026,33 @@ let hostd_receipt_path root agent lane =
   Filename.concat (hostd_receipts_directory root)
     (Printf.sprintf "%s--%s--%s.tsv" (slug agent) (slug lane) identity)
 
-let with_hostd_lock root callback =
+let with_hostd_named_lock root path busy_reason wait_seconds callback =
   let directory = hostd_directory root in
   mkdir_p directory;
   Unix.chmod directory 0o700;
-  let lock = Unix.openfile (hostd_lock_path root) [ O_WRONLY; O_CREAT ] 0o600 in
+  let lock = Unix.openfile path [ O_WRONLY; O_CREAT ] 0o600 in
   Fun.protect
     ~finally:(fun () -> Unix.close lock)
     (fun () ->
-      (try Unix.lockf lock F_TLOCK 0
-       with Unix_error _ -> failf "loom-hostd-already-active");
+      let deadline = Unix.gettimeofday () +. wait_seconds in
+      let rec acquire () =
+        try Unix.lockf lock F_TLOCK 0
+        with
+        | Unix_error ((EACCES | EAGAIN), _, _) ->
+            if Unix.gettimeofday () >= deadline then failf "%s" busy_reason;
+            Unix.sleepf 0.01;
+            acquire ()
+      in
+      acquire ();
       callback ())
+
+let with_hostd_lock root callback =
+  with_hostd_named_lock root (hostd_lock_path root) "loom-hostd-lock-timeout"
+    15.0 callback
+
+let with_hostd_supervisor_lock root callback =
+  with_hostd_named_lock root (hostd_supervisor_lock_path root)
+    "loom-hostd-supervisor-already-active" 0.0 callback
 
 let hostd_root_identity root create =
   let path = hostd_root_identity_path root in
@@ -11416,23 +11434,28 @@ let host_supervise_command cli =
   in
   if interval > 60 then failf "host-supervisor-interval-too-large";
   let once = flag cli "--once" in
-  with_hostd_lock root (fun () ->
+  with_hostd_supervisor_lock root (fun () ->
       let cycles = ref 0 in
       let rec loop () =
         incr cycles;
         (try
-           hostd_reconcile root (flag cli "--service-enabled")
-             (flag cli "--apply") cli;
-           atomic_write (hostd_supervisor_state_path root)
-             (descriptor_text
-                [ ("schema", "loom-hostd-supervisor-v1"); ("state", "active");
-                  ("pid", string_of_int (Unix.getpid ()));
-                  ("pid_start", process_start (Unix.getpid ()));
-                  ("boot_id", trim (read_file "/proc/sys/kernel/random/boot_id"));
-                  ("cycles", string_of_int !cycles); ("reconciled_utc", utc_now ());
-                  ("semantic_authority", "Sounio"); ("semantic_action", "9041");
-                  ("semantics_sha256", host_boot_semantics_sha256);
-                  ("runtime_sha256", host_boot_runtime_sha256) ])
+           with_hostd_lock root (fun () ->
+               hostd_reconcile root (flag cli "--service-enabled")
+                 (flag cli "--apply") cli;
+               atomic_write (hostd_supervisor_state_path root)
+                 (descriptor_text
+                    [ ("schema", "loom-hostd-supervisor-v1");
+                      ("state", "active");
+                      ("pid", string_of_int (Unix.getpid ()));
+                      ("pid_start", process_start (Unix.getpid ()));
+                      ("boot_id",
+                       trim (read_file "/proc/sys/kernel/random/boot_id"));
+                      ("cycles", string_of_int !cycles);
+                      ("reconciled_utc", utc_now ());
+                      ("semantic_authority", "Sounio");
+                      ("semantic_action", "9041");
+                      ("semantics_sha256", host_boot_semantics_sha256);
+                      ("runtime_sha256", host_boot_runtime_sha256) ]))
          with Loom_error reason ->
            atomic_write (hostd_supervisor_state_path root)
              (descriptor_text
