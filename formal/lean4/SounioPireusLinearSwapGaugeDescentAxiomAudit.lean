@@ -1,0 +1,16 @@
+import SounioPireusLinearSwapGaugeDescent
+
+open SounioPireusLinearSwapGaugeDescent
+
+#print axioms raw_action_identity
+#print axioms raw_action_compose
+#print axioms raw_action_inverse
+#print axioms unrestricted_coboundary_pullback
+#print axioms raw_action_coboundary_covariant
+#print axioms unrestricted_coboundary_of_gauge_word
+#print axioms basis_fixed_gauge_action_is_potential_action
+#print axioms raw_action_transports_basis_fixed_gauge_to_unrestricted_potential
+#print axioms input_swap_action_is_transpose
+#print axioms input_swap_action_is_involution
+#print axioms input_swap_commutes_with_basis_fixed_gauge
+#print axioms linear_swap_descent_progress_does_not_close_v13_target03

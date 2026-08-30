@@ -272,6 +272,11 @@ lean_lib «SounioPireusGaugeCoboundaryFaithfulness» where
 lean_lib «SounioPireusGaugeSectionCanonicalization» where
   moreLeanArgs := #["-j", "1"]
 
+-- XOR-linear pullback plus concrete input swap and unrestricted coboundary transport.
+-- Non-default: the 11-bit rebase and concrete 20160-code GL4 bridge remain open.
+lean_lib «SounioPireusLinearSwapGaugeDescent» where
+  moreLeanArgs := #["-j", "1"]
+
 -- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
 -- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
 -- sweeps (16x16 complex greedy over 1..15) build in ~10s, so kept as a default_target.
