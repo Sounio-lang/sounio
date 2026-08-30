@@ -127,6 +127,12 @@ PRODUCT_EXEC_RESULT_MANIFEST="$(verify_binding product_exec_result_manifest_path
 PRODUCT_EXEC_RESULT_RUNTIME="$(verify_binding product_exec_result_runtime_path product_exec_result_runtime_sha256 555)"
 PRODUCT_EXEC_INTENT_MANIFEST="$(verify_binding product_exec_intent_manifest_path product_exec_intent_manifest_sha256 444)"
 PRODUCT_EXEC_INTENT_RUNTIME="$(verify_binding product_exec_intent_runtime_path product_exec_intent_runtime_sha256 555)"
+PRODUCT_OPERATION_FIXTURE_MANIFEST="$(verify_binding product_operation_fixture_manifest_path product_operation_fixture_manifest_sha256 444)"
+PRODUCT_OPERATION_FIXTURE_BUNDLE="$(verify_binding product_operation_fixture_bundle_path product_operation_fixture_bundle_sha256 444)"
+PRODUCT_OPERATION_CATALOG_MANIFEST="$(verify_binding product_operation_catalog_manifest_path product_operation_catalog_manifest_sha256 444)"
+PRODUCT_OPERATION_CATALOG_RUNTIME="$(verify_binding product_operation_catalog_runtime_path product_operation_catalog_runtime_sha256 555)"
+PRODUCT_OPERATION_RESULT_MANIFEST="$(verify_binding product_operation_result_manifest_path product_operation_result_manifest_sha256 444)"
+PRODUCT_OPERATION_RESULT_RUNTIME="$(verify_binding product_operation_result_runtime_path product_operation_result_runtime_sha256 555)"
 [[ "$(record_value "$MANIFEST" controller_frozen_commit)" =~ ^[0-9a-f]{40}$ && \
    "$(record_value "$MANIFEST" resident_v4_frozen_commit)" =~ ^[0-9a-f]{40}$ && \
    "$(sha256_file "$CONTROLLER_FROZEN_RESIDENT")" == \
@@ -164,6 +170,10 @@ PRODUCT_ROOT="$RELEASE/$(record_value "$MANIFEST" product_authority_root_path)"
    "$(record_value "$MANIFEST" product_exec_ingress_action)" == 9031 && \
    "$(record_value "$MANIFEST" product_exec_result_action)" == 9033 && \
    "$(record_value "$MANIFEST" product_exec_intent_action)" == 9034 && \
+   "$(record_value "$MANIFEST" product_operation_catalog_action)" == 9035 && \
+   "$(record_value "$MANIFEST" product_operation_result_action)" == 9036 && \
+   "$(record_value "$MANIFEST" operation_fixture_hook_switched)" == true && \
+   "$(record_value "$MANIFEST" operation_fixture_result_attached)" == false && \
    "$(record_value "$MANIFEST" provider_hook_fixture_configured)" == true && \
    "$(record_value "$MANIFEST" provider_hook_switched)" == false && \
    "$(record_value "$MANIFEST" provider_lifecycle_attached)" == false && \
@@ -201,7 +211,28 @@ PRODUCT_ROOT="$RELEASE/$(record_value "$MANIFEST" product_authority_root_path)"
    "$(sha256_file "$PRODUCT_EXEC_INTENT_MANIFEST")" == \
      8a95e587ccc81c16da17d56b9649d04bc9c3e764d66fc938c195d95568e7608e && \
    "$(record_value "$PRODUCT_EXEC_INTENT_MANIFEST" executable_sha256)" == \
-     "$(sha256_file "$PRODUCT_EXEC_INTENT_RUNTIME")" ]] ||
+     "$(sha256_file "$PRODUCT_EXEC_INTENT_RUNTIME")" && \
+   "$(record_value "$PRODUCT_OPERATION_FIXTURE_MANIFEST" stage)" == SEMANTICS_FROZEN && \
+   "$(record_value "$PRODUCT_OPERATION_FIXTURE_MANIFEST" producing_language)" == Sounio && \
+   "$(record_value "$PRODUCT_OPERATION_FIXTURE_MANIFEST" action)" == 9030 && \
+   "$(record_value "$PRODUCT_OPERATION_FIXTURE_MANIFEST" catalog_action)" == 9035 && \
+   "$(record_value "$PRODUCT_OPERATION_FIXTURE_MANIFEST" result_action)" == 9036 && \
+   "$(record_value "$PRODUCT_OPERATION_FIXTURE_MANIFEST" bundle_sha256)" == \
+     "$(sha256_file "$PRODUCT_OPERATION_FIXTURE_BUNDLE")" && \
+   "$(sha256_file "$PRODUCT_OPERATION_FIXTURE_MANIFEST")" == \
+     4abfbc8a0fa9cdd1c2164f9f72ea4d408939b3d53497fa7fcaf008d71b1ea1e4 && \
+   "$(record_value "$PRODUCT_OPERATION_CATALOG_MANIFEST" action)" == 9035 && \
+   "$(record_value "$PRODUCT_OPERATION_CATALOG_MANIFEST" producing_language)" == Sounio && \
+   "$(record_value "$PRODUCT_OPERATION_CATALOG_MANIFEST" executable_sha256)" == \
+     "$(sha256_file "$PRODUCT_OPERATION_CATALOG_RUNTIME")" && \
+   "$(sha256_file "$PRODUCT_OPERATION_CATALOG_MANIFEST")" == \
+     25c58880cfe568a3b55b479df4515b63589c2e4dca703c97917e5cbdef0f1561 && \
+   "$(record_value "$PRODUCT_OPERATION_RESULT_MANIFEST" action)" == 9036 && \
+   "$(record_value "$PRODUCT_OPERATION_RESULT_MANIFEST" producing_language)" == Sounio && \
+   "$(record_value "$PRODUCT_OPERATION_RESULT_MANIFEST" executable_sha256)" == \
+     "$(sha256_file "$PRODUCT_OPERATION_RESULT_RUNTIME")" && \
+   "$(sha256_file "$PRODUCT_OPERATION_RESULT_MANIFEST")" == \
+     58d4a49c5b2462261ee53cd06f3ca8e29d363c1a38bf47274fa98a67b79cc569 ]] ||
   fail 'product ExecIngress proof capsule is incomplete'
 
 SYSTEMD_RUN="$(readlink -f "$(command -v systemd-run)")"
@@ -269,6 +300,10 @@ product_exec_cell_output="$(timeout --signal=TERM --kill-after=5s 240s \
   --product-exec-cell-fixture-bundle "$PRODUCT_EXEC_CELL_FIXTURE_BUNDLE" \
   --product-exec-result-manifest "$PRODUCT_EXEC_RESULT_MANIFEST" \
   --product-provider-hook-fixture "$PRODUCT_PROVIDER_HOOK_FIXTURE" \
+  --operation-fixture-manifest "$PRODUCT_OPERATION_FIXTURE_MANIFEST" \
+  --operation-fixture-bundle "$PRODUCT_OPERATION_FIXTURE_BUNDLE" \
+  --operation-catalog-manifest "$PRODUCT_OPERATION_CATALOG_MANIFEST" \
+  --operation-result-manifest "$PRODUCT_OPERATION_RESULT_MANIFEST" \
   --systemd-run "$SYSTEMD_RUN" --systemctl "$SYSTEMCTL" 2>&1)"
 product_exec_cell_status=$?
 set -e
@@ -293,6 +328,22 @@ for expectation in \
   'intent_command_mismatch=DENY555' \
   'provider_hook_switched=true' 'provider_lifecycle_attached=true' \
   'provider_fixture_language=OCaml' \
+  'operation_catalog_action=9035' 'operation_result_action=9036' \
+  'operation_simultaneous_distinct_dynamic_users=true' \
+  'operation_protocol=READY+ARM' \
+  'operation_principal_self_measured=true' \
+  'operation_descriptor_self_measured=true' \
+  'operation_pidfd_extinct=true' \
+  'operation_cgroup_unpopulated=true' \
+  'operation_unit_inactive=true' \
+  'operation_runtime_directory_extinct=true' \
+  'operation_record_returned=true' \
+  'operation_result_presenter=read-only' \
+  'operation_command_mismatch=DENY492' \
+  'operation_sabotage_cell_created=false' \
+  'operation_result_binding_sabotage=closed' \
+  'operation_result_digest_sabotage=closed' \
+  'operation_result_manifest_sabotage=closed' \
   'python_executed=false' 'rust_executed=false' \
   'exec_cell_attached=true' 'material_execution=true' \
   'test_only=true' 'production_activation=false' \
@@ -394,7 +445,7 @@ for expectation in \
     fail "host ProcessWitness receipt omitted $expectation"
 done
 
-printf 'sounio-loom-host-exec-quorum-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio controller_language=OCaml controller_role=EFFECT_PARITY material_language=C++20+Linux+systemd material_role=MATERIAL_PARITY transitory=true host=%s kernel=%s architecture=%s systemd_version=%s systemd_run_sha256=%s systemctl_sha256=%s release_manifest_sha256=%s broker_output_sha256=%s process_witness_output_sha256=%s product_exec_ingress_output_sha256=%s product_exec_cell_output_sha256=%s dynamic_user=true principal_distinct_uid=true non_bearer_exec_quorum=true descriptor_barrier_causal=true linear_grant_consumption=true positive_open_sentinels=1 sabotage_open_sentinels=1 total_open_sentinels=2 process_witness_core=true same_pid_execveat=true affirmative_extinction=true complete_effects=false product_lane_cell_canary=true distinct_uid_product_broker_canary=true fleet_lane_cell_attached=false product_exec_cell_canary=true exact_fixture_result_attached=true result_returned=true result_presenter=read-only exact_fixture_hook_switched=true provider_hook_switched=true provider_lifecycle_attached=true provider_fixture_language=OCaml local_exec_capability_used=false raw_event_separate=true event_projection=Sounio-9034 event_override=false intent_command_mismatch=DENY555 exec_cell_attached=true material_grant=true material_execution=true test_only=true production_activation=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false\n%s\n%s\n%s\n%s\n' \
+printf 'sounio-loom-host-exec-quorum-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio controller_language=OCaml controller_role=EFFECT_PARITY material_language=C++20+Linux+systemd material_role=MATERIAL_PARITY transitory=true host=%s kernel=%s architecture=%s systemd_version=%s systemd_run_sha256=%s systemctl_sha256=%s release_manifest_sha256=%s broker_output_sha256=%s process_witness_output_sha256=%s product_exec_ingress_output_sha256=%s product_exec_cell_output_sha256=%s dynamic_user=true principal_distinct_uid=true non_bearer_exec_quorum=true descriptor_barrier_causal=true linear_grant_consumption=true positive_open_sentinels=1 sabotage_open_sentinels=1 total_open_sentinels=2 process_witness_core=true same_pid_execveat=true affirmative_extinction=true complete_effects=false product_lane_cell_canary=true distinct_uid_product_broker_canary=true fleet_lane_cell_attached=false product_exec_cell_canary=true exact_fixture_result_attached=true result_returned=true result_presenter=read-only exact_fixture_hook_switched=true provider_hook_switched=true provider_lifecycle_attached=true provider_fixture_language=OCaml operation_catalog_action=9035 operation_result_action=9036 operation_exec_cell_attached=true operation_record_returned=true operation_result_presenter=read-only local_exec_capability_used=false raw_event_separate=true event_projection=Sounio-9034+9035 event_override=false intent_command_mismatch=DENY555 operation_command_mismatch=DENY492 exec_cell_attached=true material_grant=true material_execution=true test_only=true production_activation=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false\n%s\n%s\n%s\n%s\n' \
   "$(hostname)" "$(uname -r)" "$(uname -m)" "$SYSTEMD_VERSION" \
   "$(sha256_file "$SYSTEMD_RUN")" "$(sha256_file "$SYSTEMCTL")" \
   "$EXPECTED_MANIFEST_SHA256" "$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1)" \

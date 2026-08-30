@@ -8,6 +8,10 @@ enum class ProductIngressReply {
   ResultBindingMismatch,
   ResultReceiptMismatch,
   ResultManifestMismatch,
+  RecordExact,
+  RecordBindingMismatch,
+  RecordDigestMismatch,
+  RecordManifestMismatch,
 };
 
 enum class ProductIngressExchangeExpectation {
@@ -45,8 +49,8 @@ using ProductIngressBoundCallback =
 
 struct ProductIngressResult {
   std::string handle;
-  std::string receipt_sha256;
-  std::string receipt;
+  std::string payload_sha256;
+  std::string payload;
   std::string manifest_sha256;
 };
 
@@ -205,6 +209,8 @@ class ProductExecIngressHostCase {
         systemctl_(canonical_path(systemctl)),
         label_(std::move(label)),
         command_(std::move(command)),
+        operation_projection_(command_.rfind(
+            "loom-exec-cell-v2 sounio-check source=", 0) == 0),
         dynamic_user_(dynamic_user),
         descriptor_present_(descriptor_present),
         reply_(reply),
@@ -393,7 +399,9 @@ class ProductExecIngressHostCase {
           "--setenv=SOUNIO_LOOM_RESIDENT_RECEIPT_LOG=" + runtime_path_ +
               "/resident.tsv"};
       if (!result_event_sha256_.empty()) {
-        arguments.push_back("--setenv=SOUNIO_LOOM_EXEC_INTENT_PROJECTION=1");
+        arguments.push_back(operation_projection_
+                                ? "--setenv=SOUNIO_LOOM_EXEC_OPERATION_PROJECTION=1"
+                                : "--setenv=SOUNIO_LOOM_EXEC_INTENT_PROJECTION=1");
       }
       if (!provider_fixture_.empty()) {
         arguments.push_back("--setenv=SOUNIO_LOOM_PROVIDER_CODEX=" +
@@ -553,7 +561,10 @@ class ProductExecIngressHostCase {
                                       "GIT_CONFIG_VALUE_0=" + product_root_) &&
               (result_event_sha256_.empty() ||
                product_environment_has(
-                   environment, "SOUNIO_LOOM_EXEC_INTENT_PROJECTION=1")) &&
+                   environment,
+                   operation_projection_
+                       ? "SOUNIO_LOOM_EXEC_OPERATION_PROJECTION=1"
+                       : "SOUNIO_LOOM_EXEC_INTENT_PROJECTION=1")) &&
               (provider_fixture_.empty() ||
                (product_environment_has(
                     environment,
@@ -635,16 +646,16 @@ class ProductExecIngressHostCase {
         reply_ == ProductIngressReply::ResultManifestMismatch) {
       if (!on_result_) throw Error("product ExecResult callback absent");
       ProductIngressResult result = on_result_(observation());
-      if (!lowercase_digest(result.receipt_sha256) ||
+      if (!lowercase_digest(result.payload_sha256) ||
           !lowercase_digest(result.manifest_sha256) || result.handle.empty() ||
-          result.handle.size() > 512 || result.receipt.size() > 1024) {
+          result.handle.size() > 512 || result.payload.size() > 64 * 1024) {
         throw Error("product ExecResult callback malformed");
       }
       if (reply_ == ProductIngressReply::ResultBindingMismatch) {
         command_sha.back() = command_sha.back() == '0' ? '1' : '0';
       } else if (reply_ == ProductIngressReply::ResultReceiptMismatch) {
-        result.receipt_sha256.back() =
-            result.receipt_sha256.back() == '0' ? '1' : '0';
+        result.payload_sha256.back() =
+            result.payload_sha256.back() == '0' ? '1' : '0';
       } else if (reply_ == ProductIngressReply::ResultManifestMismatch) {
         result.manifest_sha256.back() =
             result.manifest_sha256.back() == '0' ? '1' : '0';
@@ -652,8 +663,40 @@ class ProductExecIngressHostCase {
       quorum_write_all(
           connection_.get(),
           "LOOM_EXEC_RESULT/1\t" + event_sha + "\t" + command_sha + "\t" +
-              result.handle + "\t" + result.receipt_sha256 + "\t" +
-              product_hex_encode(result.receipt) + "\t" +
+              result.handle + "\t" + result.payload_sha256 + "\t" +
+              product_hex_encode(result.payload) + "\t" +
+              result.manifest_sha256 + "\n",
+          deadline);
+      shutdown(connection_.get(), SHUT_WR);
+      connection_ = UniqueFd();
+      return;
+    }
+    if (reply_ == ProductIngressReply::RecordExact ||
+        reply_ == ProductIngressReply::RecordBindingMismatch ||
+        reply_ == ProductIngressReply::RecordDigestMismatch ||
+        reply_ == ProductIngressReply::RecordManifestMismatch) {
+      if (!on_result_) throw Error("product ExecResult record callback absent");
+      ProductIngressResult result = on_result_(observation());
+      if (!lowercase_digest(result.payload_sha256) ||
+          !lowercase_digest(result.manifest_sha256) || result.handle.empty() ||
+          result.handle.size() > 512 || result.payload.empty() ||
+          result.payload.size() > 64 * 1024) {
+        throw Error("product ExecResult record callback malformed");
+      }
+      if (reply_ == ProductIngressReply::RecordBindingMismatch) {
+        command_sha.back() = command_sha.back() == '0' ? '1' : '0';
+      } else if (reply_ == ProductIngressReply::RecordDigestMismatch) {
+        result.payload_sha256.back() =
+            result.payload_sha256.back() == '0' ? '1' : '0';
+      } else if (reply_ == ProductIngressReply::RecordManifestMismatch) {
+        result.manifest_sha256.back() =
+            result.manifest_sha256.back() == '0' ? '1' : '0';
+      }
+      quorum_write_all(
+          connection_.get(),
+          "LOOM_EXEC_RESULT_RECORD/1\t" + event_sha + "\t" + command_sha +
+              "\t" + result.handle + "\t" + result.payload_sha256 + "\t" +
+              product_hex_encode(result.payload) + "\t" +
               result.manifest_sha256 + "\n",
           deadline);
       shutdown(connection_.get(), SHUT_WR);
@@ -778,6 +821,7 @@ class ProductExecIngressHostCase {
   std::string systemctl_;
   std::string label_;
   std::string command_;
+  bool operation_projection_ = false;
   bool dynamic_user_ = true;
   bool descriptor_present_ = true;
   ProductIngressReply reply_ = ProductIngressReply::Exact;

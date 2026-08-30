@@ -1971,6 +1971,10 @@ struct Options {
   std::string product_exec_cell_fixture_bundle;
   std::string product_exec_result_manifest;
   std::string product_provider_hook_fixture;
+  std::string operation_fixture_manifest;
+  std::string operation_fixture_bundle;
+  std::string operation_catalog_manifest;
+  std::string operation_result_manifest;
   std::string systemd_run;
   std::string systemctl;
   std::string frame;
@@ -2041,6 +2045,14 @@ Options parse_options(int argc, char** argv) {
       options.product_exec_result_manifest = value;
     } else if (argument == "--product-provider-hook-fixture") {
       options.product_provider_hook_fixture = value;
+    } else if (argument == "--operation-fixture-manifest") {
+      options.operation_fixture_manifest = value;
+    } else if (argument == "--operation-fixture-bundle") {
+      options.operation_fixture_bundle = value;
+    } else if (argument == "--operation-catalog-manifest") {
+      options.operation_catalog_manifest = value;
+    } else if (argument == "--operation-result-manifest") {
+      options.operation_result_manifest = value;
     } else if (argument == "--systemd-run") {
       options.systemd_run = value;
     } else if (argument == "--systemctl") {
@@ -2142,8 +2154,12 @@ void require_product_exec_cell_host_artifacts(const Options& options) {
       options.product_exec_cell_fixture_manifest.empty() ||
       options.product_exec_cell_fixture_bundle.empty() ||
       options.product_exec_result_manifest.empty() ||
-      options.product_provider_hook_fixture.empty()) {
-    throw Error("product ExecCell controller, resident, witness, fixture manifest, fixture bundle, ExecResult manifest, and provider hook fixture are required");
+      options.product_provider_hook_fixture.empty() ||
+      options.operation_fixture_manifest.empty() ||
+      options.operation_fixture_bundle.empty() ||
+      options.operation_catalog_manifest.empty() ||
+      options.operation_result_manifest.empty()) {
+    throw Error("product ExecCell controller, resident, witness, exact and operation fixtures, ExecResult manifests, and provider hook fixture are required");
   }
 }
 
@@ -2224,7 +2240,11 @@ int main(int argc, char** argv) {
           options.product_exec_cell_fixture_manifest,
           options.product_exec_cell_fixture_bundle,
           options.product_exec_result_manifest,
-          options.product_provider_hook_fixture, options.systemd_run,
+          options.product_provider_hook_fixture,
+          options.operation_fixture_manifest,
+          options.operation_fixture_bundle,
+          options.operation_catalog_manifest,
+          options.operation_result_manifest, options.systemd_run,
           options.systemctl);
     }
     if (options.mode == "--selftest-journal") {
