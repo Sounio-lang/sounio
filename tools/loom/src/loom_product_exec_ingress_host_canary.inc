@@ -21,6 +21,8 @@ struct ProductIngressHostRun {
   std::string output;
   std::string ingress_log;
   std::string hook_log;
+  std::string provider_daemon_log;
+  std::string provider_guardian_log;
   int hook_code = 255;
   pid_t main_pid = 0;
   uid_t main_uid = 0;
@@ -722,6 +724,8 @@ class ProductExecIngressHostCase {
     result.output = output_text_;
     result.ingress_log = optional_log("ingress.tsv");
     result.hook_log = optional_log("hook.tsv");
+    result.provider_daemon_log = optional_provider_log("daemon.log");
+    result.provider_guardian_log = optional_provider_log("guardian.log");
     result.hook_code = hook_code_;
     result.main_pid = main_pid_;
     result.main_uid = main_uid_;
@@ -829,7 +833,11 @@ std::string product_case_diagnostic(const ProductIngressHostRun& run) {
          (run.identity_authenticated ? "true" : "false") +
          " output=" + product_compact_diagnostic(run.output) +
          " ingress_log=" + product_compact_diagnostic(run.ingress_log) +
-         " hook_log=" + product_compact_diagnostic(run.hook_log);
+         " hook_log=" + product_compact_diagnostic(run.hook_log) +
+         " provider_daemon_log=" +
+         product_compact_diagnostic(run.provider_daemon_log) +
+         " provider_guardian_log=" +
+         product_compact_diagnostic(run.provider_guardian_log);
 }
 
 void require_product_case(bool condition, std::string_view reason,
