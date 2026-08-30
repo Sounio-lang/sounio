@@ -187,7 +187,7 @@ ACTIVE_POD="$POD_A"
 POD_A_UID="$(kubectl -n "$NAMESPACE" get pod "$POD_A" -o jsonpath='{.metadata.uid}')"
 [[ "$POD_A_UID" =~ ^[0-9a-f-]{36}$ ]] || fail 'Pod-A UID is non-canonical'
 
-HOST_ROOT="/run/sounio-loom-causal-workflow-material-${RUN_ID}"
+HOST_ROOT="/var/lib/sounio-loom-causal-workflow-material-${RUN_ID}"
 kubectl -n "$NAMESPACE" exec "$POD_A" -- sh -c "umask 077; rm -rf '/proc/1/root$HOST_ROOT'; mkdir -p '/proc/1/root$HOST_ROOT/capsule'; chmod 0711 '/proc/1/root$HOST_ROOT'; chmod 0700 '/proc/1/root$HOST_ROOT/capsule'"
 tar -C "$CAPSULE" -cf - . | kubectl -n "$NAMESPACE" exec -i "$POD_A" -- sh -c "tar -xf - -C '/proc/1/root$HOST_ROOT/capsule'; chown -R 0:0 '/proc/1/root$HOST_ROOT/capsule'; chmod 0555 '/proc/1/root$HOST_ROOT/capsule'"
 kubectl -n "$NAMESPACE" exec -i "$POD_A" -- sh -c "cat > '/proc/1/root$HOST_ROOT/host-selftest.sh'; chmod 0500 '/proc/1/root$HOST_ROOT/host-selftest.sh'" < "$HOST_SELFTEST"
