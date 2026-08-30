@@ -109,6 +109,19 @@ host_exec() {
   kubectl -n "$NAMESPACE" exec "$pod" -- nsenter -t 1 -m -u -i -n -p -- "$@"
 }
 
+host_failure_context() {
+  local pod="$1"
+  printf 'unit_show={'
+  host_exec "$pod" systemctl show "$UNIT" -p Id -p LoadState -p ActiveState -p SubState \
+    -p Result -p ExecMainCode -p ExecMainStatus -p MainPID -p InvocationID \
+    -p ExecMainStartTimestampMonotonic 2>&1 || true
+  printf '} result_log={'
+  host_exec "$pod" cat "$HOST_ROOT/result.log" 2>&1 || true
+  printf '} journal={'
+  host_exec "$pod" journalctl -u "$UNIT" -n 80 --no-pager 2>&1 || true
+  printf '}'
+}
+
 cleanup() {
   local cleanup_transport=''
   if pod_exists "$POD_B"; then
@@ -186,13 +199,14 @@ host_exec "$POD_A" systemd-run --quiet --no-block --unit="${UNIT%.service}" \
   --property="StandardError=append:$HOST_ROOT/result.log" \
   "$HOST_ROOT/host-selftest.sh" --capsule "$HOST_ROOT/capsule" \
   --expected-manifest-sha256 "$EXPECTED_MANIFEST_SHA256" --store-root "$HOST_ROOT/store" \
-  --phase-marker "$HOST_ROOT/started.v1"
-for _ in $(seq 1 120); do
+  --phase-marker "$HOST_ROOT/started.v1" ||
+  fail "host systemd refused transient unit context=$(host_failure_context "$POD_A")"
+for _ in $(seq 1 240); do
   [[ "$(host_exec "$POD_A" cat "$HOST_ROOT/started.v1" 2>/dev/null || true)" == MATERIAL_HOST_UNIT_STARTED ]] && break
-  sleep 0.1
+  sleep 0.25
 done
 [[ "$(host_exec "$POD_A" cat "$HOST_ROOT/started.v1" 2>/dev/null || true)" == MATERIAL_HOST_UNIT_STARTED ]] ||
-  fail 'host-owned transient unit never reached durable started marker'
+  fail "host-owned transient unit never reached durable started marker context=$(host_failure_context "$POD_A")"
 READY_RECORD="$HOST_ROOT/store/pod-loss-ready.record"
 for _ in $(seq 1 720); do
   ready_probe="$(host_exec "$POD_A" cat "$READY_RECORD" 2>/dev/null || true)"
@@ -200,7 +214,7 @@ for _ in $(seq 1 720); do
   sleep 0.25
 done
 [[ "${ready_probe:-}" == loom-causal-pod-loss-ready-v1$'\n'* ]] ||
-  fail 'host workflow never reached action9037 RUNNING pod-loss synchronization point'
+  fail "host workflow never reached action9037 RUNNING pod-loss synchronization point context=$(host_failure_context "$POD_A")"
 READY_SHA256="$(printf '%s\n' "$ready_probe" | sha256sum | cut -d ' ' -f 1)"
 READY_GUARDIAN_GENERATION="$(record_value <(printf '%s\n' "$ready_probe") guardian_generation)"
 READY_WORKFLOW_ID="$(record_value <(printf '%s\n' "$ready_probe") workflow_id)"
