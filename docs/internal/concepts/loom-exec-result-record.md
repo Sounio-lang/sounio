@@ -32,5 +32,6 @@ comparison admits it.
 
 Semantic-Boundary: runtime values are observations, not expected results.
 Sounio defines the canonical fields and handle recipe. Material layers may
-measure those fields but may not omit bindings, promote the handle, execute the
-artifact, or synthesize semantic authority after execution.
+measure those fields but may not omit the principal, inherited-descriptor, or
+consumed-grant bindings, promote the handle, execute the artifact, or
+synthesize semantic authority after execution.

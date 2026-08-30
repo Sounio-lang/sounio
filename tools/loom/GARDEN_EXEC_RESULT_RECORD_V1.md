@@ -36,7 +36,8 @@ or execution authority.
 
 The record binds operation, semantic event, command template, generation,
 source, compiler, argument vector, artifact, artifact size, stdout, stderr,
-diagnostics, sandbox profile, and exit code. Its handle is derived from the
+diagnostics, sandbox profile, measured principal identity, inherited-descriptor
+binding, consumed-grant receipt, and exit code. Its handle is derived from the
 event, generation, and canonical record hash. The artifact is measured but is
 not executed by this protocol.
 
