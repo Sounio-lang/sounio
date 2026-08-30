@@ -30,9 +30,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-bash "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
-bash "$ROOT_DIR/scripts/dev/build_sounio_loom_host_boot_reconciler.sh" >/dev/null
-bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v5.sh" >/dev/null
 runtime="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 authority="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-host-boot-reconciler"
 resident="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v5"
@@ -51,6 +48,10 @@ fi
    ! -L "$exec_cell_capsule" &&
    "$exec_cell_capsule_sha256" =~ ^[0-9a-f]{64}$ ]] ||
   fail 'ExecCell capsule fixture is incomplete'
+
+bash "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
+bash "$ROOT_DIR/scripts/dev/build_sounio_loom_host_boot_reconciler.sh" >/dev/null
+bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v5.sh" >/dev/null
 
 first="$(bash "$INSTALLER" --install-root "$stage" \
   --runtime "$runtime" --authority "$authority" --resident "$resident" \
