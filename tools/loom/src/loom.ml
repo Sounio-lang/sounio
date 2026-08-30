@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.29.40"
+let runtime_version = "2026.08.30.41"
 let max_control_bytes = 16 * 1024
 let max_kernel_control_bytes = 2 * 1024 * 1024
 let max_snapshot_bytes = 1024 * 1024
@@ -10850,6 +10850,615 @@ let fleet_reconcile_command cli =
     (if coordination_available && snapshot_authorized then "true" else "false")
     (if apply then "apply" else "plan")
 
+type host_boot_decision =
+  | Host_noop_active
+  | Host_recover_same_physical
+  | Host_hold_lineage_required
+  | Host_hold_disabled
+  | Host_hold_unenrolled
+  | Host_denied of string
+
+let host_boot_semantics_sha256 =
+  "0d5174cd87b8c18b5f3bbfa7ed44d0258795a96f146730c879c46167abdddf7d"
+
+let host_boot_runtime_sha256 =
+  "99f5062729a171ac2d8c1b9b181497fbe1b8c9317859ee0fdc4d2cd4acaedb5b"
+
+let host_boot_decision_name = function
+  | Host_noop_active -> "NOOP_ACTIVE"
+  | Host_recover_same_physical -> "RECOVER_SAME_PHYSICAL"
+  | Host_hold_lineage_required -> "HOLD_LINEAGE_REQUIRED"
+  | Host_hold_disabled -> "HOLD_DISABLED"
+  | Host_hold_unenrolled -> "HOLD_UNENROLLED"
+  | Host_denied value -> value
+
+type host_boot_observation = {
+  host_stage : int;
+  host_preregistered : int;
+  host_producer_sounio : int;
+  host_expected_result_sounio : int;
+  host_python_absent : int;
+  host_rust_absent : int;
+  host_policy_present : int;
+  host_semantics_hash_bound : int;
+  host_runtime_hash_bound : int;
+  host_desired_catalog_bound : int;
+  host_service_enabled : int;
+  host_current_boot_observed : int;
+  host_state_root_bound : int;
+  host_lane_enrolled : int;
+  host_kernel_live : int;
+  host_guardian_live : int;
+  host_guardian_pid_verified : int;
+  host_guardian_start_verified : int;
+  host_guardian_instance_verified : int;
+  host_harness_live : int;
+  host_harness_pid_verified : int;
+  host_harness_start_verified : int;
+  host_command_bound : int;
+  host_boot_equal : int;
+  host_journals_verified : int;
+  host_output_prefix_preserved : int;
+  host_no_same_pty_claim_after_loss : int;
+  host_material_observation_joined : int;
+  host_sabotage_count : int;
+  host_sabotage_required : int;
+}
+
+let host_boot_frame observation =
+  [ 9041; observation.host_stage; observation.host_preregistered;
+    observation.host_producer_sounio;
+    observation.host_expected_result_sounio; observation.host_python_absent;
+    observation.host_rust_absent; observation.host_policy_present;
+    observation.host_semantics_hash_bound;
+    observation.host_runtime_hash_bound;
+    observation.host_desired_catalog_bound;
+    observation.host_service_enabled;
+    observation.host_current_boot_observed;
+    observation.host_state_root_bound; observation.host_lane_enrolled;
+    observation.host_kernel_live; observation.host_guardian_live;
+    observation.host_guardian_pid_verified;
+    observation.host_guardian_start_verified;
+    observation.host_guardian_instance_verified;
+    observation.host_harness_live; observation.host_harness_pid_verified;
+    observation.host_harness_start_verified; observation.host_command_bound;
+    observation.host_boot_equal; observation.host_journals_verified;
+    observation.host_output_prefix_preserved;
+    observation.host_no_same_pty_claim_after_loss;
+    observation.host_material_observation_joined;
+    observation.host_sabotage_count; observation.host_sabotage_required ]
+  |> List.map string_of_int |> String.concat " " |> fun line -> line ^ "\n"
+
+let host_boot_authority_command () =
+  let candidate =
+    match Sys.getenv_opt "SOUNIO_LOOM_HOST_BOOT_AUTHORITY" with
+    | Some path when path <> "" -> path
+    | _ ->
+        Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
+          "sounio-loom-host-boot-reconciler"
+  in
+  if Filename.is_relative candidate then
+    failf "host-boot-authority-command-must-be-absolute";
+  let resolved =
+    try Unix.realpath candidate
+    with _ -> failf "host-boot-authority-command-is-unavailable:%s" candidate
+  in
+  (try Unix.access resolved [ X_OK ]
+   with _ -> failf "host-boot-authority-command-is-not-executable:%s" resolved);
+  let digest = sha256 (read_file resolved) in
+  if digest <> host_boot_runtime_sha256 then
+    failf
+      "host-boot-authority-digest-mismatch:expected=%s:observed=%s"
+      host_boot_runtime_sha256 digest;
+  resolved
+
+let host_boot_authority_decision observation =
+  let command = host_boot_authority_command () in
+  let result =
+    run_captured_input_timeout ~timeout_seconds:2.0 command []
+      (host_boot_frame observation)
+  in
+  let output = trim result.captured_output in
+  let prefix = "SOUNIO_HOST_BOOT_RECONCILER " in
+  let suffix = "semantic_authority=Sounio action=9041" in
+  let has_suffix =
+    String.length output >= String.length suffix
+    && String.sub output (String.length output - String.length suffix)
+         (String.length suffix)
+       = suffix
+  in
+  if not (starts_with output prefix)
+     || not (String.contains output ' ')
+     || not has_suffix
+  then failf "host-boot-authority-result-invalid:%s" output;
+  let decision_name =
+    match split_on ' ' output with
+    | "SOUNIO_HOST_BOOT_RECONCILER" :: decision :: _ -> decision
+    | _ -> failf "host-boot-authority-result-invalid:%s" output
+  in
+  let decision =
+    match decision_name with
+    | "NOOP_ACTIVE" -> Host_noop_active
+    | "RECOVER_SAME_PHYSICAL" -> Host_recover_same_physical
+    | "HOLD_LINEAGE_REQUIRED" -> Host_hold_lineage_required
+    | "HOLD_DISABLED" -> Host_hold_disabled
+    | "HOLD_UNENROLLED" -> Host_hold_unenrolled
+    | value when starts_with value "DENY" -> Host_denied value
+    | _ -> failf "host-boot-authority-decision-unknown:%s" decision_name
+  in
+  (match decision with
+  | Host_denied _ when result.captured_code <> 42 ->
+      failf "host-boot-authority-denial-exit-mismatch:%d" result.captured_code
+  | Host_denied _ -> ()
+  | _ when result.captured_code <> 0 ->
+      failf "host-boot-authority-allow-exit-mismatch:%d" result.captured_code
+  | _ -> ());
+  (decision, output)
+
+type hostd_desired_lane = {
+  hostd_agent : string;
+  hostd_lane : string;
+  hostd_session_id : string;
+  hostd_worktree : string;
+  hostd_command : string;
+  hostd_argv_digest : string;
+  hostd_root_identity_sha256 : string;
+  hostd_enabled : bool;
+  hostd_catalog_sha256 : string;
+}
+
+let hostd_directory root = Filename.concat root "hostd"
+let hostd_lanes_directory root = Filename.concat (hostd_directory root) "lanes"
+let hostd_receipts_directory root = Filename.concat (hostd_directory root) "receipts"
+let hostd_root_identity_path root = Filename.concat (hostd_directory root) "root.identity"
+let hostd_lock_path root = Filename.concat (hostd_directory root) "hostd.lock"
+let hostd_supervisor_state_path root = Filename.concat (hostd_directory root) "supervisor.state"
+
+let hostd_desired_path root agent lane =
+  let identity = sha256 (agent ^ "\000" ^ lane) |> fun value -> String.sub value 0 16 in
+  Filename.concat (hostd_lanes_directory root)
+    (Printf.sprintf "%s--%s--%s.desired" (slug agent) (slug lane) identity)
+
+let hostd_receipt_path root agent lane =
+  let identity = sha256 (agent ^ "\000" ^ lane) |> fun value -> String.sub value 0 16 in
+  Filename.concat (hostd_receipts_directory root)
+    (Printf.sprintf "%s--%s--%s.tsv" (slug agent) (slug lane) identity)
+
+let with_hostd_lock root callback =
+  let directory = hostd_directory root in
+  mkdir_p directory;
+  Unix.chmod directory 0o700;
+  let lock = Unix.openfile (hostd_lock_path root) [ O_WRONLY; O_CREAT ] 0o600 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close lock)
+    (fun () ->
+      (try Unix.lockf lock F_TLOCK 0
+       with Unix_error _ -> failf "loom-hostd-already-active");
+      callback ())
+
+let hostd_root_identity root create =
+  let path = hostd_root_identity_path root in
+  if not (Sys.file_exists path) then (
+    if not create then failf "loom-hostd-root-identity-missing";
+    atomic_write path (random_hex 32 ^ "\n");
+    Unix.chmod path 0o600);
+  let value = trim (read_file path) in
+  if String.length value <> 64 then failf "loom-hostd-root-identity-invalid";
+  sha256 value
+
+let load_hostd_desired_lane path =
+  if (Unix.lstat path).st_kind <> S_REG then failf "loom-hostd-catalog-entry-not-regular:%s" path;
+  let values = parse_key_values path in
+  if table_value values "schema" <> "loom-hostd-desired-lane-v1" then
+    failf "loom-hostd-catalog-schema-invalid:%s" path;
+  let required_field field =
+    let value = table_value values field in
+    if value = "" then failf "loom-hostd-catalog-field-missing:%s:%s" path field;
+    value
+  in
+  let agent = required_field "agent" and lane = required_field "lane" in
+  validate_fleet_atom "agent" agent;
+  validate_fleet_atom "lane" lane;
+  let worktree = Unix.realpath (required_field "worktree") in
+  let enabled =
+    match required_field "enabled" with
+    | "true" -> true
+    | "false" -> false
+    | value -> failf "loom-hostd-catalog-enabled-invalid:%s" value
+  in
+  { hostd_agent = agent; hostd_lane = lane;
+    hostd_session_id = required_field "session_id";
+    hostd_worktree = worktree; hostd_command = required_field "command";
+    hostd_argv_digest = required_field "argv_digest";
+    hostd_root_identity_sha256 = required_field "state_root_identity_sha256";
+    hostd_enabled = enabled; hostd_catalog_sha256 = sha256 (read_file path) }
+
+let load_hostd_desired_lanes root =
+  let directory = hostd_lanes_directory root in
+  if not (Sys.file_exists directory) then []
+  else
+    Sys.readdir directory |> Array.to_list |> List.sort String.compare
+    |> List.filter (fun name -> Filename.check_suffix name ".desired")
+    |> List.map (fun name -> load_hostd_desired_lane (Filename.concat directory name))
+
+let hostd_process_identity pid_text start =
+  try
+    let pid = int_of_string pid_text in
+    pid > 1 && start <> "" && process_start pid = start
+  with _ -> false
+
+let hostd_kernel_status paths descriptor =
+  let descriptor_pid = table_value descriptor "daemon_pid" in
+  let descriptor_start = table_value descriptor "daemon_pid_start" in
+  let descriptor_live = hostd_process_identity descriptor_pid descriptor_start in
+  if Sys.file_exists paths.socket_path then
+    try
+      let values = status_request paths |> protocol_fields in
+      if table_value values "agent" <> table_value descriptor "agent"
+         || table_value values "lane" <> table_value descriptor "lane"
+         || table_value values "instance_id" <> table_value descriptor "instance_id"
+      then failf "loom-hostd-kernel-identity-drift";
+      true
+    with error ->
+      if descriptor_live then raise error else false
+  else if descriptor_live then failf "loom-hostd-live-kernel-socket-missing"
+  else false
+
+let hostd_guardian_status paths descriptor =
+  let descriptor_pid = table_value descriptor "guardian_pid" in
+  let descriptor_start = table_value descriptor "guardian_pid_start" in
+  let descriptor_live = hostd_process_identity descriptor_pid descriptor_start in
+  if Sys.file_exists paths.guardian_socket_path then
+    try Some (guardian_status_request paths (trim (read_file paths.token_path)))
+    with error -> if descriptor_live then raise error else None
+  else if descriptor_live then failf "loom-hostd-live-guardian-socket-missing"
+  else None
+
+let hostd_continuity_observation descriptor guardian =
+  try
+    let journal_path = table_value descriptor "journal_file" in
+    let guardian_path = table_value descriptor "guardian_journal_file" in
+    let output_path = table_value descriptor "output_file" in
+    let _, _, _ = load_and_verify_journal journal_path in
+    let guardian_events, _, guardian_cursor, _ =
+      load_and_verify_guardian_journal guardian_path
+    in
+    let observed_cursor =
+      match guardian with
+      | Some values -> int_of_string (table_value values "output_cursor")
+      | None -> guardian_cursor
+    in
+    if observed_cursor <> guardian_cursor then
+      failf "loom-hostd-guardian-output-cursor-drift";
+    ignore
+      (verified_guardian_output_range guardian_events output_path guardian_cursor
+         0 guardian_cursor);
+    (true, true)
+  with _ -> (false, false)
+
+let hostd_observation root service_enabled desired =
+  let paths = session_paths root desired.hostd_agent desired.hostd_lane in
+  if not (Sys.file_exists paths.descriptor_path) then
+    failf "loom-hostd-session-descriptor-missing:%s/%s" desired.hostd_agent
+      desired.hostd_lane;
+  let descriptor = parse_key_values paths.descriptor_path in
+  let current_boot = trim (read_file "/proc/sys/kernel/random/boot_id") in
+  let root_bound =
+    desired.hostd_root_identity_sha256 = hostd_root_identity root false
+  in
+  let kernel_live = hostd_kernel_status paths descriptor in
+  let guardian = hostd_guardian_status paths descriptor in
+  let guardian_live = Option.is_some guardian in
+  let guardian_pid_verified, guardian_start_verified,
+      guardian_instance_verified, harness_live, harness_pid_verified,
+      harness_start_verified, guardian_command_bound =
+    match guardian with
+    | None -> (false, false, false, false, false, false, false)
+    | Some values ->
+        let guardian_pid_equal =
+          table_value values "guardian_pid" = table_value descriptor "guardian_pid"
+        in
+        let guardian_start_equal =
+          table_value values "guardian_pid_start"
+          = table_value descriptor "guardian_pid_start"
+          && hostd_process_identity (table_value descriptor "guardian_pid")
+               (table_value descriptor "guardian_pid_start")
+        in
+        let harness_pid_equal =
+          table_value values "harness_pid" = table_value descriptor "harness_pid"
+        in
+        let harness_start_equal =
+          table_value values "harness_pid_start"
+          = table_value descriptor "harness_pid_start"
+          && hostd_process_identity (table_value descriptor "harness_pid")
+               (table_value descriptor "harness_pid_start")
+        in
+        (guardian_pid_equal, guardian_start_equal,
+         table_value values "instance_id" = table_value descriptor "instance_id",
+         harness_start_equal, harness_pid_equal, harness_start_equal,
+         table_value values "argv_digest" = table_value descriptor "argv_digest"
+         && table_value values "command" = table_value descriptor "command")
+  in
+  let command_bound =
+    guardian_command_bound
+    && desired.hostd_session_id = table_value descriptor "session_id"
+    && desired.hostd_worktree = table_value descriptor "worktree"
+    && desired.hostd_command = table_value descriptor "command"
+    && desired.hostd_argv_digest = table_value descriptor "argv_digest"
+  in
+  let journals_verified, output_prefix_preserved =
+    hostd_continuity_observation descriptor guardian
+  in
+  let int value = if value then 1 else 0 in
+  ({ host_stage = 3; host_preregistered = 1; host_producer_sounio = 1;
+     host_expected_result_sounio = 1; host_python_absent = 1;
+     host_rust_absent = 1; host_policy_present = 1;
+     host_semantics_hash_bound = 1; host_runtime_hash_bound = 1;
+     host_desired_catalog_bound = int (valid_sha256 desired.hostd_catalog_sha256);
+     host_service_enabled = int (service_enabled && desired.hostd_enabled);
+     host_current_boot_observed = int (String.length current_boot = 36);
+     host_state_root_bound = int root_bound; host_lane_enrolled = 1;
+     host_kernel_live = int kernel_live; host_guardian_live = int guardian_live;
+     host_guardian_pid_verified = int guardian_pid_verified;
+     host_guardian_start_verified = int guardian_start_verified;
+     host_guardian_instance_verified = int guardian_instance_verified;
+     host_harness_live = int harness_live;
+     host_harness_pid_verified = int harness_pid_verified;
+     host_harness_start_verified = int harness_start_verified;
+     host_command_bound = int command_bound;
+     host_boot_equal = int (table_value descriptor "boot_id" = current_boot);
+     host_journals_verified = int journals_verified;
+     host_output_prefix_preserved = int output_prefix_preserved;
+     host_no_same_pty_claim_after_loss = 1;
+     host_material_observation_joined = 1; host_sabotage_count = 1;
+     host_sabotage_required = 1 }, descriptor)
+
+let hostd_verify_receipts path =
+  if not (Sys.file_exists path) then (0, String.make 64 '0')
+  else
+    let sequence = ref 0 and previous = ref (String.make 64 '0') in
+    read_lines path
+    |> List.filter (fun line -> trim line <> "")
+    |> List.iter (fun line ->
+           match split_on '\t' line with
+           | [ seq; prior; utc; decision; observation; authority; applied; digest ] ->
+               let observed_seq =
+                 try int_of_string seq
+                 with _ -> failf "loom-hostd-receipt-sequence-invalid"
+               in
+               if observed_seq <> !sequence + 1 then
+                 failf "loom-hostd-receipt-sequence-gap";
+               if prior <> !previous then failf "loom-hostd-receipt-chain-drift";
+               let material =
+                 String.concat "\t"
+                   [ seq; prior; utc; decision; observation; authority; applied ]
+               in
+               if not (valid_sha256 observation) || not (valid_sha256 authority)
+                  || digest <> sha256 material
+               then failf "loom-hostd-receipt-digest-invalid";
+               sequence := observed_seq;
+               previous := digest
+           | _ -> failf "loom-hostd-receipt-malformed");
+    (!sequence, !previous)
+
+let hostd_append_receipt root desired decision observation authority applied =
+  let directory = hostd_receipts_directory root in
+  mkdir_p directory;
+  let path = hostd_receipt_path root desired.hostd_agent desired.hostd_lane in
+  let sequence, previous = hostd_verify_receipts path in
+  let fields =
+    [ string_of_int (sequence + 1); previous; utc_now (); decision;
+      observation; authority; if applied then "true" else "false" ]
+  in
+  let material = String.concat "\t" fields in
+  let digest = sha256 material in
+  let channel =
+    open_out_gen [ Open_wronly; Open_creat; Open_append; Open_text ] 0o600 path
+  in
+  Fun.protect
+    ~finally:(fun () -> close_out_noerr channel)
+    (fun () ->
+      output_string channel (material ^ "\t" ^ digest ^ "\n");
+      flush channel;
+      Unix.fsync (Unix.descr_of_out_channel channel));
+  (sequence + 1, digest)
+
+let host_enroll_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let agent = required cli "--agent" and lane = required cli "--lane" in
+  validate_fleet_atom "agent" agent;
+  validate_fleet_atom "lane" lane;
+  with_hostd_lock root (fun () ->
+      let paths = session_paths root agent lane in
+      if not (Sys.file_exists paths.descriptor_path) then
+        failf "loom-hostd-enroll-session-missing:%s/%s" agent lane;
+      let descriptor = parse_key_values paths.descriptor_path in
+      let token = trim (read_file paths.token_path) in
+      let guardian = guardian_status_request paths token in
+      if table_value guardian "instance_id" <> table_value descriptor "instance_id"
+         || not
+              (hostd_process_identity (table_value descriptor "guardian_pid")
+                 (table_value descriptor "guardian_pid_start"))
+         || not
+              (hostd_process_identity (table_value descriptor "harness_pid")
+                 (table_value descriptor "harness_pid_start"))
+      then failf "loom-hostd-enroll-physical-identity-unverified";
+      let root_identity = hostd_root_identity root true in
+      let directory = hostd_lanes_directory root in
+      mkdir_p directory;
+      let path = hostd_desired_path root agent lane in
+      let desired =
+        descriptor_text
+          [ ("schema", "loom-hostd-desired-lane-v1"); ("enabled", "true");
+            ("agent", agent); ("lane", lane);
+            ("session_id", table_value descriptor "session_id");
+            ("worktree", table_value descriptor "worktree");
+            ("command", table_value descriptor "command");
+            ("argv_digest", table_value descriptor "argv_digest");
+            ("state_root_identity_sha256", root_identity);
+            ("enrolled_instance_id", table_value descriptor "instance_id");
+            ("enrolled_boot_id", table_value descriptor "boot_id");
+            ("semantic_authority", "Sounio"); ("semantic_action", "9041");
+            ("semantics_sha256", host_boot_semantics_sha256) ]
+      in
+      if Sys.file_exists path && read_file path <> desired && not (flag cli "--replace")
+      then failf "loom-hostd-enroll-conflict:%s/%s" agent lane;
+      atomic_write path desired;
+      Printf.printf
+        "LOOM_HOSTD_ENROLLED agent=%s lane=%s catalog_sha256=%s root_identity_sha256=%s authority=Sounio action=9041 service_enabled=false production_activation=false\n%!"
+        agent lane (sha256 desired) root_identity)
+
+let hostd_reconcile root service_enabled apply cli =
+  let agent_filter = optional cli "--agent" and lane_filter = optional cli "--lane" in
+  if Option.is_some agent_filter <> Option.is_some lane_filter then
+    failf "host-reconcile requires both --agent and --lane or neither";
+  let desired =
+    load_hostd_desired_lanes root
+    |> List.filter (fun value ->
+           match (agent_filter, lane_filter) with
+           | Some agent, Some lane ->
+               value.hostd_agent = agent && value.hostd_lane = lane
+           | _ -> true)
+  in
+  if Option.is_some agent_filter && desired = [] then
+    failf "loom-hostd-requested-lane-unenrolled";
+  let noop = ref 0 and recovered = ref 0 and held = ref 0 in
+  List.iter
+    (fun lane ->
+      let observation, _descriptor = hostd_observation root service_enabled lane in
+      let observation_digest = sha256 (host_boot_frame observation) in
+      let decision, authority_receipt = host_boot_authority_decision observation in
+      let authority_digest = sha256 authority_receipt in
+      let name = host_boot_decision_name decision in
+      match decision with
+      | Host_denied _ ->
+          ignore
+            (hostd_append_receipt root lane name observation_digest authority_digest
+               false);
+          failf "loom-hostd-authority-refused:%s/%s:%s" lane.hostd_agent
+            lane.hostd_lane name
+      | Host_recover_same_physical when apply ->
+          let authorization_sequence, authorization_head =
+            hostd_append_receipt root lane
+              "RECOVER_SAME_PHYSICAL_AUTHORIZED" observation_digest
+              authority_digest false
+          in
+          let options = Hashtbl.create 8 in
+          Hashtbl.replace options "--agent" lane.hostd_agent;
+          Hashtbl.replace options "--lane" lane.hostd_lane;
+          Hashtbl.replace options "--session-id" lane.hostd_session_id;
+          Hashtbl.replace options "--cwd" lane.hostd_worktree;
+          Hashtbl.replace options "--state-dir" root;
+          recover_command { options; flags = Hashtbl.create 0; rest = [] };
+          let after, _ = hostd_observation root service_enabled lane in
+          let after_decision, after_receipt = host_boot_authority_decision after in
+          if after_decision <> Host_noop_active then
+            failf "loom-hostd-post-recovery-authority-diverged:%s"
+              (host_boot_decision_name after_decision);
+          let sequence, head =
+            hostd_append_receipt root lane "RECOVER_SAME_PHYSICAL_APPLIED"
+              (sha256 (host_boot_frame after)) (sha256 after_receipt) true
+          in
+          incr recovered;
+          Printf.printf
+            "LOOM_HOSTD lane=%s/%s decision=RECOVER_SAME_PHYSICAL action=applied authorization_sequence=%d authorization_head=%s receipt_sequence=%d receipt_head=%s authority=Sounio semantics_sha256=%s runtime_sha256=%s production_activation=false\n%!"
+            lane.hostd_agent lane.hostd_lane authorization_sequence
+            authorization_head sequence head host_boot_semantics_sha256
+            host_boot_runtime_sha256
+      | Host_recover_same_physical ->
+          let sequence, head =
+            hostd_append_receipt root lane name observation_digest authority_digest
+              false
+          in
+          Printf.printf
+            "LOOM_HOSTD lane=%s/%s decision=%s action=plan receipt_sequence=%d receipt_head=%s authority=Sounio production_activation=false\n%!"
+            lane.hostd_agent lane.hostd_lane name sequence head;
+          incr held
+      | Host_noop_active ->
+          let sequence, head =
+            hostd_append_receipt root lane name observation_digest authority_digest
+              false
+          in
+          Printf.printf
+            "LOOM_HOSTD lane=%s/%s decision=NOOP_ACTIVE action=noop receipt_sequence=%d receipt_head=%s authority=Sounio production_activation=false\n%!"
+            lane.hostd_agent lane.hostd_lane sequence head;
+          incr noop
+      | (Host_hold_lineage_required | Host_hold_disabled | Host_hold_unenrolled) ->
+          let sequence, head =
+            hostd_append_receipt root lane name observation_digest authority_digest
+              false
+          in
+          Printf.printf
+            "LOOM_HOSTD lane=%s/%s decision=%s action=hold receipt_sequence=%d receipt_head=%s authority=Sounio same_pty_claim=false production_activation=false\n%!"
+            lane.hostd_agent lane.hostd_lane name sequence head;
+          incr held)
+    desired;
+  Printf.printf
+    "loom_hostd_lanes=%d noop=%d recovered=%d held=%d mode=%s service_enabled=%s semantic_authority=Sounio action=9041 production_activation=false\n%!"
+    (List.length desired) !noop !recovered !held
+    (if apply then "apply" else "plan")
+    (if service_enabled then "true" else "false")
+
+let host_reconcile_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  with_hostd_lock root (fun () ->
+      hostd_reconcile root (flag cli "--service-enabled") (flag cli "--apply") cli)
+
+let host_supervise_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let interval =
+    match optional cli "--interval-seconds" with
+    | None -> 2
+    | Some value -> obligation_positive_int "host-supervisor-interval" value
+  in
+  if interval > 60 then failf "host-supervisor-interval-too-large";
+  let once = flag cli "--once" in
+  with_hostd_lock root (fun () ->
+      let cycles = ref 0 in
+      let rec loop () =
+        incr cycles;
+        (try
+           hostd_reconcile root (flag cli "--service-enabled")
+             (flag cli "--apply") cli;
+           atomic_write (hostd_supervisor_state_path root)
+             (descriptor_text
+                [ ("schema", "loom-hostd-supervisor-v1"); ("state", "active");
+                  ("pid", string_of_int (Unix.getpid ()));
+                  ("pid_start", process_start (Unix.getpid ()));
+                  ("boot_id", trim (read_file "/proc/sys/kernel/random/boot_id"));
+                  ("cycles", string_of_int !cycles); ("reconciled_utc", utc_now ());
+                  ("semantic_authority", "Sounio"); ("semantic_action", "9041");
+                  ("semantics_sha256", host_boot_semantics_sha256);
+                  ("runtime_sha256", host_boot_runtime_sha256) ])
+         with Loom_error reason ->
+           atomic_write (hostd_supervisor_state_path root)
+             (descriptor_text
+                [ ("schema", "loom-hostd-supervisor-v1"); ("state", "refused");
+                  ("pid", string_of_int (Unix.getpid ()));
+                  ("pid_start", process_start (Unix.getpid ()));
+                  ("boot_id", trim (read_file "/proc/sys/kernel/random/boot_id"));
+                  ("cycles", string_of_int !cycles); ("refused_utc", utc_now ());
+                  ("reason_sha256", sha256 reason); ("semantic_authority", "Sounio");
+                  ("semantic_action", "9041") ]);
+           raise (Loom_error reason));
+        if not once then (Unix.sleep interval; loop ())
+      in
+      loop ())
+
+let host_verify_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let agent = required cli "--agent" and lane = required cli "--lane" in
+  let path = hostd_receipt_path root agent lane in
+  let count, head = hostd_verify_receipts path in
+  if count = 0 then failf "loom-hostd-receipts-missing:%s/%s" agent lane;
+  Printf.printf
+    "LOOM_HOSTD_VERIFY agent=%s lane=%s receipts=%d head=%s hash_chain=PASS semantic_authority=Sounio action=9041\n%!"
+    agent lane count head
+
 let subprocess_membrane_probe_command cli =
   if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
     failf "subprocess-membrane-probe-requires-test-mode";
@@ -11618,7 +12227,7 @@ let exec_ingress_probe_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
+    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  host-enroll --agent A --lane L [--replace] [--state-dir DIR]\n  host-reconcile [--agent A --lane L] [--apply] [--service-enabled] [--state-dir DIR]\n  host-supervise [--once] [--interval-seconds N] [--apply] [--service-enabled] [--state-dir DIR]\n  host-verify --agent A --lane L [--state-dir DIR]\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
   Printf.eprintf
     "  exec-ingress-probe --root DIR --mode inherited|forged|missing|fixture-escape --event FILE (test mode only)\n";
@@ -11687,7 +12296,7 @@ let main () =
       let booleans =
         [ "--no-raw"; "--meta"; "--machine"; "--allow-remote"; "--apply";
           "--replace"; "--adopt-active"; "--json"; "--once"; "--unsafe-auto";
-          "--isolate-context" ]
+          "--isolate-context"; "--service-enabled" ]
       in
       let cli = parse_cli booleans (arguments_after_command ()) in
       match command with
@@ -11708,6 +12317,10 @@ let main () =
     | "guardian-status" -> guardian_status_command cli; 0
     | "wake" -> wake_command cli; 0
     | "crash-kernel" -> crash_kernel_command cli; 0
+    | "host-enroll" -> host_enroll_command cli; 0
+    | "host-reconcile" -> host_reconcile_command cli; 0
+    | "host-supervise" -> host_supervise_command cli; 0
+    | "host-verify" -> host_verify_command cli; 0
     | "provider-list" -> provider_list_command cli; 0
     | "provider-status" -> provider_status_command cli; 0
     | "provider-plan" -> provider_plan_command cli; 0
