@@ -39,6 +39,7 @@ POLICY_FILES=(
   tools/loom/resident_membrane.runtime.v4
   tools/loom/resident_membrane_v5_main.sio
   scripts/dev/build_sounio_loom_resident_membrane_v5.sh
+  scripts/dev/promote_loom_host_exec_quorum_capsule.sh
   scripts/ci/sounio_loom_resident_transport_v5_selftest.sh
 )
 
@@ -141,6 +142,9 @@ if [[ -n "$EXEC_CELL_CAPSULE" || -n "$EXEC_CELL_CAPSULE_SHA256" ]]; then
 elif [[ $ACTIVATE -eq 1 ]]; then
   fail '--activate requires a frozen ExecCell capsule and expected SHA-256'
 fi
+if [[ $ACTIVATE -eq 1 && "$SERVICE_UID" != 0 ]]; then
+  fail '--activate with the ExecCell boot gate requires the root service identity'
+fi
 
 if [[ -z "$RUNTIME" ]]; then
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
@@ -201,6 +205,7 @@ exec_cell_release_id=absent
 exec_cell_release_manifest_sha256=absent
 exec_cell_release_tree_sha256=absent
 exec_cell_release=''
+exec_cell_exec_start_pre=''
 capsule_work=''
 cleanup_capsule_work() {
   if [[ -n "$capsule_work" && -d "$capsule_work" ]]; then
@@ -319,6 +324,25 @@ if [[ -n "$EXEC_CELL_CAPSULE" ]]; then
   exec_cell_release_id="$(manifest_value "$exec_cell_manifest" release_id)"
   [[ "$exec_cell_release_id" =~ ^9030-hostq-[0-9a-f]{32}$ ]] ||
     fail 'ExecCell release identity is non-canonical'
+  exec_cell_authority_root_relative="$(manifest_value \
+    "$exec_cell_manifest" authority_root_path)"
+  exec_cell_product_root_relative="$(manifest_value \
+    "$exec_cell_manifest" product_authority_root_path)"
+  [[ "$exec_cell_authority_root_relative" =~ ^[A-Za-z0-9._/-]+$ &&
+     "$exec_cell_authority_root_relative" != /* &&
+     "/$exec_cell_authority_root_relative/" != *'/../'* &&
+     "$exec_cell_product_root_relative" == \
+       "$exec_cell_authority_root_relative" &&
+     -d "$exec_cell_release/$exec_cell_authority_root_relative" &&
+     ! -L "$exec_cell_release/$exec_cell_authority_root_relative" ]] ||
+    fail 'ExecCell authority-root binding is unsafe or divergent'
+  systemd_run_path="$(readlink -f "$(command -v systemd-run 2>/dev/null || true)")"
+  systemctl_path="$(readlink -f "$(command -v systemctl 2>/dev/null || true)")"
+  [[ "$systemd_run_path" == /* && -f "$systemd_run_path" &&
+     -x "$systemd_run_path" && ! -L "$systemd_run_path" &&
+     "$systemctl_path" == /* && -f "$systemctl_path" &&
+     -x "$systemctl_path" && ! -L "$systemctl_path" ]] ||
+    fail 'ExecCell boot gate requires canonical systemd-run and systemctl'
   exec_cell_release_tree_sha256="$(tree_sha256 "$exec_cell_release")"
   exec_cell_bundle_present=true
 fi
@@ -342,8 +366,10 @@ install -m 0755 "$RESIDENT" \
   "$dest_prefix/bin/sounio-loom-resident-membrane-runtime-v5"
 for relative in "${POLICY_FILES[@]}"; do
   destination="$dest_policy_root/$relative"
+  policy_mode=0444
+  [[ -x "$POLICY_ROOT/$relative" ]] && policy_mode=0555
   install -d -m 0755 "$(dirname "$destination")"
-  install -m 0444 "$POLICY_ROOT/$relative" "$destination"
+  install -m "$policy_mode" "$POLICY_ROOT/$relative" "$destination"
 done
 if [[ "$exec_cell_bundle_present" == true ]]; then
   dest_exec_cell_parent="$dest_prefix/exec-cell/releases"
@@ -402,11 +428,22 @@ material_transitory=true
 python_executable_invoked=false
 rust_executable_invoked=false
 exec_cell_canary_frozen=$exec_cell_bundle_present
+exec_cell_boot_gate_configured=$exec_cell_bundle_present
+exec_cell_boot_gate_test_only=true
 exec_attached=false
 production_activation=false
 EOF
 chmod 0444 "$exec_cell_manifest_stage"
 mv -f "$exec_cell_manifest_stage" "$exec_cell_manifest_install"
+
+if [[ "$exec_cell_bundle_present" == true ]]; then
+  unit_exec_cell_release="$PREFIX/exec-cell/releases/$exec_cell_release_id"
+  unit_exec_cell_manifest="$unit_exec_cell_release/release.manifest.v1"
+  unit_value() {
+    manifest_value "$exec_cell_manifest" "$1"
+  }
+  exec_cell_exec_start_pre="ExecStartPre=$unit_exec_cell_release/$(unit_value broker_path) --selftest-product-exec-cell-host --controller-manifest $unit_exec_cell_release/$(unit_value controller_manifest_path) --controller-runtime $unit_exec_cell_release/$(unit_value controller_runtime_path) --controller-root $unit_exec_cell_release/$exec_cell_authority_root_relative --resident-runtime $unit_exec_cell_release/$(unit_value resident_runtime_path) --process-witness-runtime $unit_exec_cell_release/$(unit_value process_witness_cell_path) --process-witness-payload $unit_exec_cell_release/$(unit_value process_witness_payload_path) --process-witness-manifest $unit_exec_cell_release/$(unit_value process_witness_manifest_path) --product-root $unit_exec_cell_release/$exec_cell_product_root_relative --product-runtime $unit_exec_cell_release/$(unit_value product_exec_ingress_runtime_path) --product-language-runtime $unit_exec_cell_release/$(unit_value product_language_runtime_path) --product-resident-runtime $unit_exec_cell_release/$(unit_value product_resident_runtime_path) --product-exec-cell-fixture-manifest $unit_exec_cell_release/$(unit_value product_exec_cell_fixture_manifest_path) --product-exec-cell-fixture-bundle $unit_exec_cell_release/$(unit_value product_exec_cell_fixture_bundle_path) --systemd-run $systemd_run_path --systemctl $systemctl_path"
+fi
 
 unit="$dest_unit_dir/$UNIT_NAME"
 unit_stage="$(mktemp "$dest_unit_dir/.${UNIT_NAME}.XXXXXX")"
@@ -421,9 +458,11 @@ Type=simple
 User=$SERVICE_USER
 Environment=SOUNIO_LOOM_HOST_BOOT_AUTHORITY=$PREFIX/bin/sounio-loom-host-boot-reconciler
 Environment=XDG_RUNTIME_DIR=/tmp
+$exec_cell_exec_start_pre
 ExecStart=$PREFIX/bin/sounio-loom-runtime host-supervise --state-dir $STATE_DIR --service-enabled --apply
 Restart=on-failure
 RestartSec=2s
+TimeoutStartSec=240s
 KillMode=process
 NoNewPrivileges=true
 PrivateTmp=false
@@ -458,6 +497,8 @@ exec_cell_release_id=$exec_cell_release_id
 exec_cell_release_manifest_sha256=$exec_cell_release_manifest_sha256
 exec_cell_release_tree_sha256=$exec_cell_release_tree_sha256
 exec_cell_canary_frozen=$exec_cell_bundle_present
+exec_cell_boot_gate_configured=$exec_cell_bundle_present
+exec_cell_boot_gate_test_only=true
 exec_attached=false
 prefix=$PREFIX
 state_dir=$STATE_DIR
@@ -491,10 +532,10 @@ if [[ $ACTIVATE -eq 1 ]]; then
   mv -f "$manifest_stage" "$manifest"
 fi
 
-printf 'LOOM_HOSTD_INSTALLED prefix=%s state_dir=%s socket_root=%s unit=%s language=OCaml role=EFFECT_PARITY semantic_authority=Sounio actions=9030,9031,9041 semantics_sha256=%s authority_runtime_sha256=%s ocaml_runtime_sha256=%s resident_runtime_sha256=%s product_activation_policy_sha256=%s exec_cell_bundle_present=%s exec_cell_release_id=%s exec_cell_release_manifest_sha256=%s exec_cell_release_tree_sha256=%s exec_cell_canary_frozen=%s exec_attached=false activated=%s automatic_lineage_resurrection=false python_executed=false rust_executed=false\n' \
+printf 'LOOM_HOSTD_INSTALLED prefix=%s state_dir=%s socket_root=%s unit=%s language=OCaml role=EFFECT_PARITY semantic_authority=Sounio actions=9030,9031,9041 semantics_sha256=%s authority_runtime_sha256=%s ocaml_runtime_sha256=%s resident_runtime_sha256=%s product_activation_policy_sha256=%s exec_cell_bundle_present=%s exec_cell_release_id=%s exec_cell_release_manifest_sha256=%s exec_cell_release_tree_sha256=%s exec_cell_canary_frozen=%s exec_cell_boot_gate_configured=%s exec_cell_boot_gate_test_only=true exec_attached=false activated=%s automatic_lineage_resurrection=false python_executed=false rust_executed=false\n' \
   "$PREFIX" "$STATE_DIR" "$SOCKET_ROOT" "$UNIT_DIR/$UNIT_NAME" \
   '0d5174cd87b8c18b5f3bbfa7ed44d0258795a96f146730c879c46167abdddf7d' \
   "$authority_sha256" "$runtime_sha256" "$resident_sha256" \
   "$policy_tree_sha256" "$exec_cell_bundle_present" "$exec_cell_release_id" \
   "$exec_cell_release_manifest_sha256" "$exec_cell_release_tree_sha256" \
-  "$exec_cell_bundle_present" "$activated"
+  "$exec_cell_bundle_present" "$exec_cell_bundle_present" "$activated"

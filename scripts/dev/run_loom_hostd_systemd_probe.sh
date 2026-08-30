@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
 INSTALLER="$ROOT_DIR/scripts/dev/install_loom_hostd.sh"
 HOST_GATE="$ROOT_DIR/scripts/ci/sounio_loom_hostd_systemd_host_selftest.sh"
+EXEC_CELL_CAPSULE_BUILDER="$ROOT_DIR/scripts/dev/build_loom_host_exec_quorum_capsule.sh"
 
 fail() {
   printf 'run-loom-hostd-systemd-probe: REFUSE reason=%s real_systemd_activation=false full_extinction=false\n' "$*" >&2
@@ -104,7 +105,7 @@ done
 
 [[ "$NAMESPACE" =~ ^[a-z0-9.-]+$ && "$NODE" =~ ^[A-Za-z0-9._-]+$ &&
    "$IMAGE" =~ ^[A-Za-z0-9._:/-]+$ && "$RUN_ID" =~ ^[a-z0-9-]{8,48}$ ]] || usage
-for input in "$INSTALLER" "$HOST_GATE"; do
+for input in "$INSTALLER" "$HOST_GATE" "$EXEC_CELL_CAPSULE_BUILDER"; do
   [[ -f "$input" && ! -L "$input" && -x "$input" ]] ||
     fail "required probe input is absent, linked, or non-executable: $input"
 done
@@ -142,16 +143,26 @@ cleanup() {
     --wait=false --grace-period=0 --force >/dev/null 2>&1 || true
   pod_exists "$POD_B" && kubectl -n "$NAMESPACE" delete pod "$POD_B" \
     --wait=false --grace-period=0 --force >/dev/null 2>&1 || true
+  find "$WORK" -type d -exec chmod u+rwx {} + 2>/dev/null || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 
 mkdir -p "$STAGE_ROOT"
-stage_output="$(bash "$INSTALLER" --install-root "$STAGE_ROOT" --user root)"
-[[ "$stage_output" == *'activated=false automatic_lineage_resurrection=false'* ]] ||
+EXEC_CELL_CAPSULE="$WORK/loom-host-exec-cell.tar"
+bash "$EXEC_CELL_CAPSULE_BUILDER" --output "$EXEC_CELL_CAPSULE" >/dev/null
+EXEC_CELL_CAPSULE_SHA256="$(sha256_file "$EXEC_CELL_CAPSULE")"
+stage_output="$(bash "$INSTALLER" --install-root "$STAGE_ROOT" --user root \
+  --exec-cell-capsule "$EXEC_CELL_CAPSULE" \
+  --exec-cell-capsule-sha256 "$EXEC_CELL_CAPSULE_SHA256")"
+[[ "$stage_output" == *'exec_cell_bundle_present=true '* &&
+   "$stage_output" == *'exec_cell_boot_gate_configured=true '* &&
+   "$stage_output" == *'exec_attached=false activated=false '* &&
+   "$stage_output" == *'automatic_lineage_resurrection=false'* ]] ||
   fail "local staged install widened activation: $stage_output"
 mkdir -p "$BUNDLE"
 mv "$STAGE_ROOT" "$BUNDLE/stage"
+install -m 0400 "$EXEC_CELL_CAPSULE" "$BUNDLE/exec-cell-capsule.tar"
 install -m 0555 "$INSTALLER" "$BUNDLE/install_loom_hostd.sh"
 install -m 0555 "$HOST_GATE" "$BUNDLE/host-gate.sh"
 cat > "$BUNDLE/bundle-manifest.v1" <<EOF
@@ -160,9 +171,13 @@ source_commit=$(git -C "$ROOT_DIR" rev-parse HEAD)
 installer_sha256=$(sha256_file "$INSTALLER")
 host_gate_sha256=$(sha256_file "$HOST_GATE")
 staged_manifest_sha256=$(sha256_file "$BUNDLE/stage/opt/sounio/loom-hostd/manifest.v1")
+exec_cell_capsule_sha256=$EXEC_CELL_CAPSULE_SHA256
 semantic_authority=Sounio
-semantic_action=9041
+semantic_actions=9030,9031,9041
 operational_language=OCaml
+exec_cell_boot_gate_configured=true
+exec_cell_boot_gate_test_only=true
+exec_attached=false
 production_activation=false
 python_executed=false
 rust_executed=false
@@ -226,7 +241,7 @@ set -e
    "$host_output" == *' full_extinction=true '* ]] ||
   fail "host measurement failed or timed out status=$host_status output=$host_output"
 
-transport_receipt="LOOM_HOSTD_SYSTEMD_TRANSPORT PASS namespace=$NAMESPACE node=$NODE pod_a=$POD_A pod_a_uid=$POD_A_UID pod_a_deleted=true pod_b=$POD_B pod_b_uid=$POD_B_UID distinct_transport=true archive_sha256=$ARCHIVE_SHA256 host_gate_sha256=$HOST_GATE_SHA256 host_output_sha256=$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1) source_commit=$(git -C "$ROOT_DIR" rev-parse HEAD) semantic_authority=Sounio action=9041 operational_language=OCaml material_platform=Linux+systemd real_systemd_activation=true same_physical_recovery=true causal_sabotage=PASS full_extinction=true tmux_used=false python_executed=false rust_executed=false production_activation=canary-only"
+transport_receipt="LOOM_HOSTD_SYSTEMD_TRANSPORT PASS namespace=$NAMESPACE node=$NODE pod_a=$POD_A pod_a_uid=$POD_A_UID pod_a_deleted=true pod_b=$POD_B pod_b_uid=$POD_B_UID distinct_transport=true archive_sha256=$ARCHIVE_SHA256 host_gate_sha256=$HOST_GATE_SHA256 host_output_sha256=$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1) source_commit=$(git -C "$ROOT_DIR" rev-parse HEAD) semantic_authority=Sounio actions=9030,9031,9041 operational_language=OCaml material_platform=Linux+systemd exec_cell_boot_gate=true exec_cell_boot_gate_test_only=true exec_attached=false real_systemd_activation=true same_physical_recovery=true causal_sabotage=PASS full_extinction=true tmux_used=false python_executed=false rust_executed=false production_activation=canary-only"
 if [[ -n "$RECEIPT_OUTPUT" ]]; then
   mkdir -p "$(dirname "$RECEIPT_OUTPUT")"
   receipt_stage="$(mktemp "$(dirname "$RECEIPT_OUTPUT")/.loom-hostd-systemd-receipt.XXXXXX")"
@@ -240,5 +255,6 @@ host_exec "$POD_B" "$HOST_ROOT/input/host-gate.sh" \
 HOST_ROOT_CREATED=false
 delete_transport_pod "$POD_B"
 trap - EXIT
+find "$WORK" -type d -exec chmod u+rwx {} + 2>/dev/null || true
 rm -rf "$WORK"
 printf '%s\n%s\n%s\n' "$phase_a_output" "$host_output" "$transport_receipt"

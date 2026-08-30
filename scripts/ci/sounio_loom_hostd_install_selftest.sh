@@ -58,7 +58,9 @@ first="$(bash "$INSTALLER" --install-root "$stage" \
   --exec-cell-capsule "$exec_cell_capsule" \
   --exec-cell-capsule-sha256 "$exec_cell_capsule_sha256")"
 [[ "$first" == *'exec_cell_bundle_present=true '* &&
-   "$first" == *'exec_cell_canary_frozen=true exec_attached=false '* &&
+   "$first" == *'exec_cell_canary_frozen=true '* &&
+   "$first" == *'exec_cell_boot_gate_configured=true '* &&
+   "$first" == *'exec_cell_boot_gate_test_only=true exec_attached=false '* &&
    "$first" == *'activated=false automatic_lineage_resurrection=false'* ]] ||
   fail "staged installer widened activation: $first"
 
@@ -118,6 +120,10 @@ grep -Fxq 'rust_executable_invoked=false' "$exec_cell_manifest" ||
   fail 'installed ExecCell bundle admitted a Rust oracle'
 grep -Fxq 'exec_cell_canary_frozen=true' "$exec_cell_manifest" ||
   fail 'installed ExecCell canary is not frozen'
+grep -Fxq 'exec_cell_boot_gate_configured=true' "$exec_cell_manifest" ||
+  fail 'installed ExecCell boot gate is not configured'
+grep -Fxq 'exec_cell_boot_gate_test_only=true' "$exec_cell_manifest" ||
+  fail 'installed ExecCell boot gate was misrepresented as general execution'
 grep -Fxq 'exec_attached=false' "$exec_cell_manifest" ||
   fail 'installer preclaimed product ExecCell attachment'
 exec_cell_release_id="$(sed -n 's/^release_id=//p' "$exec_cell_manifest")"
@@ -148,11 +154,23 @@ grep -Fxq "ReadWritePaths=/var/lib/sounio/loom /tmp/sounio-loom-$SERVICE_UID" "$
   fail 'unit can neither mutate the managed namespace nor limits its write surface'
 grep -Fxq 'ExecStart=/opt/sounio/loom-hostd/bin/sounio-loom-runtime host-supervise --state-dir /var/lib/sounio/loom --service-enabled --apply' "$unit" ||
   fail 'unit is not wired to the Sounio-authorized supervisor'
+grep -Fq 'ExecStartPre=/opt/sounio/loom-hostd/exec-cell/releases/' "$unit" ||
+  fail 'unit is not wired to the frozen ExecCell boot gate'
+grep -Fq ' --selftest-product-exec-cell-host ' "$unit" ||
+  fail 'unit boot gate does not execute the composed ExecCell canary'
+grep -Fq ' --product-exec-cell-fixture-manifest ' "$unit" ||
+  fail 'unit boot gate omitted the Sounio fixture manifest'
+grep -Fxq 'TimeoutStartSec=240s' "$unit" ||
+  fail 'unit boot gate lacks a bounded startup deadline'
 grep -Fxq 'Environment=SOUNIO_LOOM_HOST_BOOT_AUTHORITY=/opt/sounio/loom-hostd/bin/sounio-loom-host-boot-reconciler' "$unit" ||
   fail 'unit omitted the frozen authority path'
 grep -Fxq 'install_default=disabled' "$manifest" || fail 'install default is not disabled'
 grep -Fxq 'service_enabled=false' "$manifest" || fail 'staged service was marked enabled'
 grep -Fxq 'production_activation=false' "$manifest" || fail 'staged service was marked production-active'
+grep -Fxq 'exec_cell_boot_gate_configured=true' "$manifest" ||
+  fail 'hostd manifest omitted the ExecCell boot gate'
+grep -Fxq 'exec_cell_boot_gate_test_only=true' "$manifest" ||
+  fail 'hostd manifest widened the ExecCell boot gate'
 grep -Fxq 'socket_namespace=host-shared-tmp' "$manifest" ||
   fail 'manifest omitted the shared lane socket namespace'
 grep -Fxq "service_user=$SERVICE_USER" "$manifest" ||

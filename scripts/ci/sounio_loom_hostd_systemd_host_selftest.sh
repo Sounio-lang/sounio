@@ -93,16 +93,43 @@ wait_guardian_bridge_zero() {
 
 wait_unit_pid() {
   local different_pid="${1:-}" pid='' attempt
-  for attempt in $(seq 1 200); do
+  for attempt in $(seq 1 3000); do
     pid="$(systemctl show "$HOSTD_UNIT" --property MainPID --value 2>/dev/null || true)"
     if systemctl is-active --quiet "$HOSTD_UNIT" && [[ "$pid" =~ ^[1-9][0-9]*$ ]] &&
        [[ -z "$different_pid" || "$pid" != "$different_pid" ]]; then
       printf '%s\n' "$pid"
       return 0
     fi
-    sleep 0.05
+    sleep 0.1
   done
   fail "hostd unit did not expose a live distinct MainPID last=$pid"
+}
+
+exec_cell_boot_receipt_count() {
+  journalctl --unit "$HOSTD_UNIT" --no-pager --output=cat 2>/dev/null |
+    grep -c '^loom-product-exec-cell-host: PASS ' || true
+}
+
+wait_exec_cell_boot_receipts() {
+  local minimum="$1" count=0 latest='' attempt
+  for attempt in $(seq 1 2400); do
+    count="$(exec_cell_boot_receipt_count)"
+    if [[ "$count" =~ ^[0-9]+$ ]] && (( count >= minimum )); then
+      latest="$(journalctl --unit "$HOSTD_UNIT" --no-pager --output=cat \
+        2>/dev/null | grep '^loom-product-exec-cell-host: PASS ' | tail -n 1)"
+      [[ "$latest" == *'semantic_authority=Sounio action=9030 lane_action=9031 '* &&
+         "$latest" == *'simultaneous_distinct_dynamic_users=true '* &&
+         "$latest" == *'outcome=DONE extinction_complete=true '* &&
+         "$latest" == *'command_mismatch=DENY492 causal_sabotage=PASS '* &&
+         "$latest" == *'python_executed=false rust_executed=false '* &&
+         "$latest" == *'test_only=true production_activation=false '* ]] ||
+        fail "ExecCell boot receipt widened or diverged: $latest"
+      printf '%s\n' "$count"
+      return 0
+    fi
+    sleep 0.1
+  done
+  fail "ExecCell boot receipt did not reach minimum=$minimum last=$count"
 }
 
 wait_refusal() {
@@ -228,29 +255,44 @@ if [[ "$PHASE" == prepare ]]; then
 
   STAGED_PREFIX="$BUNDLE_DIR/stage/opt/sounio/loom-hostd"
   INSTALLER="$BUNDLE_DIR/install_loom_hostd.sh"
+  EXEC_CELL_CAPSULE="$BUNDLE_DIR/exec-cell-capsule.tar"
+  EXEC_CELL_CAPSULE_SHA256="$(record_value \
+    "$BUNDLE_DIR/bundle-manifest.v1" exec_cell_capsule_sha256)"
   [[ -x "$INSTALLER" && -x "$STAGED_PREFIX/bin/sounio-loom-runtime" &&
      -x "$STAGED_PREFIX/bin/sounio-loom-host-boot-reconciler" &&
      -x "$STAGED_PREFIX/bin/sounio-loom-resident-membrane-runtime-v5" &&
-     -d "$STAGED_PREFIX/policy/product-activation" ]] ||
+     -d "$STAGED_PREFIX/policy/product-activation" &&
+     -f "$EXEC_CELL_CAPSULE" && ! -L "$EXEC_CELL_CAPSULE" &&
+     "$EXEC_CELL_CAPSULE_SHA256" =~ ^[0-9a-f]{64}$ &&
+     "$(sha256_file "$EXEC_CELL_CAPSULE")" == \
+       "$EXEC_CELL_CAPSULE_SHA256" ]] ||
     fail 'staged installed topology is incomplete'
   bash "$INSTALLER" --prefix "$PREFIX" --state-dir "$STATE_DIR" \
     --unit-dir /etc/systemd/system --unit-name "$HOSTD_UNIT" --user root \
     --runtime "$STAGED_PREFIX/bin/sounio-loom-runtime" \
     --authority "$STAGED_PREFIX/bin/sounio-loom-host-boot-reconciler" \
     --resident "$STAGED_PREFIX/bin/sounio-loom-resident-membrane-runtime-v5" \
-    --policy-root "$STAGED_PREFIX/policy/product-activation" --activate \
+    --policy-root "$STAGED_PREFIX/policy/product-activation" \
+    --exec-cell-capsule "$EXEC_CELL_CAPSULE" \
+    --exec-cell-capsule-sha256 "$EXEC_CELL_CAPSULE_SHA256" --activate \
     > "$ROOT/install.out" 2> "$ROOT/install.err"
   mkdir -m 0700 "$WORK_DIR"
   [[ "$(systemctl is-enabled "$HOSTD_UNIT")" == enabled ]] ||
     fail 'installer did not enable the canary unit'
   supervisor_a="$(wait_unit_pid)"
   supervisor_start_a="$(process_start_tick "$supervisor_a")"
+  exec_cell_boot_receipts_a="$(wait_exec_cell_boot_receipts 1)"
   grep -Fxq 'KillMode=process' "/etc/systemd/system/$HOSTD_UNIT" ||
     fail 'activated unit lost KillMode=process'
   grep -Fxq 'PrivateTmp=false' "/etc/systemd/system/$HOSTD_UNIT" ||
     fail 'activated unit isolated the lane socket namespace'
   grep -Fxq 'Environment=XDG_RUNTIME_DIR=/tmp' "/etc/systemd/system/$HOSTD_UNIT" ||
     fail 'activated unit did not bind the managed socket namespace'
+  grep -Fq 'ExecStartPre=' "/etc/systemd/system/$HOSTD_UNIT" ||
+    fail 'activated unit omitted the ExecCell boot gate'
+  grep -Fq ' --selftest-product-exec-cell-host ' \
+    "/etc/systemd/system/$HOSTD_UNIT" ||
+    fail 'activated unit ExecCell boot gate changed mode'
   grep -Fxq "ReadWritePaths=$STATE_DIR /tmp/sounio-loom-0" \
     "/etc/systemd/system/$HOSTD_UNIT" ||
     fail 'activated unit lost the exact socket write boundary'
@@ -263,6 +305,14 @@ if [[ "$PHASE" == prepare ]]; then
     fail 'activated manifest lost the service uid'
   grep -Fxq 'socket_root=/tmp/sounio-loom-0' "$PREFIX/manifest.v1" ||
     fail 'activated manifest lost the managed socket root'
+  grep -Fxq 'exec_cell_bundle_present=true' "$PREFIX/manifest.v1" ||
+    fail 'activated manifest lost the immutable ExecCell bundle'
+  grep -Fxq 'exec_cell_boot_gate_configured=true' "$PREFIX/manifest.v1" ||
+    fail 'activated manifest lost the ExecCell boot gate'
+  grep -Fxq 'exec_cell_boot_gate_test_only=true' "$PREFIX/manifest.v1" ||
+    fail 'activated manifest widened the ExecCell canary'
+  grep -Fxq 'exec_attached=false' "$PREFIX/manifest.v1" ||
+    fail 'activated manifest preclaimed general ExecCell attachment'
   grep -Fxq 'semantic_authority=Sounio' \
     "$PREFIX/share/product-activation-policy.v1" ||
     fail 'installed policy root lost Sounio authority'
@@ -340,10 +390,13 @@ guardian_journal_prefix_bytes=$guardian_journal_prefix_bytes
 guardian_journal_prefix_sha256=$(prefix_sha256 "$guardian_journal_file" "$guardian_journal_prefix_bytes")
 host_boot_semantics_sha256=0d5174cd87b8c18b5f3bbfa7ed44d0258795a96f146730c879c46167abdddf7d
 host_boot_authority_sha256=99f5062729a171ac2d8c1b9b181497fbe1b8c9317859ee0fdc4d2cd4acaedb5b
+exec_cell_boot_receipts=$exec_cell_boot_receipts_a
+exec_cell_capsule_sha256=$EXEC_CELL_CAPSULE_SHA256
 EOF
   chmod 0400 "$PHASE_A"
-  printf 'sounio-loom-hostd-systemd-host-selftest: PHASE_A_PASS run_id=%s unit=%s enabled=true supervisor_pid=%s guardian_pid=%s harness_pid=%s kernel_pid_before=%s kernel_crashed=true transport_pod_deleted=false semantic_authority=Sounio action=9041 python_executed=false rust_executed=false\n' \
-    "$RUN_ID" "$HOSTD_UNIT" "$supervisor_a" "$guardian_a" "$harness_a" "$daemon_a"
+  printf 'sounio-loom-hostd-systemd-host-selftest: PHASE_A_PASS run_id=%s unit=%s enabled=true supervisor_pid=%s guardian_pid=%s harness_pid=%s kernel_pid_before=%s kernel_crashed=true transport_pod_deleted=false semantic_authority=Sounio actions=9030,9031,9041 exec_cell_boot_gate=true exec_cell_boot_receipts=%s exec_cell_boot_gate_test_only=true exec_attached=false python_executed=false rust_executed=false\n' \
+    "$RUN_ID" "$HOSTD_UNIT" "$supervisor_a" "$guardian_a" "$harness_a" \
+    "$daemon_a" "$exec_cell_boot_receipts_a"
   exit 0
 fi
 
@@ -452,6 +505,12 @@ verify_process_identity "$daemon_recovered_c" "$daemon_recovered_c_start" "$HOST
    "$(status_value "$status_recovered_c" instance_id)" == "$instance" ]] ||
   fail 'post-sabotage recovery changed the physical lane'
 
+exec_cell_boot_minimum="$((
+  $(record_value "$PHASE_A" exec_cell_boot_receipts) + 3
+))"
+exec_cell_boot_receipts_final="$(wait_exec_cell_boot_receipts \
+  "$exec_cell_boot_minimum")"
+
 verified="$($LOOM host-verify --state-dir "$STATE_DIR" --cwd "$WORK_DIR" \
   --agent "$AGENT" --lane "$LANE")"
 [[ "$verified" == *'hash_chain=PASS semantic_authority=Sounio action=9041'* ]] ||
@@ -477,5 +536,5 @@ systemctl daemon-reload
 systemctl is-enabled --quiet "$HOSTD_UNIT" 2>/dev/null &&
   fail 'canary unit remained boot-enabled after cleanup'
 
-receipt="sounio-loom-hostd-systemd-host-selftest: HOST_MEASUREMENT_PASS semantic_authority=Sounio action=9041 operational_language=OCaml operational_role=EFFECT_PARITY material_platform=Linux+systemd host=$(hostname) kernel=$(uname -r) systemd_version=$(systemctl --version | sed -n '1s/^systemd //p') boot_id=$(record_value "$PHASE_A" boot_id) transport_a_uid=$TRANSPORT_A_UID transport_b_uid=$TRANSPORT_B_UID transport_replaced=true predecessor_transport_extinct=true unit=$HOSTD_UNIT boot_enabled=true real_systemd_activation=true supervisor_pid_before=$supervisor_a supervisor_pid_after=$supervisor_b supervisor_restarted=true kill_mode_process_preserved_lane=true guardian_pid=$guardian guardian_start_tick=$guardian_start guardian_equal=true harness_pid=$harness harness_start_tick=$harness_start harness_equal=true instance_id=$instance instance_equal=true kernel_pid_before=$(record_value "$PHASE_A" daemon_pid) kernel_pid_after=$daemon_recovered_c automatic_recovery=true repeated_recovery=true output_prefix_preserved=true semantic_journal_verified=true guardian_journal_verified=true receipt_count=$receipt_count receipt_chain=PASS sabotage_decision=DENY545 sabotage_process_created=false causal_sabotage=PASS same_physical_recovery=true same_pty_claim_after_guardian_loss=false full_extinction=true tmux_used=false python_executed=false rust_executed=false production_activation=canary-only"
+receipt="sounio-loom-hostd-systemd-host-selftest: HOST_MEASUREMENT_PASS semantic_authority=Sounio actions=9030,9031,9041 operational_language=OCaml operational_role=EFFECT_PARITY material_platform=Linux+systemd host=$(hostname) kernel=$(uname -r) systemd_version=$(systemctl --version | sed -n '1s/^systemd //p') boot_id=$(record_value "$PHASE_A" boot_id) transport_a_uid=$TRANSPORT_A_UID transport_b_uid=$TRANSPORT_B_UID transport_replaced=true predecessor_transport_extinct=true unit=$HOSTD_UNIT boot_enabled=true real_systemd_activation=true exec_cell_boot_gate=true exec_cell_boot_gate_test_only=true exec_cell_boot_receipts=$exec_cell_boot_receipts_final exec_cell_outcome=DONE exec_cell_extinction=true exec_cell_command_mismatch=DENY492 exec_attached=false supervisor_pid_before=$supervisor_a supervisor_pid_after=$supervisor_b supervisor_restarted=true kill_mode_process_preserved_lane=true guardian_pid=$guardian guardian_start_tick=$guardian_start guardian_equal=true harness_pid=$harness harness_start_tick=$harness_start harness_equal=true instance_id=$instance instance_equal=true kernel_pid_before=$(record_value "$PHASE_A" daemon_pid) kernel_pid_after=$daemon_recovered_c automatic_recovery=true repeated_recovery=true output_prefix_preserved=true semantic_journal_verified=true guardian_journal_verified=true receipt_count=$receipt_count receipt_chain=PASS sabotage_decision=DENY545 sabotage_process_created=false causal_sabotage=PASS same_physical_recovery=true same_pty_claim_after_guardian_loss=false full_extinction=true tmux_used=false python_executed=false rust_executed=false production_activation=canary-only"
 printf '%s\n' "$receipt" | tee "$HOST_RECEIPT"
