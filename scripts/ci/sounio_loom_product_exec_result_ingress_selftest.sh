@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_PARENT="$ROOT_DIR/tools/loom/_build"
 mkdir -p "$TEST_PARENT"
 TEST_ROOT="$(mktemp -d "$TEST_PARENT/product-exec-result-ingress.XXXXXX")"
+EVIDENCE="$ROOT_DIR/tools/loom/evidence/loom-product-exec-result-ingress-v1-20260830.txt"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 fail() {
@@ -28,6 +29,14 @@ fixture_value() {
   count="$(grep -c "^${key}=" "$ROOT_DIR/tools/loom/product_exec_cell_fixture.freeze.v1" || true)"
   [[ "$count" == 1 ]] || fail "fixture field $key occurs $count times"
   line="$(grep -m1 "^${key}=" "$ROOT_DIR/tools/loom/product_exec_cell_fixture.freeze.v1")"
+  printf '%s' "${line#*=}"
+}
+
+evidence_value() {
+  local key="$1" line count
+  count="$(grep -c "^${key}=" "$EVIDENCE" || true)"
+  [[ "$count" == 1 ]] || fail "evidence field $key occurs $count times"
+  line="$(grep -m1 "^${key}=" "$EVIDENCE")"
   printf '%s' "${line#*=}"
 }
 
@@ -191,6 +200,30 @@ dependencies="$(ldd "$LOOM" 2>&1 || true; ldd "$AUTHORITY_RUNTIME" 2>&1 || true)
 printf '%s\n' "$dependencies" | grep -Eqi 'python|rust' &&
   fail 'a runtime has a prohibited Python or Rust dependency'
 
-printf 'sounio-loom-product-exec-result-ingress-selftest: PASS semantic_authority=Sounio actions=9030+9031+9033 operational_attachment=OCaml transport=authenticated-inherited-descriptor result_returned=true presenter=read-only receipt_sha256=%s manifest_sha256=%s raw_event_separate=true event_override=test-only+probe-only exact_fixture_hook_switched=true local_exec_capability_used=false binding_sabotage=REFUSED receipt_sabotage=REFUSED manifest_sabotage=REFUSED causal_rule=manifest_sha256_equal causal_mutant=ADMITTED python_executed=false rust_executed=false material_exec_cell=false production_activation=false parity_open=false claim_ready=false\n' \
+result="$(printf 'sounio-loom-product-exec-result-ingress-selftest: PASS semantic_authority=Sounio actions=9030+9031+9033 operational_attachment=OCaml transport=authenticated-inherited-descriptor result_returned=true presenter=read-only receipt_sha256=%s manifest_sha256=%s raw_event_separate=true event_override=test-only+probe-only exact_fixture_hook_switched=true local_exec_capability_used=false binding_sabotage=REFUSED receipt_sabotage=REFUSED manifest_sabotage=REFUSED causal_rule=manifest_sha256_equal causal_mutant=ADMITTED python_executed=false rust_executed=false material_exec_cell=false production_activation=false parity_open=false claim_ready=false' \
   "$(manifest_value result_receipt_sha256)" \
-  "$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1" | cut -d ' ' -f 1)"
+  "$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1" | cut -d ' ' -f 1)")"
+for binding in \
+  "sounio_semantics_manifest_sha256:tools/loom/exec_result_handle.freeze.v1" \
+  "operational_result_source_sha256:tools/loom/src/loom_exec_result.ml" \
+  "operational_ingress_source_sha256:tools/loom/src/loom_exec_ingress.ml" \
+  "operational_hook_source_sha256:tools/loom/src/loom_hook.ml" \
+  "material_ingress_source_sha256:tools/loom/src/loom_product_exec_ingress_host_canary.inc" \
+  "material_exec_cell_source_sha256:tools/loom/src/loom_product_exec_cell_host_canary.inc" \
+  "material_broker_source_sha256:tools/loom/src/loom_kernel_principal_broker.cpp" \
+  "gate_sha256:scripts/ci/sounio_loom_product_exec_result_ingress_selftest.sh" \
+  "host_evidence_sha256:tools/loom/evidence/loom-hostd-exec-cell-boot-gate-v1-20260830.txt"
+do
+  IFS=: read -r key relative <<<"$binding"
+  [[ "$(evidence_value "$key")" == \
+     "$(sha256sum "$ROOT_DIR/$relative" | cut -d ' ' -f 1)" ]] ||
+    fail "evidence binding drifted: $key"
+done
+[[ "$(evidence_value result)" == "$result" &&
+   "$(evidence_value material_exec_cell)" == true &&
+   "$(evidence_value exact_fixture_result_attached)" == true &&
+   "$(evidence_value general_exec_attached)" == false &&
+   "$(evidence_value provider_hook_switched)" == false &&
+   "$(evidence_value production_activation)" == false ]] ||
+  fail 'evidence posture or result drifted'
+printf '%s\n' "$result"
