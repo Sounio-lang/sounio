@@ -1,0 +1,15 @@
+import SounioPireusBasisFixedGaugeRebase
+
+open SounioPireusBasisFixedGaugeRebase
+
+#print axioms basis_character_xor
+#print axioms basis_character_coboundary_zero
+#print axioms rebased_potential_is_basis_fixed
+#print axioms rebased_potential_preserves_coboundary
+#print axioms basis_fixed_word_testBit
+#print axioms basis_fixed_word_roundtrip
+#print axioms pulled_gauge_potential_origin_zero
+#print axioms rebased_gauge_word_potential
+#print axioms pulled_gauge_coboundary_reencoded
+#print axioms raw_action_transports_basis_fixed_gauge
+#print axioms basis_fixed_rebase_progress_does_not_close_v13_target03
