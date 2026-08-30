@@ -1,6 +1,6 @@
 # Pireus Operator Morphogenesis V12 Contract
 
-Status: PRE_FREEZE_EXECUTABLE_CONTRACT
+Status: SEMANTICS_FROZEN
 
 Concept-ID: SOUNIO-PIREUS-PROOF-CARRYING-OPERATOR-MORPHOGENESIS
 
@@ -124,3 +124,15 @@ It may not contain expected initial/final archive counts, orbit distributions,
 signs, phases, ANFs, witness bits, law spectra, probes, or digests. Those become
 eligible for a frozen matcher only after the first authorized Sounio transcript
 has been committed.
+
+## Freeze Boundary
+
+The committed matcher was added only after the matcher-free executable, first
+authorized Sounio result, and first-result receipt existed in Git. The freeze
+receipt pins both source histories, the exact first transcript, and the exact
+matcher replay.
+
+This contract stops at `SEMANTICS_FROZEN`. It opens no Lean, Koka, C++, Haskell,
+Kubernetes target, FPGA, or other material execution. A later `PARITY_OPEN`
+receipt may authorize those roles to compare against this hash, but cannot let
+them rewrite the semantics or expected result.
