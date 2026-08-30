@@ -305,7 +305,8 @@ let run ~root ~source ~output_dir ~unit ~mode =
          (Option.get projection.source_sha256))
   in
   let material =
-    Loom_exec_catalog.execute_sounio_check ~root ~source ~output
+    Loom_exec_catalog.execute_sounio_check ~retain_captures:true ~root ~source
+      ~output
   in
   let binding : Loom_exec_result_record.binding =
     { event_sha256 = event; generation_sha256 = generation;

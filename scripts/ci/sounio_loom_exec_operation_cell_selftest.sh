@@ -114,6 +114,12 @@ done
   fail 'positive CLOSE binding diverged'
 artifact="$POSITIVE_DIR/loom-sounio-check-899d05ffe60528a6.elf"
 [[ -f "$artifact" && ! -L "$artifact" ]] || fail 'material artifact absent'
+for capture in "$artifact.stdout" "$artifact.stderr"; do
+  [[ -f "$capture" && ! -L "$capture" && "$(stat -c '%a' "$capture")" == 600 ]] ||
+    fail "material capture is absent or non-private: $capture"
+done
+[[ "$(find "$POSITIVE_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l)" == 3 ]] ||
+  fail 'positive operation cell did not retain exactly three material files'
 artifact_sha256="$(sha256sum "$artifact" | cut -d ' ' -f 1)"
 [[ "$artifact_sha256" == "$EXPECTED_ARTIFACT" ]] || fail 'material artifact drifted'
 result_artifact_sha256="$(
@@ -237,5 +243,5 @@ DEPENDENCIES="$(ldd "$LOOM" 2>&1 || true)"
 printf '%s\n' "$DEPENDENCIES" | grep -Eqi 'python|rust' &&
   fail 'operation cell has a prohibited runtime dependency'
 
-printf 'sounio-loom-exec-operation-cell-selftest: PASS semantic_authority=Sounio grant_action=9030 catalog_action=9035 result_action=9036 operational_language=OCaml operational_role=EFFECT_PARITY protocol=READY+ARM+CLOSE close_receipt_bound=true close_causal_rule=record_sha256_equal close_record_sabotage=REFUSED close_sabotage_closed_frame=false principal_self_measured=true descriptor_binding=inherited-pipe positive_material_execution=true artifact_sha256=%s artifact_executed=false dynamic_user_host_attached=false principal_mismatch=REFUSED descriptor_mismatch=REFUSED invalid_source=DENY563 sabotage_material_created=false handle_is_bearer=false handle_is_execution_authority=false python_executed=false rust_executed=false runtime_dependencies=clean provider_lifecycle_attached=false production_activation=false parity_open=false claim_ready=false\n' \
+printf 'sounio-loom-exec-operation-cell-selftest: PASS semantic_authority=Sounio grant_action=9030 catalog_action=9035 result_action=9036 operational_language=OCaml operational_role=EFFECT_PARITY protocol=READY+ARM+CLOSE close_receipt_bound=true close_causal_rule=record_sha256_equal close_record_sabotage=REFUSED close_sabotage_closed_frame=false principal_self_measured=true descriptor_binding=inherited-pipe material_files=artifact+stdout+stderr material_files_measured=3 positive_material_execution=true artifact_sha256=%s artifact_executed=false dynamic_user_host_attached=false principal_mismatch=REFUSED descriptor_mismatch=REFUSED invalid_source=DENY563 sabotage_material_created=false handle_is_bearer=false handle_is_execution_authority=false python_executed=false rust_executed=false runtime_dependencies=clean provider_lifecycle_attached=false production_activation=false parity_open=false claim_ready=false\n' \
   "$artifact_sha256"

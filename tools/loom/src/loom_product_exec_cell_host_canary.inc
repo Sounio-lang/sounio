@@ -1828,6 +1828,8 @@ int selftest_product_exec_cell_host(
       << " operation_runtime_storage=systemd-private-symlink"
       << " operation_runtime_custody_pre_close=true"
       << " operation_runtime_released_after_close=true"
+      << " operation_material_files=artifact+stdout+stderr"
+      << " operation_material_files_measured=3"
       << " operation_principal_self_measured=true"
       << " operation_descriptor_self_measured=true"
       << " operation_pidfd_extinct=true"

@@ -12471,6 +12471,7 @@ let exec_catalog_material_probe_command cli =
     failf "exec-catalog-material-probe requires SOUNIO_LOOM_HOOK_TEST_MODE=1";
   let result =
     Loom_exec_catalog.execute_sounio_check
+      ~retain_captures:false
       ~root:(required cli "--root" |> Unix.realpath)
       ~source:(required cli "--source") ~output:(required cli "--output")
   in
@@ -12500,7 +12501,7 @@ let exec_result_record_probe_command cli =
     0)
   else if mode = "issue" then (
     let material =
-      Loom_exec_catalog.execute_sounio_check ~root
+      Loom_exec_catalog.execute_sounio_check ~retain_captures:false ~root
         ~source:(required cli "--source") ~output:(required cli "--output")
     in
     let binding : Loom_exec_result_record.binding =

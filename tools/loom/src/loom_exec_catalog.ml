@@ -381,7 +381,7 @@ let wait_with_timeout pid =
   in
   wait ()
 
-let execute_sounio_check ~root ~source ~output =
+let execute_sounio_check ~retain_captures ~root ~source ~output =
   let plan = prepare_sounio_check ~root ~source ~output in
   let projected_source_sha256 = Option.get plan.projection.source_sha256 in
   if sha256_file plan.source_path <> projected_source_sha256 then
@@ -445,7 +445,7 @@ let execute_sounio_check ~root ~source ~output =
         stderr_sha256 = sha256 stderr;
         diagnostics_sha256 = sha256 (stdout ^ "\000" ^ stderr) }
     in
-    cleanup ();
+    if not retain_captures then cleanup ();
     result
   with error ->
     cleanup ();
