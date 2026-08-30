@@ -115,6 +115,20 @@ lean_lib «SounioCDRecursiveSeam» where
 @[default_target]
 lean_lib «SounioCDqbig» where
 
+-- CD core-law twin recursion — per-dimension native_decide certificate (dims 16/32/64) of BOTH
+-- doubling recursions S=2S'-8·[hi_lo≠0] and S=8-2S', plus Dmax=4(2^(n-3)-1). The ∀n proof of the
+-- recursions is in SounioSeamFlip; this file anchors them at fixed dims (regression, like lsq_16/32/64).
+@[default_target]
+lean_lib «SounioCDCoreLaw» where
+
+-- Seam-flip law — the ∀n KEYSTONE under the whole 168 lane (lift / orbit theorem / annihilation=
+-- associator bridge / core-law twin recursion all bottom out on it). Proves, for ALL n, Mathlib-free,
+-- no sorry, no native_decide: the one-step cocycle recursion R (four branches), antisymmetry, cdSigma=±1,
+-- and the FULL associator seam-flip law — all eight (p,q,r) seam configurations over the whole locus
+-- (generic + degenerate), with exact chi-corrections. Axioms [propext, Classical.choice, Quot.sound].
+@[default_target]
+lean_lib «SounioSeamFlip» where
+
 @[default_target]
 lean_lib «SounioSeamBridge» where
 
@@ -730,17 +744,17 @@ lean_lib «SounioFoMultimodFragment» where
 -- ../sounio-pbpk-sedation-weaning/formal/lean4/SounioOpioidWeaningSafety.lean
 -- (see stdlib/darwin_pbpk/WEANING_MOVED.md). Build there:
 --   cd ../sounio-pbpk-sedation-weaning/formal/lean4 && lake build SounioOpioidWeaningSafety
-
--- Registered by the #1580 split: these proof files were carried on
--- research/zd-fiber-antisymmetry-lemma-20260731 together with their lakefile
--- entries. Adding the files without the entries would put unbuilt .lean in
--- formal/lean4/ -- present in the tree and proven by nothing.
-@[default_target]
-lean_lib «SounioCDCoreLaw» where
-
-@[default_target]
-lean_lib «SounioSeamFlip» where
-
+--
+-- NOTE (rebase 2026-08-27): this PR's original lakefile also registered
+-- `lean_lib «SounioCDTowerAutomorphism»`, but `formal/lean4/SounioCDTowerAutomorphism.lean`
+-- exists on neither `origin/main` nor this PR head. The registration was dangling
+-- (non-default target, so `lake build` never surfaced it) and is dropped here.
+--
+-- NOTE (merge 2026-08-30): the #1580-split block that stood here also registered
+-- «SounioCDCoreLaw» and «SounioSeamFlip». Both landed on `origin/main`
+-- independently and are registered above; re-adding them here would declare the
+-- same target twice. Only «SounioZDChi» is still carried by this branch alone --
+-- formal/lean4/SounioZDChi.lean exists on neither `origin/main` nor any other
+-- lane -- so it keeps its entry, or the file would sit in the tree unbuilt.
 @[default_target]
 lean_lib «SounioZDChi» where
-

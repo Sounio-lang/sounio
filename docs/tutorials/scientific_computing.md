@@ -15,9 +15,13 @@ This tutorial builds complete, runnable examples. The production implementations
 
 ## Prerequisites
 
+The programs below are built up inside this tutorial; there is no ready-made
+example file to run. Paste a snippet into a file of your own and run it with the
+prebuilt compiler:
+
 ```bash
 SOUC=./bin/souc
-$SOUC run examples/my_science.sio
+$SOUC run my_science.sio      # a file you create from the snippets below
 ```
 
 ## 1. Passing Functions to Numerical Algorithms

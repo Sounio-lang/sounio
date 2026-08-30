@@ -1130,6 +1130,35 @@ impl Parser {
                 turbofish_args = Some(Box::new(ta_pair.1))
             }
 
+            // E043, path-qualified: `foo::bar!(...)`. Same lexical-adjacency
+            // rule as the bare-identifier site below -- `!` must touch BOTH the
+            // preceding segment and the following `(`. Whitespace on either
+            // side keeps the existing operator expression valid, exactly as for
+            // `x! (y)` / `x !(y)`.
+            //
+            // Without this arm E043 meant "bare identifier followed by a tight
+            // bang-call" rather than "Rust macro syntax", so the namespaced
+            // shape most Rust code actually writes -- `std::println!(..)`,
+            // `vec!`-style paths -- fell through to E004 and the message on the
+            // diagnostic was wider than the rule that produced it.
+            //
+            // The left boundary here is p1.pos - 1 (the last path segment),
+            // not self.pos: the path consumed several tokens to get here.
+            if parser_peek(p1) == TokenKind::Bang
+                && p1.pos > 0
+                && p1.pos + 1 < p1.token_count
+                && (parser_peek_ahead(p1, 1) == TokenKind::LParen || pt_read_kind_code(p1.pos + 1) == 174)
+                && PT_END[(p1.pos - 1) as usize] == PT_START[p1.pos as usize]
+                && PT_END[p1.pos as usize] == PT_START[(p1.pos + 1) as usize] {
+                p1.had_error = true
+                p1.error_count = p1.error_count + 1
+                if p1.error_count <= 20 {
+                    print("error[E043]: Sounio does not use Rust macros (`ident!(...)`)\n")
+                    print("  help: use a regular function call instead of macro syntax\n")
+                }
+                p1 = parser_advance(p1)  // skip `!`; recover as a regular call
+            }
+
             if !p1.no_struct_lit && parser_peek(p1) == TokenKind::LBrace {
                 // Struct literal: Foo { x: 1, y: 2 }
                 p1.parse_struct_literal(path, start)
@@ -1154,6 +1183,24 @@ impl Parser {
             // Simple identifier — may still carry turbofish: vec_new::<f64>()
             let span = self.current_span()
             var p = parser_advance(self)
+
+            // E043: reject only the tightly-adjacent Rust macro shape
+            // `ident!(...)`. Whitespace on either side of `!` preserves the
+            // existing operator expression, for example `x! (y)`.
+            if parser_peek(p) == TokenKind::Bang
+                && p.pos + 1 < p.token_count
+                && (parser_peek_ahead(p, 1) == TokenKind::LParen || pt_read_kind_code(p.pos + 1) == 174)
+                && PT_END[self.pos as usize] == PT_START[p.pos as usize]
+                && PT_END[p.pos as usize] == PT_START[(p.pos + 1) as usize] {
+                p.had_error = true
+                p.error_count = p.error_count + 1
+                if p.error_count <= 20 {
+                    print("error[E043]: Sounio does not use Rust macros (`ident!(...)`)\n")
+                    print("  help: use a regular function call instead of macro syntax\n")
+                }
+                p = parser_advance(p)  // skip `!`; recover as a regular call
+            }
+
             var e = mk_expr(ExprKind::ExprIdent, span)
             e.name = name
             if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::Lt {
