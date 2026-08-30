@@ -39,6 +39,36 @@ fn main() -> i64 with IO, Div {
     if c / one != -1 { return 12 }
     if c % one != 0 { return 13 }
 
+    // Regression for PR #2286 review (agourakis82): a signed LHS paired with
+    // a let-annotated unsigned-typed shift-amount or divisor must NOT flip to
+    // the unsigned IR op. The (0-8) is unary-minus-on-intlit, which is an
+    // ExprUnary (not ExprIntLit), so the contextual literal promotion does
+    // not apply -- and the typed-operand-only branch must not silently flip
+    // signed ops either.
+    //
+    // Before the fix (guard collapsed to "either operand is unsigned"):
+    //   let sh: u8 = 1; (0-8) >> sh   ->  9223372036854775804 (wrong)
+    // After the fix:
+    //   let sh: u8 = 1; (0-8) >> sh   ->  -4 (sar preserves sign)
+    let sh: u8 = 1
+    if (0 - 8) >> sh != -4 { return 14 }
+
+    // Same shape, larger shift-amount type (usize).
+    let sh_big: usize = 2
+    if (0 - 9) >> sh_big != -3 { return 15 }   // sar: -9 >> 2 = -3
+
+    // Divisor case: signed LHS / unsigned-typed divisor.
+    let n: usize = 2
+    if (0 - 9) / n != -4 { return 16 }         // -9 / 2 = -4 (truncate toward zero)
+    if (0 - 9) % n != -1 { return 17 }         // -9 % 2 = -1 (sign follows dividend)
+
+    // Sanity: the unsigned-promotion rule still fires for the bare-literal
+    // pair (`let m: u64 = ...; m / 2`) -- here the second operand IS an
+    // ExprIntLit, so the literal-promotion rule applies. Without it, this
+    // would silently go through sar and give 0 for 0x8000_0000_0000_0001/2.
+    let m: u64 = 9223372036854775809          // 0x8000_0000_0000_0001
+    if m / 2 != 4611686018427387904 { return 18 }   // 0x4000_0000_0000_0000
+
     println("i64 >>, /, % keep signed semantics")
     0
 }

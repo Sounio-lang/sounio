@@ -19068,6 +19068,19 @@ impl Lowerer {
         // unsigned interpretation of its sibling -- the textual parser
         // cannot tag a bare `2` as u64, so without this promotion the most
         // common u64 shift/divmod patterns would silently stay signed.
+        //
+        // Guard is `(both-typed-unsigned) || (literal paired with typed
+        // unsigned)`. Two literals with neither typed stay signed (no
+        // disjunct fires). One typed unsigned + one signed-expression
+        // (e.g. `let sh: u8 = 1; (0-8) >> sh`) also stays signed -- the
+        // typed operand alone does NOT flip the op; the contextual
+        // promotion only applies to bare literals. Mixing two typed
+        // operands of disagreeing signedness is left to the const-prop /
+        // checker layer, not silently coerced here. (Review by
+        // agourakis82 on PR #2286: the prior form
+        // `either_unsigned_p && (rhs_unsigned_p || lhs_unsigned_p || ...)`
+        // collapsed to `either_unsigned_p` and broke signed shifts whose
+        // shift-amount was a u8/usize local.)
         var final_op = e.bin_op
         let lhs_unsigned_p = lo3.opt_expr_is_unsigned_int_ref(&e.left)
         let rhs_unsigned_p = match e.right {
@@ -19082,16 +19095,10 @@ impl Lowerer {
             Some(rbox) => (*rbox).kind == ExprKind::ExprIntLit,
             None => false,
         }
-        let either_unsigned_p = lhs_unsigned_p || rhs_unsigned_p
+        let both_typed_unsigned_p = lhs_unsigned_p && rhs_unsigned_p
         let literal_pair_with_unsigned_p =
             (lhs_is_intlit_p && rhs_unsigned_p) || (rhs_is_intlit_p && lhs_unsigned_p)
-        if either_unsigned_p && (rhs_unsigned_p || lhs_unsigned_p || literal_pair_with_unsigned_p) {
-            // The "true" unsigned case is both-unsigned. A naked literal paired
-            // with one unsigned operand is accepted as a contextual
-            // promotion; two literals with neither typed stay signed (the
-            // `either_unsigned_p` guard rules that out). Mixing two typed
-            // operands of disagreeing signedness is left to the const-prop /
-            // checker layer, not silently coerced here.
+        if both_typed_unsigned_p || literal_pair_with_unsigned_p {
             if e.bin_op == BinaryOp::OpDiv {
                 final_op = BinaryOp::OpUDiv
             } else if e.bin_op == BinaryOp::OpRem {
