@@ -51,8 +51,9 @@ for input in \
   scripts/dev/build_sounio_loom_product_exec_cell_fixture.sh \
   scripts/dev/build_sounio_loom_exec_operation_grant_fixture.sh \
   scripts/dev/build_sounio_loom_causal_workflow_run_grant_fixture.sh \
-  scripts/dev/build_sounio_loom_causal_workflow_attest_grant_fixture.sh \
-  scripts/dev/build_loom_causal_workflow_journal_fixture.sh; do
+	  scripts/dev/build_sounio_loom_causal_workflow_attest_grant_fixture.sh \
+	  scripts/dev/build_sounio_loom_causal_workflow_kernel_fixture.sh \
+	  scripts/dev/build_loom_causal_workflow_journal_fixture.sh; do
   [[ -x "$ROOT_DIR/$input" && ! -L "$ROOT_DIR/$input" ]] ||
     fail "required source-fresh builder is absent, linked, or non-executable: $input"
 done
@@ -138,6 +139,36 @@ for relative in "${AUTHORITY_FILES[@]}"; do
   install_root_file "$relative"
 done
 
+CAUSAL_MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_kernel.freeze.v1"
+CAUSAL_DEPENDENCY_KEYS=(
+  garden
+  contract
+  concept_registry
+  source
+  entrypoint
+  build_script
+  selftest
+  first_manifest
+  first_evidence
+  freeze_evidence
+  parent_9030_manifest
+  parent_9031_manifest
+  parent_9032_manifest
+  parent_9033_manifest
+  parent_9034_manifest
+  parent_9035_manifest
+  parent_9036_manifest
+  toolchain_wrapper
+  toolchain_compiler
+  canonical_source
+)
+for key in "${CAUSAL_DEPENDENCY_KEYS[@]}"; do
+  relative="$(manifest_value "$CAUSAL_MANIFEST" "${key}_path")"
+  install_root_file "$relative"
+  [[ "$(sha256_file "$AUTHORITY_ROOT/$relative")" == "$(manifest_value "$CAUSAL_MANIFEST" "${key}_sha256")" ]] ||
+    fail "causal authority dependency drifted: $key"
+done
+
 # Action 9030's frozen controller and resident manifests pin source hashes.
 # Build them from the manifest-pinned trees; the other three material layers
 # below deliberately use the exact current working tree.
@@ -197,6 +228,11 @@ SOUNIO_LOOM_CAUSAL_ATTEST_GRANT_OUTPUT="$attest_fixture" \
 "$attest_fixture" > "$DATA/causal-attest-grant-fixtures.v1"
 SOUNIO_LOOM_CAUSAL_WORKFLOW_JOURNAL_OUTPUT="$BIN/loom-causal-workflow-journal-fixture" \
   bash "$ROOT_DIR/scripts/dev/build_loom_causal_workflow_journal_fixture.sh" >/dev/null
+CAUSAL_WORKFLOW_RUNTIME="$AUTHORITY_ROOT/tools/loom/_build/default/src/sounio-loom-causal-workflow-kernel"
+SOUNIO_LOOM_CAUSAL_WORKFLOW_OUTPUT="$CAUSAL_WORKFLOW_RUNTIME" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_causal_workflow_kernel_fixture.sh" >/dev/null
+[[ "$(sha256_file "$CAUSAL_WORKFLOW_RUNTIME")" == "$(manifest_value "$CAUSAL_MANIFEST" executable_sha256)" ]] ||
+  fail 'source-fresh Sounio causal workflow runtime drifted from its freeze'
 
 [[ "$(sha256_file "$DATA/operation-grant-fixtures.v1")" == \
   52674ef4332a4b6d54e2d55ca9a58c55de21e6686aca82ae70b9d22b7d260af2 ]] ||
@@ -250,6 +286,7 @@ resident_runtime_path=release/bin/sounio-loom-resident-membrane-runtime-v4
 product_runtime_path=release/bin/sounio-loom-product-exec-cell-fixture
 material_cell_path=release/bin/loom-causal-workflow-material-cell
 journal_runtime_path=release/bin/loom-causal-workflow-journal-fixture
+causal_workflow_runtime_path=release/authority-root/tools/loom/_build/default/src/sounio-loom-causal-workflow-kernel
 controller_runtime_manifest_path=release/authority-root/tools/loom/exec_grant_controller.runtime.v1
 resident_runtime_manifest_path=release/authority-root/tools/loom/resident_membrane.runtime.v4
 operation_fixture_manifest_path=release/authority-root/tools/loom/exec_operation_grant_fixture.freeze.v1

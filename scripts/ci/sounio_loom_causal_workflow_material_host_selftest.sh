@@ -109,7 +109,7 @@ require_payload_entry() {
 }
 
 for required in broker_path controller_runtime_path resident_runtime_path product_runtime_path \
-  material_cell_path journal_runtime_path operation_fixture_manifest_path \
+  material_cell_path journal_runtime_path causal_workflow_runtime_path operation_fixture_manifest_path \
   operation_fixture_bundle_path operation_catalog_manifest_path operation_result_manifest_path \
   causal_run_grant_manifest_path causal_run_grant_bundle_path causal_attest_grant_manifest_path \
   causal_attest_grant_bundle_path causal_workflow_manifest_path controller_runtime_manifest_path \
@@ -129,6 +129,8 @@ CONTROLLER_RUNTIME="$CAPSULE/$(record_value "$MANIFEST" controller_runtime_path)
 RESIDENT_RUNTIME="$CAPSULE/$(record_value "$MANIFEST" resident_runtime_path)"
 CONTROLLER_RUNTIME_MANIFEST="$CAPSULE/$(record_value "$MANIFEST" controller_runtime_manifest_path)"
 RESIDENT_RUNTIME_MANIFEST="$CAPSULE/$(record_value "$MANIFEST" resident_runtime_manifest_path)"
+CAUSAL_WORKFLOW_RUNTIME="$CAPSULE/$(record_value "$MANIFEST" causal_workflow_runtime_path)"
+CAUSAL_WORKFLOW_MANIFEST="$CAPSULE/$(record_value "$MANIFEST" causal_workflow_manifest_path)"
 [[ "$(record_value "$CONTROLLER_RUNTIME_MANIFEST" semantic_authority)" == Sounio &&
    "$(record_value "$CONTROLLER_RUNTIME_MANIFEST" action)" == 9030 &&
    "$(record_value "$CONTROLLER_RUNTIME_MANIFEST" controller_commit)" == "$(record_value "$MANIFEST" controller_dependency_commit)" &&
@@ -139,6 +141,11 @@ RESIDENT_RUNTIME_MANIFEST="$CAPSULE/$(record_value "$MANIFEST" resident_runtime_
    "$(record_value "$RESIDENT_RUNTIME_MANIFEST" sounio_resident_v4_commit)" == "$(record_value "$MANIFEST" resident_dependency_commit)" &&
    "$(record_value "$RESIDENT_RUNTIME_MANIFEST" runtime_sha256)" == "$(sha256_file "$RESIDENT_RUNTIME")" ]] ||
   fail 'action-9030 frozen runtime provenance drifted'
+[[ "$(record_value "$CAUSAL_WORKFLOW_MANIFEST" producing_language)" == Sounio &&
+   "$(record_value "$CAUSAL_WORKFLOW_MANIFEST" language_role)" == SEMANTIC_AUTHORITY &&
+   "$(record_value "$CAUSAL_WORKFLOW_MANIFEST" action)" == 9037 &&
+   "$(record_value "$CAUSAL_WORKFLOW_MANIFEST" executable_sha256)" == "$(sha256_file "$CAUSAL_WORKFLOW_RUNTIME")" ]] ||
+  fail 'action-9037 Sounio runtime provenance drifted'
 [[ "$STORE_ROOT" != "$CAPSULE"/* && ! -e "$STORE_ROOT" ]] || fail 'store root is unsafe or pre-existing'
 mkdir -m 0700 "$STORE_ROOT"
 if [[ -n "$PHASE_MARKER" ]]; then

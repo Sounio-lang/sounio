@@ -211,6 +211,8 @@ READY_RECORD="$HOST_ROOT/store/pod-loss-ready.record"
 for _ in $(seq 1 720); do
   ready_probe="$(host_exec "$POD_A" cat "$READY_RECORD" 2>/dev/null || true)"
   [[ "$ready_probe" == loom-causal-pod-loss-ready-v1$'\n'* ]] && break
+  ready_unit_state="$(host_exec "$POD_A" systemctl show "$UNIT" -p ActiveState --value 2>/dev/null || true)"
+  [[ "$ready_unit_state" == failed || "$ready_unit_state" == inactive ]] && break
   sleep 0.25
 done
 [[ "${ready_probe:-}" == loom-causal-pod-loss-ready-v1$'\n'* ]] ||
