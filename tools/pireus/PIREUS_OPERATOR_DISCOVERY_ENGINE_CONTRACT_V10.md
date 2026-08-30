@@ -47,15 +47,47 @@ value_carrier=Z_power_16
 address_space=F2_power_4
 coefficient_domain=Z
 coefficient_programs=OPERAND_INDEPENDENT
-arity_domain={2,3}
+first_executable_arity_domain={2}
+future_arity_domain_may_include={3}
 map_signature=(Z_power_16)^arity_to_Z_power_16
 ```
 
 Every admitted genome must be total, typed, finite in representation, and
 evaluable over its complete pure-tensor basis. For an arity-`r` multilinear
 map, the semantic basis domain is exactly the `16^r` ordered tuples
-`(e_i1, ..., e_ir)`. Multilinearity makes those values determine the full map
-over `Z^16`. Arbitrary nonlinear `Z^16` maps are outside V10.
+`(e_i1, ..., e_ir)`, with a complete 16-component output vector for every
+tuple. The stored semantic object therefore contains exactly `16^(r+1)`
+integer structure coefficients. In the first bilinear executable this is
+`16^3 = 4096`, including explicit zero coefficients. Multilinearity makes those
+values determine the full map over `Z^16`. Arbitrary nonlinear `Z^16` maps are
+outside V10.
+
+The first atlas proposition is exactly the arity-2 partition represented by V9
+genomes 0, 2, and 3. V9 genomes 4 and 5 have arity 3 and are outside this typed
+universe. A V10 certificate therefore means
+`Novel<V9_bilinear_A3,C2_diag,full_Z_bilinear_tensor,N2>`; it does not mean
+separation from every V9 arity or every bilinear change of basis.
+
+The exact V9 evidence format emits one signed nonzero integer destination coefficient
+for each of 256 ordered input pairs. The V10 admission parser is hash-bound to
+that parent format and expands its 256 rows into a 4,096-cell tensor with all
+other coefficients explicitly zero. This is not a generic dense-atlas parser;
+a denser parent requires a new Garden and input hash.
+
+The first bootstrap requires the exact 1,270,431-byte parent transcript, parses
+all 768 bilinear rows, and computes its SHA-256 inside Sounio. The
+implementation compresses every complete 64-byte block directly and applies
+the FIPS 180-4 final padding to the exact remaining bytes. It must set
+`parent_evidence_match=true` and `parent_evidence_hash_delegated=false` before
+the atlas can be admitted. A size match, a hash string quoted by the freeze, or
+successful parsing without the direct digest is insufficient.
+
+As an independent semantic cross-check, V10 also reconstructs all three
+4,096-cell tensors from the exact V9 definitions `oag_rotl4`,
+`oag_affine_address`, and `oag_genome_coefficient`. Atlas admission requires
+exact equality with the 256 parent rows, 256 affine rows, and 256
+coefficient-lift rows. The reconstruction cannot replace the transcript hash,
+and the transcript hash cannot replace reconstruction.
 
 Every affine address constructor must materialize a complete
 operand-independent integer structure tensor. Its acceptance certificate must
@@ -108,9 +140,11 @@ No first-stage outcome encodes historical novelty or priority.
 
 ## Finite Group Action
 
-The first quotient domain `Q` is a frozen finite group, not an arbitrary list
-of transformations. Each `q : Q` contains an invertible signed permutation
-matrix `Pout(q)` for the codomain and one `Ps(q)` for every input slot. Its
+The first quotient domain `Q` is the frozen group `C2_diag`, not an arbitrary
+list of transformations. Its nonidentity member is the unsigned permutation
+matrix swapping lanes 0 and 1, used diagonally for the codomain and both
+bilinear input slots. All signs are `+1`; the first executable claims neither a
+nontrivial sign gauge nor a full independent-input basis-change quotient. Its
 action on an arity-`r` map `F : (Z^16)^r -> Z^16` is exactly:
 
 ```text
@@ -118,11 +152,16 @@ apply(q, F)(x1, ..., xr)
   = Pout(q)^-1 F(P1(q)x1, ..., Pr(q)xr)
 ```
 
-Sounio must verify the signed-permutation and inverse witnesses, the complete
-group multiplication table, identity, closure, inverses, associativity, and
-the identity and composition action laws before any `Q`-orbit or quotient
-language is admitted. Affine `F2^4` address bijections and sign/cocycle gauges
-enter `Q` only through this representation.
+Sounio must verify the permutation and inverse witnesses, the complete group
+multiplication table, identity, closure, inverses, associativity, and the
+identity and composition action laws before any `Q`-orbit or quotient language
+is admitted. Larger affine `F2^4` address groups and sign/cocycle gauges enter a
+future `Q` only through an explicitly frozen representation.
+
+Because every member of the first `C2_diag` is involutive, its forward and
+inverse permutations are numerically identical. A future group containing a
+non-involution must store and verify the inverse-output permutation separately;
+the v10 executable does not claim that generalization.
 
 If the first executable intentionally uses a finite transformation set without
 all group and action laws, it returns `SEARCH_INCOMPLETE` with a
@@ -171,6 +210,15 @@ Mutation operates on typed genome constructors. It may:
   is duplicated or reused nonlinearly;
 - add or remove an explicitly typed zero or residual term;
 - change target-neutral layout annotations.
+
+The first constructor family enumerates in fixed order the 3,600 tensor
+coordinates whose two input indices are in `1..15`, and both unit coefficient
+deltas, for a grammar cardinality of 7,200. Excluding input index 0 preserves
+the frozen `e0` left/right unit equations by construction. Candidate id alone
+determines the coordinate and sign without consulting atlas comparison
+results. The search may stop at its frozen budget and return
+`SEARCH_INCOMPLETE`; it may not require that the enumerated prefix contain an
+N2 success.
 
 Mutation may not:
 

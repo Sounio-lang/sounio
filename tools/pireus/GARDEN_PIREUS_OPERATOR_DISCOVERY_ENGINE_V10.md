@@ -39,6 +39,12 @@ V9 is the exact parent of this Garden:
 V10 must not reinterpret those facts. In particular, V10 cannot promote the
 four basis-distinct maps into historical novelty.
 
+The complete V9 transcript is a semantic input, not merely a convenient table.
+V10 admits it only after Sounio computes its frozen SHA-256 directly over every
+byte. It then independently reconstructs the three bilinear atlas classes from
+the V9 source definitions `oag_rotl4`, `oag_affine_address`, and
+`oag_genome_coefficient`. Neither witness is allowed to stand in for the other.
+
 ## Novelty Is Indexed
 
 There is no unqualified `Novel` value. The intended type is conceptually:
@@ -72,9 +78,10 @@ is not semantic novelty.
 
 The complete declared pure-tensor basis map differs under the identity
 relation. For an arity-`r` multilinear map on `Z^16`, that map contains all
-`16^r` evaluations `(e_i1, ..., e_ir)`. Multilinearity makes those values
-determine the full map. This is the level V9 can already witness for four child
-maps.
+`16^r` evaluations `(e_i1, ..., e_ir)`, and every evaluation is a complete
+16-component vector. Equivalently, the representation contains `16^(r+1)`
+integer structure coefficients. Multilinearity makes those values determine
+the full map. This is the level V9 can already witness for four child maps.
 
 ### N2: Quotient Separation
 
@@ -161,7 +168,12 @@ result. A mutation survives because Sounio can replay its certificate.
 
 ## Genome Grammar
 
-The first V10 fragment remains finite and exhaustive. It may compose:
+The first V10 fragment is finite and deterministically enumerable. Its first
+constructor family changes an operand-independent integer coefficient program
+at one tensor coordinate by one unit. Both input indices are nonzero, so the
+frozen `e0` left/right unit equations are preserved by construction. The
+coordinate and sign are derived from the candidate id, never from an expected
+result. Later families may compose:
 
 - affine address transforms over `F2^4` that materialize operand-independent
   integer structure tensors and therefore preserve linearity in every tracked
@@ -196,16 +208,21 @@ declared model.
 
 ## Exact Action Convention
 
-The first quotient action is not an unspecified set of rewrites. Each member
-`q` contains invertible signed permutation matrices over `Z` for the output and
-every input slot. For an arity-`r` map `F : (Z^16)^r -> Z^16`:
+The first quotient action is not an unspecified set of rewrites. V10 begins
+with the exact group `C2_diag`: identity and the unsigned lane permutation that
+swaps basis lanes 0 and 1, applied diagonally to the output and both bilinear
+input slots. Thus every sign is `+1`; this is not advertised as a nontrivial
+sign gauge or as the full basis-change group. For this involutive group the
+input permutation and inverse-output permutation share the same numerical
+table. A future non-involutive group must represent the inverse separately.
+For an arity-`r` map `F : (Z^16)^r -> Z^16`:
 
 ```text
 apply(q, F)(x1, ..., xr)
   = Pout(q)^-1 F(P1(q)x1, ..., Pr(q)xr)
 ```
 
-Affine `F2^4` address bijections and sign gauges are admitted only after they
+Larger affine `F2^4` address groups and sign gauges are admitted only after they
 materialize such matrices. The frozen action domain must carry a complete
 finite group table and executable witnesses for identity, closure, inverses,
 associativity, and the action laws. Without those witnesses, Pireus may report
@@ -291,8 +308,8 @@ The first executable is accepted only if it:
 
 1. consumes the exact frozen V9 parent hash;
 2. freezes a finite atlas and equivalence contract in Sounio;
-3. generates candidates from a typed grammar rather than a hand-written result
-   table;
+3. generates candidates by enumerating a typed constructor family rather than
+   selecting a hand-written result table;
 4. emits at least one quotient collision as a negative control;
 5. emits a full separator table for every N2-admitted candidate;
 6. recomputes every basis map and separator in an independent Sounio matcher;
@@ -321,10 +338,21 @@ The V10 direction is demoted if any of these holds:
 
 ## First Concrete Experiment
 
-Freeze a small atlas containing the V8 seed and the V9 executable child maps.
-Search a bounded typed mutation neighborhood around the nonzero associator and
-commutator residual cells. Require a complete separator table under a declared
-finite signed-permutation group action. The differentiating result is one of:
+Freeze an arity-indexed atlas containing exactly the three V9 bilinear classes
+(genomes 0, 2, and 3). The two V9 ternary classes are outside this proposition,
+not silently counted as separated. Expand each sparse V9 basis row into the
+complete 4,096-coefficient bilinear tensor, enumerate a bounded typed
+coefficient-program neighborhood of the frozen parent class, and require a
+complete separator table under the exact `C2_diag` lane-swap group. Later
+Gardens may add a multi-seed schedule without changing what this first search
+proved. The differentiating result is one of:
+
+The `lean_single` bootstrap directly re-seals the 1,270,431-byte V9 transcript
+in V10 with Sounio's SHA-256 block compression. It also verifies the exact V9
+source, freeze, parity-open, and semantic hashes; parses all 768 bilinear rows;
+and independently reconstructs the three complete tensors from the parent
+multiplication and frozen residual formulas. Any failure in either the direct
+hash or the reconstruction rejects the atlas before search.
 
 - `QUOTIENT_COLLISION`, with the exact matched class and action;
 - `N2_RELATIVE_NOVELTY`, with complete separator evidence;
