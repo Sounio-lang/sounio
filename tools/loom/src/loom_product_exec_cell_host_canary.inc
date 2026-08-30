@@ -806,7 +806,22 @@ class HostSounioCheckCell {
     for (;;) {
       observe_client();
       if (client_reaped_) {
-        throw Error("operation ExecCell exited before identity admission");
+        const int status =
+            WIFEXITED(client_status_)
+                ? WEXITSTATUS(client_status_)
+                : (WIFSIGNALED(client_status_)
+                       ? 128 + WTERMSIG(client_status_)
+                       : 255);
+        std::string diagnostic;
+        try {
+          diagnostic = read_remaining_output(
+              std::chrono::steady_clock::now() + std::chrono::seconds(1));
+        } catch (const Error& error) {
+          diagnostic = std::string("diagnostic-unavailable:") + error.what();
+        }
+        throw Error("operation ExecCell exited before identity admission status=" +
+                    std::to_string(status) + " output=" +
+                    product_compact_diagnostic(diagnostic));
       }
       try {
         const auto parsed = parse_u64(property("MainPID"));
