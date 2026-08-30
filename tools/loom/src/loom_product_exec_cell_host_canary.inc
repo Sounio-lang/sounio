@@ -568,11 +568,17 @@ class HostSounioCheckCell {
     if (getuid() != 0 || geteuid() != 0 || getgid() != 0 || getegid() != 0) {
       throw Error("host operation ExecCell requires root broker identity");
     }
-    if (!lowercase_digest(generation_) ||
-        !process_witness_root_artifact(runtime_, true) ||
-        !process_witness_root_artifact(systemd_run_, true) ||
-        !process_witness_root_artifact(systemctl_, true)) {
-      throw Error("host operation ExecCell artifact metadata unsafe");
+    if (!lowercase_digest(generation_)) {
+      throw Error("host operation ExecCell generation malformed");
+    }
+    if (!process_witness_root_artifact(runtime_, true)) {
+      throw Error("host operation ExecCell runtime metadata unsafe");
+    }
+    if (!root_system_tool(systemd_run_)) {
+      throw Error("host operation ExecCell systemd-run metadata unsafe");
+    }
+    if (!root_system_tool(systemctl_)) {
+      throw Error("host operation ExecCell systemctl metadata unsafe");
     }
     source_path_ = canonical_path(root_ + "/" + fixtures_.source);
     source_sha256_ = file_sha256(source_path_);
@@ -659,6 +665,13 @@ class HostSounioCheckCell {
   }
 
  private:
+  static bool root_system_tool(const std::string& path) {
+    struct stat info {};
+    return lstat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode) &&
+           info.st_uid == 0 && info.st_gid == 0 && info.st_nlink == 1 &&
+           (info.st_mode & 0022) == 0 && (info.st_mode & 0111) != 0;
+  }
+
   std::string property(const std::string& name) const {
     return quorum_tool_value(systemctl_,
                              {"show", unit_, "--property=" + name, "--value"});
