@@ -3703,3 +3703,90 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-08-24 | xai/grok-4.3 [MAJOR findings addressed] + deepseek [ERROR: invalid API key] + gemini/openrouter [ERROR: insufficient credits] | fan-out / evidence review | docs/compiler/KNOWN_LIMITATIONS.md + scripts/ci/sounio_stdlib_surface_support_gate.sh | ADDRESSED_SINGLE_PROVIDER | xAI correctly required a stronger source-vs-shipped-artifact boundary for Madaros Hessian and an exact definition of the partially closed i256/i512 surface; both were added. Its Epistemic(-1) concern was addressed by limiting the cross-engine claim to measured syntax acceptance and naming the sentinel mechanism as Madaros-only. Its f128 concern was resolved by separating the E218 engine-split gate/fixtures from the passing payload/wire scaffolding gates. The proposed inventory check is not vacuous: scanner output is the expected value and independently maintained prose is the observed value, so tree drift without a doc edit fails; a code comment now states this invariant. The ownership/closure objection conflated separate registry rows and required no change. Raw: `/tmp/llm-offload-AfStlF/`. |
 | 2026-08-24 | xai/grok-4.3 [NO MATHEMATICAL CONTENT TO REVIEW] + zai/glm-5.2 [ERROR: weekly/monthly limit exhausted] | math-review | docs/compiler/KNOWN_LIMITATIONS.md (i256/i512 and Hessian capability-boundary wording) | PASS_SINGLE_PROVIDER_DEGRADED | Required M1 fan-out was invoked on the final documentation diff. xAI classified it as capability/evidence wording with no mathematical derivation to audit; Z.AI returned quota error code 1310 and is not represented as a pass. The executable/numeric claims remain grounded in the named source witnesses, direct engine probes, and the source-vs-shipped-artifact split. Raw: `/tmp/llm-offload-3eGlYB/`. |
 | 2026-08-28 | math-review | WAIVED | SounioCDCoreLaw.lean, SounioSeamFlip.lean | Both files arrive unchanged from `origin/main` through a merge commit whose only authored content is a one-line regenerated census. Blob-identical to `origin/main` (`0a263c52`, `310b4c31`), so there is no new mathematical content for a review to read. Re-reviewing a merge that changed neither file would produce a log row asserting more than the work behind it. |
+
+## 2026-08-04 — SAN-FPGA paper review (post-blocker fixes)
+
+**Target:** docs/papers/san_fpga_deployment_2026-08-04.md + arxiv/submit/main.tex
+**Task:** review
+**Provider:** xai/Grok 4.3
+**Trigger:** External-facing arXiv paper revised after peer-review blockers
+**Status:** DONE
+
+**Key findings:**
+1. Energy figure (3.3 nJ/sample) rests on coarse 1 Hz board-level subtraction; paper already adds uncertainty language but may need raw traces or stronger caveat.
+2. CPU baseline measured on different host (Xeon Gold 6526Y) than U250 DL380; noted as limitation, same-host measurement is future work.
+3. Training results are single-run small-subset; paper already frames as machinery demonstration, not statistical claim.
+4. "First measured deployment" softened to "to our knowledge".
+5. Metered-MAC convention is partial; paper already states this and EarlyStop decomposition shows freeze-on-green dominates.
+6. Table numbering: markdown uses "Table 1b" but LaTeX longtable has no caption number; need to fix formal numbering.
+7. 1.08× wall-time claim appears only in abstract; body has 0.196 ms vs 0.213 ms; need to reconcile or remove.
+
+**Actions taken / pending:**
+- Added CPU baseline Table 1b and reframed FPGA value as offload+energy+spec.
+- Added energy uncertainty paragraph.
+- Softened priority claims.
+- Pending: fix Table 1/1b numbering in markdown; reconcile 1.08× abstract claim; run CPU baseline on DL380 if access permits.
+
+## 2026-08-05 — SAN-FPGA paper final blocker closure
+
+**Target:** docs/papers/san_fpga_deployment_2026-08-04.md + arxiv/submit/main.tex + arxiv/san-fpga-arxiv-submit-2026-08-04.{pdf,zip}
+**Task:** review (post-full-CIFAR-10 run)
+**Provider:** xai/Grok 4.3 (prior round); no new offload invoked for this editorial closure
+**Trigger:** Full CIFAR-10 ResNet-50 control run completed (Slurm job 8615)
+**Status:** DONE
+
+**Full CIFAR-10 ResNet-50 result (50 000 / 10 000, τ = 0.85, 60 epochs, Slurm job 8615):**
+- SAN: t* = None, final acc = 0.7686, S_m = 10 303 TMAC.
+- EarlyStop: t* = 22, final acc = 0.8513, S_m = 9 552 TMAC.
+- Dense: t* = 24, final acc = 0.8650, S_m = 24 918 TMAC.
+- SAN vs Dense: −58.7%; SAN vs EarlyStop: +7.8%; EarlyStop vs Dense: −61.7%.
+- Job failed after ledger with CUDA OOM in latency benchmark; ledger lines are reported as measured.
+
+**Actions taken:**
+- Added §4.6 "Full CIFAR-10 ResNet-50 run (negative control)" with Table 6.
+- Renumbered former §4.6 End-to-end to §4.7 and its table to Table 7.
+- Updated abstract to state the negative control explicitly and scope small-subset savings as machinery demonstration only.
+- Updated §5.2 limitations to replace "No full-CIFAR-10 headline" with a paragraph on the full-run findings.
+- Regenerated main.tex via pandoc, reapplied newunicodechar fixes (τ, ≤, ≥, ≈, ↔, ×, ⌊, ⌋), compiled PDF (19 pages, no missing characters).
+- Updated submission PDF/zip and both gists.
+
+**Residual notes from prior offload:**
+- Table numbering corrected (no more "Table 1b").
+- 1.08× abstract claim reconciled with body (0.213 ms / 0.196 ms ≈ 1.087, rounded to 1.08×).
+- CPU baseline remains on different host (Xeon Gold 6526Y); same-host DL380 measurement still future work.
+
+## 2026-08-05 — SAN-FPGA paper pre-commit fan-out review
+
+**Target:** docs/papers/san_fpga_deployment_2026-08-04.md
+**Task:** review
+**Provider:** xai/Grok 4.3 (deepseek/gemini errored)
+**Trigger:** External-facing arXiv paper; pre-commit policy gate
+**Status:** DONE
+
+**Key findings:**
+1. [BLOCKER] Energy figure precision rests on coarse 1 Hz sensor; addressed with uncertainty language, raw idle/load values, and order-of-magnitude framing.
+2. [BLOCKER] CPU baseline on different host; addressed by disclosing limitation and listing same-host DL380 measurement as future work.
+3. [MAJOR] Single seed/no variance; mitigated by launching seed=42 and τ=0.80 jobs (8619/8620) for sensitivity analysis.
+4. [MAJOR] "First measured deployment" claim; softened to "to our knowledge" throughout.
+5. [MAJOR] Full-CIFAR-10 negative result not reflected in abstract; addressed by adding explicit qualifying clause in abstract.
+6. [MINOR] Q0.15 edge cases; noted as future hardening, not blocking submission.
+
+**Actions taken:**
+- Fan-out and single-provider reviews logged; paper already revised for items 1,2,4,5.
+- Jobs 8619 (seed=42) and 8620 (τ=0.80) submitted to Slurm for sensitivity coverage.
+- Commit proceeds with residual items disclosed.
+| 2026-08-05 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED | Pre-commit fan-out review of external-facing arXiv draft. Grok flagged: energy precision (addressed), CPU baseline host difference (addressed), single seed (mitigated by jobs 8619/8620), priority claim (softened), full-CIFAR-10 abstract mismatch (addressed), Q0.15 edge cases (noted as future work). Raw: /tmp/llm-offload-ySaGWl/. |
+| 2026-08-05 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED_SENSITIVITY_ADDED | Pre-commit review after adding full-CIFAR-10 sensitivity study (jobs 8615/8619/8620). Grok findings from prior round already addressed: energy precision, CPU baseline host, single seed (now two seeds), priority claim, abstract mismatch. New content: three-run sensitivity table showing SAN–EarlyStop variance from −6.5% to +71.3%, freeze-on-green dominance (55–88% savings), and lower SAN accuracy (0.759–0.769) vs EarlyStop (0.824–0.851) and Dense (0.850–0.865). Raw: /tmp/llm-offload-ySaGWl/. |
+| 2026-08-05 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED_SAN_V2_ADDED | Pre-commit review after adding SAN-v2 section (§4.8) with gradient analysis and learned-gating results. Grok findings from prior rounds already addressed. New content: per-stage gradient norms showing v1 pathology (trunk gradients grow 8–23× vs final head 5×), SAN-v2 with MLP heads + learned gate improving accuracy 0.768→0.812 and reducing S_m 22%, but learned gate converging to exit_frac=1.000 (always exit at first stage). Raw: /tmp/llm-offload-ySaGWl/. |
+| 2026-08-05 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED_SAN_V3_ADDED | Pre-commit review after adding SAN-v3 section (§4.8). Grok findings from prior rounds already addressed. New content: SAN-v3 with curriculum (stage-accuracy-gated) and depth penalty implemented in suffering_aware_large_architecture_v2.py; validation pending cluster availability. Raw: /tmp/llm-offload-ySaGWl/. |
+| 2026-08-05 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED_SAN_V3_RESULTS | Pre-commit review after adding SAN-v3 results (job 8630). Grok findings from prior rounds already addressed. New content: SAN-v3 with curriculum + depth penalty reaches τ=0.85 at epoch 13, acc 0.8561, S_m 5814 TMAC (−76.7% vs Dense, −51.7% vs EarlyStop). First SAN variant to reach competitive accuracy with large measured efficiency gain. Raw: /tmp/llm-offload-ySaGWl/. |
+| 2026-08-06 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED_SAN_V4_RESULTS | Pre-commit review after adding SAN-v4 results (job 8631). Grok findings from prior rounds already addressed. New content: SAN-v4 with post-τ distillation + adaptive exit reaches τ=0.85 at epoch 12, acc 0.8557, S_m 5399 TMAC (−78.3% vs Dense, −60.6% vs EarlyStop). Exit fraction remains zero; savings come from freeze-on-green, not inference-time early exits. Raw: /tmp/llm-offload-ySaGWl/. |
+| 2026-08-06 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED_SAN_V5_RESULTS | Pre-commit review after adding SAN-v5 results (job 8634). Grok findings from prior rounds already addressed. New content: SAN-v5 with adaptive curriculum + accuracy guarantee + multi-exit distillation reaches τ=0.85 at epoch 12, acc 0.8512, S_m 5399 TMAC — same as SAN-v4 but slightly lower accuracy. Negative result reported honestly: aggressive curriculum acceleration does not help at this target. Raw: /tmp/llm-offload-ySaGWl/. |
+
+## 2026-08-06 — SAN-FPGA repositioned paper (The Suffering Ledger)
+
+- Task: adversarial review of the repositioned paper draft (audit-instrument thesis, §4.9 gate case study)
+- Providers: grok (xAI, OK), zai GLM-5.2 (OK), deepseek (ERROR)
+- Target: `docs/papers/san_fpga_deployment_2026-08-04.md`
+- Verdicts: Grok — 3 substantive (first-combined-instrument needs search appendix; abstract energy claim stronger than body; §4.9 "strongest argument" overstates since gradient tools could have caught it). Z.AI — 2 fatal-seeming, verified against cluster logs: (a) Table 6 vs Table 8 same-seed baseline divergence = cross-job GPU nondeterminism, NOT copy-paste (jobs 8615/8619/8630 logs confirm distinct within-run legs); fixed with variance disclosure note + dropped "statistically indistinguishable"; (b) "integer-exact accounting of executed FLOPs" wording overclaims vs LUT-based FPGA attestation — fixed by scoping to "executed-path accounting at framework level" + "root-of-trust for the decision and its accounting" + new §5.2 limitation bullet. Also reconciled 3 Imagenette throughput envelopes (Table 1/§4.5/§4.7) and Table 7 total composition.
+- Outcome: all findings addressed in place before commit. Full review: /tmp/offload_review_v7paper.md (session-local).
