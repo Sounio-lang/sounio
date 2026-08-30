@@ -1,4 +1,4 @@
-# scripts/ci/lib_sounio_claim_oracle.sh
+# scripts/lib/lib_sounio_claim_oracle.sh
 # ADR-008 helpers for claim gates that still carry a foreign corroboration path.
 #
 #   source this file after `set -euo pipefail` and `cd` to repo root.
