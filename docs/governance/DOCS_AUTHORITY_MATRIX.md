@@ -95,6 +95,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.bucket-d-script-hardening-2026-06-21 | repo_only | docs/audit/BUCKET_D_SCRIPT_HARDENING_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.canonical-compiler-gate-structural-cost-2026-08-18 | repo_only | docs/audit/CANONICAL_COMPILER_GATE_STRUCTURAL_COST_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.capacity-validator-positive-control-2026-08-19 | repo_only | docs/audit/CAPACITY_VALIDATOR_POSITIVE_CONTROL_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.chaotic-native-bridge-repro-2026-08-30 | repo_only | docs/audit/CHAOTIC_NATIVE_BRIDGE_REPRO_2026-08-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.checker-guard-wiring-dispatch-2026-07-11 | repo_only | docs/audit/CHECKER_GUARD_WIRING_DISPATCH_2026-07-11.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.chi5-real-axiom-audit-2026-05-30 | repo_only | docs/audit/CHI5_REAL_AXIOM_AUDIT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ci-absence-as-success-contract-2026-08-17 | repo_only | docs/audit/CI_ABSENCE_AS_SUCCESS_CONTRACT_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
