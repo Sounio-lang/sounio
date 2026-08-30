@@ -98,7 +98,7 @@ record the intent **inside the compiler** rather than only in a document, and
 give them a diagnostic of their own. `i512` was named as the seed of the
 Cayley-Dickson tower (`SOUNIO-PRECISION-PRESERVATION`).
 
-Measured instance: `TyF128` and `TyF256` under Madaros. `E218` on bind, on
+Measured instance: `TyF128` and `TyF256` under Madaros. `E249` on bind, on
 arithmetic, and on signature-only use.
 
 ## The test that decides a position

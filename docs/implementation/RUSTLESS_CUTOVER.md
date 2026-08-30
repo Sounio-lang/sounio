@@ -359,7 +359,7 @@ jobs:
 
 ```bash
 # 1. Make changes to self-hosted compiler
-vim self-hosted/check/type_inference.sio
+vim self-hosted/check/infer.sio
 
 # 2. Run local verification
 make verify
@@ -371,7 +371,7 @@ make verify
 # - Run test suite on both stages
 
 # 3. If verification passes, commit
-git add self-hosted/check/type_inference.sio
+git add self-hosted/check/infer.sio
 git commit -m "[check] Improve type inference for match expressions"
 
 # 4. CI will re-verify on push
@@ -505,7 +505,10 @@ fn lower_ir_instr(comp: NativeCompiler, instr: IrInstr) -> NativeCompiler {
 
 ### Step 5: Update Tests
 
-**File**: `self-hosted/ir/test_serialize.sio`
+**File**: `self-hosted/ir/test_serialize.sio` -- this file was never committed;
+no IR-serialization test module exists in the tree, and `self-hosted/ir/serialize.sio`
+holds the implementation only. Treat this step as unimplemented rather than as a
+file to edit.
 
 ```sio
 fn test_atomic_load_roundtrip() with IO, Mut, Panic, Div {
@@ -531,7 +534,7 @@ fn test_atomic_load_roundtrip() with IO, Mut, Panic, Div {
 
 ### Step 6: Update Documentation
 
-**File**: `docs/SOIR_REFERENCE.md`
+**File**: `docs/architecture/SOIR_REFERENCE.md`
 
 Update the opcode reference table:
 

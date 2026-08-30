@@ -96,10 +96,10 @@ def emit_probe(
     lines.append("//@ run-pass")
     lines.append("//@ check-only")
     lines.append(
-        "//@ known-failure: V0-B not implemented yet — Madaros parser E218 on "
+        "//@ known-failure: V0-B not implemented yet — Madaros parser E249 on "
         "f128/f256; contract is scripts/ci/madaros_f128_f256_ladder_gate.sh "
         "--stage v0b (must FAIL until fable-1 lands literals through check). "
-        "lean_single does not enforce E218 (see ladder V0-A engine split)."
+        "lean_single does not enforce E249 (see ladder V0-A engine split)."
     )
     lines.append(
         f"//@ description: V0-B — {ty} literals from MPFR literal_boundary corpus "
@@ -128,7 +128,7 @@ def emit_probe(
         "// Target after V0-B: `souc check` prints `check: OK` and does NOT emit"
     )
     lines.append(
-        "// error[E218]. Expected limbs below are the MPFR bit patterns; a"
+        "// error[E249]. Expected limbs below are the MPFR bit patterns; a"
     )
     lines.append(
         "// widen-via-f64 implementation matches via_f64 limbs and fails every"
@@ -178,7 +178,7 @@ def emit_probe(
         "    // Touch oracle tables so they are not dead under aggressive DCE"
     )
     lines.append(
-        "    // once V0-B lands (today the whole file fails at E218 on types)."
+        "    // once V0-B lands (today the whole file fails at E249 on types)."
     )
     if rows:
         first = rows[0]["id"]

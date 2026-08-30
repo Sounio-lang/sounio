@@ -61,10 +61,12 @@ SYNC = "scripts/docs/sync_governance_metadata.mjs"
 # Fingerprint of ACTIVE_RESEARCH_DOCS's size. Was 3 from this rung's
 # writing (2026-07-31) through 2026-08-15; grew to 4 when
 # rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md was
-# whitelisted (docs/audit/BRANCH_AUDIT_2026-08-15.md). Bump this
-# deliberately when the whitelist legitimately changes size -- do not
-# let this constant silently drift out of sync with governance_registry.mjs.
-WHITELIST_SIZE = 4
+# whitelisted (docs/audit/BRANCH_AUDIT_2026-08-15.md); grew to 5 on
+# 2026-08-28 when cd-tower-automorphism-freeze.md was whitelisted in the
+# same change that added it. Bump this deliberately when the whitelist
+# legitimately changes size -- do not let this constant silently drift out
+# of sync with governance_registry.mjs.
+WHITELIST_SIZE = 5
 
 SUBJECT = "docs/research/self_falsifying_compilation_line_r24_2026-07-31.md"
 FARM_COPY = ["docs", "examples", "paper", "spec", "README.md"]

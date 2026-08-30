@@ -23,7 +23,7 @@ PR="${1:-}"
 [[ -n "$PR" ]] || { echo "usage: $0 <pr-number>" >&2; exit 2; }
 REPO="${GH_REPO:-Sounio-lang/sounio}"
 
-j() { gh pr view "$PR" --repo "$REPO" --json "$1" --jq "$2" 2>/dev/null; }
+j() { gh pr view "$PR" --repo "$REPO" --json "$1" --jq "$2"; }
 
 rc=0
 fail() { printf 'NOT MERGE-READY: %s\n' "$1" >&2; rc=1; }
@@ -43,20 +43,21 @@ failed="$(j statusCheckRollup '[.statusCheckRollup[]? | select(.conclusion=="FAI
 }
 
 # 3. The pipeline ran at all.  This is the check the other two cannot make.
-names="$(j statusCheckRollup '[.statusCheckRollup[]?.name // .statusCheckRollup[]?.context] | join("\n")')"
+names="$(j statusCheckRollup '[.statusCheckRollup[]? | (.name // .context)] | join("\n")')"
 has() { grep -qxF "$1" <<<"$names"; }
 has "Impact" || fail "the Impact gate never ran — the suite it unlocks did not run either, so a green rollup here means nothing"
 
 # 4. The gates this diff's paths require are PRESENT and green.
-files="$(gh pr view "$PR" --repo "$REPO" --json files --jq '.files[].path' 2>/dev/null)"
+files="$(gh pr view "$PR" --repo "$REPO" --json files --jq '.files[].path')"
 require() {   # require <gate name> <reason>
     local g="$1" why="$2" concl
     if ! has "$g"; then fail "$why, but the '$g' gate is absent from this PR's checks"; return; fi
-    concl="$(j statusCheckRollup "[.statusCheckRollup[]? | select(.name==\"$g\")][0].conclusion")"
+    concl="$(j statusCheckRollup "[.statusCheckRollup[]? | select((.name // .context)==\"$g\")][0].conclusion")"
     [[ "$concl" == "SUCCESS" ]] || fail "'$g' is required here and concluded '$concl'"
 }
 grep -q '^formal/lean4/'          <<<"$files" && require "Lean Proofs"  "this PR changes formal/lean4/"
-grep -qE '^(src/|compiler/)'      <<<"$files" && require "Full Test Suite" "this PR changes compiler sources"
+# The active Sounio compiler implementation is under self-hosted/.
+grep -qE '^(src/|compiler/|self-hosted/)' <<<"$files" && require "Full Test Suite" "this PR changes compiler sources"
 grep -q '^stdlib/'                <<<"$files" && require "Full Test Suite" "this PR changes stdlib/"
 
 if [[ $rc -eq 0 ]]; then

@@ -66,8 +66,8 @@ The "no f256 arithmetic is implemented" claim above holds only for Madaros:
 
 | Engine | `fn add(a: f256, b: f256) -> f256 { a + b }` |
 |---|---|
-| **Madaros** (default `bin/souc`) | Rejects with **`error[E218]`**: *"f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A"*. |
-| **lean_single** (bootstrap seed) | **Compiles and executes.** No E218, no diagnostic; the emitted ELF runs to completion (`rc=0`). |
+| **Madaros** (default `bin/souc`) | Rejects with **`error[E249]`**: *"f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A"*. |
+| **lean_single** (bootstrap seed) | **Compiles and executes.** No E249, no diagnostic; the emitted ELF runs to completion (`rc=0`). |
 
 So `MeasuredF256` is unreachable under the engine this document otherwise treats as authoritative
 (Madaros), but f256 arithmetic is not, in fact, unimplemented in this codebase — it exists,
@@ -78,7 +78,7 @@ construction, no epistemic surface, and no gate — it simply fails to refuse.
 
 The dual-engine split is **not** limited to the tilde / f128–f256 parser boundary. Two further
 measured cases (2026-08-17), recorded so this document does not leave the reader thinking
-“engine divergence = only E218”:
+“engine divergence = only E249”:
 
 | Case | Madaros (default) | lean_single | Status |
 |---|---|---|---|
