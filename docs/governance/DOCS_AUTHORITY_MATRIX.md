@@ -409,6 +409,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.sedenion-ker-basis-2026-08-23 | repo_only | docs/audit/SEDENION_KER_BASIS_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-ker-intersect-2026-08-23 | repo_only | docs/audit/SEDENION_KER_INTERSECT_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-ker-lw-2026-08-23 | repo_only | docs/audit/SEDENION_KER_LW_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.sedenion-ker-lw-basis-2026-08-24 | repo_only | docs/audit/SEDENION_KER_LW_BASIS_2026-08-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-ker-lz-2026-08-23 | repo_only | docs/audit/SEDENION_KER_LZ_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-zd-action-2026-08-23 | repo_only | docs/audit/SEDENION_ZD_ACTION_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-zd-twosided-moufang-2026-08-23 | repo_only | docs/audit/SEDENION_ZD_TWOSIDED_MOUFANG_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
