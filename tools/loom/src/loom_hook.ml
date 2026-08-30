@@ -7,6 +7,7 @@ let pinned_manifest_sha256 =
 
 let max_event_bytes = 8 * 1024 * 1024
 let process_timeout_seconds = 5.0
+let coordination_process_timeout_seconds = 15.0
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 
@@ -98,7 +99,8 @@ let drop_environment_prefix prefix environment =
   |> List.filter (fun item -> not (starts_with item prefix))
   |> Array.of_list
 
-let run_process ?(input = "") ?(environment = Unix.environment ()) ~cwd command arguments =
+let run_process ?(input = "") ?(environment = Unix.environment ())
+    ?(timeout_seconds = process_timeout_seconds) ~cwd command arguments =
   let stdin_read, stdin_write = Unix.pipe () in
   let output_read, output_write = Unix.pipe () in
   Unix.set_close_on_exec stdin_write;
@@ -134,7 +136,7 @@ let run_process ?(input = "") ?(environment = Unix.environment ()) ~cwd command 
       (try write_all stdin_write input
        with error -> kill_noerr (); raise error);
       Unix.close stdin_write;
-      let deadline = Unix.gettimeofday () +. process_timeout_seconds in
+      let deadline = Unix.gettimeofday () +. timeout_seconds in
       let output = Buffer.create 4096 in
       let bytes = Bytes.create 16384 in
       let rec drain () =
@@ -809,7 +811,8 @@ let coordination_environment () =
   |> replace_environment "SOUNIO_COORD_TTL_SECONDS" ttl
 
 let run_coord root worktree arguments =
-  run_process ~environment:(coordination_environment ()) ~cwd:worktree
+  run_process ~environment:(coordination_environment ())
+    ~timeout_seconds:coordination_process_timeout_seconds ~cwd:worktree
     (Filename.concat root "bin/sounio-coord") arguments
 
 let coord_ok root worktree arguments =
