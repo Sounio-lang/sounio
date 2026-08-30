@@ -22,8 +22,7 @@ What is mechanized here, and how it composes into Paper A's Theorem 6.4
   any typing derivation, and preservation carries it along every reduction step.
 * **NS-extended type safety.** `progress` and `preservation` for the `N`-annotated
   calculus — the row Paper A §6.4 marked `[pending wire]`.
-* **Soundness = exactness preservation.** `Exact e` says every `kraw` in `e` reports
-  its *true* variance (`m.gumVar = trueVar a`). Type safety alone does not give this
+&  its *true first-order* variance (`m.gumVar = trueVar a`). Type safety alone does not give this
   (§6.1); `exact_preservation` proves that under NS typing it is an invariant of
   reduction — at `kadd_red`/`kmul_red` the disjointness premise + Lemma 2 + Lemma 1 make
   the defective scalar combinators `gAddMeta`/`gMulMeta` *exact*.
@@ -271,6 +270,20 @@ theorem covers_scale {N : NS} {a : Aff} (k : Int) (h : Covers N a) : Covers N (s
     rcases hp with hp | hp
     · subst hp; exact h (s, c) (by simp)
     · exact ih (fun q hq => h q (by simp [hq])) hp
+
+/-- The membership-based `Covers` entails the coefficient-based containment Lemma 2 is
+    worded on: every source with a NONZERO coefficient in `a` is a member of `N`.
+    (xai review 2026-08-30, item 2: `Covers` is the stricter, conservative invariant.) -/
+theorem covers_coeff {N : NS} {a : Aff} (h : Covers N a) : ∀ s, coeff a s ≠ 0 → nsMem s N := by
+  intro s hs
+  induction a with
+  | nil => simp [coeff] at hs
+  | cons p r ih =>
+    cases p with | mk t c =>
+    by_cases ht : t = s
+    · subst ht; exact h (t, c) (by simp)
+    · simp [coeff, ht] at hs
+      exact ih (fun q hq => h q (by simp [hq])) hs
 
 /-- **Lemma 2 ⟹ Crux #1.** Tracked sets disjoint + both covered ⟹ true supports disjoint. -/
 theorem covers_disjoint {Na Nb : NS} {a b : Aff} (ha : Covers Na a) (hb : Covers Nb b)
@@ -1323,6 +1336,7 @@ end Sounio.EpistemicEffectsNS
 -- ================================================================
 #print axioms Sounio.EpistemicEffectsNS.trueVar_append
 #print axioms Sounio.EpistemicEffectsNS.inner_zero_of_ns
+#print axioms Sounio.EpistemicEffectsNS.covers_coeff
 #print axioms Sounio.EpistemicEffectsNS.progress
 #print axioms Sounio.EpistemicEffectsNS.preservation
 #print axioms Sounio.EpistemicEffectsNS.exact_preservation
