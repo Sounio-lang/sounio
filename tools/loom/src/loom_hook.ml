@@ -64,7 +64,13 @@ let read_stdin () =
   in
   loop 0
 
-let sha256_file path = sha256 (read_file path)
+let sha256_file path =
+  let stat = Unix.lstat path in
+  if stat.st_kind <> S_REG then failf "file-not-regular:%s" path;
+  let channel = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+      Cryptokit.hash_channel (Cryptokit.Hash.sha256 ()) channel
+      |> Cryptokit.transform_string (Cryptokit.Hexa.encode ()))
 
 let rec mkdir_p path =
   if path = "" || path = "." || path = "/" || Sys.file_exists path then ()
@@ -1069,14 +1075,24 @@ let execute_event tool_root root event agent lane raw_session_id
       let cwd = execution_cwd event input root in
       let ingress =
         Loom_exec_ingress.observe ~root ~agent ~lane ~session_id:raw_session_id
-          ~cwd ~event_sha256 ~command_sha256:(sha256 command)
+          ~cwd ~event_sha256 ~command ~command_sha256:(sha256 command)
       in
       match ingress with
-      | Some { Loom_exec_ingress.result = Some result; _ } ->
+      | Some
+          { Loom_exec_ingress.result =
+              Some (Loom_exec_ingress.Frozen_result result); _ } ->
           Some
             (execution_hook_output
                ~reason:"Sounio 9033 returned a read-only ExecCell result"
                input field (Loom_exec_result.presentation_command result))
+      | Some
+          { Loom_exec_ingress.result =
+              Some (Loom_exec_ingress.Operation_record result); _ } ->
+          Some
+            (execution_hook_output
+               ~reason:"Sounio 9036 returned a verified ExecCell operation record"
+               input field
+               (Loom_exec_result_record.presentation_command result))
       | _ when Loom_exec_ingress.probe_only () -> None
       | _ ->
           refresh_presence tool_root presence_root root agent lane raw_session_id;
@@ -1166,7 +1182,9 @@ let run arguments =
   | Error message
   | Loom_exec.Error message
   | Loom_exec_intent.Error message
+  | Loom_exec_catalog.Error message
   | Loom_exec_result.Error message
+  | Loom_exec_result_record.Error message
   | Loom_exec_ingress.Error message
   | Loom_membrane.Error message
   | Sys_error message ->

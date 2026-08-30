@@ -5,6 +5,11 @@ exception Error of string
 let pinned_manifest_sha256 =
   "58d4a49c5b2462261ee53cd06f3ca8e29d363c1a38bf47274fa98a67b79cc569"
 
+let pinned_grant_manifest_sha256 =
+  "4abfbc8a0fa9cdd1c2164f9f72ea4d408939b3d53497fa7fcaf008d71b1ea1e4"
+
+let max_record_bytes = 64 * 1024
+
 type policy = {
   manifest_sha256 : string;
   source_sha256 : string;
@@ -41,6 +46,24 @@ type issued = {
   handle : string;
   authority_output_sha256 : string;
   manifest_sha256 : string;
+}
+
+type transported = {
+  root : string;
+  event_sha256 : string;
+  command_sha256 : string;
+  handle : string;
+  record_sha256 : string;
+  record_hex : string;
+  record : string;
+  manifest_sha256 : string;
+}
+
+type grant_binding = {
+  command : string;
+  command_sha256 : string;
+  event_sha256 : string;
+  source : string;
 }
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
@@ -234,3 +257,162 @@ let issue ~root ~(material : Loom_exec_catalog.material_result)
       binding.event_sha256 binding.generation_sha256 record_sha256;
     authority_output_sha256 = sha256 output;
     manifest_sha256 = policy.manifest_sha256 }
+
+let load_grant_binding ~root =
+  let root = Unix.realpath root in
+  let path =
+    configured_path ~name:"SOUNIO_LOOM_EXEC_OPERATION_GRANT_FIXTURE_MANIFEST"
+      ~default:(Filename.concat root
+        "tools/loom/exec_operation_grant_fixture.freeze.v1")
+  in
+  ignore (require_regular_file path);
+  if sha256_file path <> pinned_grant_manifest_sha256 then
+    failf "exec-result-record-grant-manifest-hash-mismatch";
+  let manifest = parse_manifest path in
+  exact manifest "schema" "loom-exec-operation-grant-fixture-freeze-v1";
+  exact manifest "stage" "SEMANTICS_FROZEN";
+  exact manifest "producing_language" "Sounio";
+  exact manifest "semantic_authority" "Sounio";
+  exact manifest "action" "9030";
+  exact manifest "catalog_action" "9035";
+  exact manifest "result_action" "9036";
+  exact manifest "material_execution" "false";
+  let command = required manifest "command" in
+  let command_sha256 = required manifest "command_sha256" |> digest "command" in
+  let event_sha256 = required manifest "event_sha256" |> digest "event" in
+  if sha256 command <> command_sha256 then
+    failf "exec-result-record-grant-command-hash-mismatch";
+  let prefix = "loom-exec-cell-v2 sounio-check source=" in
+  if String.length command <= String.length prefix
+     || String.sub command 0 (String.length prefix) <> prefix
+  then failf "exec-result-record-grant-command-shape-mismatch";
+  let source =
+    String.sub command (String.length prefix)
+      (String.length command - String.length prefix)
+  in
+  { command; command_sha256; event_sha256; source }
+
+let parse_record policy record =
+  if String.length record > max_record_bytes then
+    failf "exec-result-record-transport-too-large";
+  if record = "" || record.[String.length record - 1] <> '\n' then
+    failf "exec-result-record-transport-missing-final-newline";
+  let lines = String.split_on_char '\n' record in
+  let lines =
+    match List.rev lines with
+    | "" :: tail -> List.rev tail
+    | _ -> failf "exec-result-record-transport-missing-final-newline"
+  in
+  let keys =
+    [ "operation"; "event_sha256"; "command_template_sha256";
+      "generation_sha256"; "source_sha256"; "compiler_sha256";
+      "argv_sha256"; "artifact_sha256"; "artifact_bytes";
+      "stdout_sha256"; "stderr_sha256"; "diagnostics_sha256";
+      "sandbox_profile_sha256"; "principal_sha256";
+      "descriptor_binding_sha256"; "grant_receipt_sha256"; "exit_code" ]
+  in
+  let fields = Hashtbl.create (List.length keys) in
+  let rec consume expected actual =
+    match expected, actual with
+    | [], [] -> ()
+    | key :: expected_tail, line :: actual_tail ->
+        let prefix = key ^ "=" in
+        if String.length line <= String.length prefix
+           || String.sub line 0 (String.length prefix) <> prefix
+        then failf "exec-result-record-transport-field-order:%s" key;
+        Hashtbl.add fields key
+          (String.sub line (String.length prefix)
+             (String.length line - String.length prefix));
+        consume expected_tail actual_tail
+    | _ -> failf "exec-result-record-transport-field-count"
+  in
+  (match lines with
+  | schema :: rest when schema = policy.record_schema -> consume keys rest
+  | _ -> failf "exec-result-record-transport-schema-mismatch");
+  fields
+
+let transport_field fields key =
+  match Hashtbl.find_opt fields key with
+  | Some value when value <> "" -> value
+  | _ -> failf "exec-result-record-transport-field-missing:%s" key
+
+let parse_handle handle =
+  match String.split_on_char ':' handle with
+  | [ "loom-result-v2"; event; generation; record ] ->
+      List.iter
+        (fun (label, value) -> ignore (digest label value))
+        [ ("handle-event", event); ("handle-generation", generation);
+          ("handle-record", record) ];
+      (event, generation, record)
+  | _ -> failf "exec-result-record-transport-handle-malformed"
+
+let validate_transport ~root ~event_sha256 ~command_sha256 ~handle
+    ~record_sha256 ~record_hex ~manifest_sha256 =
+  let root = Unix.realpath root in
+  let policy = load ~root in
+  let grant = load_grant_binding ~root in
+  let event_sha256 = digest "transport-event" event_sha256 in
+  let command_sha256 = digest "transport-command" command_sha256 in
+  let record_sha256 = digest "transport-record" record_sha256 in
+  let manifest_sha256 = digest "transport-manifest" manifest_sha256 in
+  if event_sha256 <> grant.event_sha256 then
+    failf "exec-result-record-transport-event-not-frozen-operation";
+  if command_sha256 <> grant.command_sha256 then
+    failf "exec-result-record-transport-command-not-frozen-operation";
+  if manifest_sha256 <> policy.manifest_sha256 then
+    failf "exec-result-record-transport-manifest-mismatch";
+  if String.length record_hex > max_record_bytes * 2 then
+    failf "exec-result-record-transport-too-large";
+  let record = Loom_exec_result.string_of_hex record_hex in
+  if sha256 record <> record_sha256 then
+    failf "exec-result-record-transport-record-hash-mismatch";
+  let fields = parse_record policy record in
+  let field key = transport_field fields key in
+  let projection =
+    Loom_exec_catalog.project ~root ~operation:"sounio-check"
+      ~source:(Some grant.source)
+  in
+  if field "operation" <> policy.operation
+     || field "event_sha256" <> event_sha256
+     || field "command_template_sha256" <> projection.command_template_sha256
+     || field "source_sha256" <> Option.get projection.source_sha256
+     || field "compiler_sha256" <>
+          (Loom_exec_catalog.load ~root).toolchain_compiler_sha256
+     || field "sandbox_profile_sha256" <> projection.sandbox_profile_sha256
+     || field "exit_code" <> "0"
+  then failf "exec-result-record-transport-semantic-binding-mismatch";
+  List.iter
+    (fun key -> ignore (digest ("record-" ^ key) (field key)))
+    [ "event_sha256"; "command_template_sha256"; "generation_sha256";
+      "source_sha256"; "compiler_sha256"; "argv_sha256";
+      "artifact_sha256"; "stdout_sha256"; "stderr_sha256";
+      "diagnostics_sha256"; "sandbox_profile_sha256"; "principal_sha256";
+      "descriptor_binding_sha256"; "grant_receipt_sha256" ];
+  let artifact_bytes = decimal "record-artifact-bytes" (field "artifact_bytes") in
+  if artifact_bytes <= 0 then failf "exec-result-record-transport-artifact-empty";
+  let handle_event, handle_generation, handle_record = parse_handle handle in
+  if handle_event <> event_sha256
+     || handle_generation <> field "generation_sha256"
+     || handle_record <> record_sha256
+  then failf "exec-result-record-transport-handle-binding-mismatch";
+  let code, output =
+    Loom_exec_intent.process_exchange policy.runtime
+      (authority_frame policy policy.positive_word0)
+  in
+  if code <> 0 || output <> expected_output policy then
+    failf "exec-result-record-transport-authority-diverged:%d:%s" code output;
+  { root; event_sha256; command_sha256; handle; record_sha256; record_hex;
+    record; manifest_sha256 }
+
+let shell_quote value =
+  "'" ^ String.concat "'\"'\"'" (String.split_on_char '\'' value) ^ "'"
+
+let presentation_command result =
+  String.concat " "
+    [ shell_quote (Unix.realpath Sys.executable_name);
+      "exec-result-record-present"; "--root"; shell_quote result.root;
+      "--event"; result.event_sha256; "--command"; result.command_sha256;
+      "--handle"; shell_quote result.handle;
+      "--record-sha256"; result.record_sha256;
+      "--record-hex"; result.record_hex;
+      "--manifest-sha256"; result.manifest_sha256 ]
