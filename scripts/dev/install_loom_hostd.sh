@@ -18,6 +18,8 @@ RUNTIME=''
 AUTHORITY=''
 RESIDENT=''
 POLICY_ROOT="$ROOT_DIR"
+EXEC_CELL_CAPSULE=''
+EXEC_CELL_CAPSULE_SHA256=''
 ACTIVATE=0
 
 POLICY_FILES=(
@@ -45,12 +47,48 @@ fail() {
   exit 1
 }
 
+sha256_file() {
+  sha256sum "$1" | cut -d ' ' -f 1
+}
+
+manifest_value() {
+  local manifest="$1" key="$2" line name value found=''
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == *=* ]] || continue
+    name="${line%%=*}"
+    value="${line#*=}"
+    if [[ "$name" == "$key" ]]; then
+      [[ -z "$found" ]] || fail "duplicate manifest field: $key"
+      found="$value"
+    fi
+  done < "$manifest"
+  [[ -n "$found" ]] || fail "manifest omitted field: $key"
+  printf '%s\n' "$found"
+}
+
+tree_sha256() {
+  local root="$1" path relative material=''
+  while IFS= read -r -d '' path; do
+    relative="${path#"$root"/}"
+    if [[ -d "$path" && ! -L "$path" ]]; then
+      material+="D $(stat -c %a "$path") $relative"$'\n'
+    elif [[ -f "$path" && ! -L "$path" ]]; then
+      material+="F $(stat -c %a "$path") $(sha256_file "$path") $relative"$'\n'
+    else
+      fail "ExecCell release contains an unsupported node: $relative"
+    fi
+  done < <(find "$root" -mindepth 1 -print0 | sort -z)
+  printf '%s' "$material" | sha256sum | cut -d ' ' -f 1
+}
+
 usage() {
   cat >&2 <<'EOF'
 usage: install_loom_hostd.sh [--install-root DIR] [--prefix ABS]
        [--state-dir ABS] [--unit-dir ABS] [--unit-name NAME.service] [--user USER]
        [--runtime PATH] [--authority PATH] [--resident PATH]
-       [--policy-root DIR] [--activate]
+       [--policy-root DIR]
+       [--exec-cell-capsule PATH --exec-cell-capsule-sha256 HEX]
+       [--activate]
 
 Installation is disabled by default. --activate is accepted only for the real
 host root and performs systemctl daemon-reload followed by enable --now.
@@ -70,6 +108,8 @@ while (($#)); do
     --authority) [[ $# -ge 2 ]] || usage; AUTHORITY="$2"; shift 2 ;;
     --resident) [[ $# -ge 2 ]] || usage; RESIDENT="$2"; shift 2 ;;
     --policy-root) [[ $# -ge 2 ]] || usage; POLICY_ROOT="$2"; shift 2 ;;
+    --exec-cell-capsule) [[ $# -ge 2 ]] || usage; EXEC_CELL_CAPSULE="$2"; shift 2 ;;
+    --exec-cell-capsule-sha256) [[ $# -ge 2 ]] || usage; EXEC_CELL_CAPSULE_SHA256="$2"; shift 2 ;;
     --activate) ACTIVATE=1; shift ;;
     *) usage ;;
   esac
@@ -91,6 +131,15 @@ SOCKET_ROOT="/tmp/sounio-loom-$SERVICE_UID"
 INSTALL_ROOT="$(cd "$INSTALL_ROOT" && pwd -P)"
 if [[ $ACTIVATE -eq 1 && "$INSTALL_ROOT" != / ]]; then
   fail '--activate is forbidden for a staged install root'
+fi
+if [[ -n "$EXEC_CELL_CAPSULE" || -n "$EXEC_CELL_CAPSULE_SHA256" ]]; then
+  [[ "$EXEC_CELL_CAPSULE" == /* && -f "$EXEC_CELL_CAPSULE" &&
+     ! -L "$EXEC_CELL_CAPSULE" ]] ||
+    fail 'ExecCell capsule is absent, linked, or non-absolute'
+  [[ "$EXEC_CELL_CAPSULE_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+    fail 'ExecCell capsule SHA-256 is absent or malformed'
+elif [[ $ACTIVATE -eq 1 ]]; then
+  fail '--activate requires a frozen ExecCell capsule and expected SHA-256'
 fi
 
 if [[ -z "$RUNTIME" ]]; then
@@ -147,6 +196,133 @@ for relative in "${POLICY_FILES[@]}"; do
 done
 policy_tree_sha256="$(printf '%s' "$policy_material" | sha256sum | cut -d ' ' -f 1)"
 
+exec_cell_bundle_present=false
+exec_cell_release_id=absent
+exec_cell_release_manifest_sha256=absent
+exec_cell_release_tree_sha256=absent
+exec_cell_release=''
+capsule_work=''
+cleanup_capsule_work() {
+  if [[ -n "$capsule_work" && -d "$capsule_work" ]]; then
+    find "$capsule_work" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+    rm -rf "$capsule_work"
+  fi
+}
+trap cleanup_capsule_work EXIT
+
+if [[ -n "$EXEC_CELL_CAPSULE" ]]; then
+  promoter="$POLICY_ROOT/scripts/dev/promote_loom_host_exec_quorum_capsule.sh"
+  [[ -f "$promoter" && -x "$promoter" && ! -L "$promoter" ]] ||
+    fail 'ExecCell capsule verifier is absent, linked, or non-executable'
+  capsule_work="$(mktemp -d "${TMPDIR:-/tmp}/loom-hostd-exec-cell.XXXXXX")"
+  capsule_copy="$capsule_work/capsule.tar"
+  install -m 0400 "$EXEC_CELL_CAPSULE" "$capsule_copy"
+  [[ "$(sha256_file "$capsule_copy")" == "$EXEC_CELL_CAPSULE_SHA256" ]] ||
+    fail 'ExecCell capsule archive hash drifted'
+  capsule_verify="$(bash "$promoter" --archive "$capsule_copy" \
+    --expected-sha256 "$EXEC_CELL_CAPSULE_SHA256" --mode verify)" ||
+    fail 'ExecCell capsule verifier refused the archive'
+  [[ "$capsule_verify" == 'LOOM_HOST_EXEC_QUORUM_CAPSULE_VERIFY PASS '* ]] ||
+    fail 'ExecCell capsule verifier returned a non-canonical receipt'
+  install -d -m 0700 "$capsule_work/extracted"
+  tar --no-same-owner --same-permissions -xf "$capsule_copy" \
+    -C "$capsule_work/extracted"
+  [[ "$(sha256_file "$capsule_copy")" == "$EXEC_CELL_CAPSULE_SHA256" ]] ||
+    fail 'ExecCell capsule archive changed during verification'
+
+  exec_cell_release="$capsule_work/extracted/capsule-v1/release"
+  exec_cell_manifest="$exec_cell_release/release.manifest.v1"
+  [[ -d "$exec_cell_release" && ! -L "$exec_cell_release" &&
+     -f "$exec_cell_manifest" && ! -L "$exec_cell_manifest" ]] ||
+    fail 'ExecCell capsule release topology is incomplete'
+  exec_cell_release_manifest_sha256="$(sha256_file "$exec_cell_manifest")"
+  [[ "$(manifest_value "$exec_cell_manifest" schema)" == \
+       loom-host-exec-quorum-experiment-release-v1 &&
+     "$(manifest_value "$exec_cell_manifest" stage)" == PARITY_OPEN_CANDIDATE &&
+     "$(manifest_value "$exec_cell_manifest" semantic_authority)" == Sounio &&
+     "$(manifest_value "$exec_cell_manifest" semantic_action)" == 9030 &&
+     "$(manifest_value "$exec_cell_manifest" product_exec_ingress_action)" == 9031 &&
+     "$(manifest_value "$exec_cell_manifest" controller_language)" == OCaml &&
+     "$(manifest_value "$exec_cell_manifest" controller_role)" == EFFECT_PARITY &&
+     "$(manifest_value "$exec_cell_manifest" material_language)" == C++20+Linux+systemd &&
+     "$(manifest_value "$exec_cell_manifest" material_role)" == MATERIAL_PARITY &&
+     "$(manifest_value "$exec_cell_manifest" material_transitory)" == true ]] ||
+    fail 'ExecCell capsule language authority or stage drifted'
+  for closed in material_grant material_execution launch_open recycle_open \
+    exec_attached commit_attached ci_attached parity_open claim_ready; do
+    [[ "$(manifest_value "$exec_cell_manifest" "$closed")" == false ]] ||
+      fail "ExecCell capsule preclaimed $closed"
+  done
+
+  verify_exec_cell_binding() {
+    local path_key="$1" hash_key="$2" mode="$3" relative path
+    relative="$(manifest_value "$exec_cell_manifest" "$path_key")"
+    [[ "$relative" =~ ^[A-Za-z0-9._/-]+$ && "$relative" != /* &&
+       "/$relative/" != *'/../'* ]] ||
+      fail "ExecCell binding path is unsafe: $path_key"
+    path="$exec_cell_release/$relative"
+    [[ -f "$path" && ! -L "$path" ]] ||
+      fail "ExecCell binding is absent or linked: $relative"
+    [[ "$(sha256_file "$path")" == \
+       "$(manifest_value "$exec_cell_manifest" "$hash_key")" ]] ||
+      fail "ExecCell binding hash drifted: $relative"
+    [[ "$(stat -c %a "$path")" == "$mode" ]] ||
+      fail "ExecCell binding mode drifted: $relative"
+    printf '%s\n' "$path"
+  }
+
+  exec_cell_broker="$(verify_exec_cell_binding broker_path broker_sha256 555)"
+  exec_cell_controller_manifest="$(verify_exec_cell_binding \
+    controller_manifest_path controller_manifest_sha256 444)"
+  exec_cell_controller_runtime="$(verify_exec_cell_binding \
+    controller_runtime_path controller_runtime_sha256 555)"
+  exec_cell_witness_cell="$(verify_exec_cell_binding \
+    process_witness_cell_path process_witness_cell_sha256 555)"
+  exec_cell_witness_payload="$(verify_exec_cell_binding \
+    process_witness_payload_path process_witness_payload_sha256 555)"
+  exec_cell_witness_manifest="$(verify_exec_cell_binding \
+    process_witness_manifest_path process_witness_manifest_sha256 444)"
+  exec_cell_fixture_manifest="$(verify_exec_cell_binding \
+    product_exec_cell_fixture_manifest_path \
+    product_exec_cell_fixture_manifest_sha256 444)"
+  exec_cell_fixture_bundle="$(verify_exec_cell_binding \
+    product_exec_cell_fixture_bundle_path \
+    product_exec_cell_fixture_bundle_sha256 444)"
+  exec_cell_product_runtime="$(verify_exec_cell_binding \
+    product_exec_ingress_runtime_path product_exec_ingress_runtime_sha256 555)"
+  exec_cell_language_runtime="$(verify_exec_cell_binding \
+    product_language_runtime_path product_language_runtime_sha256 555)"
+  exec_cell_resident_runtime="$(verify_exec_cell_binding \
+    product_resident_runtime_path product_resident_runtime_sha256 555)"
+  : "$exec_cell_broker" "$exec_cell_controller_runtime" \
+    "$exec_cell_witness_cell" "$exec_cell_product_runtime" \
+    "$exec_cell_language_runtime" "$exec_cell_resident_runtime"
+  [[ "$(manifest_value "$exec_cell_controller_manifest" semantic_authority)" == Sounio &&
+     "$(manifest_value "$exec_cell_controller_manifest" action)" == 9030 &&
+     "$(manifest_value "$exec_cell_controller_manifest" producing_language)" == OCaml &&
+     "$(manifest_value "$exec_cell_controller_manifest" language_role)" == EFFECT_PARITY &&
+     "$(manifest_value "$exec_cell_controller_manifest" python_executable_invoked)" == false &&
+     "$(manifest_value "$exec_cell_controller_manifest" rust_executable_invoked)" == false &&
+     "$(manifest_value "$exec_cell_fixture_manifest" stage)" == SEMANTICS_FROZEN &&
+     "$(manifest_value "$exec_cell_fixture_manifest" semantic_authority)" == Sounio &&
+     "$(manifest_value "$exec_cell_fixture_manifest" producing_language)" == Sounio &&
+     "$(manifest_value "$exec_cell_fixture_manifest" action)" == 9030 &&
+     "$(manifest_value "$exec_cell_fixture_manifest" python_executable_invoked)" == false &&
+     "$(manifest_value "$exec_cell_fixture_manifest" rust_executable_invoked)" == false &&
+     "$(manifest_value "$exec_cell_fixture_manifest" bundle_sha256)" == \
+       "$(sha256_file "$exec_cell_fixture_bundle")" &&
+     "$(manifest_value "$exec_cell_fixture_manifest" payload_sha256)" == \
+       "$(sha256_file "$exec_cell_witness_payload")" &&
+     "$(manifest_value "$exec_cell_fixture_manifest" payload_manifest_sha256)" == \
+       "$(sha256_file "$exec_cell_witness_manifest")" ]] ||
+    fail 'ExecCell Sounio/OCaml/ProcessWitness provenance drifted'
+  exec_cell_release_id="$(manifest_value "$exec_cell_manifest" release_id)"
+  [[ "$exec_cell_release_id" =~ ^9030-hostq-[0-9a-f]{32}$ ]] ||
+    fail 'ExecCell release identity is non-canonical'
+  exec_cell_release_tree_sha256="$(tree_sha256 "$exec_cell_release")"
+  exec_cell_bundle_present=true
+fi
+
 dest_prefix="$INSTALL_ROOT$PREFIX"
 dest_state="$INSTALL_ROOT$STATE_DIR"
 dest_unit_dir="$INSTALL_ROOT$UNIT_DIR"
@@ -169,6 +345,28 @@ for relative in "${POLICY_FILES[@]}"; do
   install -d -m 0755 "$(dirname "$destination")"
   install -m 0444 "$POLICY_ROOT/$relative" "$destination"
 done
+if [[ "$exec_cell_bundle_present" == true ]]; then
+  dest_exec_cell_parent="$dest_prefix/exec-cell/releases"
+  dest_exec_cell_release="$dest_exec_cell_parent/$exec_cell_release_id"
+  install -d -m 0755 "$dest_exec_cell_parent"
+  if [[ -e "$dest_exec_cell_release" || -L "$dest_exec_cell_release" ]]; then
+    [[ -d "$dest_exec_cell_release" && ! -L "$dest_exec_cell_release" &&
+       "$(tree_sha256 "$dest_exec_cell_release")" == \
+         "$exec_cell_release_tree_sha256" ]] ||
+      fail 'installed ExecCell release drifted'
+  else
+    dest_exec_cell_stage="$(mktemp -d \
+      "$dest_exec_cell_parent/.${exec_cell_release_id}.XXXXXX")"
+    cp -a "$exec_cell_release/." "$dest_exec_cell_stage/"
+    if [[ "$INSTALL_ROOT" == / ]]; then
+      chown -R root:root "$dest_exec_cell_stage"
+    fi
+    [[ "$(tree_sha256 "$dest_exec_cell_stage")" == \
+       "$exec_cell_release_tree_sha256" ]] ||
+      fail 'installed ExecCell release copy drifted'
+    mv -T "$dest_exec_cell_stage" "$dest_exec_cell_release"
+  fi
+fi
 policy_manifest="$dest_prefix/share/product-activation-policy.v1"
 policy_manifest_stage="$(mktemp "$dest_prefix/share/.product-activation-policy.v1.XXXXXX")"
 {
@@ -184,6 +382,31 @@ policy_manifest_stage="$(mktemp "$dest_prefix/share/.product-activation-policy.v
 } > "$policy_manifest_stage"
 chmod 0444 "$policy_manifest_stage"
 mv -f "$policy_manifest_stage" "$policy_manifest"
+
+exec_cell_manifest_install="$dest_prefix/share/exec-cell-bundle.v1"
+exec_cell_manifest_stage="$(mktemp "$dest_prefix/share/.exec-cell-bundle.v1.XXXXXX")"
+cat > "$exec_cell_manifest_stage" <<EOF
+schema=loom-hostd-exec-cell-bundle-v1
+semantic_authority=Sounio
+semantic_actions=9030,9031
+bundle_present=$exec_cell_bundle_present
+capsule_sha256=${EXEC_CELL_CAPSULE_SHA256:-absent}
+release_id=$exec_cell_release_id
+release_manifest_sha256=$exec_cell_release_manifest_sha256
+release_tree_sha256=$exec_cell_release_tree_sha256
+controller_language=OCaml
+controller_role=EFFECT_PARITY
+material_language=C++20+Linux+systemd
+material_role=MATERIAL_PARITY
+material_transitory=true
+python_executable_invoked=false
+rust_executable_invoked=false
+exec_cell_canary_frozen=$exec_cell_bundle_present
+exec_attached=false
+production_activation=false
+EOF
+chmod 0444 "$exec_cell_manifest_stage"
+mv -f "$exec_cell_manifest_stage" "$exec_cell_manifest_install"
 
 unit="$dest_unit_dir/$UNIT_NAME"
 unit_stage="$(mktemp "$dest_unit_dir/.${UNIT_NAME}.XXXXXX")"
@@ -229,6 +452,13 @@ ocaml_runtime_sha256=$runtime_sha256
 resident_runtime_sha256=$resident_sha256
 product_activation_policy_sha256=$policy_tree_sha256
 product_activation_policy_files=${#POLICY_FILES[@]}
+exec_cell_bundle_present=$exec_cell_bundle_present
+exec_cell_capsule_sha256=${EXEC_CELL_CAPSULE_SHA256:-absent}
+exec_cell_release_id=$exec_cell_release_id
+exec_cell_release_manifest_sha256=$exec_cell_release_manifest_sha256
+exec_cell_release_tree_sha256=$exec_cell_release_tree_sha256
+exec_cell_canary_frozen=$exec_cell_bundle_present
+exec_attached=false
 prefix=$PREFIX
 state_dir=$STATE_DIR
 unit_path=$UNIT_DIR/$UNIT_NAME
@@ -261,8 +491,10 @@ if [[ $ACTIVATE -eq 1 ]]; then
   mv -f "$manifest_stage" "$manifest"
 fi
 
-printf 'LOOM_HOSTD_INSTALLED prefix=%s state_dir=%s socket_root=%s unit=%s language=OCaml role=EFFECT_PARITY semantic_authority=Sounio action=9041 semantics_sha256=%s authority_runtime_sha256=%s ocaml_runtime_sha256=%s resident_runtime_sha256=%s product_activation_policy_sha256=%s activated=%s automatic_lineage_resurrection=false python_executed=false rust_executed=false\n' \
+printf 'LOOM_HOSTD_INSTALLED prefix=%s state_dir=%s socket_root=%s unit=%s language=OCaml role=EFFECT_PARITY semantic_authority=Sounio actions=9030,9031,9041 semantics_sha256=%s authority_runtime_sha256=%s ocaml_runtime_sha256=%s resident_runtime_sha256=%s product_activation_policy_sha256=%s exec_cell_bundle_present=%s exec_cell_release_id=%s exec_cell_release_manifest_sha256=%s exec_cell_release_tree_sha256=%s exec_cell_canary_frozen=%s exec_attached=false activated=%s automatic_lineage_resurrection=false python_executed=false rust_executed=false\n' \
   "$PREFIX" "$STATE_DIR" "$SOCKET_ROOT" "$UNIT_DIR/$UNIT_NAME" \
   '0d5174cd87b8c18b5f3bbfa7ed44d0258795a96f146730c879c46167abdddf7d' \
   "$authority_sha256" "$runtime_sha256" "$resident_sha256" \
-  "$policy_tree_sha256" "$activated"
+  "$policy_tree_sha256" "$exec_cell_bundle_present" "$exec_cell_release_id" \
+  "$exec_cell_release_manifest_sha256" "$exec_cell_release_tree_sha256" \
+  "$exec_cell_bundle_present" "$activated"
