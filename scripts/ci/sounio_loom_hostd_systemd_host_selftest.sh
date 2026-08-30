@@ -279,8 +279,13 @@ if [[ "$PHASE" == prepare ]]; then
     > "$ROOT/install.out" 2> "$ROOT/install.err"
   install_status=$?
   set -e
-  [[ $install_status -eq 0 ]] ||
-    fail "activated installer refused status=$install_status stdout=$(tr '\n' ',' < "$ROOT/install.out") stderr=$(tr '\n' ',' < "$ROOT/install.err")"
+  if [[ $install_status -ne 0 ]]; then
+    unit_diagnostic="$(systemctl status "$HOSTD_UNIT" --no-pager \
+      2>&1 | tail -n 30 | tr '\n' ',')"
+    journal_diagnostic="$(journalctl --unit "$HOSTD_UNIT" --no-pager \
+      --output=cat -n 80 2>&1 | tr '\n' ',')"
+    fail "activated installer refused status=$install_status stdout=$(tr '\n' ',' < "$ROOT/install.out") stderr=$(tr '\n' ',' < "$ROOT/install.err") unit=$unit_diagnostic journal=$journal_diagnostic"
+  fi
   mkdir -m 0700 "$WORK_DIR"
   [[ "$(systemctl is-enabled "$HOSTD_UNIT")" == enabled ]] ||
     fail 'installer did not enable the canary unit'
