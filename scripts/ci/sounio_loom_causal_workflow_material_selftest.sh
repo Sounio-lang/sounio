@@ -75,12 +75,26 @@ chmod 0555 "$WORK/artifact.elf"
 SOURCE_SHA256="$(sha256_file "$SOURCE")"
 COMPILER_SHA256="$(sha256_file "$COMPILER")"
 SEMANTICS_SHA256="$(sha256_file "$SEMANTICS")"
+ARTIFACT_BYTES="$(stat -c '%s' "$WORK/artifact.elf")"
+EMPTY_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 cat > "$WORK/compile.record" <<EOF
-loom-exec-result-record-v1
+LOOM_EXEC_RESULT_RECORD/1
 operation=sounio-check
+event_sha256=$SOURCE_SHA256
+command_template_sha256=$SEMANTICS_SHA256
+generation_sha256=$COMPILER_SHA256
 source_sha256=$SOURCE_SHA256
 compiler_sha256=$COMPILER_SHA256
+argv_sha256=$SOURCE_SHA256
 artifact_sha256=$EXPECTED_ARTIFACT
+artifact_bytes=$ARTIFACT_BYTES
+stdout_sha256=$EMPTY_SHA256
+stderr_sha256=$EMPTY_SHA256
+diagnostics_sha256=$EMPTY_SHA256
+sandbox_profile_sha256=$SEMANTICS_SHA256
+principal_sha256=$SOURCE_SHA256
+descriptor_binding_sha256=$COMPILER_SHA256
+grant_receipt_sha256=$EXPECTED_ARTIFACT
 exit_code=0
 EOF
 chmod 0400 "$WORK/compile.record"

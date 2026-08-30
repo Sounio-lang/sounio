@@ -839,8 +839,12 @@ int attest_cell(const Principal& identity,
   const auto hardware = key_value_fields(hardware_text);
   require_exact_fields(
       compile,
-      {"schema", "operation", "source_sha256", "compiler_sha256",
-       "artifact_sha256", "exit_code"},
+      {"schema", "operation", "event_sha256", "command_template_sha256",
+       "generation_sha256", "source_sha256", "compiler_sha256",
+       "argv_sha256", "artifact_sha256", "artifact_bytes",
+       "stdout_sha256", "stderr_sha256", "diagnostics_sha256",
+       "sandbox_profile_sha256", "principal_sha256",
+       "descriptor_binding_sha256", "grant_receipt_sha256", "exit_code"},
       "ATTEST compile record");
   require_exact_fields(
       result,
@@ -856,12 +860,25 @@ int attest_cell(const Principal& identity,
       "ATTEST result record");
   require_exact_fields(hardware, {"schema", "hostname", "kernel", "boot_id"},
                        "ATTEST hardware record");
-  if (require(compile, "schema") != "loom-exec-result-record-v1" ||
+  if (require(compile, "schema") != "LOOM_EXEC_RESULT_RECORD/1" ||
       require(compile, "operation") != "sounio-check" ||
       require(compile, "exit_code") != "0" ||
+      !digest(require(compile, "event_sha256")) ||
+      !digest(require(compile, "command_template_sha256")) ||
+      !digest(require(compile, "generation_sha256")) ||
       !digest(require(compile, "source_sha256")) ||
       !digest(require(compile, "compiler_sha256")) ||
-      !digest(require(compile, "artifact_sha256"))) {
+      !digest(require(compile, "argv_sha256")) ||
+      !digest(require(compile, "artifact_sha256")) ||
+      !decimal(require(compile, "artifact_bytes")) ||
+      require(compile, "artifact_bytes") == "0" ||
+      !digest(require(compile, "stdout_sha256")) ||
+      !digest(require(compile, "stderr_sha256")) ||
+      !digest(require(compile, "diagnostics_sha256")) ||
+      !digest(require(compile, "sandbox_profile_sha256")) ||
+      !digest(require(compile, "principal_sha256")) ||
+      !digest(require(compile, "descriptor_binding_sha256")) ||
+      !digest(require(compile, "grant_receipt_sha256"))) {
     throw Error("ATTEST compile record posture invalid");
   }
   if (require(compile, "artifact_sha256") !=
