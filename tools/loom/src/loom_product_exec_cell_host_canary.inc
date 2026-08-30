@@ -1711,6 +1711,7 @@ int selftest_product_exec_cell_host(
       "provider operation ExecCell composition failed", operation_provider_lane);
 
   bool operation_sabotage_callback = false;
+  bool operation_sabotage_projected = false;
   bool operation_sabotage_cell_created = false;
   bool operation_sabotage_denied = false;
   const std::string operation_sabotage_generation = random_generation_sha256();
@@ -1727,6 +1728,12 @@ int selftest_product_exec_cell_host(
       ProductIngressExchangeExpectation::Request,
       [&](const ProductIngressHostRun& lane) {
         operation_sabotage_callback = true;
+        operation_sabotage_projected =
+            lane.event_sha256 == operation_fixtures.event_sha256 &&
+            lane.command_sha256 == sha256(operation_sabotage_command);
+        if (!operation_sabotage_projected) {
+          throw Error("operation command sabotage projection binding invalid");
+        }
         if (lane.command_sha256 == operation_fixtures.command_sha256) {
           throw Error("operation command sabotage did not change the digest");
         }
@@ -1746,11 +1753,10 @@ int selftest_product_exec_cell_host(
   const ProductIngressHostRun operation_sabotage_lane =
       operation_sabotage_case.execute();
   require_product_case(
-          operation_sabotage_callback && operation_sabotage_denied &&
+      operation_sabotage_callback && operation_sabotage_denied &&
+          operation_sabotage_projected &&
           !operation_sabotage_cell_created &&
           operation_sabotage_lane.hook_code == 2 &&
-          product_contains(operation_sabotage_lane.ingress_log,
-                           "exec_intent_action=9035\t") &&
           product_contains(operation_sabotage_lane.output,
                            "product-exec-ingress-response-eof") &&
           !product_contains(operation_sabotage_lane.output,
