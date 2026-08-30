@@ -53,10 +53,20 @@ cd "$ROOT_DIR"
 SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/bin/souc}"
 RUN_TIMEOUT="${ONTOLOGY_MULTI_RUN_TIMEOUT:-900}"
 
+# chebi_pato_elplus_driver.sio is deliberately ABSENT from this list and from
+# the tree. Its inputs cannot be reconstructed: ChEBI's versionIRI names
+# release 254, obo/chebi/254/chebi.owl returns 404, and the undated purl now
+# serves a different release (measured 2026-08-24, recorded in
+# artifacts/ontology-frontiers/multi-ontology/fetch_downloads.sh). The
+# committed chebi_* artifacts came from an older, unrecorded release.
+#
+# It was carried here briefly and the gate SKIPped it and exited 1 -- correctly:
+# a driver in the list that cannot run is a check that reports on nothing. The
+# results it produced remain in CHEBI_PATO_RESULTS.md, labelled there as
+# unreproducible, which is the honest place for them.
 DRIVERS=(
     "artifacts/ontology-frontiers/multi-ontology/go_roots_elplus_driver.sio"
     "artifacts/ontology-frontiers/multi-ontology/obo_elplus_driver.sio"
-    "artifacts/ontology-frontiers/multi-ontology/chebi_pato_elplus_driver.sio"
     "artifacts/ontology-frontiers/multi-ontology/open_fillers_elplus_driver.sio"
     "artifacts/ontology-frontiers/multi-ontology/uberon_open_elplus_driver.sio"
 )
