@@ -1,0 +1,72 @@
+//@ run-pass
+//@ expect-stdout: MATH_ATAN_REDUCTION_OK
+// NOTE, and deliberately not an annotation: Madaros refuses the bare `atan`
+// with E221 -- its backend has no builtin id
+// for tan/atan/tanh/asin/acos, so the call would compile and then die on an
+// illegal instruction. That refusal is correct, and it makes this file a
+// lean_single test -- which is what it always was: the bug it guards lived in
+// lean_single's __native_atan_f64, and CI's suite compiles with souc-stage2,
+// which IS lean_single. No engine annotation is written here, and mentioning the
+// literal marker in prose is itself a trap: run_sio_test_suite_v2.sh matches the
+// requires marker ANYWHERE on a line, comment or not, so a sentence naming it
+// becomes one. This file failed CI that way once. The accepted values are
+// gpu, llvm and madaros; anything else fails hard, which is the defect #2155
+// fixed.
+
+// atan's argument reduction used `base > 0.0` as the proxy for "the reciprocal
+// branch fired". It is not one: the SECOND reduction, t = (t-1)/(t+1), also
+// raises base — to pi/4. So a value that took the second reduction WITHOUT the
+// first got the minus branch, and atan(0.5) returned 1.107149, which is atan(2).
+//
+// The endpoints hid it for as long as it lived. atan(1) is pi/4 either way;
+// atan(2) fires BOTH reductions, and the two sign errors cancel. asin and acos
+// are built on atan, so asin(0.5) returned acos(0.5) and acos(0.5) returned
+// asin(0.5) — a swap at one point that is not a swap anywhere else.
+//
+// The two identities carry different signs and the branch decides which:
+//   |x| > 1 : atan(x) = pi/2 - atan(1/x)          -> base - a
+//   reduce  : atan(t) = pi/4 + atan((t-1)/(t+1))  -> base + a
+//
+// Points chosen to hit each combination of the two reductions:
+//   0.2  neither      1.0  second only, a = 0
+//   0.5  second only  2.0  both            5.0  first only
+// and one negative, because the sign is applied after both.
+
+// 1e-6, not 1e-9, and the number is a property of the implementation rather
+// than slack. The series runs to t^13 and the reduction leaves |t| <= 0.4142,
+// so the first dropped term is about 0.4142^15 / 15 ~= 1.2e-7. A 1e-9 bound
+// would fail on correct output, which is worse than useless in a regression
+// test: it would be red for a reason unrelated to the defect it guards.
+fn near(a: f64, b: f64) -> bool {
+    let d = a - b
+    if d < 0.0 { return 0.0 - d < 1.0e-6 }
+    return d < 1.0e-6
+}
+
+fn main() with IO, Mut, Div {
+    let ok = near(atan(0.2), 0.19739555984988078)
+        && near(atan(0.5), 0.4636476090008061)
+        && near(atan(1.0), 0.7853981633974483)
+        && near(atan(2.0), 1.1071487177940904)
+        && near(atan(5.0), 1.3734007669450159)
+        && near(atan(0.0 - 0.5), 0.0 - 0.4636476090008061)
+        && near(asin(0.5), 0.5235987755982989)
+        && near(asin(0.8), 0.9272952180016122)
+        && near(acos(0.5), 1.0471975511965979)
+        && near(acos(0.8), 0.6435011087932844)
+    if ok {
+        print("MATH_ATAN_REDUCTION_OK\n")
+    } else {
+        print("MATH_ATAN_REDUCTION_FAIL\n")
+        print("atan(0.2)="); print_f64(atan(0.2)); print(" want 0.197396\n")
+        print("atan(0.5)="); print_f64(atan(0.5)); print(" want 0.463648\n")
+        print("atan(1.0)="); print_f64(atan(1.0)); print(" want 0.785398\n")
+        print("atan(2.0)="); print_f64(atan(2.0)); print(" want 1.107149\n")
+        print("atan(5.0)="); print_f64(atan(5.0)); print(" want 1.373401\n")
+        print("atan(-0.5)="); print_f64(atan(0.0 - 0.5)); print(" want -0.463648\n")
+        print("asin(0.5)="); print_f64(asin(0.5)); print(" want 0.523599\n")
+        print("asin(0.8)="); print_f64(asin(0.8)); print(" want 0.927295\n")
+        print("acos(0.5)="); print_f64(acos(0.5)); print(" want 1.047198\n")
+        print("acos(0.8)="); print_f64(acos(0.8)); print(" want 0.643501\n")
+    }
+}

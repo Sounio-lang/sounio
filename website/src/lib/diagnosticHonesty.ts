@@ -14,23 +14,28 @@
 export const PRE_FIX_PRINT_CAP = 127;
 
 /**
- * E219 primary message — `self-hosted/check/check.sio` `code == 219` table.
+ * E250 primary message — `self-hosted/check/check.sio` `code == 250` table.
  * Length 70; would have printed in full even before the fix.
  */
-export const E219_MESSAGE =
+export const E250_MESSAGE =
   'call to an `extern "C"` function the native backend does not implement';
 
 /**
- * E219 help literal, including the rustc-style prefix and trailing newline,
- * exactly as printed by `print_error_help(219)`. Census length: 333.
+ * E250 help literal, including the rustc-style prefix and trailing newline,
+ * exactly as printed by `print_error_help(250)`. The current allowlist is
+ * longer than the historical E219 literal measured by #1794.
  */
-export const E219_HELP =
+export const E250_HELP =
+  '   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6, malloc, free, getpid, getppid, exit, abort, system, read_i64, write_i64, read_f64, write_f64\n';
+
+/** Exact E219 help literal measured by the historical #1794 truncation census. */
+export const HISTORICAL_E219_HELP =
   '   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6\n';
 
 /**
- * E219 note literal from `print_error_note(219)`. Length 124 — under the cap.
+ * E250 note literal from `print_error_note(250)`. Length 124 — under the cap.
  */
-export const E219_NOTE =
+export const E250_NOTE =
   '   = note: there is no dynamic linker in this backend; an unimplemented extern compiles to an empty stub whose calls read 0\n';
 
 export type TruncationSplit = {

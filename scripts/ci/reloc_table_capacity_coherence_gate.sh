@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/gate_artifact.sh"
 # RelocationTable capacity coherence.
 #
 # self-hosted/native/reloc.sio declares `entries: [Relocation; N]` and guards
@@ -24,7 +25,7 @@ mkdir -p "$(dirname "$ART")"
 
 fail() {
   printf 'RELOC_CAPACITY_FAIL reason=%s\n' "$1" >&2
-  printf '{"status":"fail","reason":"%s","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' "$1" > "$ART"
+  printf '{"status":"fail","reason":"%s","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' "$1" | gate_write_artifact "$ART"
   exit 1
 }
 [[ -f "$SOURCE" ]] || fail source_missing
@@ -36,10 +37,10 @@ check() { python3 "$ROOT/scripts/ci/lib/reloc_capacity_coherence.py" "$1"; }
 # and the defect this gate exists for is precisely a guard that disagrees with
 # its declaration -- so the control reintroduces exactly that.
 SAB=$(mktemp); trap 'rm -f "$SAB"' EXIT
-sed 's/if t\.count < reloc_table_capacity() {/if t.count < 256 {/' "$SOURCE" > "$SAB"
+sed 's/if t\.count < reloc_table_capacity() {/if t.count < 256 {/' "$SOURCE" | gate_write_artifact "$SAB"
 if check "$SAB" >/dev/null 2>&1; then
   echo "CONTROL_FAIL: the sabotaged source passed. This gate inspects nothing." >&2
-  printf '{"status":"fail","reason":"positive control did not fire","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' > "$ART"
+  printf '{"status":"fail","reason":"positive control did not fire","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' | gate_write_artifact "$ART"
   exit 1
 fi
 echo "control: a literal 256 guard is rejected, as required"
@@ -52,16 +53,16 @@ if ! grep -q 'nc\.relocs\.overflow' "$CONSUMER"; then
   echo "RELOC_CAPACITY_FAIL reason=nothing_refuses_on_overflow" >&2
   echo "  reloc.sio records a dropped relocation but $CONSUMER never checks it," >&2
   echo "  so the binary ships with an unpatched site instead of being refused." >&2
-  printf '{"status":"fail","reason":"nothing refuses on overflow","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' > "$ART"
+  printf '{"status":"fail","reason":"nothing refuses on overflow","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' | gate_write_artifact "$ART"
   exit 1
 fi
 echo "control: the emitter refuses on a dropped relocation"
 
 if out=$(check "$SOURCE" 2>&1); then
   echo "$out"
-  printf '{"status":"pass","metrics":{"total":1,"passed":1,"failed":0,"not_run":0}}\n' > "$ART"
+  printf '{"status":"pass","metrics":{"total":1,"passed":1,"failed":0,"not_run":0}}\n' | gate_write_artifact "$ART"
   exit 0
 fi
 echo "$out" >&2
-printf '{"status":"fail","metrics":{"total":1,"passed":0,"failed":1,"not_run":0}}\n' > "$ART"
+printf '{"status":"fail","metrics":{"total":1,"passed":0,"failed":1,"not_run":0}}\n' | gate_write_artifact "$ART"
 exit 1

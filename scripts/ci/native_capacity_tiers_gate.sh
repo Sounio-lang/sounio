@@ -46,7 +46,7 @@ EXPECT_RELOC=131072        # NC_FLAT_RELOC_* x4    131,072 entries
 EXPECT_ELF=16777216        # NC_BIG_ELF            16 MiB
 EXPECT_LEGACY_ELF=16777216 # NATIVE_ELF_BUF        16 MiB
 ELF_BASE_ADDR=4194304      # 0x400000 — load address, NOT a capacity
-EXPECT_LABEL=4096          # NC_V2_LABEL_* x3      4,096 labels/patches per fn
+EXPECT_LABEL=16384         # NC_V2_LABEL_* x3     16,384 labels/patches per fn
                            # (must stay >= IR_MAX_INSTRS — see clause 8)
 
 if ! command -v python3 >/dev/null 2>&1; then

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/gate_artifact.sh"
 # Cross-engine parity for epsilon-bounded compile-fail tests.
 #
 # GATE_CONTRACT: v0
@@ -94,7 +95,7 @@ else
 fi
 
 printf '%s\n' "${names[@]}" > "$(dirname "$OUT")/epsilon_engine_parity.measured.list"
-cat > "$OUT" <<JSON
+cat <<JSON | gate_write_artifact "$OUT"
 {
   "gate": "epsilon_engine_parity",
   "status": "${status}",

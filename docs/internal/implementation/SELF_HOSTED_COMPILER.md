@@ -46,8 +46,12 @@ The fastest way to orient yourself is:
 - `self-hosted/compiler/module_loader.sio`
 - `self-hosted/compiler/lexer.sio`
 - `self-hosted/compiler/parser.sio`
-- `self-hosted/compiler/typecheck.sio`
-- `self-hosted/compiler/gen.sio`
+
+The monolithic `self-hosted/compiler/typecheck.sio` and `self-hosted/compiler/gen.sio`
+stages that this list used to name were superseded and moved to
+`archive/dead-code-2026/compiler/` in `2661416ce2`; checking now enters through
+`self-hosted/check/` and code generation through `self-hosted/ir/` and
+`self-hosted/native/`, as in the subsystem map above.
 
 Those files are useful entry points, but they are not the full implementation. In most cases they fan out into the subsystem directories listed above.
 
@@ -75,7 +79,9 @@ The source tree contains more capability than the checked public artifact expose
 For the current checked JIT artifact:
 
 - version: `1.0.0-beta.4`
-- enabled backend: Cranelift JIT
+- enabled backend: **none of the JIT kind**. `souc info` prints `[-] Cranelift JIT
+  - rebuild with --features jit`; measured 2026-08-27 no artifact compiles it.
+  This line read "enabled backend: Cranelift JIT"; it is not compiled.
 - disabled in the checked artifact: LLVM, GPU codegen, LSP, SMT, ontology, distributed, package-manager features
 
 For the separate checked GPU artifact:
@@ -87,7 +93,12 @@ For the separate checked GPU artifact:
 That means the right phrasing is:
 
 - "the repo contains GPU and LLVM backend work" when discussing source layout
-- "the checked JIT artifact exposes Cranelift JIT by default" when discussing the default path
+- **NOT** "the checked JIT artifact exposes Cranelift JIT by default" — not compiled. There is no
+  checked JIT artifact — `souc-linux-x86_64-jit` is tracked nowhere — and Cranelift
+  is compiled into nothing: `souc info` prints `[-] Cranelift JIT - rebuild with
+  --features jit`. Measured 2026-08-27. This line sat in a list of *recommended
+  phrasings*, so it did not merely record the error, it prescribed repeating it.
+  The right phrasing is "the shipped engine is native-v2 (Madaros)".
 - "the checked GPU artifact exposes GPU codegen and PTX emission" when discussing the GPU path
 
 ## 6. Validation surfaces

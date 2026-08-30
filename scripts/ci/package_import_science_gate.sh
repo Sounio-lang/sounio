@@ -162,7 +162,7 @@ if [[ $negative_rc -eq 0 && -x "$NEGATIVE_ELF" ]]; then
   echo '[package-import-science] FAIL: missing package import compiled successfully' >&2
   exit 1
 fi
-if ! grep -qF 'error:' "$NEGATIVE_LOG"; then
+if ! grep -qE 'error(\[E[0-9]+\])?:' "$NEGATIVE_LOG"; then
   cat "$NEGATIVE_LOG" >&2
   echo '[package-import-science] FAIL: missing package import did not produce an error diagnostic' >&2
   exit 1

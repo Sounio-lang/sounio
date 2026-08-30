@@ -23,7 +23,10 @@ The website should distinguish two checked compiler artifacts:
 
 What they prove today:
 
-- the checked JIT profile reports Cranelift JIT enabled
+- **Cranelift JIT NOT compiled** — `souc info` prints `[-] Cranelift JIT - rebuild
+  with --features jit`. Measured 2026-08-27: no artifact enables it, no build path
+  passes the feature, and the binary exports no Cranelift symbol. This bullet
+  previously read "Cranelift JIT enabled" — not compiled
 - the checked JIT profile reports LLVM and GPU codegen disabled
 - the checked GPU profile reports GPU codegen enabled and Cranelift JIT disabled
 - the checked GPU profile emits PTX through `build --backend gpu`

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # llm-offload — Fan-out a prompt to multiple LLM providers
-# Usage: ./scripts/llm-offload.sh <prompt-file> [providers...]
+# Usage: ./scripts/mcp/llm-offload.sh <prompt-file> [providers...]
 # If no providers specified, fans out to the default 5 (diverse consensus set).
 #
 # Available providers:
@@ -9,6 +9,10 @@
 #   xai|grok     — Grok 4.3 (primary adversarial math/review lane)
 #   xai-fast     — Grok 4.1 Fast Reasoning (lower-latency fallback)
 #   zai|glm      — Z.AI GLM-5.2 direct (independent math/review provider)
+#   local        — a LOCAL OpenAI-compatible endpoint (Ollama/vLLM/llama.cpp/LM Studio):
+#                  set LOCAL_LLM_URL (with the /v1 prefix) and LOCAL_LLM_MODEL
+#   local2       — a second local endpoint (LOCAL2_LLM_URL / LOCAL2_LLM_MODEL), so a
+#                  two-local fan-out can satisfy the two-provider review policy
 #   grok-code    — Grok Code Fast 1 (fast code tasks)
 #   groq         — Llama 3.3 70B on Groq (fast inference)
 #   gemini       — Gemini 2.5 Pro via OpenRouter (1M ctx, best long-context)
@@ -59,7 +63,10 @@ call_openai_compat() {
         esac
     fi
     echo "  -> Sending to $name ($model, max=$max_tok)..."
-    curl -s -m 180 "$url/chat/completions" \
+    # Local reasoning models are slow; give them room rather than losing the leg.
+    local _tmo="${OFFLOAD_TIMEOUT:-180}"
+    case "$name" in Local*) _tmo="${OFFLOAD_TIMEOUT:-600}" ;; esac
+    curl -s -m "$_tmo" "$url/chat/completions" \
         -H "Authorization: Bearer $key" \
         -H "Content-Type: application/json" \
         -d "$(jq -n --arg model "$model" --arg prompt "$PROMPT" --argjson maxtok "$max_tok" '{
@@ -67,7 +74,13 @@ call_openai_compat() {
             messages: [{role: "user", content: $prompt}],
             max_tokens: $maxtok,
             temperature: 0.7
-        }')" > "$outfile" 2>&1
+        }')" > "$outfile" 2>&1 || true
+    # `|| true` is load-bearing under `set -e`: curl exits non-zero on a TIMEOUT or a
+    # connection failure (unlike an HTTP error, where it exits 0 with a JSON body), and
+    # without it the whole background subshell dies right here — no "<- name: ERROR" line,
+    # no mention of the provider at all.  The fan-out then prints a clean Results section
+    # and exits 0 having silently lost a leg.  Measured 2026-08-24 with a local reasoning
+    # model that needed longer than the 180 s cap.
 
     # Prefer .content; fall back to .reasoning_content for reasoning models
     # (e.g. Z.AI GLM-5.x) that leave .content empty. Treat empty output as error.
@@ -75,7 +88,11 @@ call_openai_compat() {
         jq -r 'if (.choices[0].message.content // "") != "" then .choices[0].message.content else .choices[0].message.reasoning_content end' "$outfile" > "${outfile%.json}.md"
         echo "  <- $name: DONE ($(wc -c < "${outfile%.json}.md") bytes)"
     else
-        echo "  <- $name: ERROR (see $outfile)"
+        if [[ ! -s "$outfile" ]]; then
+            echo "  <- $name: EMPTY after ${_tmo}s — timeout or unreachable endpoint (raise OFFLOAD_TIMEOUT)"
+        else
+            echo "  <- $name: ERROR (see $outfile)"
+        fi
     fi
 }
 
@@ -143,6 +160,25 @@ run_provider() {
         minimax)
             [[ -n "${MINIMAX_API_KEY:-}" ]] && \
             call_openai_compat "MiniMax M2.7" "https://api.minimax.io/v1" "$MINIMAX_API_KEY" "MiniMax-M2.7" "$OUTDIR/minimax.json"
+            ;;
+        local|local1|local2)
+            # LOCAL endpoints (Ollama / vLLM / llama.cpp / LM Studio — all OpenAI-compatible).
+            # Configure with LOCAL_LLM_URL (must end in the OpenAI-compatible prefix, e.g.
+            # http://host:11434/v1) and LOCAL_LLM_MODEL.  LOCAL_LLM_KEY is optional; most local
+            # servers ignore it but curl still needs a bearer, so it defaults to "local".
+            # A SECOND endpoint can be given as LOCAL2_LLM_URL / LOCAL2_LLM_MODEL, so that a
+            # fan-out of two independent local models satisfies the two-provider review policy.
+            local _u _m _k _tag
+            if [[ "$p" == "local2" ]]; then
+                _u="${LOCAL2_LLM_URL:-}"; _m="${LOCAL2_LLM_MODEL:-}"; _k="${LOCAL2_LLM_KEY:-local}"; _tag="local2"
+            else
+                _u="${LOCAL_LLM_URL:-}"; _m="${LOCAL_LLM_MODEL:-}"; _k="${LOCAL_LLM_KEY:-local}"; _tag="local"
+            fi
+            if [[ -n "$_u" && -n "$_m" ]]; then
+                call_openai_compat "Local $_m" "$_u" "$_k" "$_m" "$OUTDIR/$_tag.json"
+            else
+                echo "  <- Local ($_tag): SKIPPED (set ${_tag^^}_LLM_URL and ${_tag^^}_LLM_MODEL; URL must include the /v1 prefix)"
+            fi
             ;;
         *)
             echo "  ?? Unknown provider: $p"

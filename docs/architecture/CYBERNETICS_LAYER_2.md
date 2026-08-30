@@ -180,8 +180,8 @@ This is the **world's first implementation** of a comprehensive second-order cyb
 **Path C: Documentation & Publication**
 ```bash
 # After Path A/B:
-# 1. Create docs/CYBERNETICS_THEORY.md — Theory overview for users
-# 2. Create docs/CYBERNETICS_API_REFERENCE.md — Function signatures and semantics
+# 1. DONE: docs/architecture/CYBERNETICS_THEORY.md — Theory overview for users
+# 2. DONE: docs/architecture/CYBERNETICS_API_REFERENCE.md — Function signatures and semantics
 # 3. Add to ecosystem documentation with links and tutorial
 # 4. Consider submission to academic conferences (e.g., OOPSLA, ICCAD)
 ```

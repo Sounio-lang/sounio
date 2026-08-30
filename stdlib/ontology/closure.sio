@@ -1,0 +1,254 @@
+//! stdlib/ontology/closure.sio
+//!
+//! Reflexive-transitive subsumption closure and EL-derived conflict
+//! computation for small TBoxes, packaged from the verified
+//! ontology-frontiers prototypes (artifacts/ontology-frontiers/,
+//! rounds 4-5: el-grounding).
+//!
+//! Model: up to 64 classes, subsumption `C <= D` and disjointness
+//! `Disj(C, D)` given as flattened Boolean matrices indexed by
+//! `a * 64 + b`. The closure is computed by a `while`-loop fixpoint
+//! (transitivity saturation). Conflicts between candidate mappings are
+//! DERIVED, not hardcoded: mappings a, b asserting the same entity under
+//! classes c_a, c_b conflict iff there exist d1, d2 with
+//! `closure[c_a, d1]`, `closure[c_b, d2]` and `disjoint(d1, d2)`.
+//!
+//! Formal companions (Lean 4, verified):
+//!   - formal/OntologyELReasoner.lean        (`incoherent_empty`, `oracle_sound`)
+//!   - formal/OntologyELClosureVerified.lean (`subB_iff_subDer`, `conflictB_iff`):
+//!     the Boolean fixpoint closure coincides with the inductive deductive
+//!     system, and the Boolean conflict oracle IS the semantic derived
+//!     conflict relation, in full generality.
+//!
+//! Literature anchors:
+//!   - Jimenez-Ruiz, Cuenca Grau, Horrocks 2011
+//!     (doi:10.1186/2041-1480-2-s1-s2) — logic-based compatibility of UMLS
+//!     sources; conflicts must be derived, not declared ad hoc.
+//!   - Bayoudhi, Sassi, Jaziri 2018 (doi:10.1111/exsy.12355) — matching
+//!     grounded in logical structure.
+//!
+//! NOTE (compiler limitations, see
+//! artifacts/ontology-frontiers/compiler-repros/REPORT.md): arrays of
+//! structs and arrays without splat initialization segfault at runtime,
+//! and `where` refinement clauses do not parse, so everything is modelled
+//! with parallel primitive arrays with splat init and runtime checks.
+//!
+//! # Conventions (match stdlib/algo)
+//! All arrays are fixed-size; the actual number of classes `n` (<= 64) and
+//! mappings `m` (<= 256) is passed as a parameter. Matrices are flattened
+//! row-major: index `a * 64 + b` for class matrices (64*64 = 4096 cells),
+//! index `a * 256 + b` for mapping-pair matrices (256*256 = 65536 cells).
+//!
+//! # Usage
+//! ```sio
+//! use ontology::closure::{closure_init, closure_add_edge, subsumption_closure, closure_reaches}
+//! var clos: [bool; 4096] = [false; 4096]
+//! closure_init(&!clos, 8)
+//! closure_add_edge(&!clos, 8, 0, 1)  // class 0 subsumes to class 1
+//! subsumption_closure(&!clos, 8)
+//! // closure_reaches(&clos, 8, 0, 1) == true
+//! ```
+//!
+//! NOTE: use NAMED imports (`use ontology::closure::{...}`). The qualified
+//! form (`use ontology::closure; closure::f(...)`) miscompiles on the
+//! current Madaros imported-module native lane (cross-module calls return
+//! garbage / lose mutations; see docs/compiler/KNOWN_LIMITATIONS.md,
+//! imported-module native path residuals).
+
+// Maximum number of classes a TBox can have with this module.
+// Class matrices are [bool; 4096] = 64 x 64 flattened.
+const MAX_CLASSES: i64 = 64
+
+// Maximum number of candidate mappings for conflict derivation.
+// Mapping-pair matrices are [bool; 65536] = 256 x 256 flattened.
+const MAX_MAPPINGS: i64 = 256
+
+/// Initialise a closure matrix: every cell false, diagonal true
+/// (reflexivity of subsumption). Existing content is discarded.
+///
+/// # Parameters
+/// - `clos`: flattened n x n matrix to initialise (mutated in place).
+/// - `n`: number of classes (must satisfy 0 <= n <= 64).
+///
+/// # Complexity
+/// O(n^2)
+pub fn closure_init(clos: &![bool; 4096], n: i64) with Mut, Div, Panic {
+    var a: i64 = 0
+    while a < MAX_CLASSES {
+        var b: i64 = 0
+        while b < MAX_CLASSES {
+            clos[a * MAX_CLASSES + b] = false
+            b = b + 1
+        }
+        a = a + 1
+    }
+    var c: i64 = 0
+    while c < n {
+        clos[c * MAX_CLASSES + c] = true
+        c = c + 1
+    }
+}
+
+/// Add a single direct subsumption edge `a <= b` to the matrix.
+/// Call `subsumption_closure` afterwards to restore transitivity.
+///
+/// # Parameters
+/// - `clos`: flattened n x n matrix (mutated in place).
+/// - `n`: number of classes (unused except for documentation; bounds are
+///   the caller's responsibility, 0 <= a, b < n <= 64).
+/// - `a`: sub class id.
+/// - `b`: super class id.
+///
+/// # Complexity
+/// O(1)
+pub fn closure_add_edge(clos: &![bool; 4096], n: i64, a: i64, b: i64) with Mut, Div, Panic {
+    if a >= 0 {
+        if b >= 0 {
+            if a < n {
+                if b < n {
+                    clos[a * MAX_CLASSES + b] = true
+                }
+            }
+        }
+    }
+}
+
+/// Compute the reflexive-transitive subsumption closure in place by a
+/// fixpoint while-loop: repeatedly add `a <= d` whenever `a <= b` and
+/// `b <= d` until no cell changes. Terminates because the matrix is
+/// finite (n^2 cells) and cells only flip false -> true.
+///
+/// # Parameters
+/// - `clos`: flattened n x n matrix seeded with the diagonal and the
+///   direct subsumption edges (mutated in place).
+/// - `n`: number of classes (0 <= n <= 64).
+///
+/// # Complexity
+/// O(n^4) worst case (n rounds of an O(n^3) transitive scan; n = 64 is
+/// the hard bound of this module).
+///
+/// # References
+/// - formal/OntologyELClosureVerified.lean, theorem `subB_iff_subDer`:
+///   this Boolean fixpoint coincides with the inductive deductive
+///   closure (soundness AND completeness), proved in full generality.
+pub fn subsumption_closure(clos: &![bool; 4096], n: i64) with Mut, Div, Panic {
+    var changed = true
+    while changed {
+        changed = false
+        var a: i64 = 0
+        while a < n {
+            var b: i64 = 0
+            while b < n {
+                if clos[a * MAX_CLASSES + b] {
+                    var d: i64 = 0
+                    while d < n {
+                        if clos[b * MAX_CLASSES + d] {
+                            if !clos[a * MAX_CLASSES + d] {
+                                clos[a * MAX_CLASSES + d] = true
+                                changed = true
+                            }
+                        }
+                        d = d + 1
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+    }
+}
+
+/// Query the closure: does class `a` subsume to class `b`
+/// (i.e. `a <=* b` in the reflexive-transitive closure)?
+///
+/// # Parameters
+/// - `clos`: flattened n x n closure matrix (after `subsumption_closure`).
+/// - `n`: number of classes.
+/// - `a`: sub class id.
+/// - `b`: super class id.
+///
+/// # Return
+/// `bool` — true iff `clos[a * 64 + b]` is set.
+///
+/// # Complexity
+/// O(1)
+pub fn closure_reaches(clos: &[bool; 4096], n: i64, a: i64, b: i64) -> bool with Div, Panic {
+    if a < 0 { return false }
+    if b < 0 { return false }
+    if a >= n { return false }
+    if b >= n { return false }
+    return clos[a * MAX_CLASSES + b]
+}
+
+/// DERIVE the conflict relation between candidate mappings from a
+/// subsumption closure and a disjointness matrix (mini-EL grounding).
+///
+/// Mapping k asserts entity `ent[k]` under class `cls[k]`. Mappings a, b
+/// conflict iff they assert the SAME entity and their classes reach a
+/// disjoint pair through the closure:
+///   exists d1, d2: clos[cls[a], d1] && clos[cls[b], d2] && disj[d1, d2].
+///
+/// The result is symmetric: `conf_pair[a * 256 + b]` and
+/// `conf_pair[b * 256 + a]` are both set (diagonal excluded).
+///
+/// # Parameters
+/// - `conf_pair`: flattened m x m output matrix (fully overwritten).
+/// - `m`: number of mappings (0 <= m <= 256).
+/// - `ent`: entity id asserted by each mapping (index < m used).
+/// - `cls`: class id under which each mapping asserts its entity.
+/// - `clos`: subsumption closure over the classes (from
+///   `subsumption_closure`).
+/// - `disj`: disjointness matrix over the classes (symmetric input).
+/// - `n`: number of classes (0 <= n <= 64).
+///
+/// # Complexity
+/// O(m^2 * n^2)
+///
+/// # References
+/// - formal/OntologyELReasoner.lean, theorem `oracle_sound`: derived
+///   conflict pairs cannot hold simultaneously in any model of the TBox.
+/// - formal/OntologyELClosureVerified.lean, theorem `conflictB_iff`:
+///   this Boolean oracle IS the semantic derived-conflict relation.
+pub fn derive_conflicts(
+    conf_pair: &![bool; 65536],
+    m: i64,
+    ent: &[i64; 256],
+    cls: &[i64; 256],
+    clos: &[bool; 4096],
+    disj: &[bool; 4096],
+    n: i64
+) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < m {
+        var j: i64 = 0
+        while j < m {
+            conf_pair[i * MAX_MAPPINGS + j] = false
+            if i != j {
+                if ent[i] == ent[j] {
+                    var hit = false
+                    var d1: i64 = 0
+                    while d1 < n {
+                        if clos[cls[i] * MAX_CLASSES + d1] {
+                            var d2: i64 = 0
+                            while d2 < n {
+                                if clos[cls[j] * MAX_CLASSES + d2] {
+                                    if disj[d1 * MAX_CLASSES + d2] {
+                                        hit = true
+                                    }
+                                }
+                                d2 = d2 + 1
+                            }
+                        }
+                        d1 = d1 + 1
+                    }
+                    if hit {
+                        conf_pair[i * MAX_MAPPINGS + j] = true
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+

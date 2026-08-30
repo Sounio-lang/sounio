@@ -139,15 +139,25 @@ active:
    ```
    Cheap `souc check <file>` does not need the lock.
 
-   > **Do NOT wrap `scripts/ci/build_modular_madaros.sh`** — it already takes the
-   > global lock itself (twice: for the seed derivation and for the main build).
-   > Wrapping it **self-deadlocks**, and the deadlock is silent: the outer wrapper
-   > waits for a lock its own child is waiting to acquire. Measured 2026-07-26 —
-   > one agent doing this blocked two others for ~27 minutes before the wedge was
-   > noticed. Call it directly:
+   > **Do NOT wrap the Madaros build** — neither `make build-madaros` nor the
+   > `scripts/ci/build_modular_madaros.sh` it calls. That script already takes the
+   > global lock itself (twice: for the seed derivation and for the main build),
+   > so run it bare and it serializes correctly on its own:
    > ```bash
-   > bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+   > make build-madaros                                  # correct
+   > bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros  # also correct
+   > scripts/dev/souc-build-lock.sh make build-madaros   # HANGS FOREVER
    > ```
+   > The lock lives on file descriptor 9, which survives `exec` — so a *directly*
+   > nested `souc-build-lock.sh` inherits the descriptor and proceeds. `make` does
+   > not pass fd 9 to its recipe shells, so an inner lock reached through a make
+   > target opens a fresh descriptor and blocks on the lock its own ancestor
+   > holds. It never times out and prints no further progress. Recognise it by
+   > **0% CPU and 00:00:00 CPU time while wall-clock climbs**, with
+   > `[souc-build-lock] another heavy build holds the lock; waiting...` as the last
+   > line of output — check `ps -o etime,time,pcpu` before concluding a long build
+   > is merely slow. Measured 2026-07-26: one agent blocked two others for ~27
+   > minutes. Measured 2026-08-25: 48 minutes of nothing wrapped, ~11 minutes bare.
    > Better still, when the cluster is reachable, keep the build off the pod
    > entirely — see `scripts/dev/souc-build-remote.sh`, which runs it on an idle
    > SLURM node and needs no lock at all, because it consumes no pod CPU.
@@ -208,6 +218,16 @@ The numbered principles below are binding. Each was learned from a measured fail
 
 11. **No drift to mean.** Excellence only. Atomic commits — one logical change per commit. No AI attribution in commit messages.
 
+12. **A blocker without a minimal repro is not diagnosed.** Cataloguing — an ID, a severity, an owner, an evidence level — documents a symptom; it does not converge on a cause, and the rigour of the catalogue can be mistaken for progress. Measured 2026-07-26: issue #1194 carried full classification and a "pinned reproduction" of two binaries plus a 1500-line module, and stayed open seven days; six three-line variants root-caused it in minutes. Worse, three separately-catalogued blockers with different owners turned out to be **one** defect in two lines of `ir/lower.sio`. If the reproduction does not fit in ~25 lines, the defect is not yet understood.
+
+13. **A premise that blocks work expires.** Re-measure before building around it. Measured 2026-07-26: at least three PRs state a large-aggregate by-value size limit as their blocker. There is no such limit — return and parameter passing succeed at every size from 24 B to 8 MiB on both engines, including the exact 128 KiB artefact one PR calls impossible. Roughly twenty days of scalar-column storage, handle bridges and scalar-result contracts were built to route around a wall nobody had measured. A source comment claiming `lean_single` miscompiles SRET is likewise false: `lean_single` passes, and Madaros segfaults on the idiom the code was rewritten *into* to escape it.
+
+14. **Depth of a PR stack is a defect.** A chain of drafts pinned to each other's SHAs cannot converge: rebasing the bottom invalidates every base above it. Measured 2026-07-26: two ten-deep chains, ~19 PRs, 25 self-declared non-mergeable. The engineering inside them is excellent and none of it lands. Split leaves that stand alone and send them straight at `main`.
+
+15. **A prebuilt binary is not a baseline.** `bin/souc` and `bin/madaros` lag source — measured at 127 commits behind on 2026-07-26 — and silently route to `artifacts/self-hosted/madaros` once that exists. Using one as the "before" column produced a false flip that a same-commit rebuild disproved. Build the baseline from the actual base commit, with nothing else varying.
+
+16. **Green in CI is not evidence for a Madaros guarantee.** `full-test-suite` runs souc-stage2 (`lean_single`), the frozen bootstrap seed; most guarantees live in the modular Madaros compiler, which `lean_single` does not implement. Three silent miscompiles were fully green in CI on 2026-07-26 while Madaros computed wrong answers — one of them corrupting a dissertation-path PBPK variance decomposition into the wrong pharmacological conclusion. Verify on a Madaros built from the source under test, and mark Madaros-only semantics with `//@ requires: madaros`.
+
 ---
 
 ## 7. Sounio syntax (NOT Rust)
@@ -222,8 +242,8 @@ enforced.
 | `let x = 5;` | `let x = 5` — **style, not a compile error.** Measured 2026-08-20: the trailing `;` is accepted and the program runs. Prefer the semicolon-free form; do not expect the compiler to enforce it. |
 | `let mut y = 10` | `var y = 10` — ✓ enforced, `error[E040]` |
 | `&mut T` | `&!T` — ✓ enforced, `error[E041]` |
-| `assert!(cond)` | `assert(cond)` — **DANGEROUS.** `assert!` checks clean and is **inert**: `assert!(1 == 2)` does not halt. `assert(1 == 2)` does. One character apart. |
-| `println!("hi")` | `println("hi")` — **`println!`/`print!`/`panic!` check clean and SIGSEGV at run time (`rc=139`)**, killing every statement after them. See `docs/audit/RUST_MACRO_ACCEPTANCE_2026-08-20.md`. |
+| `assert!(cond)` | `assert(cond)` — ✓ enforced as of the ELF this repo ships, `error[E043]` (*Sounio does not use Rust macros*). **The old "DANGEROUS, checks clean and is inert" reading was true of the committed binary, not of the source**: measured 2026-08-29, `assert!(1 == 2)` is refused by a Madaros built from `self-hosted/`, and accepted-then-inert by the ELF that was committed before it. The one-character footgun is closed the moment the shipped ELF is refreshed. |
+| `println!("hi")` | `println("hi")` — ✓ enforced, `error[E043]`, same measurement and same caveat as the row above. The *"check clean and SIGSEGV at run time (`rc=139`)"* behaviour recorded in `docs/audit/RUST_MACRO_ACCEPTANCE_2026-08-20.md` is what the **committed** ELF still does; source refuses. |
 | `#[test]`, `#[derive()]` | No attributes — ✓ enforced, fails to parse |
 | ~~`-42`~~ | **STALE — unary minus works.** Measured 2026-08-20 on both engines: `-3.5`, `f(-7)`, `10 - -3` and `[-1, -2, -3]` all check and compute correctly. `0 - x` is no longer required. |
 | `x >> 4` | `x >> 4u8` — **STALE.** Measured 2026-08-20: `x >> 4` checks and computes correctly (`64 >> 4 = 4`). |
@@ -357,12 +377,10 @@ Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/c
 
 ## 14. Cluster GPU jobs
 
-The AI/HPC cluster control plane is at `/home/devsounio/beagle/k8s/hpc-sota`. Before GPU work, read:
-
-1. `/home/devsounio/beagle/k8s/hpc-sota/AGENT_BOOTSTRAP.md`
-2. `/home/devsounio/beagle/k8s/hpc-sota/DEV_WORKFLOW.md`
-
 Prefer proven wrappers from `ops/lab-ops.sh` over ad hoc `sbatch` or `kubectl`.
+
+Cluster paths and the pre-GPU reading list live in the `cluster-gpu-jobs` skill
+(`.claude/skills/cluster-gpu-jobs/SKILL.md`) — invoke it before cluster work.
 
 ---
 
@@ -372,7 +390,31 @@ Prefer proven wrappers from `ops/lab-ops.sh` over ad hoc `sbatch` or `kubectl`.
 
 Ten agent slots share this pod (`claude-1..3`, `codex-1..3`, `grok-cli1..2`,
 `kimi-cli1..2`) and one filesystem. Coordination used to be a document that
-nobody wrote to. It is now a channel:
+nobody wrote to. It is now a channel.
+
+> **`agent-bus.sh` is not on `main`. Check before you reach for it.**
+> `scripts/dev/agent-bus.sh`, `scripts/mcp/agent_bus_mcp.py` and
+> `scripts/mcp/agent-bus.mcp.json` are tracked only on the long-running
+> integration lineage that `/workspace/sounio` is checked out on (added in
+> `925d8fa33d`; a later commit message claims it landed "on main where every
+> agent can reach it" — it did not). From any worktree cut off `main` all three
+> are absent, so the commands below fail with *no such file*. That is a missing
+> tool, **not** an empty bus — do not conclude nobody is coordinating.
+>
+> On a `main`-based checkout use `bin/sounio-coord`, which *is* on `main` and is
+> what the session hooks already call on your behalf:
+> ```bash
+> bin/sounio-coord brief                                  # FIRST THING
+> bin/sounio-coord status                                 # claims, conflicts, worktrees
+> bin/sounio-coord scope --agent ID --lane ID --intent T  # take/extend a lease
+> bin/sounio-coord inbox  --agent ID --lane ID            # messages waiting for you
+> bin/sounio-coord send   --agent ID --lane ID --kind info --message '...'
+> ```
+> `send` with no `--to-agent`/`--to-lane` broadcasts to every lane. Its store is
+> `${TMPDIR:-/tmp}/sounio-coord/<repo-key>` — a *different* store from the
+> `agent-bus` one below, so a post to one is not visible from the other.
+
+Where `agent-bus.sh` is present:
 
 ```bash
 scripts/dev/agent-bus.sh brief          # FIRST THING. hazards, leases, recent events

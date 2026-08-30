@@ -523,17 +523,25 @@ run_execute() {
       ;;
   esac
 
-  local canon_status=fail verify_status=fail
-  note "post-install verification"
-  if (cd "$ROOT_DIR" && bash "$GATE"); then canon_status=pass; else canon_status=fail; fi
-  if (cd "$ROOT_DIR" && bash "$VERIFY"); then verify_status=pass; else verify_status=fail; fi
-  if [[ "${SOUNIO_SEED_DDC:-0}" == "1" ]]; then
-    note "DDC leg"
-    SOUNIO_SEED_DDC=1 bash "$VERIFY" || verify_status=fail
-  fi
-  [[ "$canon_status" == "pass" && "$verify_status" == "pass" ]] \
-    || die "post-install gates failed (canonical=$canon_status verify=$verify_status) — seed installed but NOT receipt-clean"
-
+  # ORDER. The receipt is written BEFORE these gates, not after.
+  #
+  # canonical_compiler_gate.sh runs a provenance leg that compares the
+  # COMMITTED bin/souc-lean-single-x86_64.SeedReceipt.json against the ELF just
+  # installed. Written the other way round -- gates, then receipt -- that check
+  # reads the receipt from the PREVIOUS refresh, which by construction names a
+  # different source and a different seed. The gate fails, the script dies, and
+  # the receipt that would have satisfied it is never written.
+  #
+  # That made --execute impossible on every refresh after the first: with no
+  # receipt at all the provenance leg is WARN+PASS (day-1 policy), so the first
+  # one succeeded and each one after it could not. Measured 2026-08-28 on the
+  # #2259 refresh -- seed installed, canonical md5 matching self-compile, and
+  # still "post-install gates failed ... NOT receipt-clean".
+  #
+  # Writing first is also the stronger check: the gates then judge exactly the
+  # pair that will be committed, rather than a stale file lying beside it.
+  _canon_status="skip"
+  _verify_status="skip"
   local settle_k
   settle_k="$(tr -d '[:space:]' <"$out_meta/SETTLED.k")"
   _gens_tsv="$out_meta/gens.tsv"
@@ -557,8 +565,8 @@ run_execute() {
   if [[ -f "$out_meta/slurm.hostname" ]]; then
     _hostname="$(tr -d '[:space:]' <"$out_meta/slurm.hostname")"
   fi
-  _canon_status="$canon_status"
-  _verify_status="$verify_status"
+  # statuses stay at "skip" here: the gates that decide them run below,
+  # and this receipt is written first so they can judge it. Re-emitted after.
 
   # Receipt in artifacts/ and next to stage out/
   emit_seed_receipt "$RECEIPT_OUT"
@@ -572,6 +580,29 @@ run_execute() {
     cp -f "$RECEIPT_OUT/SeedReceipt.latest.json" "$committed_receipt"
     note "wrote committed receipt path $committed_receipt"
     note "commit this file with the ELF so seed_receipt_provenance_gate.sh can hard-check"
+  fi
+
+  local canon_status=fail verify_status=fail
+  note "post-install verification"
+  if (cd "$ROOT_DIR" && bash "$GATE"); then canon_status=pass; else canon_status=fail; fi
+  if (cd "$ROOT_DIR" && bash "$VERIFY"); then verify_status=pass; else verify_status=fail; fi
+  if [[ "${SOUNIO_SEED_DDC:-0}" == "1" ]]; then
+    note "DDC leg"
+    SOUNIO_SEED_DDC=1 bash "$VERIFY" || verify_status=fail
+  fi
+  [[ "$canon_status" == "pass" && "$verify_status" == "pass" ]] \
+    || die "post-install gates failed (canonical=$canon_status verify=$verify_status) — seed installed but NOT receipt-clean"
+
+  # Re-emit so the receipt records the verdicts the gates actually reached,
+  # not the "skip" placeholder written a moment ago.
+  _canon_status="$canon_status"
+  _verify_status="$verify_status"
+  emit_seed_receipt "$RECEIPT_OUT"
+  if [[ "$out_meta" != "$RECEIPT_OUT" ]]; then
+    emit_seed_receipt "$out_meta" || true
+  fi
+  if [[ -f "$RECEIPT_OUT/SeedReceipt.latest.json" ]]; then
+    cp -f "$RECEIPT_OUT/SeedReceipt.latest.json" "$ROOT_DIR/bin/souc-lean-single-x86_64.SeedReceipt.json"
   fi
 
   note "EXECUTE PASS — commit $SEED + SeedReceipt when ready"

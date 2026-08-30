@@ -33,6 +33,37 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Resolve the underlying modular raw ELF.
+# An explicit raw-ELF override that cannot be used ABORTS rather than being
+# skipped. The loop below moves past any candidate failing the -x test, so a
+# build that left its output non-executable resolves silently to the COMMITTED
+# bin/madaros-linux-x86_64 — which lags self-hosted/ source. The caller then
+# measures the shipped compiler while believing they measured theirs. Observed
+# 2026-08-28: `check: OK` and `error[E245]` from the same file, the only
+# difference being `chmod +x`, with no message in between.
+_madaros_reject_override() {  # _madaros_reject_override <var-name> <path>
+  local var="$1" path="$2" why
+  if   [[ ! -e "$path" ]]; then why="no such file"
+  elif [[ -d "$path" ]];   then why="is a directory"
+  elif [[ ! -x "$path" ]]; then why="not executable (chmod +x it)"
+  elif [[ "$(head -c 2 "$path" 2>/dev/null)" == "#!" ]]; then why="is a script, not a raw ELF"
+  else why="unusable"; fi
+  echo "error: madaros: $var is set but cannot be used: $why" >&2
+  echo "  $var=$path" >&2
+  echo "  refusing to fall back to the committed compiler: it lags self-hosted/ source," >&2
+  echo "  so this run would measure a different compiler than the one you named." >&2
+  echo "  fix the path, or unset $var to use the default resolution order." >&2
+  exit 78
+}
+
+for _mv in MADAROS_RAW_BIN SOUNIO_MADAROS_BIN; do
+  _mv_val="${!_mv:-}"
+  if [[ -n "$_mv_val" ]] \
+     && ! { [[ -x "$_mv_val" ]] && [[ "$(head -c 2 "$_mv_val" 2>/dev/null)" != "#!" ]]; }; then
+    _madaros_reject_override "$_mv" "$_mv_val"
+  fi
+done
+unset _mv _mv_val
+
 # Resolution order:
 #   1. MADAROS_RAW_BIN / SOUNIO_MADAROS_BIN env var
 #   2. artifacts/self-hosted/madaros (built by make build-madaros)

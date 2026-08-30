@@ -10,7 +10,7 @@ SOURCE_DIR=""
 
 usage() {
   cat <<'EOF'
-Usage: scripts/paper_submission_pack.sh [--source-dir PATH] [--out-dir PATH]
+Usage: scripts/paper/paper_submission_pack.sh [--source-dir PATH] [--out-dir PATH]
 
 Options:
   --source-dir PATH   Source paper artifact run directory (default: latest with status_summary.v1.json)

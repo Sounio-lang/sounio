@@ -161,7 +161,7 @@ Full table: `docs/audit/type_enum_denominator/cross_layer.tsv`
 
 ### The Octonion question
 
-> Um Octonion no HLIR e um Octonion no checker são um tipo ou dois?
+> Is an Octonion in HLIR and an Octonion in the checker one type or two?
 
 **Measured answer: there is no Octonion variant in the checker `TypeKind` enum.**
 

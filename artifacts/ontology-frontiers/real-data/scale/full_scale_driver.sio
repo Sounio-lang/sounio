@@ -1,0 +1,467 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Round-7 scale push, SPARSE strategy: the verified pipeline (closure ->
+// derived conflicts -> greedy epistemic repair) on the FULL OAEI 2016
+// Anatomy human TBox (H = 3304 classes, NO cap) without any H x H matrix:
+//
+//   * only 9 distinct classes appear in the 17 disjointWith axioms,
+//     so "disjoint-reachable" is a bool[H*EP] ancestor-mask fixpoint over
+//     the 3761 sub edges (an endpoint can be disjoint with several
+//     others -> partner-bit SETS, ep_pbits);
+//   * the full closure edge count comes from per-class BFS over a packed
+//     parent adjacency (counting sort), NOT from an N^2 matrix;
+//   * conflict(i,j) = same mouse entity AND
+//     (mask[ci] & pmask[cj]) != 0  -- proved equivalent to the round-6
+//     set-based definition by the mirror cross-check in gen_full_data.py.
+//
+// Data: full_data.sio (generated; mirror numbers embedded as expected_*).
+// Same sanity checks as round 6: closure edge count + mask reflexivity,
+// conflict symmetry + exact counts, conflict-free repair with maximality
+// witnesses, top-5 dropped -- all equal to the independent python mirror.
+
+import full_data::*
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    init_data()
+
+    let H = expected_h()
+    let NSUB = expected_sub()
+    let NDEP = expected_disj()
+    let EP = expected_endpoints()
+    let M = expected_mappings()
+
+    // ── Endpoint indexing + partner bit-sets ────────────────────────────
+    var ep_bit: [i64; 3304] = [0; 3304]        // class -> endpoint bit+1 (0 = none)
+    var ep_pbits: [bool; 81] = [false; 81]  // partner set per endpoint bit
+    var neps: i64 = 0
+    var a: i64 = 0
+    var b: i64 = 0
+    var ia: i64 = 0
+    var ib: i64 = 0
+    var k: i64 = 0
+    while k < NDEP {
+        a = h_dep[k] / 10000
+        b = h_dep[k] - a * 10000
+        if ep_bit[a] == 0 {
+            neps = neps + 1
+            ep_bit[a] = neps
+        }
+        if ep_bit[b] == 0 {
+            neps = neps + 1
+            ep_bit[b] = neps
+        }
+        ia = ep_bit[a] - 1
+        ib = ep_bit[b] - 1
+        ep_pbits[ia * EP + ib] = true
+        ep_pbits[ib * EP + ia] = true
+        k = k + 1
+    }
+    if neps != EP {
+        println("FAIL: distinct endpoint count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── Ancestor-disjointness mask fixpoint (sparse closure) ────────────
+    var mask: [bool; 29736] = [false; 29736]
+    var c: i64 = 0
+    while c < H {
+        if ep_bit[c] > 0 {
+            mask[c * EP + ep_bit[c] - 1] = true
+        }
+        c = c + 1
+    }
+    var e: i64 = 0
+    var p: i64 = 0
+    var mp: i64 = 0
+    var changed = true
+    while changed {
+        changed = false
+        mp = mp + 1
+        e = 0
+        while e < NSUB {
+            c = h_sub[e] / 10000
+            p = h_sub[e] - c * 10000
+            k = 0
+            while k < EP {
+                if mask[p * EP + k] && !mask[c * EP + k] {
+                    mask[c * EP + k] = true
+                    changed = true
+                }
+                k = k + 1
+            }
+            e = e + 1
+        }
+    }
+    if mp != expected_mask_passes() {
+        println("FAIL: mask fixpoint passes disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── Check (1b): mask reflexive on every endpoint ────────────────────
+    c = 0
+    while c < H {
+        if ep_bit[c] > 0 {
+            if !mask[c * EP + ep_bit[c] - 1] {
+                println("FAIL: endpoint mask not reflexive")
+                n_fail = n_fail + 1
+            }
+        }
+        c = c + 1
+    }
+
+    // ── pmask[c][j] = OR_k ( mask[c][k] AND ep_pbits[k][j] ) ────────────
+    var pmask: [bool; 29736] = [false; 29736]
+    var j: i64 = 0
+    var any = false
+    c = 0
+    while c < H {
+        j = 0
+        while j < EP {
+            any = false
+            k = 0
+            while k < EP {
+                if mask[c * EP + k] && ep_pbits[k * EP + j] {
+                    any = true
+                }
+                k = k + 1
+            }
+            pmask[c * EP + j] = any
+            j = j + 1
+        }
+        c = c + 1
+    }
+
+    // ── Full closure edge count: per-class BFS over parent adjacency ────
+    var pcount: [i64; 3304] = [0; 3304]
+    var poff: [i64; 3305] = [0; 3305]
+    var plist: [i64; 3761] = [0; 3761]
+    var vis: [i64; 3304] = [0; 3304]
+    var queue: [i64; 3304] = [0; 3304]
+    e = 0
+    while e < NSUB {
+        c = h_sub[e] / 10000
+        pcount[c] = pcount[c] + 1
+        e = e + 1
+    }
+    c = 0
+    while c < H {
+        poff[c + 1] = poff[c] + pcount[c]
+        c = c + 1
+    }
+    c = 0
+    while c < H {
+        pcount[c] = poff[c]
+        c = c + 1
+    }
+    e = 0
+    while e < NSUB {
+        c = h_sub[e] / 10000
+        p = h_sub[e] - c * 10000
+        plist[pcount[c]] = p
+        pcount[c] = pcount[c] + 1
+        e = e + 1
+    }
+    var total_edges: i64 = 0
+    var head: i64 = 0
+    var tail: i64 = 0
+    var t: i64 = 0
+    var s: i64 = 0
+    while s < H {
+        head = 0
+        tail = 0
+        queue[tail] = s
+        tail = tail + 1
+        vis[s] = s + 1
+        while head < tail {
+            b = queue[head]
+            head = head + 1
+            total_edges = total_edges + 1
+            t = poff[b]
+            while t < poff[b + 1] {
+                p = plist[t]
+                if vis[p] != s + 1 {
+                    vis[p] = s + 1
+                    queue[tail] = p
+                    tail = tail + 1
+                }
+                t = t + 1
+            }
+        }
+        s = s + 1
+    }
+    // ── Check (1a): closure edge count equals the mirror ────────────────
+    if total_edges != expected_closure_edges() {
+        println("FAIL: closure edge count disagrees with python mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── Derived conflicts: same mouse entity, disjoint-reachable targets ─
+    var ei: i64 = 0
+    var ej: i64 = 0
+    var ci2: i64 = 0
+    var cj2: i64 = 0
+    var hit = false
+    var n_conf: i64 = 0
+    var i: i64 = 0
+    while i < M {
+        ei = m_pack[i] / 10000
+        ci2 = m_pack[i] - ei * 10000
+        j = 0
+        while j < M {
+            if i != j {
+                ej = m_pack[j] / 10000
+                if ei == ej {
+                    cj2 = m_pack[j] - ej * 10000
+                    hit = false
+                    k = 0
+                    while k < EP {
+                        if mask[ci2 * EP + k] && pmask[cj2 * EP + k] {
+                            hit = true
+                        }
+                        k = k + 1
+                    }
+                    if hit {
+                        n_conf = n_conf + 1
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if n_conf != expected_derived_conflicts() {
+        println("FAIL: derived conflict count disagrees with python mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── Check (2): derived conflict relation is symmetric ───────────────
+    var cij = false
+    var cji = false
+    i = 0
+    while i < M {
+        ei = m_pack[i] / 10000
+        ci2 = m_pack[i] - ei * 10000
+        j = i + 1
+        while j < M {
+            ej = m_pack[j] / 10000
+            cj2 = m_pack[j] - ej * 10000
+            if ei == ej {
+                cij = false
+                cji = false
+                k = 0
+                while k < EP {
+                    if mask[ci2 * EP + k] && pmask[cj2 * EP + k] {
+                        cij = true
+                    }
+                    if mask[cj2 * EP + k] && pmask[ci2 * EP + k] {
+                        cji = true
+                    }
+                    k = k + 1
+                }
+                if (cij && !cji) || (!cij && cji) {
+                    println("FAIL: derived conflict relation not symmetric")
+                    n_fail = n_fail + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Greedy epistemic repair (drop weaker of each live conflict) ─────
+    i = 0
+    while i < M {
+        ei = m_pack[i] / 10000
+        ci2 = m_pack[i] - ei * 10000
+        j = i + 1
+        while j < M {
+            if m_keep[i] && m_keep[j] {
+                ej = m_pack[j] / 10000
+                if ei == ej {
+                    cj2 = m_pack[j] - ej * 10000
+                    hit = false
+                    k = 0
+                    while k < EP {
+                        if mask[ci2 * EP + k] && pmask[cj2 * EP + k] {
+                            hit = true
+                        }
+                        k = k + 1
+                    }
+                    if hit {
+                        if m_conf[i] >= m_conf[j] {
+                            m_keep[j] = false
+                        } else {
+                            m_keep[i] = false
+                        }
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var n_kept: i64 = 0
+    i = 0
+    while i < M {
+        if m_keep[i] {
+            n_kept = n_kept + 1
+        }
+        i = i + 1
+    }
+    let n_dropped = M - n_kept
+    if n_kept != expected_kept() {
+        println("FAIL: kept count disagrees with python mirror")
+        n_fail = n_fail + 1
+    }
+    if n_dropped != expected_dropped() {
+        println("FAIL: dropped count disagrees with python mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── Check (3a): retained set is conflict-free ───────────────────────
+    i = 0
+    while i < M {
+        ei = m_pack[i] / 10000
+        ci2 = m_pack[i] - ei * 10000
+        j = i + 1
+        while j < M {
+            if m_keep[i] && m_keep[j] {
+                ej = m_pack[j] / 10000
+                if ei == ej {
+                    cj2 = m_pack[j] - ej * 10000
+                    hit = false
+                    k = 0
+                    while k < EP {
+                        if mask[ci2 * EP + k] && pmask[cj2 * EP + k] {
+                            hit = true
+                        }
+                        k = k + 1
+                    }
+                    if hit {
+                        println("FAIL: retained set still has a conflict")
+                        n_fail = n_fail + 1
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Check (3b): every dropped mapping has a maximality witness ──────
+    var witnessed = false
+    i = 0
+    while i < M {
+        if !m_keep[i] {
+            ei = m_pack[i] / 10000
+            ci2 = m_pack[i] - ei * 10000
+            witnessed = false
+            j = 0
+            while j < M {
+                if m_keep[j] {
+                    ej = m_pack[j] / 10000
+                    if ei == ej {
+                        cj2 = m_pack[j] - ej * 10000
+                        hit = false
+                        k = 0
+                        while k < EP {
+                            if mask[ci2 * EP + k] && pmask[cj2 * EP + k] {
+                                hit = true
+                            }
+                            k = k + 1
+                        }
+                        if hit {
+                            if m_conf[j] >= m_conf[i] {
+                                witnessed = true
+                            }
+                        }
+                    }
+                }
+                j = j + 1
+            }
+            if !witnessed {
+                println("FAIL: dropped mapping lacks witness")
+                n_fail = n_fail + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // ── Check (4): top-5 dropped by confidence (lowest first) ───────────
+    var chosen: [i64; 5] = [0 - 1; 5]
+    var best_id: i64 = 0 - 1
+    var best_conf: i64 = 20000
+    var already = false
+    k = 0
+    while k < 5 {
+        best_id = 0 - 1
+        best_conf = 20000
+        i = 0
+        while i < M {
+            if !m_keep[i] {
+                already = false
+                t = 0
+                while t < k {
+                    if chosen[t] == i {
+                        already = true
+                    }
+                    t = t + 1
+                }
+                if !already {
+                    if m_conf[i] < best_conf || (m_conf[i] == best_conf && (best_id < 0 || i < best_id)) {
+                        best_conf = m_conf[i]
+                        best_id = i
+                    }
+                }
+            }
+            i = i + 1
+        }
+        chosen[k] = best_id
+        if best_id != expected_drop5(k) {
+            println("FAIL: top-5 dropped disagrees with python mirror")
+            n_fail = n_fail + 1
+        }
+        k = k + 1
+    }
+
+    // ── Summary ─────────────────────────────────────────────────────────
+    println("=== OAEI 2016 Anatomy: FULL-TBox scale push (sparse) ===")
+    println("human classes (H):")
+    println(H)
+    println("sub axioms:")
+    println(NSUB)
+    println("disjoint pairs:")
+    println(NDEP)
+    println("distinct disjoint endpoints:")
+    println(EP)
+    println("closure edges (full TBox, BFS count):")
+    println(total_edges)
+    println("mask fixpoint passes:")
+    println(mp)
+    println("candidate mappings (M):")
+    println(M)
+    println("derived conflicts (ordered pairs):")
+    println(n_conf)
+    println("kept:")
+    println(n_kept)
+    println("dropped:")
+    println(n_dropped)
+    println("top-5 dropped by confidence (lowest first; conf per-10000):")
+    k = 0
+    while k < 5 {
+        println(chosen[k])
+        println(m_conf[chosen[k]])
+        k = k + 1
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

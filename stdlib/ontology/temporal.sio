@@ -1,0 +1,338 @@
+//! stdlib/ontology/temporal.sio
+//!
+//! Qualitative temporal reasoning (Allen interval algebra) as EL+ role
+//! composition over the verified dense engine of
+//! stdlib/ontology/elplus.sio.
+//!
+//! MODEL.  The EL+ `roleComp` completion rule — edges (r1,C,D) and
+//! (r2,D,E) with a chain r1 o r2 <= r3 derive (r3,C,E) — is exactly
+//! path-consistency propagation on a binary constraint network.  The
+//! full 13-relation Allen algebra cannot be loaded directly: its
+//! composition table has DISJUNCTIVE entries (e.g. meets o during
+//! gives one of {b, o, m, d, s}), and an EL+ chain r1 o r2 <= r3 is a
+//! single-conclusion Horn rule with no disjunction.  The POINTISABLE
+//! relations — those whose models are determined by endpoint
+//! orderings — sidestep disjunction entirely via the classical
+//! endpoint translation.  This module encodes the seven FORWARD
+//! pointisable relations (before, meets, overlaps, starts, during,
+//! finishes and equality); the six inverse relations (after, met-by,
+//! overlapped-by, started-by, contains, finished-by) are equally
+//! pointisable and are expressed by swapping the constrained pair, so
+//! nothing is lost.  Every basic relation becomes a conjunction of
+//! constraints over the POINT algebra (the strict and non-strict point
+//! orderings, plus equality) on interval endpoints
+//! (Vilain & Kautz 1986), and point-algebra composition is
+//! non-disjunctive:
+//!
+//!   <= o <=  <=  <=        <= o <   <=  <
+//!   <  o <=  <=  <         <  o <   <=  <
+//!
+//! i.e. FOUR EL+ role chains over TWO roles.  Path consistency decides
+//! consistency for this Horn fragment of the point algebra: a network
+//! over the strict and non-strict orderings is unsatisfiable iff its transitive closure contains a
+//! strict self-loop x < x (van Beek 1992).  Since `roleComp` iterated
+//! to fixpoint IS that transitive closure, the consistency oracle is a
+//! single scan of the closed role-edge cube for a `before(c, c)` cell.
+//!
+//! ENCODING (dense variant, 64 concepts / 8 roles / 8 chains — the
+//! fixed ABI of stdlib/ontology/elplus.sio).  For n intervals
+//! (0 <= i < n) the interned concept universe is:
+//!
+//!   c = 0                     top
+//!   c = 1 + 2i                Phase_i^-  (start endpoint of interval i)
+//!   c = 2 + 2i                Phase_i^+  (finish endpoint of interval i)
+//!   NB = 1 + 2n               first existential id
+//!   c = NB + (k-1)            exists leq.E_k      (k in 1..2n)
+//!   c = NB + 2n + (k-1)       exists before.E_k
+//!   NC = 1 + 6n <= 64   =>    n <= TEMPORAL_MAXI = 10
+//!
+//! Roles (role ids, no role hierarchy — leq and before are kept
+//! incomparable so the closed matrix carries exactly the translated
+//! point constraints; adding before <=* leq to the role closure is
+//! sound but buys nothing for the consistency oracle):
+//!
+//!   role 0  leq     edge (0, x, y): point x <= point y
+//!   role 1  before  edge (1, x, y): point x <  point y   (strict)
+//!
+//! Stated temporal constraints are seeded DIRECTLY into the role-edge
+//! cube R before `elplus_fixpoint` (the completion rules are monotone,
+//! so iterating from a seeded R yields the least fixpoint above the
+//! seed; every endpoint filler is interned, so roleComp/RtoS/Rmono
+//! never skip a derivation for lack of an existential id).
+//!
+//! ENDPOINT TRANSLATION of the pointisable Allen relations (X rel Y,
+//! with xs/xf/ys/yf the start/finish endpoint atoms; every interval
+//! also carries its well-formedness constraint xs < xf):
+//!
+//!   X before   Y:  xf <  ys
+//!   X meets    Y:  xf <= ys,  ys <= xf            (xf = ys)
+//!   X overlaps Y:  xs <  ys,  ys <  xf,  xf <  yf
+//!   X starts   Y:  xs <= ys,  ys <= xs,  xf <  yf
+//!   X during   Y:  ys <  xs,  xf <  yf
+//!   X finishes Y:  ys <  xs,  xf <= yf,  yf <= xf
+//!   X equals   Y:  xs <= ys,  ys <= xs,  xf <= yf,  yf <= xf
+//!
+//! CLAIMS SPLIT:
+//!   * Proven (engine level): the boolean closure computed by
+//!     `elplus_fixpoint` coincides with EL+ entailment over the
+//!     interned concept universe
+//!     (formal/OntologyELPlusClosureComplete.lean, theorems
+//!     subBPlusC_iff / conflictBPlusC_iff).
+//!   * Standard but NOT machine-checked here: the endpoint translation
+//!     of the pointisable sub-algebra (Vilain & Kautz 1986) and the
+//!     completeness of path consistency for the Horn point algebra
+//!     (van Beek 1992) are cited results; this module is an executable
+//!     encoding of them, not a Lean-verified reduction.
+//!   * NOT attempted: the full 13-relation Allen algebra with
+//!     disjunctive composition (inexpressible as single-conclusion EL+
+//!     chains), metric/duration reasoning, minimal-network extraction.
+//!
+//! COMPILER NOTES: mirrors stdlib/ontology/elplus.sio conventions —
+//! parallel primitive arrays with splat init, no `where` clauses, no
+//! arrays of structs.  Every function takes at most 8 parameters
+//! (imported calls with 9+ parameters fail native codegen on the
+//! current Madaros lane; see the elplus_fixpoint_packed header).  Use
+//! NAMED imports (`use ontology::temporal::{...}`): the qualified form
+//! miscompiles on the current lane (docs/compiler/KNOWN_LIMITATIONS.md).
+//!
+//! # References
+//! - Allen, J.F. (1983). Maintaining knowledge about temporal
+//!   intervals.  Communications of the ACM 26(11):832-843.
+//! - Vilain, M. & Kautz, H. (1986). Constraint propagation algorithms
+//!   for temporal reasoning.  AAAI-86, 377-382.
+//! - van Beek, P. (1992). Reasoning about qualitative temporal
+//!   information.  Artificial Intelligence 58(1-3):297-326.
+//! - formal/OntologyELPlus.lean, formal/OntologyELPlusClosureComplete.lean
+//!   (engine-level soundness/completeness of the closure this module
+//!   drives).
+
+// ── Capacities and role/relation codes ─────────────────────────────────
+// Maximum number of intervals (endpoint atoms + both existential
+// layers must fit the 64-concept dense matrix: 1 + 6n <= 64).
+pub const TEMPORAL_MAXI: i64 = 10
+// Role id of the non-strict point ordering (x <= y).
+pub const TEMPORAL_ROLE_LEQ: i64 = 0
+// Role id of the strict point ordering (x < y).
+pub const TEMPORAL_ROLE_BEFORE: i64 = 1
+// Pointisable Allen relation codes for `temporal_constrain`.
+pub const TEMPORAL_REL_BEFORE: i64 = 0
+pub const TEMPORAL_REL_MEETS: i64 = 1
+pub const TEMPORAL_REL_OVERLAPS: i64 = 2
+pub const TEMPORAL_REL_STARTS: i64 = 3
+pub const TEMPORAL_REL_DURING: i64 = 4
+pub const TEMPORAL_REL_FINISHES: i64 = 5
+pub const TEMPORAL_REL_EQUALS: i64 = 6
+
+/// Start-endpoint atom of interval `i` (concept id 1 + 2i).
+pub fn temporal_start(i: i64) -> i64 { 1 + 2 * i }
+
+/// Finish-endpoint atom of interval `i` (concept id 2 + 2i).
+pub fn temporal_finish(i: i64) -> i64 { 2 + 2 * i }
+
+/// Number of base concepts for `n` intervals (1 + 2n; fillers range
+/// over 0..nb-1 in the dense engine).
+pub fn temporal_nb(n: i64) -> i64 { 1 + 2 * n }
+
+/// Number of interned concepts for `n` intervals (1 + 6n; must be
+/// <= 64, i.e. n <= TEMPORAL_MAXI).
+pub fn temporal_nc(n: i64) -> i64 { 1 + 6 * n }
+
+/// Intern the endpoint concept universe for `n` intervals into the
+/// dense EL+ concept table: top, the 2n endpoint atoms, and BOTH
+/// existential layers (exists leq.E_k and exists before.E_k for every
+/// endpoint atom k), with `exid` reset to -1 everywhere first and then
+/// filled for the two roles.  After this call the caller seeds the
+/// subsumption matrix with `elplus_seed` and the role-edge cube with
+/// `temporal_constrain`, then runs `elplus_fixpoint`.
+///
+/// # Parameters
+/// - `ckind`, `carg1`, `carg2`: concept table (see elplus.sio header;
+///   mutated in place).
+/// - `exid`: role*64 + filler -> interned id of the existential, or -1
+///   (fully overwritten).
+/// - `n`: number of intervals (0 <= n <= TEMPORAL_MAXI).
+///
+/// # Complexity
+/// O(512 + n)
+pub fn temporal_intern(
+    ckind: &![i64; 64],
+    carg1: &![i64; 64],
+    carg2: &![i64; 64],
+    exid: &![i64; 512],
+    n: i64
+) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < 512 {
+        exid[i] = 0 - 1
+        i = i + 1
+    }
+    ckind[0] = 1
+    var k: i64 = 1
+    while k <= 2 * n {
+        ckind[k] = 0
+        carg1[k] = k
+        k = k + 1
+    }
+    let nb = 1 + 2 * n
+    k = 1
+    while k <= 2 * n {
+        // exists leq.E_k at NB + (k-1); exists before.E_k at NB + 2n + (k-1).
+        let exl = nb + k - 1
+        ckind[exl] = 3
+        carg1[exl] = TEMPORAL_ROLE_LEQ
+        carg2[exl] = k
+        exid[TEMPORAL_ROLE_LEQ * 64 + k] = exl
+        let exb = nb + 2 * n + k - 1
+        ckind[exb] = 3
+        carg1[exb] = TEMPORAL_ROLE_BEFORE
+        carg2[exb] = k
+        exid[TEMPORAL_ROLE_BEFORE * 64 + k] = exb
+        k = k + 1
+    }
+}
+
+/// Load the point-algebra composition table as EL+ role chains —
+/// the Allen composition sub-table AFTER endpoint translation:
+///   leq o leq <= leq,  leq o before <= before,
+///   before o leq <= before,  before o before <= before.
+/// Returns the number of chains (4), to be passed as `nchain` to
+/// `elplus_fixpoint`.
+///
+/// # Parameters
+/// - `ch1`, `ch2`, `ch3`: chain arrays (first 4 cells overwritten).
+///
+/// # Complexity
+/// O(1)
+pub fn temporal_load_chains(ch1: &![i64; 8], ch2: &![i64; 8], ch3: &![i64; 8]) -> i64 with Mut, Div, Panic {
+    ch1[0] = TEMPORAL_ROLE_LEQ
+    ch2[0] = TEMPORAL_ROLE_LEQ
+    ch3[0] = TEMPORAL_ROLE_LEQ
+    ch1[1] = TEMPORAL_ROLE_LEQ
+    ch2[1] = TEMPORAL_ROLE_BEFORE
+    ch3[1] = TEMPORAL_ROLE_BEFORE
+    ch1[2] = TEMPORAL_ROLE_BEFORE
+    ch2[2] = TEMPORAL_ROLE_LEQ
+    ch3[2] = TEMPORAL_ROLE_BEFORE
+    ch1[3] = TEMPORAL_ROLE_BEFORE
+    ch2[3] = TEMPORAL_ROLE_BEFORE
+    ch3[3] = TEMPORAL_ROLE_BEFORE
+    return 4
+}
+
+/// Assert one point constraint as a stated role edge: `role` must be
+/// TEMPORAL_ROLE_LEQ (from <= to) or TEMPORAL_ROLE_BEFORE (from < to),
+/// with `from`/`to` endpoint atoms (1..2n).  Seed BEFORE
+/// `elplus_fixpoint`; reseeding an already-closed cube is not
+/// supported (splat it false and re-seed instead).
+///
+/// # Complexity
+/// O(1)
+pub fn temporal_assert_point(r: &![bool; 32768], role: i64, from: i64, to: i64) with Mut, Div, Panic {
+    r[(role * 64 + from) * 64 + to] = true
+}
+
+/// Declare an interval: seeds only its well-formedness constraint
+/// start < finish.  `temporal_constrain` calls this for both
+/// endpoints, so this is needed only for intervals that appear in no
+/// relation.
+///
+/// # Complexity
+/// O(1)
+pub fn temporal_declare(r: &![bool; 32768], i: i64) with Mut, Div, Panic {
+    r[(TEMPORAL_ROLE_BEFORE * 64 + temporal_start(i)) * 64 + temporal_finish(i)] = true
+}
+
+/// Assert a pointisable Allen relation between intervals `i` and `j`
+/// as a set of stated endpoint edges (translation table in the module
+/// header), plus the well-formedness constraint of both intervals.
+///
+/// # Parameters
+/// - `r`: role-edge cube (mutated in place; seed before the fixpoint).
+/// - `rel`: TEMPORAL_REL_BEFORE | MEETS | OVERLAPS | STARTS | DURING |
+///   FINISHES | EQUALS.
+/// - `i`, `j`: interval ids (0 <= i, j < n; i = j is allowed but only
+///   EQUALS is satisfiable then — anything else derives a strict
+///   self-loop, by design).
+///
+/// # Complexity
+/// O(1)
+pub fn temporal_constrain(r: &![bool; 32768], rel: i64, i: i64, j: i64) with Mut, Div, Panic {
+    let xs = temporal_start(i)
+    let xf = temporal_finish(i)
+    let ys = temporal_start(j)
+    let yf = temporal_finish(j)
+    // Well-formedness: each interval's start strictly precedes its finish.
+    r[(TEMPORAL_ROLE_BEFORE * 64 + xs) * 64 + xf] = true
+    r[(TEMPORAL_ROLE_BEFORE * 64 + ys) * 64 + yf] = true
+    if rel == TEMPORAL_REL_BEFORE {
+        r[(TEMPORAL_ROLE_BEFORE * 64 + xf) * 64 + ys] = true
+    } else if rel == TEMPORAL_REL_MEETS {
+        r[(TEMPORAL_ROLE_LEQ * 64 + xf) * 64 + ys] = true
+        r[(TEMPORAL_ROLE_LEQ * 64 + ys) * 64 + xf] = true
+    } else if rel == TEMPORAL_REL_OVERLAPS {
+        r[(TEMPORAL_ROLE_BEFORE * 64 + xs) * 64 + ys] = true
+        r[(TEMPORAL_ROLE_BEFORE * 64 + ys) * 64 + xf] = true
+        r[(TEMPORAL_ROLE_BEFORE * 64 + xf) * 64 + yf] = true
+    } else if rel == TEMPORAL_REL_STARTS {
+        r[(TEMPORAL_ROLE_LEQ * 64 + xs) * 64 + ys] = true
+        r[(TEMPORAL_ROLE_LEQ * 64 + ys) * 64 + xs] = true
+        r[(TEMPORAL_ROLE_BEFORE * 64 + xf) * 64 + yf] = true
+    } else if rel == TEMPORAL_REL_DURING {
+        r[(TEMPORAL_ROLE_BEFORE * 64 + ys) * 64 + xs] = true
+        r[(TEMPORAL_ROLE_BEFORE * 64 + xf) * 64 + yf] = true
+    } else if rel == TEMPORAL_REL_FINISHES {
+        r[(TEMPORAL_ROLE_BEFORE * 64 + ys) * 64 + xs] = true
+        r[(TEMPORAL_ROLE_LEQ * 64 + xf) * 64 + yf] = true
+        r[(TEMPORAL_ROLE_LEQ * 64 + yf) * 64 + xf] = true
+    } else {
+        // TEMPORAL_REL_EQUALS
+        r[(TEMPORAL_ROLE_LEQ * 64 + xs) * 64 + ys] = true
+        r[(TEMPORAL_ROLE_LEQ * 64 + ys) * 64 + xs] = true
+        r[(TEMPORAL_ROLE_LEQ * 64 + xf) * 64 + yf] = true
+        r[(TEMPORAL_ROLE_LEQ * 64 + yf) * 64 + xf] = true
+    }
+}
+
+/// Derived-edge query over a CLOSED role-edge cube (output of
+/// `elplus_fixpoint`): does the point constraint `role`(from, to)
+/// hold in the path-consistent network?
+///
+/// # Complexity
+/// O(1)
+pub fn temporal_edge(r: &[bool; 32768], role: i64, from: i64, to: i64) -> bool with Div, Panic {
+    return r[(role * 64 + from) * 64 + to]
+}
+
+/// Derived interval-level query over a CLOSED role-edge cube: is
+/// interval `i` strictly before interval `j` (finish(i) < start(j))?
+/// This is the Allen `before` relation; note that meets/overlaps/etc.
+/// do NOT surface here — query `temporal_edge` directly for the
+/// underlying point constraints.
+///
+/// # Complexity
+/// O(1)
+pub fn temporal_interval_before(r: &[bool; 32768], i: i64, j: i64) -> bool with Div, Panic {
+    return r[(TEMPORAL_ROLE_BEFORE * 64 + temporal_finish(i)) * 64 + temporal_start(j)]
+}
+
+/// CONSISTENCY ORACLE over a CLOSED role-edge cube: the stated
+/// endpoint network is satisfiable iff NO endpoint atom carries a
+/// strict self-loop before(c, c).  Completeness is the cited van Beek
+/// result for the Horn point algebra (path consistency decides
+/// consistency over the strict and non-strict orderings); a strict
+/// self-loop arises exactly when the constraints force a cycle
+/// containing at least one strict edge,
+/// e.g. "A before B" together with "B before A".
+///
+/// # Complexity
+/// O(n)
+pub fn temporal_consistent(r: &[bool; 32768], n: i64) -> bool with Div, Panic {
+    var k: i64 = 1
+    while k <= 2 * n {
+        if r[(TEMPORAL_ROLE_BEFORE * 64 + k) * 64 + k] {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}

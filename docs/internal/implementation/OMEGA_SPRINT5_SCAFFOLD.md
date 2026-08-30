@@ -34,7 +34,7 @@ The scaffold now generates and records:
 PATH=/home/demetrios/work/sounio/target/debug:$PATH \
 SOUC_BIN=/home/demetrios/work/sounio/target/debug/souc \
 OMEGA_POLICY_SOUC_BIN=/home/demetrios/work/sounio/target/debug/souc \
-bash scripts/omega_sprint1_gate.sh --strict --report-full
+bash scripts/archive/omega_sprint1_gate.sh --strict --report-full
 ```
 
 ## Output

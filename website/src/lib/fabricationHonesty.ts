@@ -13,7 +13,11 @@
  * does not match the measured decimal, and claiming it would.
  */
 
-import { E219_HELP, PRE_FIX_PRINT_CAP, splitAtPrintCap } from './diagnosticHonesty';
+import {
+  HISTORICAL_E219_HELP,
+  PRE_FIX_PRINT_CAP,
+  splitAtPrintCap,
+} from './diagnosticHonesty';
 
 export type FabricationKind = 'silent-zero' | 'bit-pattern' | 'truncated';
 
@@ -60,8 +64,8 @@ export const SILENT_ZERO_ACTUAL = '~1e-5';
 export const BIT_PATTERN_PRINTED = '4604219396932172800';
 export const BIT_PATTERN_ACTUAL = '0.671038';
 
-export function truncatedE219Help(): FabricationReading {
-  const split = splitAtPrintCap(E219_HELP, PRE_FIX_PRINT_CAP);
+export function truncatedHistoricalE219Help(): FabricationReading {
+  const split = splitAtPrintCap(HISTORICAL_E219_HELP, PRE_FIX_PRINT_CAP);
   if (!split.wouldTruncate) {
     return { state: 'vacuous', kind: 'truncated', reason: 'faces-identical' };
   }

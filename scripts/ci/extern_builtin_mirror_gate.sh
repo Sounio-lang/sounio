@@ -6,11 +6,11 @@
 # self-hosted/native/codegen_x86_linux.sio maps such a stub to a builtin id
 # 1..27 and returns 0 -- "emit nothing" -- for every other name, so a call to an
 # unlisted extern reads whatever is in rax. check/check.sio refuses that call at
-# type-check time (E219) using name_is_native_backend_builtin.
+# type-check time (E250) using name_is_native_backend_builtin.
 #
 # Two lists, one truth. If the backend gains a builtin and the checker does not
 # hear about it, the checker rejects a name that now works -- a false refusal,
-# strictly worse than the bug E219 was written to kill. If the backend LOSES one,
+# strictly worse than the bug E250 was written to kill. If the backend LOSES one,
 # the checker accepts a call that silently returns 0 again. This gate diffs them.
 #
 # Track A added a second route to the same backend. For twelve names the parser
@@ -63,7 +63,40 @@ awk '
 ' "$CODEGEN" \
   | grep -oE '(name_is|name_ref_is)_[a-z_0-9]+' \
   | sed -E 's/^name_ref_is_//; s/^name_is_//' \
-  | sort -u > "$WORK/backend_all.txt"
+  | sort -u > "$WORK/backend_raw.txt"
+
+# Drop predicates that match a name no source file can spell.
+#
+# The convention above -- "the predicate name carries the builtin name after
+# the is_ prefix" -- holds only while the builtin name is a valid identifier.
+# An arity-retagged builtin like `str_slice.3` is written into the IR by
+# ir_module_ensure_builtin_call_targets and never appears in source; the dot is
+# deliberate, so that no user identifier can collide with it. Its predicate is
+# therefore spelled name_is_str_slice3, and the extraction yields `str_slice3`
+# -- a name that is in neither list and belongs in neither.
+#
+# The mirror exists so the CHECKER admits an `extern "C"` the backend
+# implements. A name containing a dot cannot be an extern declaration, so it
+# can never need mirroring, and adding it would let the checker admit an extern
+# literally named `str_slice3` that the backend does not have.
+#
+# Detected from the predicate's own body -- it compares a byte against 46, the
+# dot -- rather than from its comment, so a renamed helper or a reworded
+# comment does not change the answer.
+: > "$WORK/backend_all.txt"
+while read -r _n; do
+  _pred=""
+  for _cand in "name_is_$_n" "name_ref_is_$_n"; do
+    grep -q "^fn $_cand(" "$CODEGEN" && _pred="$_cand"
+  done
+  if [[ -n "$_pred" ]] \
+     && awk -v f="fn $_pred(" 'index($0,f)==1{i=1;next} i&&/^}/{exit} i' "$CODEGEN" \
+        | grep -qE '\b46 as i8\b'; then
+    echo "[extern-mirror] internal-only builtin (dotted name, not source-spellable): $_n" >&2
+    continue
+  fi
+  printf '%s\n' "$_n"
+done < "$WORK/backend_raw.txt" | sort -u > "$WORK/backend_all.txt"
 
 # Two kinds of arm live in that registry and they answer different questions.
 #

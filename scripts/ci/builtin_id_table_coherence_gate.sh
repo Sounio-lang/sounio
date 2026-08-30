@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/gate_artifact.sh"
 # Builtin-id table coherence.
 #
 # A builtin name reaches machine code through FOUR independent tables in
@@ -43,10 +44,10 @@ run() { python3 scripts/ci/lib/builtin_id_coherence.py "$1"; }
 # if the sabotaged copy passes, the gate is inspecting nothing and must not be
 # allowed to report green on the real file.
 SAB=$(mktemp); trap 'rm -f "$SAB"' EXIT
-sed 's/if builtin_id == 47 {/if builtin_id == 37 {/' "$CG" > "$SAB"
+sed 's/if builtin_id == 47 {/if builtin_id == 37 {/' "$CG" | gate_write_artifact "$SAB"
 if run "$SAB" >/dev/null 2>&1; then
   echo "CONTROL_FAIL: the sabotaged table passed. This gate inspects nothing."
-  printf '{"status":"fail","reason":"positive control did not fire","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' > "$ART"
+  printf '{"status":"fail","reason":"positive control did not fire","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' | gate_write_artifact "$ART"
   exit 1
 fi
 echo "control: sabotaged table rejected, as required"
@@ -59,9 +60,9 @@ if out=$(run "$CG" 2>&1); then
   # floor was set: the seven original ffi_* plus sqrt, floor and ceil. The range
   # only grows, so a drop means the extraction broke, not that builtins left.
   require_min_count "$n" 10 "ffi_* builtins compared across the tables"
-  printf '{"status":"pass","metrics":{"total":%s,"passed":%s,"failed":0,"not_run":0}}\n' "$n" "$n" > "$ART"
+  printf '{"status":"pass","metrics":{"total":%s,"passed":%s,"failed":0,"not_run":0}}\n' "$n" "$n" | gate_write_artifact "$ART"
   exit 0
 fi
 echo "$out"
-printf '{"status":"fail","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' > "$ART"
+printf '{"status":"fail","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' | gate_write_artifact "$ART"
 exit 1

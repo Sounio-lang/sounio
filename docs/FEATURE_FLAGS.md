@@ -19,8 +19,24 @@ The checked compiler artifacts live under `artifacts/omega/souc-bin/`.
 
 | Profile | Artifact | What `souc info` proves |
 |---------|----------|-------------------------|
-| Default JIT profile | `souc-linux-x86_64-jit` | Cranelift JIT enabled; LLVM and GPU codegen disabled |
-| GPU profile | `souc-linux-x86_64-gpu` | GPU codegen enabled; Cranelift JIT disabled; PTX emission via `build --backend gpu` |
+| GPU profile | `souc-linux-x86_64-gpu` | GPU codegen enabled; LLVM and Cranelift JIT **not compiled**; PTX emission via `build --backend gpu` |
+
+> **There is no JIT profile, and there is no Cranelift backend — measured 2026-08-27.**
+> This table used to open with a "Default JIT profile" row naming
+> `souc-linux-x86_64-jit`. That artifact does not exist, is tracked nowhere, and no
+> build script passes `--features jit`. The column header is `What souc info proves`,
+> and what `souc info` actually prints is:
+>
+> ```
+> Enabled Backends:
+>   [-] LLVM - rebuild with --features llvm
+>   [-] Cranelift JIT - rebuild with --features jit
+>   [+] GPU codegen - PTX/SPIR-V generation
+> ```
+>
+> The seven `cranelift` strings in the binary are the messages that say it is absent
+> (`Cranelift backend not compiled. Add --features jit.`); it exports no Cranelift
+> symbol. The shipped engine is native-v2 (Madaros) per `docs/RELEASE_POLICY.md`.
 
 Recommended verification:
 

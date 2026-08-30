@@ -26,6 +26,7 @@
 #   scripts/dev/souc-build-remote.sh --gate full           # + madaros_full_gate.sh
 #   scripts/dev/souc-build-remote.sh --gate corpus         # + corpus regression gate
 #   scripts/dev/souc-build-remote.sh --gate check          # + gen1 typechecks main.sio
+#   scripts/dev/souc-build-remote.sh --gate stack-floor    # + <=32 MiB compiler stack gate
 #   SOUNIO_WITNESS_GLOB='tests/compiler/foo/*.sio' \
 #     scripts/dev/souc-build-remote.sh --gate witness      # + task witness gate
 #   scripts/dev/souc-build-remote.sh --gate full --gate corpus
@@ -43,6 +44,12 @@ set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
+
+# The workspace pod carries a 16 GiB soft RLIMIT_AS even though its hard limit
+# is unlimited. Slurm propagates that soft limit to compute jobs, where the
+# source-generated seed then SIGSEGVs while compiling main.sio. Lift it before
+# srun so the remote build can use the memory granted by the selected node.
+ulimit -v unlimited 2>/dev/null || true
 
 # Target policy comes from the cluster-ops tier document
 # (~devsounio/beagle/k8s/hpc-sota/ops/cluster-cpu-tiers.md, 2026-06-27):
@@ -138,6 +145,41 @@ for g in $GATES; do
       tail -3 "\$W/fpcheck.log" | sed 's/^/REMOTE: /'
       if [ \$fp_rc -ne 0 ] || [ "\${fp_err:-0}" -gt 0 ]; then exit 1; fi
       ;;
+    stack-floor)
+      echo "REMOTE: --- Madaros stack-floor gate ---"
+      MADAROS_RAW_BIN="\$W/madaros.elf" \
+        bash scripts/dev/measure_madaros_stack_floor.sh --reps 10 \
+        > "\$W/stack-floor.csv" 2>&1
+      stack_rc=\$?
+      sed 's/^/REMOTE: /' "\$W/stack-floor.csv"
+      if [ \$stack_rc -ne 0 ]; then
+        echo "REMOTE: stack_floor rc=\$stack_rc"
+        exit \$stack_rc
+      fi
+      for expected in 'minimal,32,0,10' 'helper,32,0,10'; do
+        if ! grep -Fxq "\$expected" "\$W/stack-floor.csv"; then
+          echo "REMOTE: stack_floor FAIL missing=\$expected"
+          exit 1
+        fi
+      done
+      echo "REMOTE: stack_floor PASS stack_mib=32 reps=10/10 programs=2/2"
+      ;;
+    silent)
+      echo "REMOTE: --- silent verdict measurement ---"
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      ulimit -s 524288 2>/dev/null || true
+      SOUNIO_SILENT_VERDICT_MADAROS="\$W/madaros.elf" \\
+        bash scripts/dev/measure_silent_verdicts.sh 2>&1 | tail -40
+      echo "REMOTE: silent rc=\$?"
+      ;;
+    sabotage)
+      echo "REMOTE: --- witness declares its sabotage ---"
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      ulimit -s 524288 2>/dev/null || true
+      SOUNIO_WITNESS_SABOTAGE_MADAROS="\$W/madaros.elf" \\
+        bash scripts/ci/witness_declares_its_sabotage_gate.sh 2>&1 | tail -30
+      echo "REMOTE: sabotage_gate rc=\$?"
+      ;;
     witness)
       echo "REMOTE: --- witness ---"
       export SOUNIO_STDLIB_PATH="\$W/stdlib"
@@ -194,9 +236,10 @@ REMOTE
 
 # tests/ is included only when a gate needs it -- it is the bulk of the payload.
 PAYLOAD="self-hosted stdlib bin/souc bin/souc-linux-x86_64 scripts"
-case "$GATES" in *full*|*corpus*|*witness*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
+case "$GATES" in *full*|*corpus*|*witness*|*sabotage*|*silent*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
 
 tar czf - $PAYLOAD 2>/dev/null \
   | srun --partition="$PARTITION" ${NODE:+--nodelist="$NODE"} --ntasks=1 \
+     --job-name="${SOUNIO_REMOTE_JOBNAME:-souc-${GATES:-build}-$$}" \
          --cpus-per-task="$CPUS" --time="$TIMELIMIT" bash -c "$REMOTE_SCRIPT" 2>&1 \
   | grep -vE "^srun: (job|Job)|couldn't chdir"

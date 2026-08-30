@@ -33,7 +33,8 @@
 #
 # Does not rebuild Madaros. Does not pin lean_single. Uses default bin/souc.
 # If stock prebuilt lags a source fix for a required lock:
-#   scripts/dev/souc-build-lock.sh make build-madaros
+#   make build-madaros   # bare: it locks internally; wrapping it in
+#                        # souc-build-lock.sh deadlocks (see CLAUDE.md §4)
 #   MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash "$0"
 #
 # Usage:
@@ -573,7 +574,7 @@ if [[ $fail_required -eq 0 ]]; then
 fi
 if [[ ( "$cd_exact_status" != "pass" || "$cd_exact_e2e_status" != "pass" ) && "$REQUIRE_CD_EXACT" == "1" ]]; then
   echo "NOTE: cd_exact family RED while required — rebuild Madaros if stock prebuilt lags #1392:" >&2
-  echo "  scripts/dev/souc-build-lock.sh make build-madaros" >&2
+  echo "  make build-madaros   # bare; wrapping it in souc-build-lock.sh deadlocks" >&2
   echo "  MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash $0" >&2
 fi
 echo "MADAROS_WAVE15_SHOWCASE_GATE_FAIL" >&2

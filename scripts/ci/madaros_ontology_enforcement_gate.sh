@@ -5,6 +5,7 @@ set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR" || exit 1
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/gate_artifact.sh"
 
 # Require an explicit source-current binary. The checked-in Madaros artefact
 # predates this fix and would turn a source gate into a stale-binary measurement.
@@ -122,7 +123,7 @@ if [[ $FAILED -gt 0 || $NOT_RUN -gt 0 ]]; then
 fi
 
 mkdir -p "$(dirname "$ARTIFACT")"
-cat >"$ARTIFACT" <<JSON
+cat <<JSON | gate_write_artifact "$ARTIFACT"
 {
   "schema": "sounio.madaros-ontology-enforcement-gate.v1",
   "status": "$STATUS",
