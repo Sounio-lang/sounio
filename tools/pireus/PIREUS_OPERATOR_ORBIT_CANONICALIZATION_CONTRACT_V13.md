@@ -1,6 +1,6 @@
 # Pireus Operator Orbit Canonicalization V13 Contract
 
-Status: GARDEN
+Status: SEMANTICS_FROZEN
 
 Concept-ID: SOUNIO-PIREUS-OPERATOR-ORBIT-CANONICALIZATION
 
