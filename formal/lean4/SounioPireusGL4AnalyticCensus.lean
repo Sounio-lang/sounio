@@ -440,6 +440,8 @@ structure GL4AnalyticCensusBoundary where
   fourthFiberCount8Proved : Bool
   analyticOrderedBasisCount20160Proved : Bool
   nativeMatrixScanConsumed : Bool
+  orderedFramesIdentifiedWithGl4Group : Bool
+  spanListsEqualLinearCombinationImagesProved : Bool
   analyticBasisToFrozenScanBijectionProved : Bool
   frozenScanCount20160ProvedAnalytically : Bool
   outer40320ActionCountProved : Bool
@@ -459,6 +461,8 @@ def gl4AnalyticCensusBoundary : GL4AnalyticCensusBoundary :=
   , fourthFiberCount8Proved := true
   , analyticOrderedBasisCount20160Proved := true
   , nativeMatrixScanConsumed := false
+  , orderedFramesIdentifiedWithGl4Group := false
+  , spanListsEqualLinearCombinationImagesProved := false
   , analyticBasisToFrozenScanBijectionProved := false
   , frozenScanCount20160ProvedAnalytically := false
   , outer40320ActionCountProved := false
@@ -477,6 +481,8 @@ theorem analytic_census_does_not_close_frozen_scan_or_target03 :
       gl4AnalyticCensusBoundary.fourthFiberCount8Proved &&
       gl4AnalyticCensusBoundary.analyticOrderedBasisCount20160Proved &&
       !gl4AnalyticCensusBoundary.nativeMatrixScanConsumed &&
+      !gl4AnalyticCensusBoundary.orderedFramesIdentifiedWithGl4Group &&
+      !gl4AnalyticCensusBoundary.spanListsEqualLinearCombinationImagesProved &&
       !gl4AnalyticCensusBoundary.analyticBasisToFrozenScanBijectionProved &&
       !gl4AnalyticCensusBoundary.frozenScanCount20160ProvedAnalytically &&
       !gl4AnalyticCensusBoundary.outer40320ActionCountProved &&
