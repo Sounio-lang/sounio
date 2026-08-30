@@ -280,8 +280,8 @@ if [[ "$PHASE" == prepare ]]; then
   install_status=$?
   set -e
   if [[ $install_status -ne 0 ]]; then
-    unit_diagnostic="$(systemctl status "$HOSTD_UNIT" --no-pager \
-      2>&1 | tail -n 30 | tr '\n' ',')"
+    unit_diagnostic="$({ systemctl status "$HOSTD_UNIT" --no-pager 2>&1 || true; } |
+      tail -n 30 | tr '\n' ',')"
     journal_diagnostic="$(journalctl --unit "$HOSTD_UNIT" --no-pager \
       --output=cat -n 80 2>&1 | tr '\n' ',')"
     fail "activated installer refused status=$install_status stdout=$(tr '\n' ',' < "$ROOT/install.out") stderr=$(tr '\n' ',' < "$ROOT/install.err") unit=$unit_diagnostic journal=$journal_diagnostic"
