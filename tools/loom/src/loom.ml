@@ -12474,6 +12474,12 @@ let exec_result_record_probe_command cli =
     0)
   else failf "exec-result-record-probe mode must be issue or artifact-binding"
 
+let exec_operation_cell_command cli =
+  Loom_exec_operation_cell.run
+    ~root:(required cli "--root") ~source:(required cli "--source")
+    ~output_dir:(required cli "--output-dir") ~unit:(required cli "--unit")
+    ~mode:(required cli "--mode")
+
 let exec_result_present_command cli =
   let result =
     Loom_exec_result.validate_transport
@@ -12592,6 +12598,7 @@ let main () =
     | "exec-catalog-material-probe" ->
         exec_catalog_material_probe_command cli
     | "exec-result-record-probe" -> exec_result_record_probe_command cli
+    | "_exec-operation-cell" -> exec_operation_cell_command cli
     | "exec-result-probe" -> exec_result_probe_command cli
     | "exec-result-present" -> exec_result_present_command cli
     | "peer-activation-capsule-probe" ->
@@ -12703,6 +12710,8 @@ let () =
   | Loom_exec_grant_cell.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_exec_intent.Error error
   | Loom_exec_catalog.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
+  | Loom_exec_operation_cell.Error error ->
+      Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_exec_result_record.Error error ->
       Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_exec_result.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
