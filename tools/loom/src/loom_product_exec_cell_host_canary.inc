@@ -473,7 +473,9 @@ std::map<std::string, std::string> operation_key_value_line(
   std::istringstream input(line);
   std::string schema;
   if (!(input >> schema) || schema != expected_schema) {
-    throw Error("operation ExecCell line schema mismatch");
+    throw Error("operation ExecCell line schema mismatch expected=" +
+                std::string(expected_schema) + " actual=" +
+                product_compact_diagnostic(line));
   }
   std::map<std::string, std::string> fields;
   std::string token;

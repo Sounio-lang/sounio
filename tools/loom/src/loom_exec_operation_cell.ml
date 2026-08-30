@@ -211,7 +211,7 @@ let require_private_output_directory ~mode path =
     failf "exec-operation-cell-output-dir-custody-mismatch";
   if stat.st_perm land 0o777 <> 0o700 then
     failf "exec-operation-cell-output-dir-not-private";
-  lexical
+  resolved
 
 let valid_invocation_id value =
   String.length value = 32
@@ -266,6 +266,7 @@ let parse_close line =
 let run ~root ~source ~output_dir ~unit ~mode =
   Unix.set_close_on_exec Unix.stdin;
   let root = Unix.realpath root in
+  let requested_output_dir = output_dir in
   let policy = load_grant_policy ~root in
   let projection =
     Loom_exec_catalog.project ~root ~operation:"sounio-check" ~source:(Some source)
@@ -275,7 +276,9 @@ let run ~root ~source ~output_dir ~unit ~mode =
     failf "exec-operation-cell-catalog-event-mismatch";
   let output_dir = require_private_output_directory ~mode output_dir in
   let cgroup = read_bounded_file "/proc/self/cgroup" in
-  let host_mode = verify_host_context ~mode ~unit ~output_dir ~cgroup in
+  let host_mode =
+    verify_host_context ~mode ~unit ~output_dir:requested_output_dir ~cgroup
+  in
   let principal = measure_principal ~unit ~cgroup in
   let descriptor = measure_descriptor ~unit in
   Printf.printf
