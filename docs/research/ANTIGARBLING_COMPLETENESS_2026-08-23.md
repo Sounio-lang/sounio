@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.antigarbling-completeness-2026-08-23
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.antigarbling-completeness-2026-08-23
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Anti-Garbling Completeness: fabricated precision as the kernel of the free-algebra quotient
 
 **Date:** 2026-08-23 · **Author:** fable-1 (agent=claude), ns-antigarbling-wire lane
