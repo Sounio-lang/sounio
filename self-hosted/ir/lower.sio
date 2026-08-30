@@ -73,6 +73,33 @@ struct LowerLocalStack {
     count: i64,
 }
 
+// FO bind table, moved OFF the Lowerer and behind a Box.
+//
+// WHY. These two arrays are 49 KB of the Lowerer's 75.5 KB of inline storage, and
+// the Lowerer is passed BY VALUE into every classifier and lowering method here.
+// lower_expr_non_binary_ref alone makes 71 by-value calls whose methods also
+// RETURN a Lowerer, so one frame of it holds ~150 copies: 11,941,664 bytes,
+// measured from its own prologue. At 103 nested if-expressions that is 1173 MB of
+// a 1536 MB stack -- 76.6% of it, and the reason a gen2 self-compile SIGSEGVs in
+// the stack probe at `dep_begin 80`.
+//
+// Boxing them cuts the inline Lowerer from 75.5 KB to 26.5 KB, which divides EVERY
+// frame in every recursion, not just this one. That is why the table moves rather
+// than the recursion being flattened: the depth (103) is legitimate source
+// nesting, and the classifier trio that looked like the culprit is 4.7% of the
+// budget. Measured before choosing, because the obvious target was the wrong one.
+struct LowerFoBindTable {
+    names: [Name; 128],
+    sens: [i64; 4096],
+}
+
+fn empty_lower_fo_bind_table() -> LowerFoBindTable {
+    LowerFoBindTable {
+        names: [ir_empty_name(); 128],
+        sens: [-1; 4096],
+    }
+}
+
 fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
     let names = lowerer_box_empty_local_name_slots()
     let struct_types = lowerer_box_empty_local_name_slots()
@@ -945,8 +972,7 @@ struct Lowerer {
     fo_expr_sens: [i64; 32],
     fo_pending_sens: [i64; 32],
     fo_bind_count: i64,
-    fo_bind_names: [Name; 128],
-    fo_bind_sens: [i64; 4096],
+    fo_bind: Box<LowerFoBindTable>,
     // Second order. H_jk = d2y/dx_j dx_k over the same 8 seed channels, stored
     // as the upper triangle (36 slots, so_hess_idx below). A slot of -1 means
     // STRUCTURALLY zero, not "unknown" -- measure() and every projection have
@@ -1245,8 +1271,7 @@ fn lowerer_new() -> Lowerer with Alloc, Mut, Panic, Div {
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
         fo_bind_count: 0,
-        fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 4096],
+        fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
@@ -1783,8 +1808,7 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
         fo_bind_count: 0,
-        fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 4096],
+        fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
@@ -1847,8 +1871,7 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
         fo_bind_count: 0,
-        fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 4096],
+        fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
@@ -1915,8 +1938,7 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
         fo_bind_count: 0,
-        fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 4096],
+        fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
@@ -8774,7 +8796,7 @@ impl Lowerer {
         var lo = self
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.fo_bind).names[i as usize], name) {
                 return (lo, i)
             }
             i = i + 1
@@ -8783,12 +8805,14 @@ impl Lowerer {
             return (lo, 0 - 1)
         }
         let idx = lo.fo_bind_count
-        lo.fo_bind_names[idx as usize] = name
+        var fb0 = lo.fo_bind
+        (*fb0).names[idx as usize] = name
         var c: i64 = 0
         while c < 32 {
-            lo.fo_bind_sens[(idx * 32 + c) as usize] = 0 - 1
+            (*fb0).sens[(idx * 32 + c) as usize] = 0 - 1
             c = c + 1
         }
+        lo.fo_bind = fb0
         lo.fo_bind_count = idx + 1
         (lo, idx)
     }
@@ -8813,13 +8837,15 @@ impl Lowerer {
             // Same aliasing rule as alloc_variance_slot_for_local: a channel already
             // bound points at the RHS's vreg, so copy its value into a private reg
             // rather than reusing it as this local's slot.
-            let existing = lo.fo_bind_sens[(row * 32 + k) as usize]
+            let existing = (*lo.fo_bind).sens[(row * 32 + k) as usize]
             let z = lo.emit_f64_const(0.0)
             lo = z.0
             if existing >= 0 {
                 lo = lo.emit(ir_copy(z.1, existing))
             }
-            lo.fo_bind_sens[(row * 32 + k) as usize] = z.1
+            var fb1 = lo.fo_bind
+            (*fb1).sens[(row * 32 + k) as usize] = z.1
+            lo.fo_bind = fb1
             k = k + 1
         }
         lo
@@ -8835,7 +8861,7 @@ impl Lowerer {
         var row: i64 = 0 - 1
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.fo_bind).names[i as usize], name) {
                 row = i
                 i = lo.fo_bind_count
             } else {
@@ -8848,7 +8874,7 @@ impl Lowerer {
         var any: bool = false
         var k: i64 = 0
         while k < 32 {
-            let slot = lo.fo_bind_sens[(row * 32 + k) as usize]
+            let slot = (*lo.fo_bind).sens[(row * 32 + k) as usize]
             if slot >= 0 {
                 any = true
                 let src = lo.fo_expr_sens[k as usize]
@@ -9489,7 +9515,7 @@ impl Lowerer {
         var row: i64 = 0 - 1
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.fo_bind).names[i as usize], name) {
                 row = i
                 i = lo.fo_bind_count
             } else {
@@ -9512,10 +9538,12 @@ impl Lowerer {
         // Update existing bind if present.
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.fo_bind).names[i as usize], name) {
                 var k: i64 = 0
                 while k < 32 {
-                    lo.fo_bind_sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+                    var fb2 = lo.fo_bind
+                    (*fb2).sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+                    lo.fo_bind = fb2
                     k = k + 1
                 }
                 return lo
@@ -9526,10 +9554,14 @@ impl Lowerer {
             return lo
         }
         let idx = lo.fo_bind_count
-        lo.fo_bind_names[idx as usize] = name
+        var fb3 = lo.fo_bind
+        (*fb3).names[idx as usize] = name
+        lo.fo_bind = fb3
         var k2: i64 = 0
         while k2 < 32 {
-            lo.fo_bind_sens[(idx * 32 + k2) as usize] = lo.fo_expr_sens[k2 as usize]
+            var fb4 = lo.fo_bind
+            (*fb4).sens[(idx * 32 + k2) as usize] = lo.fo_expr_sens[k2 as usize]
+            lo.fo_bind = fb4
             k2 = k2 + 1
         }
         lo.fo_bind_count = idx + 1
@@ -9559,10 +9591,10 @@ impl Lowerer {
         var lo = self
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.fo_bind).names[i as usize], name) {
                 var k: i64 = 0
                 while k < 32 {
-                    lo.fo_expr_sens[k as usize] = lo.fo_bind_sens[(i * 32 + k) as usize]
+                    lo.fo_expr_sens[k as usize] = (*lo.fo_bind).sens[(i * 32 + k) as usize]
                     k = k + 1
                 }
                 return lo
