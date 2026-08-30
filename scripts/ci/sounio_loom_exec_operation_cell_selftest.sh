@@ -12,6 +12,7 @@ UNIT="loom-exec-operation-cell-local.service"
 GENERATION="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 EVENT="6017e4c6e745560696f78836f9cc07ec71a9106f13ad1bfdb16d7e342f0840a9"
 GRANT="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+CLOSE_GRANT="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 WRONG="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 EXPECTED_ARTIFACT="eff2ac0ef28b34d6cc4f008cfb08a30ba18a0874c8654c06a3c62ec2f48a249c"
 
@@ -75,9 +76,21 @@ digest "$descriptor" || fail 'descriptor binding digest malformed'
   fail 'positive READY identity or pre-ARM state diverged'
 printf 'ARM %s %s %s %s %s\n' \
   "$GENERATION" "$EVENT" "$principal" "$descriptor" "$GRANT" >&"$positive_write"
+IFS= read -r positive_header <&"$positive_read" || fail 'positive result header absent'
+positive_record=''
+for line_number in $(seq 1 18); do
+  IFS= read -r record_line <&"$positive_read" ||
+    fail "positive result record line $line_number absent"
+  positive_record+="$record_line"$'\n'
+done
+record_sha256="$(printf '%s' "$positive_record" | sha256sum | cut -d ' ' -f 1)"
+printf 'CLOSE %s %s %s %s\n' \
+  "$GENERATION" "$EVENT" "$record_sha256" "$CLOSE_GRANT" >&"$positive_write"
 exec {positive_write}>&-
-positive_result="$(cat <&"$positive_read")"
-wait "$positive_pid" || fail 'positive cell refused after ARM'
+IFS= read -r positive_closed <&"$positive_read" || fail 'positive CLOSED frame absent'
+printf -v positive_result '%s\n%s' "$positive_header" "$positive_record"
+wait "$positive_pid" ||
+  fail "positive cell refused after CLOSE: $(tr '\n' ' ' <"$TEST_ROOT/positive.err")"
 [[ "$positive_result" == LOOM_EXEC_OPERATION_CELL_RESULT_V1* ]] ||
   fail 'positive result frame absent'
 for expected in \
@@ -92,6 +105,13 @@ for expected in \
   grep -Fq "$expected" <<<"$positive_result" ||
     fail "positive result omitted $expected"
 done
+[[ "$positive_closed" == LOOM_EXEC_OPERATION_CELL_CLOSED_V1* &&
+   "$(field_value "$positive_closed" generation_sha256)" == "$GENERATION" &&
+   "$(field_value "$positive_closed" event_sha256)" == "$EVENT" &&
+   "$(field_value "$positive_closed" record_sha256)" == "$record_sha256" &&
+   "$(field_value "$positive_closed" close_receipt_sha256)" == "$CLOSE_GRANT" &&
+   "$(field_value "$positive_closed" authority_extinction)" == armed ]] ||
+  fail 'positive CLOSE binding diverged'
 artifact="$POSITIVE_DIR/loom-sounio-check-899d05ffe60528a6.elf"
 [[ -f "$artifact" && ! -L "$artifact" ]] || fail 'material artifact absent'
 artifact_sha256="$(sha256sum "$artifact" | cut -d ' ' -f 1)"
@@ -101,6 +121,44 @@ result_artifact_sha256="$(
 )"
 [[ "$result_artifact_sha256" == "$artifact_sha256" ]] ||
   fail 'result header did not bind material artifact'
+
+CLOSE_CONTROL_DIR="$TEST_ROOT/close-mismatch"
+mkdir -m 0700 "$CLOSE_CONTROL_DIR"
+coproc CLOSE_CONTROL {
+  exec env SOUNIO_LOOM_EXEC_OPERATION_CELL_TEST_MODE=1 \
+    "$LOOM" _exec-operation-cell --root "$ROOT_DIR" --source "$SOURCE" \
+      --output-dir "$CLOSE_CONTROL_DIR" --unit "$UNIT" --mode test \
+      2>"$TEST_ROOT/close-mismatch.err"
+}
+close_pid="$CLOSE_CONTROL_PID"
+close_read="${CLOSE_CONTROL[0]}"
+close_write="${CLOSE_CONTROL[1]}"
+IFS= read -r close_ready <&"$close_read" || fail 'close control READY absent'
+close_principal="$(field_value "$close_ready" principal_sha256)"
+close_descriptor="$(field_value "$close_ready" descriptor_binding_sha256)"
+printf 'ARM %s %s %s %s %s\n' \
+  "$GENERATION" "$EVENT" "$close_principal" "$close_descriptor" "$GRANT" \
+  >&"$close_write"
+IFS= read -r close_header <&"$close_read" || fail 'close control result header absent'
+for line_number in $(seq 1 18); do
+  IFS= read -r close_record_line <&"$close_read" ||
+    fail "close control record line $line_number absent"
+done
+printf 'CLOSE %s %s %s %s\n' \
+  "$GENERATION" "$EVENT" "$WRONG" "$CLOSE_GRANT" >&"$close_write"
+exec {close_write}>&-
+cat <&"$close_read" >"$TEST_ROOT/close-mismatch.out" || true
+set +e
+wait "$close_pid"
+close_status=$?
+set -e
+[[ $close_status -ne 0 ]] || fail 'record-mismatched CLOSE was admitted'
+grep -Fq 'exec-operation-cell-close-record-mismatch' \
+  "$TEST_ROOT/close-mismatch.err" || fail 'CLOSE mismatch reason diverged'
+[[ ! -s "$TEST_ROOT/close-mismatch.out" ]] ||
+  fail 'record-mismatched CLOSE emitted a closure frame'
+[[ -f "$CLOSE_CONTROL_DIR/loom-sounio-check-899d05ffe60528a6.elf" ]] ||
+  fail 'CLOSE control did not cross the material boundary'
 
 PRINCIPAL_DIR="$TEST_ROOT/principal-mismatch"
 mkdir -m 0700 "$PRINCIPAL_DIR"
@@ -179,5 +237,5 @@ DEPENDENCIES="$(ldd "$LOOM" 2>&1 || true)"
 printf '%s\n' "$DEPENDENCIES" | grep -Eqi 'python|rust' &&
   fail 'operation cell has a prohibited runtime dependency'
 
-printf 'sounio-loom-exec-operation-cell-selftest: PASS semantic_authority=Sounio grant_action=9030 catalog_action=9035 result_action=9036 operational_language=OCaml operational_role=EFFECT_PARITY protocol=READY+ARM principal_self_measured=true descriptor_binding=inherited-pipe positive_material_execution=true artifact_sha256=%s artifact_executed=false dynamic_user_host_attached=false principal_mismatch=REFUSED descriptor_mismatch=REFUSED invalid_source=DENY563 sabotage_material_created=false handle_is_bearer=false handle_is_execution_authority=false python_executed=false rust_executed=false runtime_dependencies=clean provider_lifecycle_attached=false production_activation=false parity_open=false claim_ready=false\n' \
+printf 'sounio-loom-exec-operation-cell-selftest: PASS semantic_authority=Sounio grant_action=9030 catalog_action=9035 result_action=9036 operational_language=OCaml operational_role=EFFECT_PARITY protocol=READY+ARM+CLOSE close_receipt_bound=true close_causal_rule=record_sha256_equal close_record_sabotage=REFUSED close_sabotage_closed_frame=false principal_self_measured=true descriptor_binding=inherited-pipe positive_material_execution=true artifact_sha256=%s artifact_executed=false dynamic_user_host_attached=false principal_mismatch=REFUSED descriptor_mismatch=REFUSED invalid_source=DENY563 sabotage_material_created=false handle_is_bearer=false handle_is_execution_authority=false python_executed=false rust_executed=false runtime_dependencies=clean provider_lifecycle_attached=false production_activation=false parity_open=false claim_ready=false\n' \
   "$artifact_sha256"

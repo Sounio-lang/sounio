@@ -533,6 +533,7 @@ struct HostSounioCheckObservation {
   bool ready = false;
   bool identity_authenticated = false;
   bool arm_sent = false;
+  bool close_bound = false;
   bool material_execution = false;
   bool artifact_measured = false;
   bool pidfd_extinct = false;
@@ -542,8 +543,8 @@ struct HostSounioCheckObservation {
   bool runtime_directory_extinct = false;
 
   bool success_complete() const {
-    return ready && identity_authenticated && arm_sent && material_execution &&
-           artifact_measured && pidfd_extinct && process_extinct &&
+    return ready && identity_authenticated && arm_sent && close_bound &&
+           material_execution && artifact_measured && pidfd_extinct && process_extinct &&
            cgroup_unpopulated && unit_inactive && runtime_directory_extinct;
   }
 };
@@ -564,7 +565,8 @@ class HostSounioCheckCell {
         unit_("sounio-loom-operation-cell-" + std::to_string(getpid()) + "-" +
               nonce_ + ".service"),
         runtime_directory_("sounio-loom-operation-cell-" + nonce_),
-        runtime_path_("/run/" + runtime_directory_) {
+        runtime_path_("/run/" + runtime_directory_),
+        runtime_storage_path_("/run/private/" + runtime_directory_) {
     if (getuid() != 0 || geteuid() != 0 || getgid() != 0 || getegid() != 0) {
       throw Error("host operation ExecCell requires root broker identity");
     }
@@ -613,6 +615,7 @@ class HostSounioCheckCell {
              property("PrivateDevices") == "yes" &&
              property("MemoryDenyWriteExecute") == "yes" &&
              property("RuntimeDirectoryPreserve") == "yes" &&
+             runtime_storage_authenticated() &&
              uid_ != 0 && gid_ != 0;
     } catch (...) {
       return false;
@@ -633,7 +636,6 @@ class HostSounioCheckCell {
             principal_sha256_ + " " + descriptor_sha256_ + " " +
             grant_receipt_sha256 + "\n",
         deadline);
-    input_ = UniqueFd();
     HostSounioCheckObservation observation;
     observation.uid = uid_;
     observation.gid = gid_;
@@ -645,23 +647,63 @@ class HostSounioCheckCell {
         "operation ExecCell result header timeout");
     const auto header_fields = operation_key_value_line(
         header, "LOOM_EXEC_OPERATION_CELL_RESULT_V1");
-    observation.record = read_remaining_output(deadline);
+    observation.record.clear();
+    for (std::size_t line = 0; line < 18; ++line) {
+      observation.record += quorum_read_line(
+          output_.get(), output_buffer_, 4096, deadline,
+          "operation ExecCell result record timeout") + "\n";
+    }
     observation.record_sha256 = sha256(observation.record);
     observation.handle = operation_require(header_fields, "handle");
     observation.artifact_sha256 =
         operation_require(header_fields, "artifact_sha256");
     observation.source_sha256 = operation_require(header_fields, "source_sha256");
     validate_result(header_fields, grant_receipt_sha256, observation);
+    observation.material_execution = true;
+    observation.artifact_measured = verify_material_artifacts(observation);
+    return observation;
+  }
+
+  void close(HostSounioCheckObservation& observation,
+             const std::string& close_receipt_sha256) {
+    if (finished_ || !observation.artifact_measured ||
+        !lowercase_digest(close_receipt_sha256) ||
+        !authenticated_before_arm()) {
+      throw Error("operation ExecCell CLOSE boundary invalid");
+    }
+    const auto deadline =
+        std::chrono::steady_clock::now() + kProductExecIngressHostDeadline;
+    quorum_write_all(
+        input_.get(),
+        "CLOSE " + generation_ + " " + fixtures_.event_sha256 + " " +
+            observation.record_sha256 + " " + close_receipt_sha256 + "\n",
+        deadline);
+    input_ = UniqueFd();
+    const std::string closed = quorum_read_line(
+        output_.get(), output_buffer_, 4096, deadline,
+        "operation ExecCell CLOSED timeout");
+    const auto fields = operation_key_value_line(
+        closed, "LOOM_EXEC_OPERATION_CELL_CLOSED_V1");
+    if (operation_require(fields, "semantic_authority") != "Sounio" ||
+        operation_require(fields, "action") != "9030" ||
+        operation_require(fields, "generation_sha256") != generation_ ||
+        operation_require(fields, "event_sha256") != fixtures_.event_sha256 ||
+        operation_require(fields, "record_sha256") !=
+            observation.record_sha256 ||
+        operation_require(fields, "close_receipt_sha256") !=
+            close_receipt_sha256 ||
+        operation_require(fields, "material_execution") != "true" ||
+        operation_require(fields, "authority_extinction") != "armed") {
+      throw Error("operation ExecCell CLOSED binding invalid");
+    }
+    observation.close_bound = true;
     const int status = await_client_exit();
     if (status != 0) {
       throw Error("operation ExecCell systemd client status diverged: " +
                   std::to_string(status));
     }
-    observation.material_execution = true;
-    observation.artifact_measured = verify_material_artifacts(observation);
     finish_extinction(observation);
     finished_ = true;
-    return observation;
   }
 
  private:
@@ -670,6 +712,28 @@ class HostSounioCheckCell {
     return lstat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode) &&
            info.st_uid == 0 && info.st_gid == 0 && info.st_nlink == 1 &&
            (info.st_mode & 0022) == 0 && (info.st_mode & 0111) != 0;
+  }
+
+  static bool path_absent(const std::string& path) {
+    struct stat info {};
+    return lstat(path.c_str(), &info) != 0 && errno == ENOENT;
+  }
+
+  bool runtime_storage_authenticated() const {
+    struct stat link {};
+    struct stat directory {};
+    std::array<char, PATH_MAX> target{};
+    const ssize_t target_size =
+        readlink(runtime_path_.c_str(), target.data(), target.size() - 1);
+    const std::string expected_target = "private/" + runtime_directory_;
+    return lstat(runtime_path_.c_str(), &link) == 0 &&
+           S_ISLNK(link.st_mode) && link.st_uid == 0 && link.st_gid == 0 &&
+           target_size == static_cast<ssize_t>(expected_target.size()) &&
+           std::string(target.data(), static_cast<std::size_t>(target_size)) ==
+               expected_target &&
+           lstat(runtime_storage_path_.c_str(), &directory) == 0 &&
+           S_ISDIR(directory.st_mode) && directory.st_uid == uid_ &&
+           directory.st_gid == gid_ && (directory.st_mode & 0777) == 0700;
   }
 
   std::string property(const std::string& name) const {
@@ -999,8 +1063,8 @@ class HostSounioCheckCell {
   bool verify_material_artifacts(
       const HostSounioCheckObservation& observation) const {
     const std::string artifact =
-        runtime_path_ + "/loom-sounio-check-" + source_sha256_.substr(0, 16) +
-        ".elf";
+        runtime_storage_path_ + "/loom-sounio-check-" +
+        source_sha256_.substr(0, 16) + ".elf";
     const auto measured_regular = [&](const std::string& path,
                                       const std::string& expected_sha256,
                                       std::optional<std::uint64_t> expected_bytes) {
@@ -1033,7 +1097,8 @@ class HostSounioCheckCell {
       return false;
     }
     std::size_t entries = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(runtime_path_)) {
+    for (const auto& entry :
+         std::filesystem::directory_iterator(runtime_storage_path_)) {
       if (!entry.is_regular_file()) return false;
       ++entries;
     }
@@ -1042,6 +1107,7 @@ class HostSounioCheckCell {
 
   void finish_extinction(HostSounioCheckObservation& observation) {
     std::error_code ignored;
+    std::filesystem::remove_all(runtime_storage_path_, ignored);
     std::filesystem::remove_all(runtime_path_, ignored);
     const auto deadline =
         std::chrono::steady_clock::now() + kProductExecIngressHostDeadline;
@@ -1056,7 +1122,7 @@ class HostSounioCheckCell {
           process_witness_cgroup_unpopulated(cgroup_relative_);
       observation.unit_inactive = unit_inactive();
       observation.runtime_directory_extinct =
-          !std::filesystem::exists(runtime_path_);
+          path_absent(runtime_path_) && path_absent(runtime_storage_path_);
       if (observation.pidfd_extinct && observation.process_extinct &&
           observation.cgroup_unpopulated && observation.unit_inactive &&
           observation.runtime_directory_extinct) {
@@ -1086,6 +1152,7 @@ class HostSounioCheckCell {
       }
     }
     std::error_code ignored;
+    std::filesystem::remove_all(runtime_storage_path_, ignored);
     std::filesystem::remove_all(runtime_path_, ignored);
     client_pid_ = -1;
     pid_ = -1;
@@ -1102,6 +1169,7 @@ class HostSounioCheckCell {
   std::string unit_;
   std::string runtime_directory_;
   std::string runtime_path_;
+  std::string runtime_storage_path_;
   std::string source_path_;
   std::string source_sha256_;
   std::string runtime_sha256_;
@@ -1538,6 +1606,15 @@ int selftest_product_exec_cell_host(
         const std::string grant_receipt_sha256 =
             sha256(issue.line + "\n" + consume.line + "\n");
         operation_observation = cell.execute(grant_receipt_sha256);
+        const QuorumReceipt close = operation_controller.command(
+            "CLOSE", operation_fixtures.frames.at("close"));
+        if (close.require("code") != "0" ||
+            close.require("state") != "CLOSED" ||
+            close.require("controller_generation_sha256") !=
+                operation_generation) {
+          throw Error("operation ExecGrant CLOSE was not admitted");
+        }
+        cell.close(operation_observation, sha256(close.line + "\n"));
         operation_provider_done = operation_observation.success_complete() &&
                                   operation_observation.artifact_sha256 ==
                                       kFrozenOperationArtifactSha256;
@@ -1546,8 +1623,6 @@ int selftest_product_exec_cell_host(
                                  operation_observation.record_sha256,
                                  operation_observation.record,
                                  operation_result_policy.manifest_sha256};
-        static_cast<void>(operation_controller.command(
-            "CLOSE", operation_fixtures.frames.at("close")));
       },
       operation_fixtures.event_sha256,
       [&](const ProductIngressHostRun&) { return operation_transport; },
@@ -1704,7 +1779,11 @@ int selftest_product_exec_cell_host(
       << " operation_exec_uid=" << operation_exec_uid
       << " operation_exec_gid=" << operation_exec_gid
       << " operation_simultaneous_distinct_dynamic_users=true"
-      << " operation_protocol=READY+ARM"
+      << " operation_protocol=READY+ARM+CLOSE"
+      << " operation_close_receipt_bound=true"
+      << " operation_runtime_storage=systemd-private-symlink"
+      << " operation_runtime_custody_pre_close=true"
+      << " operation_runtime_released_after_close=true"
       << " operation_principal_self_measured=true"
       << " operation_descriptor_self_measured=true"
       << " operation_pidfd_extinct=true"

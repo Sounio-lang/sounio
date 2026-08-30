@@ -191,19 +191,27 @@ let measure_descriptor ~unit =
   { device = descriptor.st_dev; inode = descriptor.st_ino; canonical;
     sha256 = sha256 canonical }
 
-let require_private_output_directory path =
+let require_private_output_directory ~mode path =
   if Filename.is_relative path then failf "exec-operation-cell-output-dir-not-absolute";
   let lexical = path in
   let before = Unix.lstat lexical in
-  if before.st_kind <> S_DIR then failf "exec-operation-cell-output-dir-not-directory";
   let resolved = Unix.realpath lexical in
-  if resolved <> lexical then failf "exec-operation-cell-output-dir-not-canonical";
+  if before.st_kind = S_DIR then (
+    if resolved <> lexical then failf "exec-operation-cell-output-dir-not-canonical")
+  else if mode = "host" && before.st_kind = S_LNK then (
+    let name = Filename.basename lexical in
+    let expected_target = Filename.concat "private" name in
+    let expected_resolved = Filename.concat "/run/private" name in
+    if Filename.dirname lexical <> "/run" || name = "." || name = ".." ||
+       Unix.readlink lexical <> expected_target || resolved <> expected_resolved then
+      failf "exec-operation-cell-runtime-symlink-mismatch")
+  else failf "exec-operation-cell-output-dir-not-directory";
   let stat = Unix.stat resolved in
   if stat.st_uid <> Unix.getuid () || stat.st_gid <> Unix.getgid () then
     failf "exec-operation-cell-output-dir-custody-mismatch";
   if stat.st_perm land 0o777 <> 0o700 then
     failf "exec-operation-cell-output-dir-not-private";
-  resolved
+  lexical
 
 let valid_invocation_id value =
   String.length value = 32
@@ -245,6 +253,16 @@ let parse_arm line =
       (generation, event, principal, descriptor, grant_receipt)
   | _ -> failf "exec-operation-cell-arm-frame-malformed"
 
+let parse_close line =
+  match String.split_on_char ' ' line with
+  | [ "CLOSE"; generation; event; record; close_receipt ] ->
+      List.iter
+        (fun (label, value) -> ignore (digest ("close-" ^ label) value))
+        [ ("generation", generation); ("event", event); ("record", record);
+          ("receipt", close_receipt) ];
+      (generation, event, record, close_receipt)
+  | _ -> failf "exec-operation-cell-close-frame-malformed"
+
 let run ~root ~source ~output_dir ~unit ~mode =
   Unix.set_close_on_exec Unix.stdin;
   let root = Unix.realpath root in
@@ -255,7 +273,7 @@ let run ~root ~source ~output_dir ~unit ~mode =
   if source <> policy.source then failf "exec-operation-cell-source-not-frozen";
   if projection.semantic_event_sha256 <> policy.event_sha256 then
     failf "exec-operation-cell-catalog-event-mismatch";
-  let output_dir = require_private_output_directory output_dir in
+  let output_dir = require_private_output_directory ~mode output_dir in
   let cgroup = read_bounded_file "/proc/self/cgroup" in
   let host_mode = verify_host_context ~mode ~unit ~output_dir ~cgroup in
   let principal = measure_principal ~unit ~cgroup in
@@ -299,4 +317,19 @@ let run ~root ~source ~output_dir ~unit ~mode =
     (Option.get material.plan.projection.source_sha256)
     material.artifact_sha256 material.artifact_bytes issued.record_sha256
     issued.handle (if host_mode then "true" else "false") issued.record;
+  let close =
+    try input_line Stdlib.stdin with End_of_file ->
+      failf "exec-operation-cell-close-eof"
+  in
+  let close_generation, close_event, close_record, close_receipt =
+    parse_close close
+  in
+  if close_generation <> generation then
+    failf "exec-operation-cell-close-generation-mismatch";
+  if close_event <> event then failf "exec-operation-cell-close-event-mismatch";
+  if close_record <> issued.record_sha256 then
+    failf "exec-operation-cell-close-record-mismatch";
+  Printf.printf
+    "LOOM_EXEC_OPERATION_CELL_CLOSED_V1 semantic_authority=Sounio action=9030 generation_sha256=%s event_sha256=%s record_sha256=%s close_receipt_sha256=%s material_execution=true authority_extinction=armed\n%!"
+    generation event issued.record_sha256 close_receipt;
   0
