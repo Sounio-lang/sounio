@@ -244,6 +244,7 @@ int selftest_product_exec_cell_host(
     const std::string& product_fixture_manifest_path,
     const std::string& product_fixture_bundle_path,
     const std::string& product_exec_result_manifest_path,
+    const std::string& product_provider_hook_fixture_path,
     const std::string& systemd_run_path,
     const std::string& systemctl_path) {
   if (getuid() != 0 || geteuid() != 0 || getgid() != 0 || getegid() != 0 ||
@@ -386,6 +387,97 @@ int selftest_product_exec_cell_host(
           !product_contains(positive_lane.output, "exec-capability"),
       "product ExecCell positive composition failed", positive_lane);
 
+  bool provider_callback = false;
+  bool provider_done = false;
+  bool provider_distinct_live_principals = false;
+  bool provider_controller_extinct = false;
+  std::string provider_receipt;
+  const std::string provider_generation = random_generation_sha256();
+  ExecQuorumController provider_controller(
+      controller_runtime_path, root, resident_runtime_path,
+      provider_generation, "60000");
+  ProductExecIngressHostCase provider_case(
+      product_root, product_runtime, product_language_runtime,
+      product_resident_runtime, systemd_run_path, systemctl_path,
+      "current_material", fixtures.command, true, true,
+      ProductIngressReply::ResultExact,
+      ProductIngressExchangeExpectation::Request,
+      [&](const ProductIngressHostRun& lane) {
+        provider_callback = true;
+        if (!lane.identity_authenticated || !lane.dynamic_user ||
+            lane.command_sha256 != fixtures.command_sha256 ||
+            !lowercase_digest(lane.event_sha256)) {
+          throw Error("provider LaneCell command admission binding invalid");
+        }
+        const QuorumReceipt issue = provider_controller.command(
+            "ISSUE", fixtures.frames.at("issue"));
+        const QuorumReceipt consume = provider_controller.command(
+            "CONSUME", fixtures.frames.at("consume"));
+        const bool semantic_consumed =
+            issue.require("code") == "0" &&
+            consume.require("code") == "0" &&
+            consume.require("quorum_ready") == "true" &&
+            consume.require("state") == "OUTCOME_PENDING" &&
+            issue.require("controller_generation_sha256") ==
+                provider_generation &&
+            consume.require("controller_generation_sha256") ==
+                provider_generation &&
+            provider_controller.authenticated();
+        HostProcessWitnessCell principal(
+            process_witness_runtime_path, process_witness_payload_path,
+            process_witness_manifest_path, systemd_run_path, systemctl_path,
+            provider_generation, false);
+        provider_distinct_live_principals =
+            principal.distinct_uid() && lane.main_uid != 0 &&
+            lane.main_gid != 0 && principal.uid() != lane.main_uid &&
+            principal.gid() != lane.main_gid;
+        const ProcessWitnessObservation observation =
+            principal.execute(semantic_consumed, "CLOSE\n");
+        provider_receipt = observation.receipt;
+        provider_done = semantic_consumed &&
+                        provider_distinct_live_principals &&
+                        observation.success_complete() &&
+                        sha256(provider_receipt) == result_policy.receipt_sha256;
+        static_cast<void>(provider_controller.command(
+            "CLOSE", fixtures.frames.at("close")));
+      },
+      result_policy.event_sha256,
+      [&](const ProductIngressHostRun&) {
+        return ProductIngressResult{result_policy.handle,
+                                    result_policy.receipt_sha256,
+                                    provider_receipt,
+                                    result_policy.manifest_sha256};
+      },
+      product_provider_hook_fixture_path);
+  const ProductIngressHostRun provider_lane = provider_case.execute();
+  const auto provider_controller_deadline =
+      std::chrono::steady_clock::now() + kExecQuorumDeadline;
+  while (provider_controller.authenticated() &&
+         std::chrono::steady_clock::now() < provider_controller_deadline) {
+    poll(nullptr, 0, 5);
+  }
+  provider_controller_extinct = !provider_controller.authenticated();
+  require_product_case(
+      provider_callback && provider_done &&
+          provider_distinct_live_principals && provider_controller_extinct &&
+          provider_lane.hook_code == 0 &&
+          provider_lane.identity_authenticated &&
+          provider_lane.raw_event_sha256 != result_policy.event_sha256 &&
+          provider_lane.event_sha256 == result_policy.event_sha256 &&
+          provider_lane.command_sha256 == fixtures.command_sha256 &&
+          product_contains(provider_lane.ingress_log,
+                           "exec_intent_action=9034\t") &&
+          product_contains(provider_lane.ingress_log,
+                           "result_returned=true\t") &&
+          product_contains(provider_lane.ingress_log,
+                           "exec_attached=true\t") &&
+          product_contains(provider_lane.output,
+                           "LOOM_PROVIDER_STARTED schema=loom-provider-abi-v1 provider=codex") &&
+          product_contains(provider_lane.output, "exec-result-present") &&
+          product_contains(provider_lane.output, result_policy.handle) &&
+          !product_contains(provider_lane.output, "exec-capability"),
+      "provider lifecycle ExecCell composition failed", provider_lane);
+
   bool sabotage_callback = false;
   bool sabotage_exec_cell_created = false;
   bool sabotage_payload_executed = false;
@@ -509,6 +601,8 @@ int selftest_product_exec_cell_host(
       << " exact_fixture_hook_switched=true local_exec_capability_used=false"
       << " raw_event_separate=true event_projection=Sounio-9034"
       << " event_override=false intent_command_mismatch=DENY555"
+      << " provider_hook_switched=true provider_lifecycle_attached=true"
+      << " provider_fixture_language=OCaml"
       << " python_executed=false rust_executed=false"
       << " exec_cell_attached=true material_execution=true"
       << " test_only=true production_activation=false launch_open=false"

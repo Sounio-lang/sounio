@@ -106,6 +106,7 @@ PROCESS_WITNESS_PAYLOAD="$(verify_binding process_witness_payload_path process_w
 PROCESS_WITNESS_MANIFEST="$(verify_binding process_witness_manifest_path process_witness_manifest_sha256 444)"
 PROCESS_WITNESS_GARDEN="$(verify_binding process_witness_garden_path process_witness_garden_sha256 444)"
 PRODUCT_RUNTIME="$(verify_binding product_exec_ingress_runtime_path product_exec_ingress_runtime_sha256 555)"
+PRODUCT_PROVIDER_HOOK_FIXTURE="$(verify_binding product_provider_hook_fixture_path product_provider_hook_fixture_sha256 555)"
 PRODUCT_LANGUAGE_RUNTIME="$(verify_binding product_language_runtime_path product_language_runtime_sha256 555)"
 PRODUCT_LANGUAGE_MANIFEST="$(verify_binding product_language_manifest_path product_language_manifest_sha256 444)"
 PRODUCT_LANGUAGE_FROZEN_SOURCE="$(verify_binding product_language_frozen_source_path product_language_frozen_source_sha256 444)"
@@ -163,11 +164,15 @@ PRODUCT_ROOT="$RELEASE/$(record_value "$MANIFEST" product_authority_root_path)"
    "$(record_value "$MANIFEST" product_exec_ingress_action)" == 9031 && \
    "$(record_value "$MANIFEST" product_exec_result_action)" == 9033 && \
    "$(record_value "$MANIFEST" product_exec_intent_action)" == 9034 && \
+   "$(record_value "$MANIFEST" provider_hook_fixture_configured)" == true && \
+   "$(record_value "$MANIFEST" provider_hook_switched)" == false && \
+   "$(record_value "$MANIFEST" provider_lifecycle_attached)" == false && \
    "$(record_value "$MANIFEST" product_lane_cell_canary)" == false && \
    "$(record_value "$MANIFEST" distinct_uid_product_broker_canary)" == false && \
    "$(record_value "$MANIFEST" product_exec_cell_canary)" == false ]] ||
   fail 'product ExecIngress release posture drifted'
-[[ -s "$PRODUCT_INGRESS_MANIFEST" && -s "$PRODUCT_INGRESS_CONTRACT" && \
+[[ -s "$PRODUCT_PROVIDER_HOOK_FIXTURE" && \
+   -s "$PRODUCT_INGRESS_MANIFEST" && -s "$PRODUCT_INGRESS_CONTRACT" && \
    -s "$PRODUCT_INGRESS_EVIDENCE" && -s "$PRODUCT_LANE_CELL_CANARY_CONTRACT" && \
    -s "$PRODUCT_LANE_CELL_CANARY_MANIFEST" && \
    -s "$PRODUCT_LANE_CELL_CANARY_EVIDENCE" && \
@@ -247,7 +252,7 @@ for expectation in \
 done
 
 set +e
-product_exec_cell_output="$(timeout --signal=TERM --kill-after=5s 180s \
+product_exec_cell_output="$(timeout --signal=TERM --kill-after=5s 240s \
   "$BROKER" --selftest-product-exec-cell-host \
   --controller-manifest "$CONTROLLER_MANIFEST" \
   --controller-runtime "$CONTROLLER_RUNTIME" \
@@ -263,6 +268,7 @@ product_exec_cell_output="$(timeout --signal=TERM --kill-after=5s 180s \
   --product-exec-cell-fixture-manifest "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST" \
   --product-exec-cell-fixture-bundle "$PRODUCT_EXEC_CELL_FIXTURE_BUNDLE" \
   --product-exec-result-manifest "$PRODUCT_EXEC_RESULT_MANIFEST" \
+  --product-provider-hook-fixture "$PRODUCT_PROVIDER_HOOK_FIXTURE" \
   --systemd-run "$SYSTEMD_RUN" --systemctl "$SYSTEMCTL" 2>&1)"
 product_exec_cell_status=$?
 set -e
@@ -285,6 +291,8 @@ for expectation in \
   'local_exec_capability_used=false' 'raw_event_separate=true' \
   'event_projection=Sounio-9034' 'event_override=false' \
   'intent_command_mismatch=DENY555' \
+  'provider_hook_switched=true' 'provider_lifecycle_attached=true' \
+  'provider_fixture_language=OCaml' \
   'python_executed=false' 'rust_executed=false' \
   'exec_cell_attached=true' 'material_execution=true' \
   'test_only=true' 'production_activation=false' \

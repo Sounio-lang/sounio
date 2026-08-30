@@ -193,7 +193,8 @@ class ProductExecIngressHostCase {
       ProductIngressExchangeExpectation exchange_expectation,
       ProductIngressBoundCallback on_bound = {},
       std::string result_event_sha256 = {},
-      ProductIngressResultCallback on_result = {})
+      ProductIngressResultCallback on_result = {},
+      std::string provider_fixture = {})
       : product_root_(canonical_path(product_root)),
         product_runtime_(canonical_path(product_runtime)),
         language_runtime_(canonical_path(language_runtime)),
@@ -209,6 +210,9 @@ class ProductExecIngressHostCase {
         on_bound_(std::move(on_bound)),
         result_event_sha256_(std::move(result_event_sha256)),
         on_result_(std::move(on_result)),
+        provider_fixture_(provider_fixture.empty()
+                              ? ""
+                              : canonical_path(provider_fixture)),
         nonce_(random_generation_sha256().substr(0, 16)),
         unit_("sounio-loom-product-ingress-" + std::to_string(getpid()) + "-" +
               nonce_ + ".service"),
@@ -221,6 +225,9 @@ class ProductExecIngressHostCase {
     verify_runtime(product_runtime_, "product hook runtime");
     verify_runtime(language_runtime_, "language authority runtime");
     verify_runtime(resident_runtime_, "resident action-9031 runtime");
+    if (!provider_fixture_.empty()) {
+      verify_runtime(provider_fixture_, "provider hook fixture");
+    }
   }
 
   ProductExecIngressHostCase(const ProductExecIngressHostCase&) = delete;
@@ -300,6 +307,9 @@ class ProductExecIngressHostCase {
   }
 
   void spawn_systemd_client() {
+    const std::string event = product_hook_event(
+        product_root_, "product-dynamic-user-" + nonce_, command_);
+    raw_event_sha256_ = sha256(event);
     int input_pipe[2];
     int output_pipe[2];
     if (pipe2(input_pipe, O_CLOEXEC) != 0 ||
@@ -382,6 +392,15 @@ class ProductExecIngressHostCase {
       if (!result_event_sha256_.empty()) {
         arguments.push_back("--setenv=SOUNIO_LOOM_EXEC_INTENT_PROJECTION=1");
       }
+      if (!provider_fixture_.empty()) {
+        arguments.push_back("--setenv=SOUNIO_LOOM_PROVIDER_CODEX=" +
+                            provider_fixture_);
+        arguments.push_back("--setenv=SOUNIO_LOOM_PROVIDER_HOOK_RUNTIME=" +
+                            product_runtime_);
+        arguments.push_back("--setenv=SOUNIO_LOOM_PRODUCT_ACTIVATION_ROOT=" +
+                            product_root_);
+        arguments.push_back("--setenv=SOUNIO_LOOM_COORD_AUTO=0");
+      }
       if (dynamic_user_) {
         arguments.push_back("--property=DynamicUser=yes");
       } else {
@@ -399,9 +418,29 @@ class ProductExecIngressHostCase {
       }
       arguments.push_back("--");
       arguments.push_back(product_runtime_);
-      arguments.push_back("agent-hook");
-      arguments.push_back("--agent");
-      arguments.push_back("codex");
+      if (provider_fixture_.empty()) {
+        arguments.push_back("agent-hook");
+        arguments.push_back("--agent");
+        arguments.push_back("codex");
+      } else {
+        arguments.push_back("provider-start");
+        arguments.push_back("--wait");
+        arguments.push_back("--provider");
+        arguments.push_back("codex");
+        arguments.push_back("--state-dir");
+        arguments.push_back(runtime_path_ + "/provider-state");
+        arguments.push_back("--agent");
+        arguments.push_back("provider-host-canary");
+        arguments.push_back("--lane");
+        arguments.push_back("provider-" + nonce_);
+        arguments.push_back("--session-id");
+        arguments.push_back("44444444-4444-4444-8444-444444444444");
+        arguments.push_back("--cwd");
+        arguments.push_back(product_root_);
+        arguments.push_back("--prompt");
+        arguments.push_back(event);
+        arguments.push_back("--isolate-context");
+      }
       std::vector<char*> values;
       values.reserve(arguments.size() + 2);
       values.push_back(const_cast<char*>(systemd_run_.c_str()));
@@ -416,12 +455,11 @@ class ProductExecIngressHostCase {
     output_write = UniqueFd();
     input_ = std::move(input_write);
     output_ = std::move(output_read);
-    const std::string event = product_hook_event(
-        product_root_, "product-dynamic-user-" + nonce_, command_);
-    raw_event_sha256_ = sha256(event);
-    const auto deadline =
-        std::chrono::steady_clock::now() + kProductExecIngressHostDeadline;
-    quorum_write_all(input_.get(), event, deadline);
+    if (provider_fixture_.empty()) {
+      const auto deadline =
+          std::chrono::steady_clock::now() + kProductExecIngressHostDeadline;
+      quorum_write_all(input_.get(), event, deadline);
+    }
   }
 
   void accept_guardian_connection() {
@@ -511,6 +549,18 @@ class ProductExecIngressHostCase {
               (result_event_sha256_.empty() ||
                product_environment_has(
                    environment, "SOUNIO_LOOM_EXEC_INTENT_PROJECTION=1")) &&
+              (provider_fixture_.empty() ||
+               (product_environment_has(
+                    environment,
+                    "SOUNIO_LOOM_PROVIDER_CODEX=" + provider_fixture_) &&
+                product_environment_has(
+                    environment,
+                    "SOUNIO_LOOM_PROVIDER_HOOK_RUNTIME=" + product_runtime_) &&
+                product_environment_has(
+                    environment,
+                    "SOUNIO_LOOM_PRODUCT_ACTIVATION_ROOT=" + product_root_) &&
+                product_environment_has(environment,
+                                        "SOUNIO_LOOM_COORD_AUTO=0"))) &&
               (!descriptor_present_ ||
                (product_environment_has(environment, "LISTEN_FDS=1") &&
                 product_environment_has(
@@ -706,6 +756,7 @@ class ProductExecIngressHostCase {
   ProductIngressBoundCallback on_bound_;
   std::string result_event_sha256_;
   ProductIngressResultCallback on_result_;
+  std::string provider_fixture_;
   std::string nonce_;
   std::string unit_;
   std::string runtime_directory_;

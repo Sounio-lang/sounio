@@ -130,6 +130,12 @@ grep -Fxq 'exec_result_transport_configured=true' "$exec_cell_manifest" ||
   fail 'installed ExecCell bundle omitted the Sounio 9033 result transport'
 grep -Fxq 'exec_intent_projection_configured=true' "$exec_cell_manifest" ||
   fail 'installed ExecCell bundle omitted the Sounio 9034 intent projection'
+grep -Fxq 'provider_hook_fixture_configured=true' "$exec_cell_manifest" ||
+  fail 'installed ExecCell bundle omitted the OCaml provider hook fixture'
+grep -Fxq 'provider_hook_switched=false' "$exec_cell_manifest" ||
+  fail 'installer preclaimed the provider hook switch'
+grep -Fxq 'provider_lifecycle_attached=false' "$exec_cell_manifest" ||
+  fail 'installer preclaimed provider lifecycle attachment'
 grep -Fxq 'exact_fixture_result_attached=false' "$exec_cell_manifest" ||
   fail 'installer preclaimed execution of the exact result fixture'
 grep -Fxq 'exec_attached=false' "$exec_cell_manifest" ||
@@ -144,6 +150,7 @@ exec_cell_release="$prefix/exec-cell/releases/$exec_cell_release_id"
    -x "$exec_cell_release/bin/sounio-loom-process-witness-handshake-v1" &&
    -x "$exec_cell_release/bin/sounio-loom-exec-result-handle" &&
    -x "$exec_cell_release/bin/sounio-loom-exec-intent-envelope" &&
+   -x "$exec_cell_release/bin/sounio-loom-provider-hook-fixture" &&
    -f "$exec_cell_release/authority-root/tools/loom/exec_result_handle.freeze.v1" &&
    -f "$exec_cell_release/authority-root/tools/loom/exec_intent_envelope.freeze.v1" &&
    -f "$exec_cell_release/data/product-exec-cell-fixtures.v1" ]] ||
@@ -188,6 +195,8 @@ grep -Fq ' --product-exec-cell-fixture-manifest ' "$unit" ||
   fail 'unit boot gate omitted the Sounio fixture manifest'
 grep -Fq ' --product-exec-result-manifest ' "$unit" ||
   fail 'unit boot gate omitted the Sounio 9033 result manifest'
+grep -Fq ' --product-provider-hook-fixture ' "$unit" ||
+  fail 'unit boot gate omitted the OCaml provider hook fixture'
 grep -Fxq 'TimeoutStartSec=240s' "$unit" ||
   fail 'unit boot gate lacks a bounded startup deadline'
 grep -Fxq 'Environment=SOUNIO_LOOM_HOST_BOOT_AUTHORITY=/opt/sounio/loom-hostd/bin/sounio-loom-host-boot-reconciler' "$unit" ||
@@ -203,6 +212,12 @@ grep -Fxq 'exec_result_transport_configured=true' "$manifest" ||
   fail 'hostd manifest omitted the Sounio 9033 result transport'
 grep -Fxq 'exec_intent_projection_configured=true' "$manifest" ||
   fail 'hostd manifest omitted the Sounio 9034 intent projection'
+grep -Fxq 'provider_hook_fixture_configured=true' "$manifest" ||
+  fail 'hostd manifest omitted the OCaml provider hook fixture'
+grep -Fxq 'provider_hook_switched=false' "$manifest" ||
+  fail 'hostd manifest preclaimed the provider hook switch'
+grep -Fxq 'provider_lifecycle_attached=false' "$manifest" ||
+  fail 'hostd manifest preclaimed provider lifecycle attachment'
 grep -Fxq 'exact_fixture_result_attached=false' "$manifest" ||
   fail 'hostd manifest preclaimed execution of the exact result fixture'
 grep -Fxq 'socket_namespace=host-shared-tmp' "$manifest" ||

@@ -305,12 +305,16 @@ if [[ -n "$EXEC_CELL_CAPSULE" ]]; then
     product_exec_intent_runtime_path product_exec_intent_runtime_sha256 555)"
   exec_cell_product_runtime="$(verify_exec_cell_binding \
     product_exec_ingress_runtime_path product_exec_ingress_runtime_sha256 555)"
+  exec_cell_provider_hook_fixture="$(verify_exec_cell_binding \
+    product_provider_hook_fixture_path \
+    product_provider_hook_fixture_sha256 555)"
   exec_cell_language_runtime="$(verify_exec_cell_binding \
     product_language_runtime_path product_language_runtime_sha256 555)"
   exec_cell_resident_runtime="$(verify_exec_cell_binding \
     product_resident_runtime_path product_resident_runtime_sha256 555)"
   : "$exec_cell_broker" "$exec_cell_controller_runtime" \
     "$exec_cell_witness_cell" "$exec_cell_product_runtime" \
+    "$exec_cell_provider_hook_fixture" \
     "$exec_cell_language_runtime" "$exec_cell_resident_runtime" \
     "$exec_cell_result_runtime" "$exec_cell_intent_runtime"
   [[ "$(manifest_value "$exec_cell_controller_manifest" semantic_authority)" == Sounio &&
@@ -360,6 +364,10 @@ if [[ -n "$EXEC_CELL_CAPSULE" ]]; then
      "$(manifest_value "$exec_cell_intent_manifest" provider_lifecycle_attached)" == false &&
      "$(manifest_value "$exec_cell_intent_manifest" production_activation)" == false ]] ||
     fail 'ExecCell Sounio 9034 intent authority provenance drifted'
+  [[ "$(manifest_value "$exec_cell_manifest" provider_hook_fixture_configured)" == true &&
+     "$(manifest_value "$exec_cell_manifest" provider_hook_switched)" == false &&
+     "$(manifest_value "$exec_cell_manifest" provider_lifecycle_attached)" == false ]] ||
+    fail 'ExecCell provider hook fixture posture drifted'
   exec_cell_release_id="$(manifest_value "$exec_cell_manifest" release_id)"
   [[ "$exec_cell_release_id" =~ ^9030-hostq-[0-9a-f]{32}$ ]] ||
     fail 'ExecCell release identity is non-canonical'
@@ -471,6 +479,9 @@ exec_cell_boot_gate_configured=$exec_cell_bundle_present
 exec_cell_boot_gate_test_only=true
 exec_result_transport_configured=$exec_cell_bundle_present
 exec_intent_projection_configured=$exec_cell_bundle_present
+provider_hook_fixture_configured=$exec_cell_bundle_present
+provider_hook_switched=false
+provider_lifecycle_attached=false
 exact_fixture_result_attached=false
 exec_attached=false
 production_activation=false
@@ -485,7 +496,7 @@ if [[ "$exec_cell_bundle_present" == true ]]; then
   unit_value() {
     manifest_value "$exec_cell_manifest" "$1"
   }
-  exec_cell_exec_start_pre="ExecStartPre=$systemd_run_path --quiet --wait --pipe --collect --unit=$unit_exec_cell_gate --service-type=exec --setenv=SOUNIO_LOOM_RESIDENT_RECEIPT_LOG=$STATE_DIR/exec-cell-gate-authority.tsv --property=UMask=0077 --property=NoNewPrivileges=yes --property=PrivateTmp=yes --property=PrivateDevices=yes --property=PrivateNetwork=yes --property=ProtectSystem=strict --property=ProtectHome=yes --property=ReadWritePaths=/run\x20$STATE_DIR --property=RestrictAddressFamilies=AF_UNIX --property=TimeoutStartSec=220s -- $unit_exec_cell_release/$(unit_value broker_path) --selftest-product-exec-cell-host --controller-manifest $unit_exec_cell_release/$(unit_value controller_manifest_path) --controller-runtime $unit_exec_cell_release/$(unit_value controller_runtime_path) --controller-root $unit_exec_cell_release/$exec_cell_authority_root_relative --resident-runtime $unit_exec_cell_release/$(unit_value resident_runtime_path) --process-witness-runtime $unit_exec_cell_release/$(unit_value process_witness_cell_path) --process-witness-payload $unit_exec_cell_release/$(unit_value process_witness_payload_path) --process-witness-manifest $unit_exec_cell_release/$(unit_value process_witness_manifest_path) --product-root $unit_exec_cell_release/$exec_cell_product_root_relative --product-runtime $unit_exec_cell_release/$(unit_value product_exec_ingress_runtime_path) --product-language-runtime $unit_exec_cell_release/$(unit_value product_language_runtime_path) --product-resident-runtime $unit_exec_cell_release/$(unit_value product_resident_runtime_path) --product-exec-cell-fixture-manifest $unit_exec_cell_release/$(unit_value product_exec_cell_fixture_manifest_path) --product-exec-cell-fixture-bundle $unit_exec_cell_release/$(unit_value product_exec_cell_fixture_bundle_path) --product-exec-result-manifest $unit_exec_cell_release/$(unit_value product_exec_result_manifest_path) --systemd-run $systemd_run_path --systemctl $systemctl_path"
+  exec_cell_exec_start_pre="ExecStartPre=$systemd_run_path --quiet --wait --pipe --collect --unit=$unit_exec_cell_gate --service-type=exec --setenv=SOUNIO_LOOM_RESIDENT_RECEIPT_LOG=$STATE_DIR/exec-cell-gate-authority.tsv --property=UMask=0077 --property=NoNewPrivileges=yes --property=PrivateTmp=yes --property=PrivateDevices=yes --property=PrivateNetwork=yes --property=ProtectSystem=strict --property=ProtectHome=yes --property=ReadWritePaths=/run\x20$STATE_DIR --property=RestrictAddressFamilies=AF_UNIX --property=TimeoutStartSec=220s -- $unit_exec_cell_release/$(unit_value broker_path) --selftest-product-exec-cell-host --controller-manifest $unit_exec_cell_release/$(unit_value controller_manifest_path) --controller-runtime $unit_exec_cell_release/$(unit_value controller_runtime_path) --controller-root $unit_exec_cell_release/$exec_cell_authority_root_relative --resident-runtime $unit_exec_cell_release/$(unit_value resident_runtime_path) --process-witness-runtime $unit_exec_cell_release/$(unit_value process_witness_cell_path) --process-witness-payload $unit_exec_cell_release/$(unit_value process_witness_payload_path) --process-witness-manifest $unit_exec_cell_release/$(unit_value process_witness_manifest_path) --product-root $unit_exec_cell_release/$exec_cell_product_root_relative --product-runtime $unit_exec_cell_release/$(unit_value product_exec_ingress_runtime_path) --product-language-runtime $unit_exec_cell_release/$(unit_value product_language_runtime_path) --product-resident-runtime $unit_exec_cell_release/$(unit_value product_resident_runtime_path) --product-exec-cell-fixture-manifest $unit_exec_cell_release/$(unit_value product_exec_cell_fixture_manifest_path) --product-exec-cell-fixture-bundle $unit_exec_cell_release/$(unit_value product_exec_cell_fixture_bundle_path) --product-exec-result-manifest $unit_exec_cell_release/$(unit_value product_exec_result_manifest_path) --product-provider-hook-fixture $unit_exec_cell_release/$(unit_value product_provider_hook_fixture_path) --systemd-run $systemd_run_path --systemctl $systemctl_path"
 fi
 
 unit="$dest_unit_dir/$UNIT_NAME"
@@ -544,6 +555,9 @@ exec_cell_boot_gate_configured=$exec_cell_bundle_present
 exec_cell_boot_gate_test_only=true
 exec_result_transport_configured=$exec_cell_bundle_present
 exec_intent_projection_configured=$exec_cell_bundle_present
+provider_hook_fixture_configured=$exec_cell_bundle_present
+provider_hook_switched=false
+provider_lifecycle_attached=false
 exact_fixture_result_attached=false
 exec_attached=false
 prefix=$PREFIX
@@ -578,11 +592,12 @@ if [[ $ACTIVATE -eq 1 ]]; then
   mv -f "$manifest_stage" "$manifest"
 fi
 
-printf 'LOOM_HOSTD_INSTALLED prefix=%s state_dir=%s socket_root=%s unit=%s language=OCaml role=EFFECT_PARITY semantic_authority=Sounio actions=9030,9031,9033,9034,9041 semantics_sha256=%s authority_runtime_sha256=%s ocaml_runtime_sha256=%s resident_runtime_sha256=%s product_activation_policy_sha256=%s exec_cell_bundle_present=%s exec_cell_release_id=%s exec_cell_release_manifest_sha256=%s exec_cell_release_tree_sha256=%s exec_cell_canary_frozen=%s exec_cell_boot_gate_configured=%s exec_cell_boot_gate_test_only=true exec_result_transport_configured=%s exec_intent_projection_configured=%s exact_fixture_result_attached=false exec_attached=false activated=%s automatic_lineage_resurrection=false python_executed=false rust_executed=false\n' \
+printf 'LOOM_HOSTD_INSTALLED prefix=%s state_dir=%s socket_root=%s unit=%s language=OCaml role=EFFECT_PARITY semantic_authority=Sounio actions=9030,9031,9033,9034,9041 semantics_sha256=%s authority_runtime_sha256=%s ocaml_runtime_sha256=%s resident_runtime_sha256=%s product_activation_policy_sha256=%s exec_cell_bundle_present=%s exec_cell_release_id=%s exec_cell_release_manifest_sha256=%s exec_cell_release_tree_sha256=%s exec_cell_canary_frozen=%s exec_cell_boot_gate_configured=%s exec_cell_boot_gate_test_only=true exec_result_transport_configured=%s exec_intent_projection_configured=%s provider_hook_fixture_configured=%s provider_hook_switched=false provider_lifecycle_attached=false exact_fixture_result_attached=false exec_attached=false activated=%s automatic_lineage_resurrection=false python_executed=false rust_executed=false\n' \
   "$PREFIX" "$STATE_DIR" "$SOCKET_ROOT" "$UNIT_DIR/$UNIT_NAME" \
   '0d5174cd87b8c18b5f3bbfa7ed44d0258795a96f146730c879c46167abdddf7d' \
   "$authority_sha256" "$runtime_sha256" "$resident_sha256" \
   "$policy_tree_sha256" "$exec_cell_bundle_present" "$exec_cell_release_id" \
   "$exec_cell_release_manifest_sha256" "$exec_cell_release_tree_sha256" \
   "$exec_cell_bundle_present" "$exec_cell_bundle_present" \
-  "$exec_cell_bundle_present" "$exec_cell_bundle_present" "$activated"
+  "$exec_cell_bundle_present" "$exec_cell_bundle_present" \
+  "$exec_cell_bundle_present" "$activated"

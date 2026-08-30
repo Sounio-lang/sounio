@@ -119,10 +119,14 @@ SOUNIO_LOOM_EXEC_INTENT_ENVELOPE_OUTPUT="$BIN/sounio-loom-exec-intent-envelope" 
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_exec_intent_envelope_fixture.sh" >/dev/null
 (
   flock -x 9
-  dune build --root "$ROOT_DIR/tools/loom" src/loom.exe >/dev/null
+  dune build --root "$ROOT_DIR/tools/loom" \
+    src/loom.exe src/loom_provider_hook_fixture.exe >/dev/null
 ) 9>"$ROOT_DIR/tools/loom/_build/.dune-build.lock"
 install -m 0555 "$ROOT_DIR/tools/loom/_build/default/src/loom.exe" \
   "$BIN/sounio-loom-runtime"
+install -m 0555 \
+  "$ROOT_DIR/tools/loom/_build/default/src/loom_provider_hook_fixture.exe" \
+  "$BIN/sounio-loom-provider-hook-fixture"
 fixture_runtime="$WORK/sounio-loom-host-exec-quorum-fixture"
 SOUNIO_LOOM_HOST_EXEC_QUORUM_FIXTURE_OUTPUT="$fixture_runtime" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_host_exec_quorum_fixture.sh" >/dev/null
@@ -275,6 +279,7 @@ PROCESS_WITNESS_CELL_SHA256="$(sha256_file "$BIN/loom-process-witness-principal-
 PROCESS_WITNESS_PAYLOAD_SHA256="$(sha256_file "$BIN/sounio-loom-process-witness-handshake-v1")"
 PROCESS_WITNESS_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/process_witness_handshake_payload.freeze.v1")"
 PRODUCT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-runtime")"
+PRODUCT_PROVIDER_HOOK_FIXTURE_SHA256="$(sha256_file "$BIN/sounio-loom-provider-hook-fixture")"
 PRODUCT_LANGUAGE_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-language-authority-runtime")"
 PRODUCT_LANGUAGE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/language_authority.freeze.v1")"
 PRODUCT_RESIDENT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-resident-membrane-runtime-v5")"
@@ -312,7 +317,7 @@ FIXTURE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/host_exec_quo
 CONTROLLER_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_grant_controller.runtime.v1")"
 DERIVED_GARDEN_SHA256="$(sha256_file "$ROOT_DIR/tools/loom/GARDEN_HOST_EXEC_QUORUM_DYNAMIC_PRINCIPAL_V1.md")"
 PROCESS_WITNESS_GARDEN_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md")"
-RELEASE_DIGEST="$(printf '%s\n' "$SOURCE_COMMIT" "$BROKER_SHA256" "$CONTROLLER_SHA256" "$RESIDENT_SHA256" "$LOCAL_BARRIER_SHA256" "$HOST_BARRIER_SHA256" "$DERIVED_GARDEN_SHA256" "$PROCESS_WITNESS_CELL_SHA256" "$PROCESS_WITNESS_PAYLOAD_SHA256" "$PROCESS_WITNESS_MANIFEST_SHA256" "$PROCESS_WITNESS_GARDEN_SHA256" "$PRODUCT_RUNTIME_SHA256" "$PRODUCT_LANGUAGE_RUNTIME_SHA256" "$PRODUCT_RESIDENT_RUNTIME_SHA256" "$PRODUCT_INGRESS_MANIFEST_SHA256" "$PRODUCT_LANE_CELL_CANARY_CONTRACT_SHA256" "$PRODUCT_LANE_CELL_CANARY_MANIFEST_SHA256" "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST_SHA256" "$PRODUCT_EXEC_CELL_FIXTURE_BUNDLE_SHA256" "$PRODUCT_EXEC_RESULT_MANIFEST_SHA256" "$PRODUCT_EXEC_RESULT_RUNTIME_SHA256" "$PRODUCT_EXEC_INTENT_MANIFEST_SHA256" "$PRODUCT_EXEC_INTENT_RUNTIME_SHA256" | sha256sum | cut -d ' ' -f 1)"
+RELEASE_DIGEST="$(printf '%s\n' "$SOURCE_COMMIT" "$BROKER_SHA256" "$CONTROLLER_SHA256" "$RESIDENT_SHA256" "$LOCAL_BARRIER_SHA256" "$HOST_BARRIER_SHA256" "$DERIVED_GARDEN_SHA256" "$PROCESS_WITNESS_CELL_SHA256" "$PROCESS_WITNESS_PAYLOAD_SHA256" "$PROCESS_WITNESS_MANIFEST_SHA256" "$PROCESS_WITNESS_GARDEN_SHA256" "$PRODUCT_RUNTIME_SHA256" "$PRODUCT_PROVIDER_HOOK_FIXTURE_SHA256" "$PRODUCT_LANGUAGE_RUNTIME_SHA256" "$PRODUCT_RESIDENT_RUNTIME_SHA256" "$PRODUCT_INGRESS_MANIFEST_SHA256" "$PRODUCT_LANE_CELL_CANARY_CONTRACT_SHA256" "$PRODUCT_LANE_CELL_CANARY_MANIFEST_SHA256" "$PRODUCT_EXEC_CELL_FIXTURE_MANIFEST_SHA256" "$PRODUCT_EXEC_CELL_FIXTURE_BUNDLE_SHA256" "$PRODUCT_EXEC_RESULT_MANIFEST_SHA256" "$PRODUCT_EXEC_RESULT_RUNTIME_SHA256" "$PRODUCT_EXEC_INTENT_MANIFEST_SHA256" "$PRODUCT_EXEC_INTENT_RUNTIME_SHA256" | sha256sum | cut -d ' ' -f 1)"
 RELEASE_ID="9030-hostq-${RELEASE_DIGEST:0:32}"
 
 cat > "$RELEASE_STAGE/release.manifest.v1" <<EOF
@@ -395,6 +400,8 @@ product_exec_intent_runtime_path=bin/sounio-loom-exec-intent-envelope
 product_exec_intent_runtime_sha256=$PRODUCT_EXEC_INTENT_RUNTIME_SHA256
 product_exec_ingress_runtime_path=bin/sounio-loom-runtime
 product_exec_ingress_runtime_sha256=$PRODUCT_RUNTIME_SHA256
+product_provider_hook_fixture_path=bin/sounio-loom-provider-hook-fixture
+product_provider_hook_fixture_sha256=$PRODUCT_PROVIDER_HOOK_FIXTURE_SHA256
 product_language_runtime_path=bin/sounio-loom-language-authority-runtime
 product_language_runtime_sha256=$PRODUCT_LANGUAGE_RUNTIME_SHA256
 product_language_manifest_path=authority-root/tools/loom/language_authority.freeze.v1
@@ -424,6 +431,9 @@ recycle_open=false
 exec_attached=false
 exact_fixture_hook_switched=true
 exact_fixture_result_attached=false
+provider_hook_fixture_configured=true
+provider_hook_switched=false
+provider_lifecycle_attached=false
 commit_attached=false
 ci_attached=false
 parity_open=false
