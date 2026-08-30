@@ -119,6 +119,16 @@ set -e
 [[ $mismatch_code -eq 42 && "$mismatch_result" == \
    "$(manifest_value template_mismatch_decision)" ]] ||
   fail 'template-binding sabotage drifted'
+for control in unknown_operation invalid_argument write_effect; do
+  frame="$(manifest_value wire_schema) $(manifest_value "${control}_word0") $(manifest_value common_word1)"
+  set +e
+  control_result="$(printf '%s\n' "$frame" | "$work/runtime-one")"
+  control_code=$?
+  set -e
+  [[ $control_code -eq 42 && "$control_result" == \
+     "$(manifest_value "${control}_decision")" ]] ||
+    fail "$control control drifted"
+done
 
 result="$(bash "$ROOT_DIR/scripts/ci/sounio_loom_exec_operation_catalog_selftest.sh")"
 [[ "$result" == "$(manifest_value result)" ]] ||

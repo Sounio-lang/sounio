@@ -12399,6 +12399,27 @@ let exec_intent_probe_command cli =
   else failf "exec-intent-probe mode must be project or command-mismatch";
   0
 
+let exec_catalog_probe_command cli =
+  if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
+    failf "exec-catalog-probe requires SOUNIO_LOOM_HOOK_TEST_MODE=1";
+  let projection =
+    Loom_exec_catalog.project
+      ~root:(required cli "--root" |> Unix.realpath)
+      ~operation:(required cli "--operation")
+      ~source:(optional cli "--source")
+  in
+  Printf.printf
+    "LOOM_EXEC_OPERATION_CATALOG_PROJECTION semantic_authority=Sounio action=9035 operational_kernel=OCaml operation=%s source_path=%s source_sha256=%s catalog_sha256=%s manifest_sha256=%s authority_source_sha256=%s authority_executable_sha256=%s semantic_event_sha256=%s command_template_sha256=%s argument_schema_sha256=%s result_schema_sha256=%s sandbox_profile_sha256=%s authority_output_sha256=%s arbitrary_shell=false ocaml_catalog_projection_attached=true host_payload_selection_attached=false provider_lifecycle_attached=false general_exec_attached=false production_activation=false\n%!"
+    projection.operation
+    (Option.value ~default:"-" projection.source_path)
+    (Option.value ~default:"-" projection.source_sha256)
+    projection.catalog_sha256 projection.manifest_sha256
+    projection.authority_source_sha256 projection.authority_executable_sha256
+    projection.semantic_event_sha256 projection.command_template_sha256
+    projection.argument_schema_sha256 projection.result_schema_sha256
+    projection.sandbox_profile_sha256 projection.authority_output_sha256;
+  0
+
 let exec_result_present_command cli =
   let result =
     Loom_exec_result.validate_transport
@@ -12426,6 +12447,8 @@ let usage () =
     "  exec-result-probe --root DIR --store DIR --mode publish|resolve|command-mismatch|promote-authority [--receipt FILE] [--handle HANDLE] (test mode only)\n";
   Printf.eprintf
     "  exec-intent-probe --root DIR --mode project|command-mismatch --raw-event SHA --command SHA (test mode only)\n";
+  Printf.eprintf
+    "  exec-catalog-probe --root DIR --operation calibration|sounio-check [--source RELATIVE.sio] (test mode only)\n";
   Printf.eprintf
     "  exec-result-present --root DIR --event SHA --command SHA --handle HANDLE --receipt-sha256 SHA --receipt-hex HEX --manifest-sha256 SHA\n";
   Printf.eprintf
@@ -12507,6 +12530,7 @@ let main () =
     | "exec-grant-cell-probe" -> exec_grant_cell_probe_command cli
     | "exec-ingress-probe" -> exec_ingress_probe_command cli
     | "exec-intent-probe" -> exec_intent_probe_command cli
+    | "exec-catalog-probe" -> exec_catalog_probe_command cli
     | "exec-result-probe" -> exec_result_probe_command cli
     | "exec-result-present" -> exec_result_present_command cli
     | "peer-activation-capsule-probe" ->
@@ -12616,7 +12640,8 @@ let () =
   | Loom_effect_closure.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_invocation_cell.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_exec_grant_cell.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
-  | Loom_exec_intent.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
+  | Loom_exec_intent.Error error
+  | Loom_exec_catalog.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_exec_result.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_peer_activation_capsule.Error error ->
       Printf.eprintf "error: %s\n%!" error; exit 1
