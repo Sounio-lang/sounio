@@ -58,6 +58,35 @@ jobs:
           node-version: '22'
       - name: Workflow script references
         run: bash scripts/dev/check_workflow_script_refs.sh
+      # The docs claimed "Cranelift JIT enabled" and named a JIT profile artifact
+      # that is tracked nowhere. `souc info` prints `[-] Cranelift JIT` and the
+      # binary exports no Cranelift symbol. A doc may not claim a backend the
+      # binary reports as not compiled.
+      - name: Backend claim parity
+        run: bash scripts/ci/backend_claim_parity_gate.sh
+      # `souc --help` omitted `ontology`, `install` and `search`. The verbs work;
+      # the usage block never mentioned them, and a survey of `--help` concluded
+      # they did not exist. Runs with SOUC_BIN cleared: an inherited SOUC_BIN
+      # points at another checkout and the comparison becomes meaningless.
+      - name: souc --help verb parity
+        run: env -u SOUC_BIN -u SOUNIO_SOUC_BIN bash scripts/ci/souc_help_verb_parity_gate.sh
+      # A number this repo states about itself must equal the number the tree
+      # yields. Seeded from a 2026-08-27 backlog sweep where nearly every rebased
+      # PR asserted a figure that was true when written and false by then --
+      # invisible to review, to rebase and to CI, because a stale number reads
+      # exactly like a fresh one.
+      - name: Measured claims match the tree
+        run: bash scripts/ci/measured_claim_gate.sh
+      - name: Measured-claim gate fails when it should
+        run: bash scripts/ci/measured_claim_gate_selftest.sh
+      # Naming a compiler must select it or stop. MADAROS_RAW_BIN / SOUNIO_SOUC_BIN
+      # were resolved by "first candidate that is executable", so an override that
+      # was set but not executable got SKIPPED and resolution fell through to the
+      # committed ELF -- which lags self-hosted/ source. Measured 2026-08-28: the
+      # same file gave "check: OK" at mode 0600 and error[E245] at 0700. This step
+      # drives both directions, so a guard that refused everything would fail too.
+      - name: Unusable compiler override fails closed
+        run: bash scripts/ci/compiler_override_fail_closed_gate.sh
       # The step above enforces workflow -> script (a named path must exist and
       # be executable). The reverse was unenforced: a gate could be added that no
       # workflow names, breaking nothing and running nowhere. This ratchets that
@@ -110,6 +139,13 @@ jobs:
         run: bash scripts/ci/sounio_package_support_gate.sh
       - name: LoRA dataset assets
         run: bash scripts/ci/lora_assets_gate.sh
+      # Static pin of Knowledge annotation parser coverage (declared vs
+      # reachable vs E241). Dynamic probes need a source-built Madaros —
+      # that clock is the Witness live-refuse step, not this one.
+      - name: Knowledge annotation parser coverage (static)
+        env:
+          SOUNIO_KCOV_SKIP_DYNAMIC: "1"
+        run: bash scripts/dev/knowledge_annotation_parser_coverage.sh
       - name: Issue template contracts
         run: bash scripts/ci/check_issue_template_contracts.sh
       - name: Legacy path hygiene
@@ -253,9 +289,9 @@ jobs:
         run: bash scripts/ci/verify_boot4_seed.sh
       - name: Extern builtin allow-list mirror (#1622)
         run: bash scripts/ci/extern_builtin_mirror_gate.sh
-      - name: E219 refusal correspondence (Lean Check ↔ Madaros)
+      - name: E250 refusal correspondence (Lean Check ↔ Madaros)
         run: bash scripts/ci/e219_refusal_correspondence_gate.sh
-      - name: E219 engine oracle (Madaros refuses; seed split is reported)
+      - name: E250 engine oracle (Madaros refuses; seed split is reported)
         run: bash scripts/ci/e219_engine_oracle_gate.sh
       # #1780: first machine-checked link between EpistemicEffectsV2 t_kraw
       # and Madaros measure/Knowledge typing. Grep correspondence, not a
@@ -276,6 +312,10 @@ jobs:
         run: python3 scripts/ci/ci_watch_receipt_selftest.py
       - name: Madaros changed-test selector self-test
         run: bash scripts/ci/madaros_changed_tests_selftest.sh
+      # Honour expect-stdout-contains and refuse invented expect-* keys.
+      # A gate that no workflow names is invisible tomorrow (ratchet #1972).
+      - name: Test-suite annotation self-test
+        run: bash scripts/ci/test_suite_annotation_selftest.sh
       - name: Madaros v2 ENIR gate stack
         run: |
           # Shadow stack: ENIR work must not change codegen/ABI/runtime.
@@ -330,14 +370,117 @@ jobs:
         run: bash scripts/ci/madaros_receipt_gate.sh
       # 67% of gates carry no emptiness guard. This one is ratcheted: the known
       # set may only shrink, and a NEW gate without a guard is red.
+      # Compiles the word instead of modelling the parser. A static version was
+      # tried first and was WRONG: it reported 30 identifier-capable keywords as
+      # broken and probing showed all 30 work. Runs its own negative control --
+      # match, struct, while, return and let must all be refused -- before it
+      # reports anything.
+      - name: IDENTIFIER_OK keywords are actually usable as identifiers
+        run: bash scripts/ci/keyword_identifier_capability_gate.sh
+      # lean_single has canonical_compiler_gate.sh; Madaros had nothing, because
+      # rebuilding it takes four minutes. This does not rebuild -- it asks, per
+      # capability, whether the shipped binary does what the source implements.
+      - name: Committed Madaros binary is not behind its source
+        run: bash scripts/ci/madaros_binary_source_drift_gate.sh
       - name: Gates must not pass on no data
         run: bash scripts/ci/gate_vacuity_gate.sh
+      # An epistemic builtin must refuse what it cannot answer. hessian_of(x*x)
+      # with no indices used to type-check and return 0.0 while the true H_00 is
+      # 2.0 -- and in this algebra zero is not neutral, it is the claim "no
+      # second-order dependence". The gate builds its own probes and carries
+      # positive controls, so it cannot pass by refusing everything.
+      - name: Epistemic builtins refuse what they cannot answer
+        run: bash scripts/ci/epistemic_refusal_coverage_gate.sh
+      # Census mode only: the full mode rebuilds each declared witness under its
+      # own sabotage, which needs a Madaros ELF this job does not have. The
+      # census is the number worth watching anyway -- how many of our run-pass
+      # tests can demonstrate they measure anything at all. It was 6 of 1830
+      # when the gate landed.
+      #
+      # This gate was merged unnamed and gate_workflow_reference_ratchet.sh
+      # caught it on the next PR (472 -> 473). It was right to: a gate about
+      # instruments that measure nothing, itself run by nobody, is the exact
+      # defect it exists to find.
+      # The gate's own control matrix. It lived in a PR description, ran once, and
+      # would never have run again. Nine cells, each required to produce a
+      # DIFFERENT verdict -- the first version returned the same one in all four
+      # because the synthetic compiler exited 0 without writing its output.
+      # A claim is not a finding until someone who did not produce it returns a
+      # verdict, by a DIFFERENT route than the one that produced it. Blocks on
+      # claims with no verdict and on verdicts that state no independent route.
+      # REFUTED and UNMEASURED are healthy states and do not block.
+      - name: Findings carry a second party's verdict
+        run: bash scripts/ci/pair_verification_ratchet.sh
+
+      # A diagnostic code is a global semantic identity and may name one thing.
+      # Seventeen collisions were found by census (#2170), six with both sides
+      # emitted; this gate counts them from the tree and freezes all three
+      # populations. Its extraction carries its own positive control: if it
+      # cannot find the two hand-verified collisions it refuses to report,
+      # because a zero from a broken pattern looks exactly like a clean tree.
+      - name: A diagnostic code names one thing
+        run: bash scripts/ci/diagnostic_identity_gate.sh
+      # #2170: freeze the semantic ownership of the four repaired codes and
+      # prove each assertion is live by laundering it back to the old number.
+      - name: E247-E250 diagnostic remap with sabotage controls
+        run: bash scripts/ci/diagnostic_remap_2170_gate.sh
+
+      - name: Sabotage gate self-test
+        run: bash scripts/ci/witness_sabotage_gate_selftest.sh
+
+      - name: Witnesses declare what would kill them (census)
+        env:
+          SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY: "1"
+        run: bash scripts/ci/witness_declares_its_sabotage_gate.sh
+
+      # The fleet launcher lives outside the repository and is not tracked, so
+      # a bad edit to it is invisible to every review here. This reports whether
+      # the live file still matches the committed reference; it does not fail on
+      # drift, because the live file is legitimately edited on the pod.
+      - name: Fleet lane launcher matches its committed reference
+        run: bash scripts/ci/lane_shell_drift_gate.sh
+      # Three gates arrive with the kimi-cli1 rescue. Naming them here is the
+      # price of landing them: gate_workflow_reference_ratchet.sh refuses a gate
+      # no workflow runs, and it is right to -- an unnamed gate costs nothing
+      # today and is invisible tomorrow. Each was timed before wiring, so none
+      # is an instant green: 3.0s, 70.1s and 210s of real work respectively.
+      - name: Uncertain equality keeps its trust channel
+        run: bash scripts/ci/madaros_uncertain_eq_trust_gate.sh
+      - name: Ontology frontiers hold
+        run: bash scripts/ci/ontology_frontiers_gate.sh
+      - name: Multi-ontology composition holds
+        run: bash scripts/ci/ontology_multi_ontology_gate.sh
+      # Absence of measurement must not read as success. Meta-gate requires a
+      # positive GATE_MEASURED assertions=N receipt (see CI_ABSENCE_AS_SUCCESS_CONTRACT).
+      #
+      # This step drives two fixtures, named here on purpose so
+      # gate_workflow_reference_ratchet.sh does not count them as gates no
+      # workflow runs (it greps this directory for scripts/ paths, comments
+      # included). They must NOT get their own steps: they are the meta-gate's
+      # controls, and scripts/ci/fixtures/gate_measurement_pilot_vacuous.sh is
+      # REQUIRED to be rejected — running it as a CI step would assert the
+      # opposite of what it exists to prove.
+      #   scripts/ci/fixtures/gate_measurement_pilot_ok.sh       (must be accepted)
+      #   scripts/ci/fixtures/gate_measurement_pilot_vacuous.sh  (must be refused)
+      - name: Gates must prove they measured
+        run: bash scripts/ci/gate_measurement_meta_gate.sh
       # The shipped lean_single ELF must BE the byte-identical fixed point of
       # current lean_single.sio. This gate existed, passed, and was wired to no
       # workflow — so the one thing that would notice the shipped binary drifting
       # from source was never run. ~2 s.
       - name: Canonical lean_single fixed point
         run: bash scripts/ci/canonical_compiler_gate.sh
+      # Archaeology ladders. Position is derived from fixtures, not stored.
+      # Measured green on origin/main 1dc0df549d before this wire.
+      # effect_archaeology_gate.sh is NOT here: it is red on that SHA
+      # (Chaotic pass fixture dies at native ELF write rc=12). Wiring a
+      # red gate would paint main red. Do not lower its criterion to land it.
+      - name: TypeKind archaeology ladder
+        run: bash scripts/ci/typekind_archaeology_gate.sh
+      - name: TypeKind archaeology family C
+        run: bash scripts/ci/typekind_archaeology_c.sh
+      - name: TypeKind archaeology family E
+        run: bash scripts/ci/typekind_archaeology_e.sh
       - name: Sounio launcher BSD portability
         run: bash scripts/ci/souc_launcher_portability_gate.sh
       - name: Output-path invariants
@@ -439,6 +582,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Host self-host gate
         run: bash scripts/ci/selfhost_host_gate.sh
+      - name: Aggregate field identity across module boundaries
+        env:
+          SOUNIO_AGGREGATE_FIELD_SEED: /tmp/sounio-selfhost-linux-x86_64/artifacts/souc-stage2
+        run: bash scripts/ci/aggregate_field_identity_gate.sh
       - name: Feature gate (11 tests)
         run: |
           cp /tmp/sounio-selfhost-linux-x86_64/artifacts/souc-stage2 /tmp/final_boot4.elf
@@ -601,6 +748,16 @@ jobs:
         env:
           SOUNIO_EPISTEMIC_EGRAPH_MADAROS: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/epistemic_egraph_rewrite_gate.sh
+      # W044: `Tipo::metodo(...)` whose target resolves to nothing typechecked
+      # silently and evaluated to 0. Five cases, two warn and three quiet --
+      # the quiet ones are the point, because the failure mode of this check is
+      # firing on legitimate module-qualified calls, not missing one. Reuses the
+      # ELF built above; adds no build.
+      - name: Unknown associated-fn call warns (W044)
+        env:
+          SOUNIO_MADAROS_UNKNOWN_ASSOC_FN_GATE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_UNKNOWN_ASSOC_FN_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering/unknown-assoc-fn
+        run: bash scripts/ci/madaros_unknown_assoc_fn_gate.sh
       # madaros_corpus_regression_gate.sh is deliberately NOT wired in yet.
       # Run for real against a from-source Madaros for the first time on
       # 2026-07-27, it reports 1028 corpus programs failing that are not in
@@ -705,13 +862,18 @@ jobs:
     needs: impact
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Raised from 20 with the sabotage gate: it rebuilds each declared witness.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Build Madaros from this PR's own source
         run: |
           ulimit -s 1048576 2>/dev/null || true
           bash scripts/ci/build_modular_madaros.sh /tmp/madaros-ci.elf
+      - name: Imported Seq lowering against the fresh build
+        env:
+          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+        run: bash scripts/ci/madaros_imported_seed_lowering_gate.sh
       - name: Tier 0 witness matrix against the fresh build
         env:
           MADAROS_RAW_BIN: /tmp/madaros-ci.elf
@@ -729,20 +891,119 @@ jobs:
           MADAROS_RAW_BIN: /tmp/madaros-ci.elf
           SOUNIO_WITNESS_GLOB: tests/compiler/epistemic_payload_gate/*.sio
         run: bash scripts/ci/madaros_epistemic_payload_gate.sh
+      # Full mode, not census: census reports passed=0/not_run=total, which would
+      # satisfy the workflow-reference ratchet while the gate verified nothing --
+      # the exact defect it was written to catch. This job already has a fresh
+      # Madaros, so the real mode costs one rebuild per declared witness.
+      - name: Witness sabotage declarations against the fresh build
+        env:
+          SOUNIO_WITNESS_SABOTAGE_MADAROS: /tmp/madaros-ci.elf
+        run: bash scripts/ci/witness_declares_its_sabotage_gate.sh
+      - name: propagate monte_carlo fn-ptr promotion (default Madaros)
+        env:
+          SOUNIO_STDLIB_PATH: ${{ github.workspace }}/stdlib
+        run: bash scripts/ci/madaros_propagate_monte_carlo_fnptr_gate.sh
       # Grep correspondence lives in Contracts. This arm compiles the
-      # E219 fixture against the Madaros just built from this commit.
-      - name: E219 live refuse against the fresh build
+      # E250 fixture against the Madaros just built from this commit.
+      - name: E250 live refuse against the fresh build
         env:
           MADAROS_RAW_BIN: /tmp/madaros-ci.elf
         run: bash scripts/ci/e219_madaros_live_refuse.sh
+      # Static ownership and sabotage run in Contracts; this arm proves that
+      # the same source-fresh compiler emits the three source-reachable codes.
+      # E248 remains structural-only because parser E249 preempts wide casts.
+      - name: E247-E250 diagnostic remap against the fresh build
+        env:
+          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+        run: bash scripts/ci/diagnostic_remap_2170_gate.sh --souc bin/souc
+      # E229: the lexer's token-table / source-byte ceiling must REFUSE, never
+      # silently drop input. Same family and same reason as the E219 arm above --
+      # the committed ELF predates the refusal and still clips (measured
+      # 2026-08-27: W1 rc=0 on lean_single, no E229), so this needs the Madaros
+      # just built from this commit and cannot live in Contracts.
+      - name: E229 token/source ceiling refuses against the fresh build
+        env:
+          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+        run: bash scripts/ci/token_table_ceiling_gate.sh
+      # E241: unknown Knowledge components must refuse on the Madaros just
+      # built from this commit. The committed ELF still swallows them —
+      # same class as E250 / E158, so this is Witness not Contracts.
+      - name: E241 unknown Knowledge component live refuse against the fresh build
+        env:
+          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+        run: bash scripts/ci/knowledge_unknown_component_live_refuse.sh
       # #1798: forward inverse_of must be E158 on both engines. The committed
       # bin/madaros-linux-x86_64 still accepts the witness (check: OK) —
       # measured 2026-08-18 against origin/main. The gate requires an explicit
       # source-current ELF; putting it in Contracts would fail every PR.
+      # Pure source analysis -- no build, no compiler run, so it sits before
+      # anything expensive and fails in under a second. It has its own positive
+      # control built in: it sabotages a copy of the table first and refuses to
+      # report green unless that copy is rejected.
+      # Same family and same cost: source analysis, sub-second, its own positive
+      # control built in.
+      - name: RelocationTable declared size agrees with its bound check
+        run: bash scripts/ci/reloc_table_capacity_coherence_gate.sh
+      - name: Builtin-id tables agree across all four dispatch sites
+        run: bash scripts/ci/builtin_id_table_coherence_gate.sh
       - name: Ontology inverse_of declaration-order (E158) against the fresh build
         env:
           MADAROS_BIN: /tmp/madaros-ci.elf
         run: bash scripts/ci/madaros_ontology_enforcement_gate.sh
+
+  gate-wave-0:
+    name: Gate Wave 0
+    needs: impact
+    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Madaros from this PR's own source
+        run: |
+          ulimit -s 1048576 2>/dev/null || true
+          bash scripts/ci/build_modular_madaros.sh /tmp/madaros-wave0.elf
+      # First four of the 472 gate scripts that no workflow named (frozen count:
+      # scripts/ci/gate_workflow_reference.frozen). Picked from the PASS
+      # bucket of a from-source gate sweep, for the incident each one would
+      # have caught rather than for convenience:
+      #   - madaros_gum_cross_function_gate.sh: FO variance silently drops to
+      #     0.000000 across a call boundary -- the same failure SHAPE as
+      #     #1792 (epistemic fabrication), on a different surface.
+      #   - gate_assert_instrument_selftest.sh: scripts/lib/gate_assert.sh
+      #     underlies most gates in this repo, including this job's own
+      #     run_gate_list.sh; an unverified shared assertion library fails
+      #     silently for everything built on it, not just for itself.
+      #   - parser_keyword_classification_gate.sh: an unclassified keyword
+      #     cost real hours twice -- `policy` produced six misattributed
+      #     errors, `level` produced thirteen parse errors that broke every
+      #     importer of stdlib/plot/line.sio and got the dissertation's
+      #     clinical validation test wrongly blamed. See the gate's own
+      #     header for the measured cost.
+      #   - compile_fail_harness_contract_gate.sh: positive control that the
+      #     compile-fail harness rejects a crash, a timeout, or the wrong
+      #     diagnostic as a pass -- a green run that proves nothing, applied
+      #     to the harness every compile-fail test in the suite depends on.
+      # A green Wave 0 means these four ran and returned what they claim to
+      # measure -- not that Madaros, the parser, or the harness are healthy
+      # in general.
+      - name: Wave 0
+        env:
+          MADAROS_RAW_BIN: /tmp/madaros-wave0.elf
+        run: |
+          printf '%s\n' \
+            scripts/ci/madaros_gum_cross_function_gate.sh \
+            scripts/ci/gate_assert_instrument_selftest.sh \
+            scripts/ci/parser_keyword_classification_gate.sh \
+            scripts/ci/compile_fail_harness_contract_gate.sh \
+            | bash scripts/ci/run_gate_list.sh wave0
+      - name: Upload Wave 0 gate artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-wave-0
+          path: artifacts/gates/wave0.json
+          retention-days: 7
 
   sounio-lint:
     name: Sounio Lint
@@ -852,6 +1113,7 @@ jobs:
       - native-selfhost-macos-arm64
       - full-test-suite
       - madaros-witness-gate
+      - gate-wave-0
       - sounio-lint
       - lean-proofs
       - website

@@ -1,0 +1,72 @@
+//@ run-pass
+//@ expect-stdout: oid=85,29 value=170,187 variance=7 confidence=9
+//
+// A user struct field named `value` was silently clobbered by its sibling.
+//
+// `ir_register_knowledge_layout` preseeds a synthetic `Knowledge` layout —
+// value@0, variance@1, confidence@2 — as entry 0 of the struct layout table,
+// before any user struct is registered. `field_idx_from_name_simple` resolves a
+// field *name* to a slot by scanning the whole table in order and taking the
+// first hit in any struct, and that path is what runs whenever the base is not
+// a typed local: `arr[i].f` reaches it because array locals record a length but
+// no element type.
+//
+// So `ext[0].value` resolved to Knowledge's slot 0 — the same slot as `oid` —
+// and `ext[0].value = val_buf` overwrote the `oid` written just before it. Both
+// reads then went to slot 0 too, so `value` read back correct while `oid`
+// returned `value`'s bytes: a silent wrong answer at rc=0, with no diagnostic.
+//
+// The trigger was the identifier, not the shape. The same program with the
+// field named `val` was always correct, at any struct size, array length or
+// index form — which is why size- and index-threshold hypotheses all died.
+//
+// Guard all three preseeded names. Anything reading its sibling's data here
+// means the synthetic layout is shadowing user layouts again.
+//
+// Honest scope: CI runs this suite under souc-stage2, which never carried the
+// defect, so this file is green either way there — it is the readable witness,
+// not the guard. The discriminating gate is the `knowledge_field_shadow` case
+// in tests/madaros/source_to_elf/manifest.tsv, which compiles with Madaros and
+// was measured red before this fix and green after.
+
+struct Ext {
+    oid: [u8; 20],
+    value: [u8; 512],
+    variance: i64,
+    confidence: i64,
+}
+
+fn zero_ext() -> Ext {
+    Ext { oid: [0; 20], value: [0; 512], variance: 0, confidence: 0 }
+}
+
+fn main() with IO {
+    var ext: [Ext; 4] = [ zero_ext(), zero_ext(), zero_ext(), zero_ext() ]
+
+    var oid_buf: [u8; 20] = [0; 20]
+    oid_buf[0] = 0x55
+    oid_buf[1] = 0x1D
+    var val_buf: [u8; 512] = [0; 512]
+    val_buf[0] = 0xAA
+    val_buf[1] = 0xBB
+
+    var i: i64 = 0
+    ext[i as usize].oid = oid_buf
+    ext[i as usize].value = val_buf
+    ext[i as usize].variance = 7
+    ext[i as usize].confidence = 9
+
+    print("oid=")
+    print_int(ext[0].oid[0] as i64)
+    print(",")
+    print_int(ext[0].oid[1] as i64)
+    print(" value=")
+    print_int(ext[0].value[0] as i64)
+    print(",")
+    print_int(ext[0].value[1] as i64)
+    print(" variance=")
+    print_int(ext[0].variance)
+    print(" confidence=")
+    print_int(ext[0].confidence)
+    println("")
+}

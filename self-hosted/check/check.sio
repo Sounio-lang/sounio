@@ -2416,7 +2416,7 @@ fn checker_lower_exactly_private_type_mut(c: *mut Checker, inner_opt: Option<Box
         Some(largs) => {
             let lname = checker_copy_string_list_to_name((*largs).head.path.segments)
             if !zd_locus_is_wellformed(lname) {
-                checker_report_error_at_inplace(c, span, 208, 0, 0, 0)
+                checker_report_error_at_inplace(c, span, 247, 0, 0, 0)
             }
         }
     }
@@ -2471,7 +2471,7 @@ fn checker_lower_exactly_private_named_mut(c: *mut Checker, type_args: Option<Bo
                 Some(rest) => {
                     let lname = checker_copy_string_list_to_name((*rest).head.path.segments)
                     if !zd_locus_is_wellformed(lname) {
-                        checker_report_error_at_inplace(c, span, 208, 0, 0, 0)
+                        checker_report_error_at_inplace(c, span, 247, 0, 0, 0)
                     }
                 }
             }
@@ -2521,7 +2521,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         return ty_error()
     }
     if checker_type_expr_contains_reserved_wide_float(&te) {
-        checker_report_error_at_inplace(c, te.span, 218, 0, 0, 0)
+        checker_report_error_at_inplace(c, te.span, 249, 0, 0, 0)
         checker_exit_type_expr_mut(c)
         return ty_error()
     }
@@ -3754,14 +3754,57 @@ fn checker_lookup_user_effect_id_mut(c: *mut Checker, name_buf: [i8; 64], name_l
     0 - 1
 }
 
-fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64; 8], count: i64) -> MutEffectsResult with Mut, Panic, Div {
+// E246: an effect name the programmer wrote is being discarded. One code for
+// both faces because they are one mechanism (S06_EFFECTS_ROWS.md 6.1.0: the
+// unknown-name hole and the ninth-effect hole are the same `eff_id >= 0 &&
+// n < 8` guard; re-separating them was ruled a regression against 6.1.1).
+// face 0: the name is in no list - not the closed 30, not the user-effect
+//         registry, not the held transition list (effects.sio).
+// face 1: the name resolves, but the 8-slot signature table is full and this
+//         would be a 9th distinct effect.
+fn checker_emit_e246(c: *mut Checker, face: i64, name_buf: [i8; 64], name_len: i64) with Mut, IO, Panic, Div, Alloc {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    print("error[E246]")
+    print(" in ")
+    e035_print_module_path((*c).current_module)
+    print("::")
+    e035_print_ident((*c).current_fn_name)
+    print(": ")
+    if face == 0 {
+        print("unknown effect '")
+    } else {
+        print("effect '")
+    }
+    var i: i64 = 0
+    while i < name_len && i < 64 {
+        print_ascii_i8(name_buf[i as usize])
+        i = i + 1
+    }
+    print("'")
+    if face == 0 {
+        println(": not in the closed effect list (S06 6.1.0), not a declared user effect, not held")
+    } else {
+        println(": dropped, a signature holds 8 distinct effects and this is a 9th")
+    }
+}
+
+fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64; 8], count: i64) -> MutEffectsResult with Mut, Panic, Div, IO, Alloc {
     var effs = effects
     var n = count
     var eff_id = effect_name_to_id(list.head.name_buf, list.head.name_len)
     if eff_id < 0 {
         eff_id = checker_lookup_user_effect_id_mut(c, list.head.name_buf, list.head.name_len)
     }
-    if eff_id >= 0 && n < 8 {
+    if eff_id < 0 {
+        // Held names keep today's silent behaviour by the founder's hold
+        // ruling (effects.sio header, hold_mod_claude1): the corpus
+        // load-bearingly depends on them pending the misspelling audit.
+        // Anything else is refused instead of silently dropped.
+        if !effect_name_is_held(list.head.name_buf, list.head.name_len) {
+            checker_emit_e246(c, 0, list.head.name_buf, list.head.name_len)
+        }
+    } else {
         var already_present = false
         var i: i64 = 0
         while i < n {
@@ -3771,8 +3814,15 @@ fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64;
             i = i + 1
         }
         if !already_present {
-            effs[n as usize] = eff_id
-            n = n + 1
+            if n >= 8 {
+                // The ninth distinct effect: dropped silently before E246.
+                // Widening the slot table is a separate conversation; this
+                // refusal only stops the discard from being invisible.
+                checker_emit_e246(c, 1, list.head.name_buf, list.head.name_len)
+            } else {
+                effs[n as usize] = eff_id
+                n = n + 1
+            }
         }
     }
     match list.tail {
@@ -3781,7 +3831,7 @@ fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64;
     }
 }
 
-fn checker_extract_effects_mut(c: *mut Checker, opt: Option<Box<EffectList> >) -> MutEffectsResult with Mut, Panic, Div {
+fn checker_extract_effects_mut(c: *mut Checker, opt: Option<Box<EffectList> >) -> MutEffectsResult with Mut, Panic, Div, IO, Alloc {
     match opt {
         None => MutEffectsResult { effects: [0; 8], count: 0 }
         Some(list) => checker_collect_effects_mut(c, *list, [0; 8], 0)
@@ -3830,6 +3880,12 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
     match opt {
         Some(fd) => {
             let name = (*fd).name
+            // E246 identity: the effect collector reports module::fn, but
+            // current_fn_name was only recorded on impl-body paths. Record the
+            // fn being collected for the extraction window and restore it
+            // after, mirroring the saved_effects pair below.
+            let saved_fn_name = (*c).current_fn_name
+            (*c).current_fn_name = name
             // Effects must be current BEFORE parameter types lower. The ZD
             // family interrogates `with ZD` at the parameter; collecting the
             // signature with an empty effect set would refuse every `with ZD`
@@ -3849,6 +3905,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             }
             (*c).current_effects = saved_effects
             (*c).current_effect_count = saved_effect_count
+            (*c).current_fn_name = saved_fn_name
             let fn_effects = eff_pair.effects
             let fn_effect_count = eff_pair.count
             let epistemic_min_confidence = epistemic_min_confidence_from_effects((*fd).effects)
@@ -4149,6 +4206,42 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("log"))
     checker_bind_import_unknown_inplace(c, make_name("sin"))
     checker_bind_import_unknown_inplace(c, make_name("cos"))
+    checker_bind_import_unknown_inplace(c, make_name("tan"))
+    checker_bind_import_unknown_inplace(c, make_name("atan"))
+    checker_bind_import_unknown_inplace(c, make_name("tanh"))
+    checker_bind_import_unknown_inplace(c, make_name("asin"))
+    checker_bind_import_unknown_inplace(c, make_name("acos"))
+    checker_bind_import_unknown_inplace(c, make_name("pow"))
+    // Track A extern "C" wrapper intrinsics (docs/audit/MADAROS_EXTERN_C_
+    // BUILTIN_PORT_DISPATCH_2026-08-16): the parser rewrites an extern
+    // declaration into a fn forwarding to ffi_<name>; these entries let the
+    // inner call resolve.
+    //
+    // The list is closed and the parser knows it. parser/items.sio's
+    // extern_name_has_ffi_intrinsic carries the same twelve names and rewrites
+    // ONLY them, so an extern that is absent here never grows a wrapper body
+    // and never trips E137 on an unbound ffi_<name>. It keeps the bodyless
+    // declaration instead: legal to declare, refused at the CALL by E250.
+    // An earlier draft rewrote every declaration and, with is_extern false on
+    // the wrapper, E250 could no longer fire at all -- the refusal moved to
+    // the declaration site and a bindings module stopped compiling.
+    // scripts/ci/extern_builtin_mirror_gate.sh diffs the two lists against the
+    // backend registry arms that actually emit these intrinsics.
+    checker_bind_import_unknown_inplace(c, make_name("ffi_getpid"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_getppid"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_exit"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_abort"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_malloc"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_free"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_system"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_sqrt"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_floor"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_ceil"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_pow"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_tgamma"))
+    checker_bind_import_unknown_inplace(c, make_name("hessian_diag_of"))
+    checker_bind_import_unknown_inplace(c, make_name("second_order_mean"))
+    checker_bind_import_unknown_inplace(c, make_name("correlate"))
     checker_bind_import_unknown_inplace(c, make_name("assert"))
     // Standard enum constructors used like values/functions by user code.
     checker_bind_import_unknown_inplace(c, make_name("Some"))
@@ -4843,6 +4936,14 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
+                // The implicit tail return carries the same obligation as an
+                // explicit one: `fn f() -> T { 2000000000 }` and
+                // `fn f() -> T { return 2000000000 }` are the same claim. AFTER
+                // the compatibility call above, which reads last_literal_kind for
+                // its int-literal narrowing; this helper zeroes that flag, and the
+                // zeroing is also what stops an explicit `return` inside the body
+                // from being reported a second time here.
+                checker_check_refinement_literal_inplace(c, (*fd).span, sig2.return_type)
             }
             if (*c).multitest_count > 1 && !(*c).multitest_corrected {
                 checker_report_multitest_correction_required_inplace(c, (*fd).span, (*c).multitest_count)
@@ -5190,6 +5291,10 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
+                // Free-function implicit tail return. Same obligation and same
+                // ordering constraint as the impl-method site above; see the
+                // comment there.
+                checker_check_refinement_literal_inplace(c, (*fd).span, sig2.return_type)
             }
             // Raw-reference escape: the body tail yields a reference rooted in a
             // frame-local (e.g. `let r = &x; r` or `Holder { p: &x }`) → dangling.
@@ -5518,6 +5623,29 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
             if !checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type) {
                 checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
             }
+            // A refinement must hold at the RETURN too, not only at a binding.
+            //
+            // Measured on main@88c2ab8ee8: checker_check_refinement_literal_inplace
+            // had exactly two callers (9627, 9687), both in the let/var handlers,
+            // and check/compat.sio has zero references to refinement_id. So under
+            // Madaros a refinement was enforced where a value is BOUND and nowhere
+            // else, and
+            //
+            //     fn f() -> { n: i64 | n >= 0 } { return 0 - 5 }
+            //
+            // was accepted. lean_single rejects it; tests/known_failures/
+            // hardened_diagnostics_full_suite.txt records the split and calls the
+            // Madaros side "a compiler defect, not a manifest one" (2026-08-23).
+            //
+            // Scope: the helper only acts when last_literal_kind is 1 or 2, so
+            // this closes the LITERAL return. `return x` for an ident, and a
+            // literal propagated through a let, are still accepted here -- they
+            // need dataflow this site does not have.
+            //
+            // Placed AFTER the compatibility check on purpose: this helper zeroes
+            // last_literal_kind on exit, and checker_fn_body_return_compatible_inplace
+            // reads that same flag for its int-literal return narrowing.
+            checker_check_refinement_literal_inplace(c, e.span, (*c).current_return_type)
             // Raw-reference escape: `return &local` / `return r` where r is rooted
             // in a frame-local → dangling reference.
             if checker_expr_provenance(c, *val_expr) == 1 {
@@ -5925,6 +6053,30 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         if left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
             let hc = check_hyper_binary(*c, e.span, e.bin_op, left_inner, right_inner)
             checker_store_from_value(c, hc.0)
+        }
+        // Knowledge (x) Knowledge arithmetic typechecks here but has no lowering:
+        // lower_binary_expr_ref (ir/lower.sio) has no Knowledge arm, so both
+        // operands lower as scalars -- and a Knowledge operand lowers to the
+        // object handle. `kA * kB` therefore multiplies two pointers, and
+        // `.value` on the result dereferences an arbitrary address. Measured on
+        // Madaros: `*` returns the right operand's value (silently wrong), while
+        // `+`, `-` and `/` segfault at runtime. Refuse it rather than answer
+        // wrongly. The mixed Knowledge/scalar forms are already refused above,
+        // and lean_single implements all of this correctly -- see #1706.
+        let kk_both = is_knowledge_type(left_ty) && is_knowledge_type(right_ty)
+        let kk_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv
+            || e.bin_op == BinaryOp::OpRem
+        // Hypercomplex inners take the check_hyper_binary path above, so spare them
+        // rather than refuse on an untested guess. Measured caveat: this guard is
+        // narrower than it looks. `Knowledge<Octonion>` built from the
+        // algebra::octonion STRUCT does not carry TyHyper inners, so it does NOT
+        // take this exemption and IS refused below -- correctly, since it has no
+        // lowering either. What the guard actually spares is only inners the
+        // checker itself classifies as TyHyper, and that case remains unmeasured.
+        let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
+        if kk_both && kk_arith && !kk_hyper {
+            checker_report_error_at_inplace(c, e.span, 245, 0, 0, 0)
         }
         let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty)
         if knowledge_result.kind == TypeKind::TyError {
@@ -6910,6 +7062,57 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     }
                 }
             }
+            // The same array local may not initialise two fields.
+            //
+            // `Trajectory { speakers: zi, hashes: zi, ... }` reads as "both start
+            // zeroed" and is that under lean_single. Under Madaros the value copy
+            // is shallow, so the two fields are ONE array: traj_push's five writes
+            // landed in the same place and only the last survived, and every read
+            // of speakers returned the dim (#2152).
+            //
+            // The engines disagree about whether a struct literal copies an array
+            // field by value. That is a language decision and lean_single, the
+            // fixed point, already answers it -- but until Madaros copies deep,
+            // the honest move is that neither reading may be depended on. So the
+            // ambiguous form is refused rather than resolved silently either way.
+            //
+            // Cost of refusing, measured across stdlib/, self-hosted/ and tests/
+            // with both controls (Trajectory must appear, PBPKState28 must not):
+            // FIVE sites, three real, all already rewritten with one literal per
+            // field. Nothing legitimate is outlawed -- the fix is to write the
+            // literal twice, which is what the code meant.
+            var oi = e.fields
+            var odone = false
+            while !odone {
+                match oi {
+                    Some(ol) => {
+                        if (*ol).head.value.kind == ExprKind::ExprIdent {
+                            let oty = field_info_list_find(si.fields, (*ol).head.name)
+                            if oty.kind == TypeKind::TyArray {
+                                var ij = (*ol).tail
+                                var idone = false
+                                while !idone {
+                                    match ij {
+                                        Some(il) => {
+                                            if (*il).head.value.kind == ExprKind::ExprIdent && name_eq((*il).head.value.name, (*ol).head.value.name) {
+                                                checker_report_error_at_inplace(c, (*il).head.value.span, 232, 0, 0, 0)
+                                            }
+                                            ij = (*il).tail
+                                        }
+                                        None => {
+                                            idone = true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        oi = (*ol).tail
+                    }
+                    None => {
+                        odone = true
+                    }
+                }
+            }
             ty_named(struct_name)
         }
     } else {
@@ -7458,6 +7661,8 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_uncertainty_of(e.left) { return true }
     if call_expr_is_builtin_sensitivity_of(e.left) { return true }
     if call_expr_is_builtin_hessian_of(e.left) { return true }
+    if call_expr_is_builtin_second_order_mean(e.left) { return true }
+    if call_expr_is_builtin_correlate(e.left) { return true }
     if call_expr_contest_witness_kind(e.left) >= 0 { return true }
     false
 }
@@ -7821,21 +8026,44 @@ fn checker_check_variance_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeE
 }
 
 // hessian_of(x, j, k) -> f64. THREE arguments.
-fn checker_check_hessian_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    let first_arg = expr_list_head(e.args)
-    match first_arg {
-        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
-        Some(_) => {}
+
+// correlate(a, b, rho) -> f64. THREE arguments, all required. Neither the
+// variance form (one) nor the sensitivity form (two) will do: each reports E010
+// on the argument it does not expect. A missing rho must be an error rather
+// than a silent 0.0, which would read as "these are independent" -- the very
+// assumption this builtin exists to let you deny.
+// A compile-time correlation coefficient, or (false, 0.0) when it is not one.
+//
+// Same two forms as epistemic_index_literal, for the same reason: this dialect
+// writes a negative literal as `0.0 - 0.5`, an ExprBinary. The lowerer read
+// only ExprFloatLit, so a negative rho -- the one case in GUM where
+// correlation is interesting -- folded to 0.0 in silence, which is the exact
+// assumption `correlate` exists to deny.
+fn correlate_rho_literal(opt: Option<Box<Expr> >) -> (bool, f64) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        None => (false, 0.0)
+        Some(ex) => {
+            if (*ex).kind == ExprKind::ExprFloatLit {
+                return (true, (*ex).float_val)
+            }
+            if (*ex).kind == ExprKind::ExprBinary && (*ex).bin_op == BinaryOp::OpSub {
+                let l = expr_opt_get((*ex).left)
+                let r = expr_opt_get((*ex).right)
+                if (*l).kind == ExprKind::ExprFloatLit && (*r).kind == ExprKind::ExprFloatLit {
+                    if (*l).float_val == 0.0 {
+                        return (true, 0.0 - (*r).float_val)
+                    }
+                }
+            }
+            (false, 0.0)
+        }
     }
-    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-    ty_f64()
 }
 
-// sensitivity_of(x, k) -> f64. TWO arguments, so it cannot reuse
-// checker_check_variance_metric_expr_inplace, which reports E010 on a second one.
-fn checker_check_sensitivity_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_check_correlate_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
     let second_arg = expr_list_second(e.args)
+    let third_arg = expr_list_third(e.args)
     match first_arg {
         None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
         Some(_) => {}
@@ -7844,10 +8072,23 @@ fn checker_check_sensitivity_metric_expr_inplace(c: *mut Checker, e: Expr) -> Ty
         None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
         Some(_) => {}
     }
+    match third_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(rho_ex) => {
+            // rho must fold at compile time. The lowerer keeps a f64, not a
+            // register, so a runtime third argument never propagates -- it
+            // silently leaves rho at 0.0, fabricating the very independence
+            // this builtin exists to deny. There is no lowering to fall back
+            // on, so refusing is the only honest answer.
+            let rho_lit_7930 = correlate_rho_literal(Some(rho_ex))
+            if !rho_lit_7930.0 {
+                checker_report_error_at_inplace(c, e.span, 243, 0, 0, 0)
+            }
+        }
+    }
     checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
     ty_f64()
 }
-
 // slice_len(s: &[T]) -> i64. Inplace transcription of check_slice_len_call_expr —
 // the by-value bridge SRET-smashed on populated enum tables (slice_fat_pointers crash).
 fn checker_check_assert_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -7866,6 +8107,106 @@ fn checker_check_assert_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
         checker_report_mismatch_inplace(c, e.span, 174, ty_bool(), cond_ty)
     }
     ty_unit()
+}
+
+// A compile-time channel index, or (false, 0) when it is not one.
+//
+// Two forms, because this dialect writes a negative literal as `0 - 1`: an
+// ExprIntLit, and an ExprBinary OpSub whose left is the literal 0. Reading only
+// the first let hessian_of(x*x, 0 - 1, 0) through -- the refusal gate caught it
+// on the very run that was meant to prove the gate green, which is the whole
+// point of writing the expected numbers down first.
+fn epistemic_index_literal(opt: Option<Box<Expr> >) -> (bool, i64) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        None => (false, 0)
+        Some(ex) => {
+            if (*ex).kind == ExprKind::ExprIntLit {
+                return (true, (*ex).int_val)
+            }
+            if (*ex).kind == ExprKind::ExprBinary && (*ex).bin_op == BinaryOp::OpSub {
+                let l = expr_opt_get((*ex).left)
+                let r = expr_opt_get((*ex).right)
+                if (*l).kind == ExprKind::ExprIntLit && (*r).kind == ExprKind::ExprIntLit {
+                    if (*l).int_val == 0 {
+                        return (true, 0 - (*r).int_val)
+                    }
+                }
+            }
+            (false, 0)
+        }
+    }
+}
+
+fn checker_check_hessian_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // hessian_of(expr, j, k) -> f64. THREE arguments, and j,k inside 0..8.
+    //
+    // It used to require only the first. hessian_of(x*x) then type-checked,
+    // lowered through `if j >= 0 && j < 8 && k >= 0 && k < 8` with j = k = -1,
+    // missed, and returned 0.0 -- while the true H_00 is 2.0. Out-of-range
+    // literals did the same. In this algebra a zero Hessian is the claim "no
+    // second-order dependence", which is the strongest thing the system can
+    // say, handed back silently in the case where it knows least.
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let third_arg = expr_list_third(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(idx) => {
+            let lit_idx_7927 = epistemic_index_literal(Some(idx))
+            if lit_idx_7927.0 {
+                if lit_idx_7927.1 < 0 || lit_idx_7927.1 >= 8 {
+                    checker_report_error_at_inplace(c, e.span, 242, lit_idx_7927.1, 8, 0)
+                }
+            }
+        }
+    }
+    match third_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(idx2) => {
+            let lit_idx2_7937 = epistemic_index_literal(Some(idx2))
+            if lit_idx2_7937.0 {
+                if lit_idx2_7937.1 < 0 || lit_idx2_7937.1 >= 8 {
+                    checker_report_error_at_inplace(c, e.span, 242, lit_idx2_7937.1, 8, 0)
+                }
+            }
+        }
+    }
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_f64()
+}
+
+// sensitivity_of(x, k) -> f64. TWO arguments, so it cannot reuse
+// checker_check_variance_metric_expr_inplace, which reports E010 on a second one.
+fn checker_check_sensitivity_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // sensitivity_of(x, k) -> f64, k inside 0..32.
+    //
+    // Same reason as hessian_of above: sensitivity_of(x, 99) lowered through
+    // `if chan >= 0 && chan < 32`, missed, and returned 0.0 -- "x does not
+    // depend on channel 99", stated with confidence about a channel that
+    // cannot exist.
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(idx) => {
+            let lit_idx_7966 = epistemic_index_literal(Some(idx))
+            if lit_idx_7966.0 {
+                if lit_idx_7966.1 < 0 || lit_idx_7966.1 >= 32 {
+                    checker_report_error_at_inplace(c, e.span, 242, lit_idx_7966.1, 32, 0)
+                }
+            }
+        }
+    }
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_f64()
 }
 
 fn checker_check_print_i64_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -8005,7 +8346,7 @@ fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut
     let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
     // #1627 / E175: a private `extern "C"` stub for a native-backend builtin must
     // not false-reject sibling modules that call the builtin by name. Same
-    // allow-list as E219 (#1622). Without this, the first module that declared
+    // allow-list as E250 (#1622). Without this, the first module that declared
     // `extern "C" { fn sqrt; }` owns a private sig that prefer_module falls
     // through to, and every later module's `sqrt(...)` becomes E175.
     if sig.is_extern && name_is_native_backend_builtin(sig.name) {
@@ -8138,6 +8479,18 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     if call_expr_is_builtin_hessian_of(e.left) {
         return checker_check_hessian_metric_expr_inplace(c, e)
     }
+    // E2 is a mean, not a spread: it type-checks as the variance-family
+    // metric -- one expression argument, f64 result, same as variance_of.
+    if call_expr_is_builtin_second_order_mean(e.left) {
+        return checker_check_variance_metric_expr_inplace(c, e)
+    }
+    // correlate(a, b, rho) is three arguments, not one. Routing it to
+    // checker_check_variance_metric_expr_inplace reports E010 on the second --
+    // exactly what the comment on checker_check_sensitivity_metric_expr_inplace
+    // warns about, and exactly what I did on the first attempt.
+    if call_expr_is_builtin_correlate(e.left) {
+        return checker_check_correlate_metric_expr_inplace(c, e)
+    }
     if call_expr_is_builtin_slice_len(e.left) {
         return checker_check_slice_len_expr_inplace(c, e)
     }
@@ -8240,9 +8593,57 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 // Prefer semantic match (kind+name) then name-only self_type_name.
                 let recv_ty = ty_named(path_type_name)
                 direct_sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
+                // W044. The fallthrough documented just above is also what lets an
+                // associated-function call whose target resolves to NOTHING be accepted
+                // silently, evaluating to 0 and propagating that 0 as a pointer. The plain
+                // form `nao_existe(3)` is correctly rejected (E137); only the path form
+                // escaped, so ANY `Tipo::metodo(...)` typechecks, including invented ones --
+                // `Coisa::inexistente(9)` compiles clean and evaluates to 0. That is the
+                // mechanism that turned a missing `Box::new` lowering case into a call to a
+                // bodyless stub returning 0 rather than a diagnostic.
+                //
+                // print_warning_message already carries the text for code 44; only the
+                // detection was missing, so W044 was documented but dead until now.
+                //
+                // Reported only when the first segment names NO known type at all. That is
+                // what preserves the residual the comment above protects: a KNOWN type whose
+                // associated-fn lookup misses across modules stays silent, while an unknown
+                // receiver is named. A free fn matching the last segment also suppresses it,
+                // so module-qualified calls (`gpu::launch`, `wmma::mma_sync`) are unaffected.
+                // `Box::new` returns at call_expr_is_box_new above and never arrives here.
+                //
+                // Warning, not error, because it fires on live code: `Vec::new()` appears 20
+                // times across stdlib (qnn, pbpk, nn, compiler/epistemic, epistemic) while NO
+                // `Vec` type exists anywhere in the tree, so those field initialisers are
+                // already 0 today. Promoting to an error requires deciding what they should
+                // be, which is stdlib semantics work, not a checker change.
+                if direct_sig_id < 0 {
+                    if struct_table_find((*c).structs, path_type_name) < 0 {
+                        if enum_table_find((*c).enums, path_type_name) < 0 {
+                            if checker_fn_sigs_find_inplace(c, path_method_name) < 0 {
+                                checker_report_warning_at_mut(c, e.span, 44, 0, 0, 0)
+                            }
+                        }
+                    }
+                }
             }
         }
         None => {}
+    }
+    // #2164: a bare call to a math name the native backend cannot emit. Guarded
+    // on direct_sig_id < 0 so it fires only where the name resolves to nothing
+    // real -- the phantom-builtin case that produces a runtime SIGILL.
+    if direct_sig_id < 0 {
+        match e.left {
+            Some(callee_expr) => {
+                if (*callee_expr).kind == ExprKind::ExprIdent {
+                    if name_is_unimplemented_native_math((*callee_expr).name) {
+                        checker_report_error_at_inplace(c, e.span, 221, 0, 0, 0)
+                    }
+                }
+            }
+            None => {}
+        }
     }
     if direct_sig_id >= 0 {
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
@@ -8255,7 +8656,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // direct_sig_id and returns below, never reaching the TyFn fallback.
         var refused_unimplemented = false
         if direct_sig.is_extern && !name_is_native_backend_builtin(direct_sig.name) {
-            checker_report_error_at_inplace(c, e.span, 219, 0, 0, 0)
+            checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
             refused_unimplemented = true
         }
         var effective_params = fn_param_list_clone(&direct_sig.params)
@@ -8341,14 +8742,19 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
         // #1622: calling an `extern "C"` name the native backend does not
         // implement. Refuse here rather than emit a call that reads 0.
-        // Checked at the CALL, not at the declaration: ffi_libm_call.sio
-        // declares tgamma/pow/floor/ceil and calls only sqrt, and
+        // Checked at the CALL, not at the declaration. A bindings module
+        // declares many names and a program calls few, so a declaration-site
+        // refusal would break the declarations for no gain:
         // parser_card_a_raw_pointer_types.sio declares malloc and never calls
-        // it -- both compile and pass today, and a declaration-site refusal
-        // would break them for no gain.
+        // it, and tests/run-pass/ffi_declared_never_called_is_legal.sio pins
+        // the case this rule exists for -- a declared, never-called name with
+        // no intrinsic at all. That fixture is also the guard on the parser:
+        // it only holds while parser/items.sio leaves such a declaration
+        // bodyless instead of giving it a ffi_<name> forwarding body, because
+        // a wrapper body carries is_extern false and this arm never fires.
         var refused_unimplemented = false
         if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
-            checker_report_error_at_inplace(c, e.span, 219, 0, 0, 0)
+            checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
             refused_unimplemented = true
         }
         let call_start_borrows = (*c).borrows
@@ -8872,7 +9278,7 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         Some(ty) => {
             let target_ty = checker_lower_type_expr_mut(c, *ty)
             if is_wide_float_type(src_ty) || is_wide_float_type(target_ty) {
-                checker_report_error_at_inplace(c, e.span, 217, 0, 0, 0)
+                checker_report_error_at_inplace(c, e.span, 248, 0, 0, 0)
                 return ty_error()
             }
             let src_is_epistemic = src_ty.kind == TypeKind::TyKnowledge
@@ -11280,6 +11686,89 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
             print_int(ty.epistemic_meta_id)
             print(">")
         }
+        // Ten TypeKind variants had no arm here. The build printed
+        //   error: match must be exhaustive at self-hosted/check/check.sio:11624
+        // and exited 0 -- the arms were missing, not merely unreachable. They
+        // became visible only once #2215 stopped a nested `match ty.inner` from
+        // clobbering this outer match's scrutinee identity, so exhaustiveness had
+        // been decided against the wrong enum. This is a diagnostic printer: a
+        // missing arm is a type that renders as nothing in an error message.
+        //
+        // Nine of the ten wrap an inner type, so they follow the TyLemma/TyAxiom
+        // shape rather than printing a bare name and losing what they wrap.
+        TypeKind::TyEpistemic => {
+            print("Epistemic<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TypeKind::TyAleatoric => {
+            print("Aleatoric<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TypeKind::TyEffectRow => {
+            print("EffectRow<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TypeKind::TyGradedEffect => {
+            print("GradedEffect<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TypeKind::TyCausalEffect => {
+            print("CausalEffect<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TypeKind::TyMonitoringPolicy => {
+            print("MonitoringPolicy<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TypeKind::TyObservedTransition => {
+            print("ObservedTransition<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TypeKind::TyRollbackCertificate => {
+            print("RollbackCertificate<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        // TyEffectVar carries no inner type; its identity is the id.
+        TypeKind::TyEffectVar => {
+            print("EffectVar#")
+            print_int(ty.array_size)
+        }
+        // TyUnobserved has no constructor in check/types.sio -- it is declared and
+        // never built. Printed rather than omitted so that if one ever appears it
+        // is legible instead of blank.
+        TypeKind::TyUnobserved => print("Unobserved")
         TypeKind::TyNever => print("!")
         TypeKind::TyError => print("<error>")
         TypeKind::TyUnknown => print("<unknown>")
@@ -13739,6 +14228,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 175 { print("function is private in its defining module") }
     else if code == 176 { print("struct constructor is private in its defining module") }
     else if code == 177 { print("enum constructor is private in its defining module") }
+    else if code == 221 { print("this math function is bound for typechecking but the native backend cannot emit it; the call would compile and then die on an illegal instruction at run time") }
+    else if code == 245 { print("arithmetic between two Knowledge<T> values is not supported by this compiler; the operation typechecks but has no lowering, so it would produce a wrong value or crash at runtime") }
     else if code == 200 { print("Forgettable type requires ZD effect: exact annihilation is only possible via zero-divisor algebra (sedenions). Division algebras cannot satisfy this guarantee. Add `with ZD` to your function signature.") }
     else if code == 201 { print("ExactlyPrivate<T> requires ZD effect: exact data-contribution removal is only possible via sedenion annihilation. Differential privacy (epsilon-bounded) does not suffice. Add `with ZD` to your function signature.") }
     else if code == 202 { print("Editable<T> requires ZD effect: locality-bounded edits (G5) require ZD-based kernel annihilation. Ripple-free editing is not achievable via rank-1 or mask-based updates. Add `with ZD` to your function signature.") }
@@ -13747,13 +14238,16 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 205 { print("Audited<T> requires ZD and Witness effects: witness-bearing surgery (G9) must emit a machine-checkable Lean derivation of the ZD-kernel action. `with ZD` alone produces the erasure without evidence; Witness is what makes it checkable. Add `with ZD, Witness` to your function signature.") }
     else if code == 206 { print("Revivable<T> requires ZD and Temporal effects: time-bounded reversible surgery (G10) needs both the ZD annihilator algebra and an explicit Temporal window in which the op can be inverted. After the window, the surgery is irrevocable. Add `with ZD, Temporal` to your function signature.") }
     else if code == 207 { print("Interpretable<T> requires ZD effect: the 168-class canonical basis is the projective ZD-graph of sedenions. Without the ZD effect the compiler cannot guarantee that decomposition/reconstruction is fp-exact. Add `with ZD` to your function signature.") }
-    else if code == 208 { print("ZD locus is not a well-formed sedenion pair eIeJ with 1 <= I < J <= 15") }
+    else if code == 247 { print("ZD locus is not a well-formed sedenion pair eIeJ with 1 <= I < J <= 15") }
     else if code == 213 { print("tuple destructure arity mismatch") }
     else if code == 215 { print("EpistemicComplete violation") }
     else if code == 216 { print("infinite recursive type") }
-    else if code == 217 { print("f128/f256 value conversion is not implemented; wide-float casts fail closed") }
-    else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
-    else if code == 219 { print("call to an `extern \"C\"` function the native backend does not implement") }
+    else if code == 248 { print("f128/f256 value conversion is not implemented; wide-float casts fail closed") }
+    else if code == 249 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
+    else if code == 250 { print("call to an `extern \"C\"` function the native backend does not implement") }
+    else if code == 242 { print("epistemic channel index is out of range") }
+    else if code == 232 { print("the same array local initialises two fields; the value copy is shallow, so they would be one array -- give each field its own literal") }
+    else if code == 243 { print("the correlation coefficient must be a compile-time literal; a runtime value silently becomes 0.0, which asserts independence") }
     else { print("unknown error") }
 }
 
@@ -14032,13 +14526,19 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     else if code == 171 {
         print("   |\n   = help: use `.value` within a `with Epistemic` function to extract the inner value with explicit acknowledgment\n")
     }
-    else if code == 217 {
+    else if code == 221 {
+        print("   |\n   = help: `use math::pure::{atan}` -- pure Sounio implementations of all five live there -- or use sin, cos, exp, log, sqrt, which the backend emits directly\n")
+    }
+    else if code == 245 {
+        print("   |\n   = help: peel first -- `let a = kA.value` and `let b = kB.value`, then combine `a` and `b`; `variance_of(a op b)` propagates the uncertainty and is the supported path on this engine\n")
+    }
+    else if code == 248 {
         print("   |\n   = help: wait for explicit from_bits/conversion operations; no f64 cast is a valid f128/f256 implementation\n")
     }
-    else if code == 218 {
+    else if code == 249 {
         print("   |\n   = help: V0-A exposes binary128/binary256 descriptors internally but rejects every source-level use before IR\n")
     }
-    else if code == 219 {
+    else if code == 250 {
         print("   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6, malloc, free, getpid, getppid, exit, abort, system, read_i64, write_i64, read_f64, write_f64\n")
     }
     else {
@@ -14356,14 +14856,20 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     else if code == 155 {
         print("   = note: a study without hypotheses cannot support the declared statistical analysis contract\n")
     }
-    else if code == 217 {
+    else if code == 248 {
         print("   = note: V0-A defines format identity only and intentionally emits no wide value or lowering\n")
     }
-    else if code == 218 {
+    else if code == 249 {
         print("   = note: no literal, field, alias, binding, signature, conversion, ABI, or native carrier is implemented\n")
     }
-    else if code == 219 {
+    else if code == 250 {
         print("   = note: there is no dynamic linker in this backend; an unimplemented extern compiles to an empty stub whose calls read 0\n")
+    }
+    else if code == 221 {
+        print("   = note: checker_bind_import_unknown_inplace binds tan/atan/tanh/asin/acos, but native_v2_builtin_id_for_func_ref has no id for them; sin, cos and exp do\n")
+    }
+    else if code == 245 {
+        print("   = note: the checker types this as Knowledge<T>, but lower_binary_expr_ref has no Knowledge arm, so both operands would lower as scalars and the result handle would be arithmetic on two pointers\n")
     }
     else {
         // No note available for unknown errors
@@ -14744,6 +15250,32 @@ fn call_expr_is_builtin_hessian_of(opt: Option<Box<Expr> >) -> bool with Mut, Pa
     }
 }
 
+fn call_expr_is_builtin_correlate(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            // "correlate"
+            name_matches_str9((*expr).name, 99, 111, 114, 114, 101, 108, 97, 116, 101)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_second_order_mean(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            // "second_order_mean"
+            name_matches_str17((*expr).name, 115, 101, 99, 111, 110, 100, 95, 111, 114, 100, 101, 114, 95, 109, 101, 97, 110)
+        }
+        None => false
+    }
+}
+
 fn call_expr_is_builtin_sensitivity_of(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
@@ -14825,6 +15357,39 @@ fn call_expr_is_syscall6(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, 
 // extern names probed under Madaros (fabs, pow, floor, ceil, malloc, getpid,
 // tgamma, ...) all 19 returned 0, and heap_alloc — listed but dispatched
 // elsewhere — returned a real pointer.
+// #2164: bound for checking, absent from the backend.
+//
+// checker_bind_import_unknown_inplace binds these five so a multi-module program
+// does not trip E137 on them, exactly as it does for sin/cos/exp. The difference
+// is that sin/cos/exp have builtin ids and these do not: native_v2_builtin_id_
+// for_func_ref -- which the comment above calls the authority -- maps neither
+// tan, atan, tanh, asin nor acos. A call therefore typechecks, compiles to an
+// ELF, and dies on an illegal instruction at run time. `print_f64(atan(0.5))`
+// alone is enough; measured rc=132 on all five.
+//
+// Refusing is the honest answer until the backend emits them. Each needs a
+// hand-written x86-64 kernel with its own range reduction, the way
+// emit_builtin_sin already is -- and a subtly wrong one would be worse than the
+// crash, which at least announces itself.
+//
+// This refuses ONLY the unresolved bare name: a program that DEFINES the
+// function resolves through direct_sig_id and never reaches the check, which is
+// why the whole stdlib is unaffected -- measured, 2 files refused across
+// stdlib+tests+examples, and both are the known-broken ones.
+//
+// The help line points at stdlib/math/pure.sio, whose implementations are
+// correct (verified: copied verbatim under another name, atan(0.5) = 0.463648).
+// They were not `pub` until this change, so importing them failed with E175 and
+// the refusal would have been a dead end -- measured, not assumed.
+fn name_is_unimplemented_native_math(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if name_eq(n, make_name("tan")) { return true }
+    if name_eq(n, make_name("atan")) { return true }
+    if name_eq(n, make_name("tanh")) { return true }
+    if name_eq(n, make_name("asin")) { return true }
+    if name_eq(n, make_name("acos")) { return true }
+    false
+}
+
 fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
     if name_eq(n, make_name("print_int")) { return true }        // id 1
     if name_eq(n, make_name("print_char")) { return true }       // id 2
@@ -14853,7 +15418,7 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("f64_to_bits")) { return true }      // id 25
     if name_eq(n, make_name("bits_to_f64")) { return true }      // id 26
     if name_eq(n, make_name("syscall6")) { return true }         // id 27
-    // P0-F allowlisted POSIX externs. Adding a name here REMOVES the E219
+    // P0-F allowlisted POSIX externs. Adding a name here REMOVES the E250
     // fail-closed guard for it, so each MUST have a working native emitter in
     // codegen_x86_linux.sio (native_v2_emit_builtin_by_id_into + the two
     // name-based emit blocks) or it silently returns a fabricated 0. Per-name
@@ -14874,6 +15439,26 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("write_f64")) { return true }        // id 36
     if name_eq(n, make_name("acknowledge")) { return true }      // id 37
     if name_eq(n, make_name("require_confidence")) { return true } // id 38
+    // libm names this backend answers with an exact hardware instruction:
+    // sqrt (id 14, already allowlisted above as a plain builtin) plus these
+    // two. Both are ROUNDSD with an explicit rounding mode, correctly rounded
+    // by the ISA including -0.0, the infinities and NaN, so neither carries an
+    // error budget. pow and tgamma are deliberately NOT here -- they are
+    // approximations and belong behind their own witnesses.
+    if name_eq(n, make_name("floor")) { return true }            // id 47
+    if name_eq(n, make_name("ceil")) { return true }             // id 48
+    // pow and tgamma. These two ARE approximations, so the paragraph above
+    // deliberately excluded them; they are listed now because they finally
+    // have emitters -- emit_builtin_ffi_pow / emit_builtin_ffi_tgamma in
+    // native::math_ffi_emitters, wrapping the native::math_ffi kernels. The
+    // oracle measures 0.76 ulp (pow) and 3.64 ulp (tgamma), so both still
+    // belong behind their own reference vectors; what changes here is only
+    // that a call no longer fabricates 0.
+    if name_eq(n, make_name("pow")) { return true }              // id 49
+    if name_eq(n, make_name("tgamma")) { return true }           // id 50
+    if name_eq(n, make_name("__sounio_seq_push")) { return true } // id 51
+    if name_eq(n, make_name("__sounio_seq_get")) { return true }  // id 52
+    if name_eq(n, make_name("__sounio_seq_set")) { return true }  // id 53
     false
 }
 
@@ -16586,7 +17171,7 @@ impl Checker {
             return (c.exit_type_depth(), ty_error())
         }
         if checker_type_expr_contains_reserved_wide_float(&te) {
-            let blocked = c.report_error_at(te.span, 218, 0, 0, 0)
+            let blocked = c.report_error_at(te.span, 249, 0, 0, 0)
             return (blocked.exit_type_depth(), ty_error())
         }
         let result = match te.kind {
@@ -17120,7 +17705,7 @@ impl Checker {
                     Some(largs) => {
                         let lname = checker_copy_string_list_to_name((*largs).head.path.segments)
                         if !zd_locus_is_wellformed(lname) {
-                            c = c.report_error_at(span, 208, 0, 0, 0)
+                            c = c.report_error_at(span, 247, 0, 0, 0)
                         }
                     }
                 }
@@ -17743,6 +18328,9 @@ impl Checker {
             ItemKind::ItemAlgebra => self.collect_algebra_def(item.algebra_def)
             ItemKind::ItemStudy => self.collect_study_def(item.span, item.study_def)
             ItemKind::ItemOntology => self.collect_ontology_def(item.ontology_def)
+            // Claim metadata is removed from the item stream by the parse
+            // driver, so collection has no work to perform for this variant.
+            ItemKind::ItemClaim => self
         }
     }
 
@@ -20210,6 +20798,11 @@ impl Checker {
             ItemKind::ItemAlgebra => self  // Already handled in collect pass
             ItemKind::ItemStudy => self  // Already handled in collect pass
             ItemKind::ItemOntology => self  // Already handled in collect pass
+            // Claim metadata never reaches check: the parse driver drops
+            // ItemKind::ItemClaim from the item stream (parser/mod.sio:41).
+            // The arm exists so the match is exhaustive — without it the build
+            // prints `error: match must be exhaustive` and still exits 0.
+            ItemKind::ItemClaim => self
         }
     }
 
@@ -20914,6 +21507,26 @@ impl Checker {
                 let hyper_checked = check_hyper_binary(c, e.span, e.bin_op, left_inner, right_inner)
                 c = hyper_checked.0
             }
+            // Mirror of the E245 refusal in
+            // checker_check_binary_with_operand_types_inplace. check.sio carries two
+            // parallel implementations of this rule, and leaving one without the
+            // refusal is a trap for whoever edits the other next.
+            //
+            // Honest limit: I could not demonstrate which engine reaches THIS copy.
+            // Madaros demonstrably takes the in-place one (that is where the probes
+            // fire), and CI's Full Test Suite runs souc-stage2, which
+            // selfhost_host_gate.sh builds from self-hosted/compiler/lean_single.sio
+            // -- a self-contained file with its own checker that neither copy feeds.
+            // Both copies carry the rule for consistency, not on a measured claim
+            // that this one runs.
+            let kk_both = is_knowledge_type(left_ty) && is_knowledge_type(right_ty)
+            let kk_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+                || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv
+                || e.bin_op == BinaryOp::OpRem
+            let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
+            if kk_both && kk_arith && !kk_hyper {
+                c = c.report_error_at(e.span, 245, 0, 0, 0)
+            }
             let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty)
             if knowledge_result.kind == TypeKind::TyError {
                 c = c.report_error_at(e.span, 36, 0, 0, 0)
@@ -21511,6 +22124,9 @@ impl Checker {
                 None => {}
             }
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+            if is_seq_type(base_ty) {
+                return (c, ty_knowledge(ty_i64(), 0.0 - 1.0))
+            }
             return (c, ty_i64())
         }
         if base_ty.kind == TypeKind::TyKnowledge {
@@ -22098,14 +22714,12 @@ impl Checker {
             }
             // #1622: calling an `extern "C"` name the native backend does not
             // implement. Refuse here rather than emit a call that reads 0.
-            // Checked at the CALL, not at the declaration: ffi_libm_call.sio
-            // declares tgamma/pow/floor/ceil and calls only sqrt, and
-            // parser_card_a_raw_pointer_types.sio declares malloc and never
-            // calls it — both compile and pass today, and a declaration-site
-            // refusal would break them for no gain.
+            // Checked at the CALL, not at the declaration -- see the same note
+            // on the in-place arm above, and the fixture that pins it,
+            // tests/run-pass/ffi_declared_never_called_is_legal.sio.
             var refused_unimplemented = false
             if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
-                c = c.report_error_at(e.span, 219, 0, 0, 0)
+                c = c.report_error_at(e.span, 250, 0, 0, 0)
                 refused_unimplemented = true
             }
             let call_start_borrows = c.borrows
@@ -25121,7 +25735,7 @@ impl Checker {
                 c = ty_pair.0
                 let target_ty = ty_pair.1
                 if is_wide_float_type(src_ty) || is_wide_float_type(target_ty) {
-                    c = c.report_error_at(e.span, 217, 0, 0, 0)
+                    c = c.report_error_at(e.span, 248, 0, 0, 0)
                     return (c, ty_error())
                 }
                 // Epistemic enforcement: cannot cast Knowledge<T> to T via `as`

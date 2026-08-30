@@ -70,7 +70,7 @@ from goldens.
   3. If souc rebuild needed: `bash scripts/ci/lean_single_fixed_point_gate.sh`
      to confirm self-host fixed-point still green; rebuild only if
      fixed-point is broken or souc rejects current source.
-  4. Run `bash scripts/ci/kaxi_ptx_capture.sh` to regenerate goldens.
+  4. Run `bash scripts/gpu/kaxi_ptx_capture.sh` to regenerate goldens.
   5. Run `bash scripts/ci/kaxi_ptx_golden_gate.sh`. The May 2026
      closeout target was 318/318 PASS, 0 FAIL, 0 MISSING. That
      number is stale. Live measurement 2026-08-18 (#1915): **0/318**,

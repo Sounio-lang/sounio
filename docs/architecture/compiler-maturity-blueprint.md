@@ -59,14 +59,14 @@ bundle-owned decision for that validated subset.
 
 M9 established the current large-surface frontier on the generated self-host.
 
-For `scripts/ci/m4_large_surface_probe.sio`:
+For `self-hosted/ci/m4_large_surface_probe.sio`:
 
 - at `2 MiB`, closure truncates with `rc=2`, `module_count=46`,
   `total_requested_bytes=2810871`, and `first_truncated_index=28`
 - at `4 MiB`, `8 MiB`, and `16 MiB`, byte truncation is gone, but execution
   still fails with `rc=139`, `ND_COUNT=262143`, `ovf_nd=1`, and `ovf_pool=1`
 
-For `scripts/ci/ontology_witness_program_probe.sio`:
+For `self-hosted/ci/ontology_witness_program_probe.sio`:
 
 - at `2 MiB`, closure truncates with `rc=2`, `module_count=48`,
   `total_requested_bytes=2834721`, and `first_truncated_index=30`

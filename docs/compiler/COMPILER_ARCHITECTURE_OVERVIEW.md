@@ -28,11 +28,33 @@ artifacts/omega/souc-bin/souc-linux-x86_64-gpu
 On the current snapshot, `souc info` for the default JIT profile reports:
 
 - version `1.0.0-beta.4`
-- Cranelift JIT enabled
+- **Cranelift JIT NOT compiled** — `souc info` prints `[-] Cranelift JIT - rebuild
+  with --features jit`. Measured 2026-08-27: no artifact enables it, no build path
+  passes the feature, and the binary exports no Cranelift symbol. This bullet
+  previously read "Cranelift JIT enabled" — not compiled
 - LLVM disabled in the checked artifact
 - GPU codegen disabled in the checked JIT artifact
 - LSP, SMT, distributed, and package-manager features disabled in the checked artifact
-- ontology resolution CLI enabled natively via `souc ontology <resolve|search|ancestors|is-subclass>`
+- ontology CLI on the checked artifact via `souc ontology <init|info|search|is-subclass|list|lock|update|diff|deprecations|verify>`
+
+> **Two binaries, two different `souc ontology` CLIs — measured 2026-08-26.** The
+> command name is shared and the subcommand sets barely overlap, so which one you
+> get depends on which binary you are holding:
+>
+> | | checked artifact (`artifacts/omega/souc-bin/souc-linux-x86_64-gpu`) | default `bin/souc` (Madaros v0.80.0) |
+> |---|---|---|
+> | subcommands | `init info search is-subclass list lock update diff deprecations verify` | `resolve search ancestors is-subclass map` |
+> | `ontology resolve GO:0008150` | not a subcommand — prints usage | `label=biological_process`, `iri=…GO_0008150`, `provenance=local:go` |
+>
+> Both are real; `souc ontology bogussub` gives `unknown ontology subcommand` on
+> the default binary, so its dispatch is genuine and not a fallback. A CURIE
+> outside the bundled slice (`CHEBI:15377`, `LOINC:2345-7`) answers `unresolved`
+> — the slice is partial, which is not the same as the command being absent, and
+> reading it as absence is an easy mistake to make.
+>
+> `souc --help` does not list `ontology` at all on the default binary. That
+> omission is the whole trap: a survey of `--help` concludes the command does not
+> exist, and it does.
 
 For the separate checked GPU profile, `souc info` reports:
 

@@ -18,7 +18,8 @@
 # legacy residual packaging that intentionally omits the closed e2e claim.
 # Prefer scripts/dev/madaros_wave13_showcase_gate.sh for the public full-green
 # surface. If stock prebuilt lags #1392, rebuild:
-#   scripts/dev/souc-build-lock.sh make build-madaros
+#   make build-madaros   # bare: it locks internally; wrapping it in
+#                        # souc-build-lock.sh deadlocks (see CLAUDE.md §4)
 #   # or: MADAROS_RAW_BIN=artifacts/self-hosted/madaros
 #
 # Exit 0 when every REQUIRED sub-gate is green. Writes machine-readable receipt:
@@ -355,7 +356,7 @@ if [[ $fail_required -eq 0 ]]; then
 fi
 if [[ "$cd_exact_status" != "pass" && "$REQUIRE_CD_EXACT" == "1" ]]; then
   echo "NOTE: cd_exact RED while required — rebuild Madaros if stock prebuilt lags #1392:" >&2
-  echo "  scripts/dev/souc-build-lock.sh make build-madaros" >&2
+  echo "  make build-madaros   # bare; wrapping it in souc-build-lock.sh deadlocks" >&2
   echo "  # or MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash $0" >&2
 fi
 echo "MADAROS_WAVE12_SHOWCASE_GATE_FAIL" >&2

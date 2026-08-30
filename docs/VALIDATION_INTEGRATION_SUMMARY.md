@@ -31,7 +31,7 @@ A comprehensive validation system that integrates Sounio code checking into ever
 
 ### 4. **Documentation**
 - `CHECK_SOUNIO_GUIDE.md` - User guide
-- `docs/validation/INTEGRATION_GUIDE.md` - Integration guide
+- Integration guide - no longer in the repository (`docs/validation/INTEGRATION_GUIDE.md` was lost in the `sounio-dev-01` working-tree recovery import and never restored)
 - `scripts/lsp-integration/README.md` - LSP documentation
 
 ## 🚀 Quick Start Commands
@@ -227,8 +227,8 @@ bash scripts/ci/sounio_validation.sh validate 2>&1 | tee debug.log
 ## 📚 Additional Resources
 
 - [Sounio Language Guide](docs/guide/getting-started.md)
-- [LSP Implementation](self-hosted/lsp/README.md)
-- [CI/CD Best Practices](docs/ci-cd/README.md)
+- [LSP Implementation](scripts/lsp-integration/README.md) (the modules themselves live in `self-hosted/lsp/`)
+- CI/CD wiring - see `scripts/ci/sounio_validation.sh` and `.gitlab-ci.yml`; there is no separate CI/CD best-practices document
 - [Contributing Guidelines](CONTRIBUTING.md)
 
 ---

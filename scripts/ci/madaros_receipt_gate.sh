@@ -2,7 +2,8 @@
 # A binary that asserts its own identity must be telling the truth.
 #
 # artifacts/self-hosted/madaros.gate-receipt is TRACKED in git and claims a
-# sha256, a source_commit and a gate result for artifacts/self-hosted/madaros —
+# sha256, a source_commit and a gate result for whatever artifact it NAMES --
+# today bin/madaros-linux-x86_64, not the path in this file's own name --
 # which is NOT tracked (.gitignore:206). Measured 2026-08-04:
 #
 #     receipt sha256   5629c3a48b6c...    file sha256   6303ec70187b...
@@ -72,8 +73,34 @@ if ! git rev-parse --verify -q "${claimed_commit}^{commit}" >/dev/null 2>&1; the
   fi
 else
   if ! git merge-base --is-ancestor "$claimed_commit" HEAD 2>/dev/null; then
-    gate_fail "receipt source_commit=$claimed_commit is not an ancestor of HEAD — the receipt describes a tree this branch is not on"
-  fi
+          # Not in this history. Two legitimate ways that happens, and neither is a
+          # false claim:
+          #
+          #   squash merge      the branch collapsed into one new commit, so the id
+          #                     the receipt names never lands
+          #   written early     madaros_write_receipt.sh records HEAD when the
+          #                     artifact is modified-but-uncommitted, and HEAD is by
+          #                     definition the commit BEFORE the new binary. That
+          #                     commit therefore carries the OLD blob.
+          #
+          # I first accepted only the squash shape, by requiring the named commit to
+          # carry the same blob as HEAD. That failed main at e5e7ce8aff on a receipt
+          # whose sha256 matched the shipped ELF byte for byte -- the second shape
+          # above. Once a commit is outside this history its blob proves nothing
+          # either way, so provenance is reported UNVERIFIED and the sha256 check
+          # below is what stands. It always was the load-bearing one; making the
+          # commit id load-bearing is what broke twice in one day.
+          head_blob="$(git rev-parse -q --verify "HEAD:$claimed_artifact" 2>/dev/null || true)"
+          claimed_blob="$(git rev-parse -q --verify "$claimed_commit:$claimed_artifact" 2>/dev/null || true)"
+          if [[ -n "$claimed_blob" && "$claimed_blob" == "$head_blob" ]]; then
+            echo "  receipt: source=$claimed_commit was rewritten out of this history (squash); it carried this exact artifact"
+          else
+            echo "  receipt: source=$claimed_commit is not in this history -- provenance UNVERIFIED"
+            echo "  receipt: the sha256 comparison below is what stands"
+          fi
+          delivered="$(git log -1 --format=%H -- "$claimed_artifact" 2>/dev/null)"
+          claimed_commit="${delivered:-$claimed_commit}"
+        fi
   behind="$(git rev-list --count "${claimed_commit}..HEAD" 2>/dev/null || echo '?')"
   echo "  receipt: gate=$claimed_gate result=$claimed_result source=$claimed_commit (${behind} commits behind HEAD)"
 fi
@@ -100,11 +127,12 @@ if [[ "$actual_sha" != "$claimed_sha" ]]; then
   echo "  receipt claims $claimed_sha"
   echo "  file is       $actual_sha"
   echo
-  echo "  This ELF is not the one the receipt was written for. It is resolved as an"
-  echo "  oracle by ~82 scripts and preferred by scripts/install.sh over the committed"
-  echo "  bin/madaros-linux-x86_64. Rebuild and re-emit the receipt, or delete the ELF:"
-  echo "    make build-madaros && bash scripts/ci/madaros_write_receipt.sh"
-  gate_fail "artifacts/self-hosted/madaros does not match its own receipt"
+  echo "  This ELF is not the one the receipt was written for. Whatever the receipt"
+  echo "  names is resolved as an oracle by ~82 scripts, so a stale receipt lets every"
+  echo "  one of them attest a build nobody measured. Re-run the gate against the ELF"
+  echo "  that is actually there, then re-emit the receipt:"
+  echo "    bash scripts/ci/madaros_full_gate.sh && bash scripts/ci/madaros_write_receipt.sh"
+  gate_fail "$claimed_artifact does not match its own receipt"
 fi
 
 gate_pass "binary matches its receipt ($actual_sha)"

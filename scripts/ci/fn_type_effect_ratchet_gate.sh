@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/gate_artifact.sh"
 # fn_type_effect_ratchet_gate.sh — freeze the number of function types that
 # carry no effect clause, so the gap to SOUNIO-SPEC-06 §6.0 cannot widen.
 #
@@ -107,7 +108,7 @@ require_min_count "$ficheiros" 500 "live .sio files"
 
 atual=$(enumerate | wc -l | tr -d ' ')
 require_nonempty "$atual" "the bare-function-type count came back empty"
-[ -f "$REF" ] || printf '%s\n' "$atual" > "$REF"
+[ -f "$REF" ] || printf '%s\n' "$atual" | gate_write_artifact "$REF"
 congelado=$(head -1 "$REF" | tr -d ' ')
 
 mkdir -p "$(dirname "$OUT")"
@@ -126,7 +127,7 @@ else
   echo "OK: bare function types hold at ${congelado}."
 fi
 
-cat > "$OUT" <<JSON
+cat <<JSON | gate_write_artifact "$OUT"
 {
   "gate": "fn_type_effect_ratchet",
   "status": "${estado}",

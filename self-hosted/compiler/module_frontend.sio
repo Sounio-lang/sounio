@@ -2337,8 +2337,38 @@ fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Pan
         while ii < f.instr_count {
             let op = (IR_A_OP[(ir_region_slot_r(f.region, (ii))) as usize] as IrOpcode)
             if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
-                let cn = ir_arena_name(ir_region_slot_r(f.region, (ii)))
-                let bid = if cn.len > 0 { native_v2_builtin_id_for_name(cn) } else { 0 }
+                var cn = ir_arena_name(ir_region_slot_r(f.region, (ii)))
+                var bid = if cn.len > 0 { native_v2_builtin_id_for_name(cn) } else { 0 }
+                // #2244: str_slice is arity-polymorphic at the source level --
+                // (s, start) is the suffix pointer, (s, start, end) is a copy of
+                // the half-open range. lean_single dispatches on arity while it
+                // parses; a native builtin is one stub with no view of its call
+                // site, so both spellings lowered to the suffix form and end was
+                // discarded at 102 call sites. Retag the 3-arg sites onto their
+                // own builtin name here, where the arity is still on the
+                // instruction, so each spelling gets its own stub. Making the one
+                // stub 3-arg instead would turn the specified 2-arg form into a
+                // range copy over an uninitialised end -- corruption, not a wrong
+                // string. Idempotent: a retagged call reads back as bid 51.
+                if bid == 8 {
+                    let slice_argc = IR_A_ARG_COUNT[(ir_region_slot_r(f.region, (ii))) as usize]
+                    // `== 3`, not `>= 3`. The retag decides an overload
+                    // IDENTITY, so it must name the arity it means. With `>=`
+                    // a 4-argument call is relabelled str_slice.3 and its
+                    // fourth argument disappears -- and that call is
+                    // reachable: `souc check` accepts str_slice(s,2,5,7)
+                    // today (measured 2026-08-28), so the checker does not
+                    // stand between source and this line. A 4-argument call
+                    // now keeps the 2-argument spelling, which is still
+                    // wrong for the caller but is wrong VISIBLY, rather than
+                    // being silently accepted as something it is not.
+                    if slice_argc == 3 {
+                        cn = make_name("str_slice.3")
+                        ir_arena_put_name(ir_region_slot_w(f.region, (ii)), cn)
+                        bid = native_v2_builtin_id_for_name(cn)
+                        changed = true
+                    }
+                }
                 if cn.len > 0 && bid != 0 {
                     let cur = IR_A_FN_ID[(ir_region_slot_r(f.region, (ii))) as usize]
                     var ok: bool = false
@@ -6256,6 +6286,15 @@ fn module_frontend_merge_imported_box(
         // IrModule by-value chain (promote/compact/ensure/resolve each used to copy).
         ir_module_finalize_merged_calls(&! (*module_box))
         ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
+        // #2244: the restore above replays a PRE-finalize snapshot over slot 0, so
+        // it undoes what ir_module_ensure_builtin_call_targets just did to that
+        // slot. It already re-applies the float-marker half of that pass by hand
+        // (see the IR_FLOAT_REG_MARKER_FLAG loop inside it); the name/fn_id half
+        // was missing, so a builtin call in the restored slot kept its pre-finalize
+        // binding. Measured: the first function of the first imported module was
+        // the only one in a merged compile whose 3-arg str_slice was not retagged.
+        // Re-running the pass is idempotent -- it rewrites only what is still stale.
+        ir_module_ensure_builtin_call_targets(&! (*module_box))
     }
     module_frontend_lower_direct_box_ok(module_box, ir_empty_validated_patch_stats())
 }
@@ -6563,6 +6602,15 @@ pub fn module_frontend_compile_imported_to_file(
     // Memory wall P0: finalize/restore in place — no full IrModule by-value locals.
     ir_module_finalize_merged_calls(&! (*module_box))
     ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
+    // #2244: the restore above replays a PRE-finalize snapshot over slot 0, so
+    // it undoes what ir_module_ensure_builtin_call_targets just did to that
+    // slot. It already re-applies the float-marker half of that pass by hand
+    // (see the IR_FLOAT_REG_MARKER_FLAG loop inside it); the name/fn_id half
+    // was missing, so a builtin call in the restored slot kept its pre-finalize
+    // binding. Measured: the first function of the first imported module was
+    // the only one in a merged compile whose 3-arg str_slice was not retagged.
+    // Re-running the pass is idempotent -- it rewrites only what is still stale.
+    ir_module_ensure_builtin_call_targets(&! (*module_box))
     if str_eq(read_env("SOUNIO_DUMP_ALL_CALLS"), "1") {
         print("DUMPALL: post_finalize\n")
         ir_module_dump_all_calls_diag(&(*module_box))

@@ -19,9 +19,22 @@ The wrapper prepends a task-specific system prompt from `.claude/offload-tasks/<
 | `scaffold` | `deepseek` | `qwen`, `grok-code` | Spec → boilerplate (.sio, SQL, ETL, LaTeX) |
 | `review` | `deepseek` | `xai`, `qwen` | Devil's-advocate code/paper review |
 | `paraphrase` | `minimax` (needs key) | `qwen`, `deepseek` | Cover letters, abstract polishing |
-| `math-review` | `xai zai` fan-out (Grok 4.3 + Z.AI GLM) | `xai-fast`, `qwen`, `mistral` | Math / algebra / stats audit — **default is now a two-provider fan-out for every agent** |
+| `math-review` | `xai zai local` fan-out | `xai-fast`, `qwen`, `mistral` | Math / algebra / stats audit — **three-way, so one outage still leaves two independent opinions** |
 
 > **Default math review (2026-07-07):** `bin/llm-offload -t math-review` fans out to **xai (grok-4.3)** and **zai (Z.AI GLM-5.2)** automatically — an independent second opinion is the standard, not opt-in. Z.AI needs `ZAI_API_KEY` (or `ZHIPU_API_KEY`); without it the tool runs xai alone and prints a SKIPPED notice for Z.AI. The default response cap is 8,192 tokens; deep audits must opt in with `OFFLOAD_MAX_TOKENS`. Run `bin/llm-offload --status` to see loaded keys.
+
+> **Third leg added 2026-08-24.** The two-provider default degrades to ONE whenever either
+> vendor is down, silently — the run still exits 0 and prints a review. On 2026-08-24 zai
+> returned `1310 Weekly/Monthly Limit Exhausted` and six math reviews were logged as
+> single-provider before anyone noticed the policy standard was not being met. `local` is now
+> the third leg: it is the on-prem gateway (`LOCAL_LLM_URL`/`LOCAL_LLM_MODEL`), it needs no
+> vendor account, and `.claude/AGENT_OFFLOAD_POLICY.md` M1 already accepts a local leg for this
+> purpose. Verified the same day on a real Lean diff: it independently checked the arithmetic and
+> the negative control rather than echoing the prompt.
+>
+> **It is a weaker leg than a second frontier vendor, not a substitute for one.** When zai
+> recovers you get three; treat `local` as the floor that keeps the standard reachable, and
+> prefer `--raw <prompt> xai zai` style fan-outs for anything referee-bound.
 
 ```bash
 # Outline -> prose

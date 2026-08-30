@@ -96,6 +96,13 @@ lean_lib «SounioSedenionMeasurement» where
 @[default_target]
 lean_lib «SounioCDCocycle» where
 
+-- CD-tower ZD fibers: the fiber-antisymmetry development.  Mathlib-free, no `sorry`, no
+-- `native_decide`; imports only SounioCDCocycle.  Carries the deviation law
+-- (`deviation_law_all`) and both rows of the level transfer (`s3_level_recursion`,
+-- `cp2_level_recursion`).
+@[default_target]
+lean_lib «SounioZDFiberAntisym» where
+
 @[default_target]
 lean_lib «SounioCDTowerSeam» where
 
@@ -107,6 +114,20 @@ lean_lib «SounioCDRecursiveSeam» where
 
 @[default_target]
 lean_lib «SounioCDqbig» where
+
+-- CD core-law twin recursion — per-dimension native_decide certificate (dims 16/32/64) of BOTH
+-- doubling recursions S=2S'-8·[hi_lo≠0] and S=8-2S', plus Dmax=4(2^(n-3)-1). The ∀n proof of the
+-- recursions is in SounioSeamFlip; this file anchors them at fixed dims (regression, like lsq_16/32/64).
+@[default_target]
+lean_lib «SounioCDCoreLaw» where
+
+-- Seam-flip law — the ∀n KEYSTONE under the whole 168 lane (lift / orbit theorem / annihilation=
+-- associator bridge / core-law twin recursion all bottom out on it). Proves, for ALL n, Mathlib-free,
+-- no sorry, no native_decide: the one-step cocycle recursion R (four branches), antisymmetry, cdSigma=±1,
+-- and the FULL associator seam-flip law — all eight (p,q,r) seam configurations over the whole locus
+-- (generic + degenerate), with exact chi-corrections. Axioms [propext, Classical.choice, Quot.sound].
+@[default_target]
+lean_lib «SounioSeamFlip» where
 
 @[default_target]
 lean_lib «SounioSeamBridge» where
@@ -723,3 +744,8 @@ lean_lib «SounioFoMultimodFragment» where
 -- ../sounio-pbpk-sedation-weaning/formal/lean4/SounioOpioidWeaningSafety.lean
 -- (see stdlib/darwin_pbpk/WEANING_MOVED.md). Build there:
 --   cd ../sounio-pbpk-sedation-weaning/formal/lean4 && lake build SounioOpioidWeaningSafety
+--
+-- NOTE (rebase 2026-08-27): this PR's original lakefile also registered
+-- `lean_lib «SounioCDTowerAutomorphism»`, but `formal/lean4/SounioCDTowerAutomorphism.lean`
+-- exists on neither `origin/main` nor this PR head. The registration was dangling
+-- (non-default target, so `lake build` never surfaced it) and is dropped here.

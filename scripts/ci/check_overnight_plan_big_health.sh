@@ -11,7 +11,7 @@ REVALIDATE_SEC="${PLAN_BIG_OVERNIGHT_HEALTH_REVALIDATE_SEC:-120}"
 
 usage() {
   cat <<USAGE
-Usage: scripts/check_overnight_plan_big_health.sh [--auto-heal] [--tail-lines N] [--revalidate-sec N]
+Usage: scripts/ci/check_overnight_plan_big_health.sh [--auto-heal] [--tail-lines N] [--revalidate-sec N]
 
 Options:
   --auto-heal     Attempt restart when state is stale/stopped

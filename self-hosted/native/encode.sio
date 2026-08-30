@@ -1536,6 +1536,25 @@ pub fn emit_sar_rax_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     b
 }
 
+// SHR rax, cl — LOGICAL right shift. The one this file was missing.
+//
+// Verified against as(1): `shr rax, cl` assembles to 48 D3 E8, `sar` to
+// 48 D3 F8, `shl` to 48 D3 E0. Only the last two had encoders, so anyone
+// needing a logical shift either hand-wrote the bytes -- codegen.sio does
+// exactly that when extracting a biased exponent, with the comment
+// "shr rax, cl: 48 D3 E8" -- or reached for emit_sar_rax_cl and relied on the
+// sign bit being clear. The second habit is the dangerous one: it is correct
+// until the value it shifts can go negative, and then it is wrong by 2^64
+// with nothing to notice.
+pub fn emit_shr_rax_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    // 48 D3 E8
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xD3)
+    b = emit_byte(b, 0xE8)
+    b
+}
+
 // mov rcx, rbx — 48 89 d9
 pub fn emit_mov_rcx_rbx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
@@ -1948,6 +1967,86 @@ pub fn emit_sqrtsd_xmm0_xmm0(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div
     b = emit_byte(b, 0x0F)
     b = emit_byte(b, 0x51)
     b = emit_byte(b, 0xC0)
+    b
+}
+
+// MOVSD xmm0/xmm1 <-> [rbp+disp32] — the disp32 forms of the four disp8 slot
+// moves above.
+//
+// Added because disp8 caps the frame at 15 double slots below rbp, and that
+// cap is a code limit masquerading as a numerical one. The comment on
+// emit_horner_step already records this failure mode once: the exp and log
+// emitters open-coded their Horner steps and stopped at degree 6 and degree 4
+// because the code, not the mathematics, set the accuracy. A double-double
+// pow needs more live intermediates than 15, so the same wall was waiting.
+//
+// Encoding differs from the disp8 form only in ModRM.mod (10 instead of 01)
+// and a 4-byte little-endian displacement: 0x85 for xmm0, 0x8D for xmm1.
+
+pub fn emit_movsd_xmm0_rbp_disp32(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xF2)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x10)
+    b = emit_byte(b, 0x85)   // ModRM: mod=10 reg=xmm0 r/m=rbp
+    b = emit_u32_le(b, disp)
+    b
+}
+
+pub fn emit_movsd_xmm1_rbp_disp32(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xF2)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x10)
+    b = emit_byte(b, 0x8D)   // ModRM: mod=10 reg=xmm1 r/m=rbp
+    b = emit_u32_le(b, disp)
+    b
+}
+
+pub fn emit_movsd_rbp_disp32_xmm0(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xF2)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x11)
+    b = emit_byte(b, 0x85)   // ModRM: mod=10 reg=xmm0 r/m=rbp
+    b = emit_u32_le(b, disp)
+    b
+}
+
+pub fn emit_movsd_rbp_disp32_xmm1(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xF2)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x11)
+    b = emit_byte(b, 0x8D)   // ModRM: mod=10 reg=xmm1 r/m=rbp
+    b = emit_u32_le(b, disp)
+    b
+}
+
+// ROUNDSD xmm0, xmm0, imm8 — round scalar double under an explicit mode.
+//
+// SSE4.1 (66 0F 3A 0B /r ib). imm8 low two bits select the mode when bit 2 is
+// clear: 0 = nearest-even, 1 = toward -inf (floor), 2 = toward +inf (ceil),
+// 3 = toward zero (trunc). Bit 3 (0x08) suppresses the inexact exception,
+// which is what libm's floor/ceil do, so callers pass 0x09 / 0x0A.
+//
+// This is one instruction where the alternative is a branch sequence around
+// cvttsd2si, and the branch version is not merely longer: cvttsd2si saturates
+// on |x| >= 2^63 and has no defined answer for NaN, so the emulation needs a
+// magnitude guard and a NaN guard to stay IEEE-correct. ROUNDSD is correct on
+// -0.0, on both infinities, and on NaN by construction.
+//
+// SSE4.1 has been present on every x86-64 part since Penryn (2007); this
+// backend already targets Linux x86-64 only.
+pub fn emit_roundsd_xmm0_xmm0_imm8(buf: CodeBuffer, mode: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 66 0F 3A 0B C0 ib
+    var b = buf
+    b = emit_byte(b, 0x66)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x3A)
+    b = emit_byte(b, 0x0B)
+    b = emit_byte(b, 0xC0)
+    b = emit_byte(b, mode)
     b
 }
 

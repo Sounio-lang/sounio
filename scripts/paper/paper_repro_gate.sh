@@ -11,7 +11,7 @@ STATUS_JSON=""
 
 usage() {
   cat <<'EOF'
-Usage: scripts/paper_repro_gate.sh [--status-json PATH] [--no-run]
+Usage: scripts/paper/paper_repro_gate.sh [--status-json PATH] [--no-run]
 
 Options:
   --status-json PATH   Evaluate an existing status_summary.v1.json

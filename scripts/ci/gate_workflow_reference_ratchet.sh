@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/gate_artifact.sh"
 # gate_workflow_reference_ratchet.sh — freeze the number of gate scripts that no
 # workflow names, so the count cannot grow.
 #
@@ -83,7 +84,7 @@ require_min_count "$n_gate" 50 "versioned gate scripts"
 
 atual=$(nao_nomeados | wc -l | tr -d ' ')
 require_nonempty "$atual" "the unnamed-gate count came back empty"
-[ -f "$REF" ] || printf '%s\n' "$atual" > "$REF"
+[ -f "$REF" ] || printf '%s\n' "$atual" | gate_write_artifact "$REF"
 congelado=$(head -1 "$REF" | tr -d ' ')
 
 mkdir -p "$(dirname "$OUT")"
@@ -109,7 +110,7 @@ fi
 mkdir -p "$(dirname "$OUT")"
 nao_nomeados > "$(dirname "$OUT")/gate_workflow_reference.measured.list"
 
-cat > "$OUT" <<JSON
+cat <<JSON | gate_write_artifact "$OUT"
 {
   "gate": "gate_workflow_reference_ratchet",
   "status": "${estado}",

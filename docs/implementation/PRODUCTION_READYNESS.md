@@ -70,7 +70,9 @@ canonical setup story for this repo snapshot.
 ## 4) Troubleshooting
 
 ### `ImportError` / `Import not found`
-- Check `SOUNIO_STDLIB_PATH` and `souc sysroot stdlib-paths`.
+- Check `SOUNIO_STDLIB_PATH` and the `stdlib:` line printed by `"$SOUC_BIN" info`.
+  (`souc sysroot` was a Rust-era subcommand and was removed with the Rust crates
+  in `79acc192e1`; `souc info` is where the resolved stdlib root is reported now.)
 - Ensure imports are module-rooted correctly (`import stdlib.foo::bar;`).
 - Confirm workspace run path: relative imports are resolved from the source directory.
 
@@ -100,14 +102,21 @@ canonical setup story for this repo snapshot.
 3. Freeze dynamic config:
    - keep `SOUNIO_STDLIB_PATH` unchanged for deterministic imports.
 4. Re-run smoke matrix and compare:
-   - `tests/native_execution.rs`
-   - `tests/selfhost_native_e2e.rs`
-   - `tests/integration_cli.rs` self-hosted build contract checks
+   - `bash scripts/run_sio_test_suite.sh` (the self-hosted `.sio` suite; it
+     dispatches to `scripts/dev/run_sio_test_suite.sh`)
+   - The three Rust smoke tests this step used to name -- `native_execution.rs`,
+     `selfhost_native_e2e.rs` and `integration_cli.rs` -- lived under
+     `crates/souc/tests/` and were removed with the whole Rust tree on
+     2026-02-26 by `79acc192e1 [cutover] Remove Rust crates -- compiler is
+     self-hosted`. They have no direct replacement: the CLI build-contract
+     coverage they provided has not been reconstructed in the `.sio` suite.
 5. Document regression in postmortem notes and reopen risk register before restart.
 
 ## 6) CI gates for go/no-go
 
-- `cargo test -p souc --test native_execution`
-- `cargo test -p souc --test selfhost_native_e2e`
-- `cargo test -p souc --test integration_cli -- --nocapture`
+- `bash scripts/run_sio_test_suite.sh`
+- The three `cargo test -p souc --test ...` invocations this list used to carry
+  are not runnable: the repository has no `Cargo.toml` and no `crates/` tree
+  after `79acc192e1`, so there is no cargo workspace and no `souc` crate to
+  test. Do not treat their absence as a passing gate.
 - no critical regression on CLI stable contract for two weeks before go-live

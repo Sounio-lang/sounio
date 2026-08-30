@@ -1,0 +1,369 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// examples/clinical/ddi_elplus_demo.sio
+//
+// Role-aware EL+ drug–drug interaction (DDI) SMOKE DEMO (unit test, not
+// a validated screening service): bridges the ChEBI drug grounding of
+// stdlib/chemistry/ontology.sio with the verified EL+ closure engine of
+// stdlib/ontology/elplus.sio to DERIVE polypharmacy interaction flags
+// from a mini pharmacological TBox instead of a hardcoded interaction
+// table.
+//
+// CLAIMS SPLIT (offload review 2026-08-05, xai):
+//   * Proven: logical fidelity only.  The boolean closure and conflict
+//     oracle coincide with EL+ entailment over the interned concept
+//     universe (formal/OntologyELPlusClosureComplete.lean, theorems
+//     subBPlusC_iff / conflictBPlusC_iff).
+//   * NOT established: pharmacological adequacy of this hand-built
+//     TBox, completeness of the drug list, or any FP/FN rate against
+//     DrugBank/Lexicomp/FDA labels.  A derived "conflict" here is a
+//     POTENTIAL pharmacokinetic interaction flag, not a clinical
+//     contraindication: no dose, timing, route, or severity model is
+//     represented.
+//
+// Engine: SOUNIO_SOUC_ENGINE=lean_single (non-production lane)
+//   (stdlib/chemistry/ontology.sio is a lean_single-lane module: its
+//   &str/&string workaround predicates do not type-check under the
+//   current Madaros lane; the elplus engine itself runs under both —
+//   see examples/ontology/biomedical/snomed_elplus_demo.sio).
+// Gate: bash scripts/clinical_ddi_elplus_gate.sh
+//
+// TBox (drug atoms keyed by their ChEBI ids from chemistry::ontology):
+//
+//   midazolam   <= exists metabolized_by.CYP3A4      (CHEBI:6931)
+//   tacrolimus  <= exists metabolized_by.CYP3A4      (CHEBI:61049)
+//   rapamycin   <= exists metabolized_by.CYP3A4      (CHEBI:9168)
+//   rapamycin   <= exists transported_by.P-gp
+//   digoxin     <= exists transported_by.P-gp        (CHEBI:4551)
+//   warfarin    <= exists metabolized_by.CYP2C9      (CHEBI:10033)
+//   ketoconazole <= exists inhibits.CYP3A4           (CHEBI:48339)
+//   CYP3A4      <= exists part_of.CYP3A_subfamily
+//   tacrolimus / warfarin / digoxin <= NTI_drug      (narrow therap. index)
+//
+//   exists metabolized_by.CYP3A4 <= CYP3A4_substrate_therapy   (GCI)
+//   exists inhibits.CYP3A4       <= strong_CYP3A4_inhibitor_therapy
+//
+// Role layer — this is the COMPLETE stated role axiom set (the part a
+// plain is-a walk cannot express):
+//   inhibits              sqsubseteq alters_activity_of   (role hierarchy)
+//   part_of o part_of     sqsubseteq part_of              (composition)
+//   metabolized_by o part_of sqsubseteq metabolized_by    (Galen-style
+//                                                          chain)
+// Not modelled (by design): induction roles, transported_by chains,
+// reversible vs mechanism-based inhibition, inhibitor strength grading.
+//
+// Disjointness (co-administration flag rule):
+//   CYP3A4_substrate_therapy  disjoint  strong_CYP3A4_inhibitor_therapy
+//
+// The closure derives, among others:
+//   midazolam  <= exists metabolized_by.CYP3A_subfamily   (chain)
+//   ketoconazole <= exists alters_activity_of.CYP3A4      (role hierarchy)
+//   midazolam  <= CYP3A4_substrate_therapy                (GCI + trans.)
+// and elplus_derive_conflicts then flags the patient-level pairs
+// (midazolam, ketoconazole) and (tacrolimus, ketoconazole) while leaving
+// the P-gp-only digoxin pairs clear; the tacrolimus pair is additionally
+// severity-flagged because tacrolimus is an NTI drug.
+//
+// Soundness anchor (logical fidelity only — see CLAIMS SPLIT above):
+// formal/OntologyELPlusClosureComplete.lean, theorems subBPlusC_iff /
+// conflictBPlusC_iff.
+//
+// claims_not_made: quantitative AUCR prediction (that is the
+//   darwin_pbpk::ddi lane, see tests/stdlib/clinical/
+//   test_midazolam_ddi_e2e.sio); cohort statistics or FP/FN validation;
+//   dual-role drugs (same agent substrate AND inhibitor); graded
+//   inhibitor strength; formulary-scale interning; bedside alerting
+//   product.
+
+use chemistry::ontology::{
+    midazolam_chebi,
+    tacrolimus_chebi,
+    rapamycin_chebi,
+    warfarin_chebi,
+    digoxin_chebi,
+    ketoconazole_chebi
+}
+use ontology::elplus::{
+    elplus_role_closure,
+    elplus_seed,
+    elplus_fixpoint,
+    elplus_derive_conflicts
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    // ── Concept universe ────────────────────────────────────────────────
+    // elplus dense encoding (fixed ABI of stdlib/ontology/elplus.sio):
+    // ckind 0 = atom, 1 = top, 3 = existential (mirrors the Lean
+    // conceptUniv constructors); concept stride 64, role stride 8,
+    // mapping stride 256.
+    let TOP = 0
+    let MIDAZOLAM = 1
+    let TACROLIMUS = 2
+    let RAPAMYCIN = 3
+    let WARFARIN = 4
+    let DIGOXIN = 5
+    let KETOCONAZOLE = 6
+    let CYP3A4 = 7
+    let CYP3A = 8
+    let CYP2C9 = 9
+    let PGP = 10
+    let NTI_DRUG = 11
+    let CYP3A4_SUB_THERAPY = 12
+    let STRONG_INH_THERAPY = 13
+    // Interned existentials.
+    let EX_MET_CYP3A4 = 14
+    let EX_MET_CYP2C9 = 15
+    let EX_INH_CYP3A4 = 16
+    let EX_TRA_PGP = 17
+    let EX_PART_CYP3A = 18
+    let EX_MET_CYP3A = 19
+    let EX_ALT_CYP3A4 = 20
+    let NC = 21
+
+    // Roles.
+    let METABOLIZED_BY = 0
+    let INHIBITS = 1
+    let PART_OF = 2
+    let ALTERS_ACTIVITY_OF = 3
+    let TRANSPORTED_BY = 4
+    let NR = 5
+
+    // ── ChEBI bridge: the drug atoms ARE the chemistry::ontology IRIs ──
+    var chebi_key: [i64; 64] = [0; 64]
+    chebi_key[MIDAZOLAM] = midazolam_chebi().id
+    chebi_key[TACROLIMUS] = tacrolimus_chebi().id
+    chebi_key[RAPAMYCIN] = rapamycin_chebi().id
+    chebi_key[WARFARIN] = warfarin_chebi().id
+    chebi_key[DIGOXIN] = digoxin_chebi().id
+    chebi_key[KETOCONAZOLE] = ketoconazole_chebi().id
+    if chebi_key[MIDAZOLAM] != 6931 || chebi_key[TACROLIMUS] != 61049 {
+        println("FAIL: ChEBI bridge broken for midazolam/tacrolimus")
+        n_fail = n_fail + 1
+    }
+    if chebi_key[RAPAMYCIN] != 9168 || chebi_key[WARFARIN] != 10033 || chebi_key[DIGOXIN] != 4551 {
+        println("FAIL: ChEBI bridge broken for rapamycin/warfarin/digoxin")
+        n_fail = n_fail + 1
+    }
+    if chebi_key[KETOCONAZOLE] != 48339 {
+        println("FAIL: ChEBI bridge broken for ketoconazole")
+        n_fail = n_fail + 1
+    }
+
+    // ── Concept table ───────────────────────────────────────────────────
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    var exid: [i64; 512] = [0; 512]
+    var rclos: [bool; 64] = [false; 64]
+    var s: [bool; 4096] = [false; 4096]
+    var redges: [bool; 32768] = [false; 32768]
+    var ch1: [i64; 8] = [0; 8]
+    var ch2: [i64; 8] = [0; 8]
+    var ch3: [i64; 8] = [0; 8]
+    var disj: [bool; 4096] = [false; 4096]
+
+    ckind[TOP] = 1
+    var a: i64 = 1
+    while a <= 13 {
+        ckind[a] = 0
+        carg1[a] = a
+        a = a + 1
+    }
+    // exid[role * 64 + filler] = concept id; -1 = not interned.
+    var i: i64 = 0
+    while i < 512 {
+        exid[i] = 0 - 1
+        i = i + 1
+    }
+    ckind[EX_MET_CYP3A4] = 3
+    carg1[EX_MET_CYP3A4] = METABOLIZED_BY
+    carg2[EX_MET_CYP3A4] = CYP3A4
+    exid[METABOLIZED_BY * 64 + CYP3A4] = EX_MET_CYP3A4
+    ckind[EX_MET_CYP2C9] = 3
+    carg1[EX_MET_CYP2C9] = METABOLIZED_BY
+    carg2[EX_MET_CYP2C9] = CYP2C9
+    exid[METABOLIZED_BY * 64 + CYP2C9] = EX_MET_CYP2C9
+    ckind[EX_INH_CYP3A4] = 3
+    carg1[EX_INH_CYP3A4] = INHIBITS
+    carg2[EX_INH_CYP3A4] = CYP3A4
+    exid[INHIBITS * 64 + CYP3A4] = EX_INH_CYP3A4
+    ckind[EX_TRA_PGP] = 3
+    carg1[EX_TRA_PGP] = TRANSPORTED_BY
+    carg2[EX_TRA_PGP] = PGP
+    exid[TRANSPORTED_BY * 64 + PGP] = EX_TRA_PGP
+    ckind[EX_PART_CYP3A] = 3
+    carg1[EX_PART_CYP3A] = PART_OF
+    carg2[EX_PART_CYP3A] = CYP3A
+    exid[PART_OF * 64 + CYP3A] = EX_PART_CYP3A
+    ckind[EX_MET_CYP3A] = 3
+    carg1[EX_MET_CYP3A] = METABOLIZED_BY
+    carg2[EX_MET_CYP3A] = CYP3A
+    exid[METABOLIZED_BY * 64 + CYP3A] = EX_MET_CYP3A
+    ckind[EX_ALT_CYP3A4] = 3
+    carg1[EX_ALT_CYP3A4] = ALTERS_ACTIVITY_OF
+    carg2[EX_ALT_CYP3A4] = CYP3A4
+    exid[ALTERS_ACTIVITY_OF * 64 + CYP3A4] = EX_ALT_CYP3A4
+
+    // ── Role layer (rclos stride is ELPLUS_MAXR = 8) ────────────────────
+    rclos[INHIBITS * 8 + ALTERS_ACTIVITY_OF] = true
+    elplus_role_closure(&!rclos, NR)
+
+    // part_of o part_of <= part_of ; metabolized_by o part_of <= metabolized_by
+    let N_CHAINS = 2
+    ch1[0] = PART_OF
+    ch2[0] = PART_OF
+    ch3[0] = PART_OF
+    ch1[1] = METABOLIZED_BY
+    ch2[1] = PART_OF
+    ch3[1] = METABOLIZED_BY
+
+    // ── Stated inclusions ───────────────────────────────────────────────
+    elplus_seed(&!s, NC, TOP)
+    s[MIDAZOLAM * 64 + EX_MET_CYP3A4] = true
+    s[TACROLIMUS * 64 + EX_MET_CYP3A4] = true
+    s[RAPAMYCIN * 64 + EX_MET_CYP3A4] = true
+    s[RAPAMYCIN * 64 + EX_TRA_PGP] = true
+    s[DIGOXIN * 64 + EX_TRA_PGP] = true
+    s[WARFARIN * 64 + EX_MET_CYP2C9] = true
+    s[KETOCONAZOLE * 64 + EX_INH_CYP3A4] = true
+    s[CYP3A4 * 64 + EX_PART_CYP3A] = true
+    s[TACROLIMUS * 64 + NTI_DRUG] = true
+    s[WARFARIN * 64 + NTI_DRUG] = true
+    s[DIGOXIN * 64 + NTI_DRUG] = true
+    s[EX_MET_CYP3A4 * 64 + CYP3A4_SUB_THERAPY] = true
+    s[EX_INH_CYP3A4 * 64 + STRONG_INH_THERAPY] = true
+
+    // ── Fixpoint (8-rule EL+ completion) ────────────────────────────────
+    let rounds = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &ch1, &ch2, &ch3, N_CHAINS, NC, NC, NR)
+    if rounds <= 0 {
+        println("FAIL: fixpoint took no rounds")
+        n_fail = n_fail + 1
+    }
+
+    // 1. Chain derivation: midazolam <= exists metabolized_by.CYP3A
+    //    (metabolized_by o part_of <= metabolized_by over
+    //    CYP3A4 <= exists part_of.CYP3A).
+    if !s[MIDAZOLAM * 64 + EX_MET_CYP3A] {
+        println("FAIL: midazolam should subsume to exists metabolized_by.CYP3A")
+        n_fail = n_fail + 1
+    }
+
+    // 2. Role hierarchy: ketoconazole <= exists alters_activity_of.CYP3A4
+    //    (inhibits sqsubseteq alters_activity_of).
+    if !s[KETOCONAZOLE * 64 + EX_ALT_CYP3A4] {
+        println("FAIL: ketoconazole should subsume to exists alters_activity_of.CYP3A4")
+        n_fail = n_fail + 1
+    }
+
+    // 3. GCI + transitivity: midazolam reaches the substrate-therapy class.
+    if !s[MIDAZOLAM * 64 + CYP3A4_SUB_THERAPY] {
+        println("FAIL: midazolam should reach CYP3A4_substrate_therapy")
+        n_fail = n_fail + 1
+    }
+    if !s[KETOCONAZOLE * 64 + STRONG_INH_THERAPY] {
+        println("FAIL: ketoconazole should reach strong_CYP3A4_inhibitor_therapy")
+        n_fail = n_fail + 1
+    }
+
+    // 4. Negative: warfarin is a CYP2C9 substrate, not CYP3A4.
+    if s[WARFARIN * 64 + EX_MET_CYP3A4] {
+        println("FAIL: warfarin must not subsume to exists metabolized_by.CYP3A4")
+        n_fail = n_fail + 1
+    }
+    if s[WARFARIN * 64 + CYP3A4_SUB_THERAPY] {
+        println("FAIL: warfarin must not reach CYP3A4_substrate_therapy")
+        n_fail = n_fail + 1
+    }
+
+    // 5. Negative: digoxin (P-gp only) must not reach the CYP3A4 classes.
+    if s[DIGOXIN * 64 + CYP3A4_SUB_THERAPY] {
+        println("FAIL: digoxin must not reach CYP3A4_substrate_therapy")
+        n_fail = n_fail + 1
+    }
+
+    // ── Patient-level polypharmacy panel (synthetic unit fixture) ──────
+    // Interaction flag rule: a CYP3A4-substrate therapy asserted together
+    // with a strong CYP3A4-inhibitor therapy for the SAME patient.
+    disj[CYP3A4_SUB_THERAPY * 64 + STRONG_INH_THERAPY] = true
+    disj[STRONG_INH_THERAPY * 64 + CYP3A4_SUB_THERAPY] = true
+
+    // One patient (entity 0), four active medications.
+    var ent: [i64; 256] = [0; 256]
+    var cls: [i64; 256] = [0; 256]
+    ent[0] = 0
+    cls[0] = MIDAZOLAM
+    ent[1] = 0
+    cls[1] = KETOCONAZOLE
+    ent[2] = 0
+    cls[2] = DIGOXIN
+    ent[3] = 0
+    cls[3] = TACROLIMUS
+
+    var conf_pair: [bool; 65536] = [false; 65536]
+    elplus_derive_conflicts(&!conf_pair, 4, &ent, &cls, &s, &disj, NC)
+
+    // 6. midazolam x ketoconazole is flagged (symmetric).
+    if !conf_pair[0 * 256 + 1] || !conf_pair[1 * 256 + 0] {
+        println("FAIL_CONFLICT_MIDAZOLAM_KETOCONAZOLE")
+        n_fail = n_fail + 1
+    }
+
+    // 7. tacrolimus x ketoconazole is flagged (symmetric).
+    if !conf_pair[3 * 256 + 1] || !conf_pair[1 * 256 + 3] {
+        println("FAIL_CONFLICT_TACROLIMUS_KETOCONAZOLE")
+        n_fail = n_fail + 1
+    }
+
+    // 8. Exactly those two pairs are flagged; digoxin pairs stay clear
+    //    and nothing self-conflicts.
+    var n_conf: i64 = 0
+    i = 0
+    while i < 4 {
+        var j: i64 = 0
+        while j < 4 {
+            if conf_pair[i * 256 + j] {
+                n_conf = n_conf + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if n_conf != 4 {
+        println("FAIL_CONFLICT_PAIR_COUNT")
+        n_fail = n_fail + 1
+    }
+
+    // 9. Severity flag: a flagged pair is HIGH-SEVERITY when one side is
+    //    a narrow-therapeutic-index drug.  Exactly the
+    //    tacrolimus x ketoconazole pair qualifies (tacrolimus reaches
+    //    NTI_drug; midazolam does not).
+    var n_severe: i64 = 0
+    i = 0
+    while i < 4 {
+        var j: i64 = i + 1
+        while j < 4 {
+            if conf_pair[i * 256 + j] {
+                if s[cls[i] * 64 + NTI_DRUG] || s[cls[j] * 64 + NTI_DRUG] {
+                    n_severe = n_severe + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if n_severe != 1 {
+        println("FAIL_SEVERITY_NTI_PAIR")
+        n_fail = n_fail + 1
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

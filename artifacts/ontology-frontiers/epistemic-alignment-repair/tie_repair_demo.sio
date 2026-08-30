@@ -1,0 +1,158 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Tie-broken epistemic ontology alignment repair — deterministic tie-break
+// by mapping id, closing the "equal confidences excluded" gap of round 2.
+//
+// Frontier: epistemic-alignment-repair (see FRONTIER.md)
+// Formal companion: formal/OntologyRepairTies.lean (repair_iff_greedy_ties).
+//
+// Scenario: 4 candidate mappings. m0 (0.50) and m1 (0.50) TIE; both conflict
+// with m2 (0.30), and the tie pair (m0, m1) itself conflicts — the conflict
+// graph is the clique {m0, m1, m2}. m3 (0.90) is conflict-free.
+// Tie rule (matches the greedy `conf[i] >= conf[j]` drop-j on id-ordered
+// pairs): on a confidence tie the LOWER id survives, so m0 wins over m1.
+//
+// Verified at runtime:
+//   (1) determinism: two identical runs produce identical kept sets;
+//   (2) the retained set is conflict-free;
+//   (3) every dropped mapping has a maximality witness: a retained mapping
+//       it conflicts with that has strictly higher confidence, or equal
+//       confidence and lower id (the tie rule);
+//   (4) the exact expected survivors: m0 (tie winner), m3; dropped: m1, m2.
+//
+// NOTE: parallel primitive arrays with splat init (arrays of structs and
+// arrays without splat init segfault in the current runtime).
+
+fn conflicts(a: i64, b: i64) -> bool {
+    if a == 0 && b == 1 { return true }
+    if a == 1 && b == 0 { return true }
+    if a == 0 && b == 2 { return true }
+    if a == 2 && b == 0 { return true }
+    if a == 1 && b == 2 { return true }
+    if a == 2 && b == 1 { return true }
+    return false
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    var conf: [f64; 4] = [0.0; 4]
+    conf[0] = 0.50
+    conf[1] = 0.50
+    conf[2] = 0.30
+    conf[3] = 0.90
+
+    var keep: [bool; 4] = [true; 4]
+    var keep2: [bool; 4] = [true; 4]
+
+    // ── Greedy repair, run 1 ────────────────────────────────────────────
+    var i: i64 = 0
+    while i < 4 {
+        var j: i64 = i + 1
+        while j < 4 {
+            if keep[i] && keep[j] {
+                if conflicts(i, j) {
+                    if conf[i] >= conf[j] {
+                        keep[j] = false
+                    } else {
+                        keep[i] = false
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Greedy repair, run 2 (identical input) ──────────────────────────
+    i = 0
+    while i < 4 {
+        var j: i64 = i + 1
+        while j < 4 {
+            if keep2[i] && keep2[j] {
+                if conflicts(i, j) {
+                    if conf[i] >= conf[j] {
+                        keep2[j] = false
+                    } else {
+                        keep2[i] = false
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Check (1): determinism — the two runs agree ─────────────────────
+    i = 0
+    while i < 4 {
+        if keep[i] != keep2[i] {
+            println("FAIL: non-deterministic outcome")
+            n_fail = n_fail + 1
+        }
+        i = i + 1
+    }
+
+    // ── Check (2): retained set is conflict-free ────────────────────────
+    i = 0
+    while i < 4 {
+        var j: i64 = i + 1
+        while j < 4 {
+            if keep[i] && keep[j] {
+                if conflicts(i, j) {
+                    println("FAIL: retained set still has a conflict")
+                    n_fail = n_fail + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Check (3): every dropped mapping has a maximality witness ───────
+    // Witness: retained, conflicting, and strictly stronger by the
+    // lexicographic priority (higher conf, or equal conf with lower id).
+    i = 0
+    while i < 4 {
+        if !keep[i] {
+            var witnessed = false
+            var j: i64 = 0
+            while j < 4 {
+                if keep[j] {
+                    if conflicts(i, j) {
+                        if conf[j] > conf[i] {
+                            witnessed = true
+                        }
+                        if conf[j] == conf[i] {
+                            if j < i {
+                                witnessed = true
+                            }
+                        }
+                    }
+                }
+                j = j + 1
+            }
+            if !witnessed {
+                println("FAIL: dropped mapping lacks witness")
+                n_fail = n_fail + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // ── Check (4): exact expected outcome ───────────────────────────────
+    // m0 survives: it wins the tie against m1 (equal conf, lower id) and
+    // beats m2 outright (0.50 > 0.30). m3 survives (no conflicts).
+    if !keep[0] { println("FAIL: m0 should survive the tie"); n_fail = n_fail + 1 }
+    if keep[1]  { println("FAIL: m1 should be dropped (tie, higher id)"); n_fail = n_fail + 1 }
+    if keep[2]  { println("FAIL: m2 should be dropped (0.30 < 0.50)"); n_fail = n_fail + 1 }
+    if !keep[3] { println("FAIL: m3 should survive"); n_fail = n_fail + 1 }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}
