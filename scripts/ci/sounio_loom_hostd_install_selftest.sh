@@ -155,8 +155,12 @@ grep -Fxq "ReadWritePaths=/var/lib/sounio/loom /tmp/sounio-loom-$SERVICE_UID" "$
   fail 'unit can neither mutate the managed namespace nor limits its write surface'
 grep -Fxq 'ExecStart=/opt/sounio/loom-hostd/bin/sounio-loom-runtime host-supervise --state-dir /var/lib/sounio/loom --service-enabled --apply' "$unit" ||
   fail 'unit is not wired to the Sounio-authorized supervisor'
-grep -Fq 'ExecStartPre=/opt/sounio/loom-hostd/exec-cell/releases/' "$unit" ||
-  fail 'unit is not wired to the frozen ExecCell boot gate'
+grep -Fq 'ExecStartPre=/usr/bin/systemd-run --quiet --wait --pipe --collect ' \
+  "$unit" || fail 'unit is not wired to an isolated ExecCell boot gate'
+grep -Fq ' --property=ReadWritePaths=/run ' "$unit" ||
+  fail 'isolated ExecCell boot gate lacks its bounded transient write policy'
+grep -Fq ' -- /opt/sounio/loom-hostd/exec-cell/releases/' "$unit" ||
+  fail 'isolated boot gate is not wired to the frozen ExecCell release'
 grep -Fq ' --selftest-product-exec-cell-host ' "$unit" ||
   fail 'unit boot gate does not execute the composed ExecCell canary'
 grep -Fq ' --product-exec-cell-fixture-manifest ' "$unit" ||
