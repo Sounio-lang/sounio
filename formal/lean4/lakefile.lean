@@ -267,6 +267,11 @@ lean_lib «SounioPireusGaugeCoboundaryAction» where
 lean_lib «SounioPireusGaugeCoboundaryFaithfulness» where
   moreLeanArgs := #["-j", "1"]
 
+-- Direct 11-bit gauge section as a unique orbit representative.
+-- Non-default: closes the gauge quotient only, not the outer GL4 x swap fold.
+lean_lib «SounioPireusGaugeSectionCanonicalization» where
+  moreLeanArgs := #["-j", "1"]
+
 -- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
 -- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
 -- sweeps (16x16 complex greedy over 1..15) build in ~10s, so kept as a default_target.
