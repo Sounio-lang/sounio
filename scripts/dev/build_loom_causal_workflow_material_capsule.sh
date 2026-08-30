@@ -69,7 +69,8 @@ RESIDENT_RUNTIME_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
 [[ "$(manifest_value "$CONTROLLER_RUNTIME_MANIFEST" semantic_authority)" == Sounio &&
    "$(manifest_value "$CONTROLLER_RUNTIME_MANIFEST" action)" == 9030 &&
    "$(manifest_value "$CONTROLLER_RUNTIME_MANIFEST" controller_commit)" == "$CONTROLLER_COMMIT" &&
-   "$(manifest_value "$RESIDENT_RUNTIME_MANIFEST" semantic_authority)" == Sounio &&
+   "$(manifest_value "$RESIDENT_RUNTIME_MANIFEST" producing_language)" == Sounio &&
+   "$(manifest_value "$RESIDENT_RUNTIME_MANIFEST" language_role)" == SEMANTIC_AUTHORITY &&
    "$(manifest_value "$RESIDENT_RUNTIME_MANIFEST" sounio_resident_v4_commit)" == "$RESIDENT_COMMIT" ]] ||
   fail 'action-9030 dependency authority posture drifted'
 [[ "$(manifest_value "$CONTROLLER_RUNTIME_MANIFEST" resident_runtime_manifest_sha256)" == "$(sha256_file "$RESIDENT_RUNTIME_MANIFEST")" ]] ||

@@ -134,7 +134,8 @@ RESIDENT_RUNTIME_MANIFEST="$CAPSULE/$(record_value "$MANIFEST" resident_runtime_
    "$(record_value "$CONTROLLER_RUNTIME_MANIFEST" controller_commit)" == "$(record_value "$MANIFEST" controller_dependency_commit)" &&
    "$(record_value "$CONTROLLER_RUNTIME_MANIFEST" runtime_sha256)" == "$(sha256_file "$CONTROLLER_RUNTIME")" &&
    "$(record_value "$CONTROLLER_RUNTIME_MANIFEST" resident_runtime_manifest_sha256)" == "$(sha256_file "$RESIDENT_RUNTIME_MANIFEST")" &&
-   "$(record_value "$RESIDENT_RUNTIME_MANIFEST" semantic_authority)" == Sounio &&
+   "$(record_value "$RESIDENT_RUNTIME_MANIFEST" producing_language)" == Sounio &&
+   "$(record_value "$RESIDENT_RUNTIME_MANIFEST" language_role)" == SEMANTIC_AUTHORITY &&
    "$(record_value "$RESIDENT_RUNTIME_MANIFEST" sounio_resident_v4_commit)" == "$(record_value "$MANIFEST" resident_dependency_commit)" &&
    "$(record_value "$RESIDENT_RUNTIME_MANIFEST" runtime_sha256)" == "$(sha256_file "$RESIDENT_RUNTIME)" ]] ||
   fail 'action-9030 frozen runtime provenance drifted'
