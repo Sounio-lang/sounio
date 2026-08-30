@@ -228,6 +228,8 @@ lean_lib «SounioPireusOperatorDiscoveryEngine» where
 -- FORMAL_PARITY for the frozen Sounio Pireus Operator Novelty Frontier v11.
 -- Non-default: checks all 7200 codec entries and proves the support corollaries.
 lean_lib «SounioPireusOperatorNoveltyFrontier» where
+
+lean_lib «SounioPireusOperatorMorphogenesis» where
   moreLeanArgs := #["-j", "1"]
 
 -- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
