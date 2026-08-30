@@ -291,7 +291,8 @@ class HostCausalMaterialCell {
         std::chrono::steady_clock::now() + kCausalMaterialDeadline;
     while (std::chrono::steady_clock::now() < extinction_deadline) {
       observation.pidfd_extinct = !pidfd_live(pidfd_.get());
-      observation.process_extinct = kill(pid_, 0) != 0 && errno == ESRCH;
+      observation.process_extinct =
+          process_witness_original_extinct(pid_, start_tick_);
       observation.cgroup_unpopulated = cgroup_unpopulated();
       if (observation.pidfd_extinct && observation.process_extinct &&
           observation.cgroup_unpopulated) {
@@ -308,7 +309,9 @@ class HostCausalMaterialCell {
     if (stop.exit_code != 0) throw Error("causal material unit stop refused");
     const int status = await_client_exit();
     if (status != 0) throw Error("causal material systemd client refused");
-    while (std::chrono::steady_clock::now() < extinction_deadline) {
+    const auto unit_extinction_deadline =
+        std::chrono::steady_clock::now() + kCausalMaterialDeadline;
+    while (std::chrono::steady_clock::now() < unit_extinction_deadline) {
       observation.unit_inactive = unit_inactive();
       if (observation.unit_inactive) break;
       poll(nullptr, 0, 5);
@@ -353,22 +356,8 @@ class HostCausalMaterialCell {
   }
 
   bool cgroup_unpopulated() const {
-    try {
-      const std::string control_group = property("ControlGroup");
-      if (control_group.empty() || control_group.front() != '/' ||
-          control_group.find("..") != std::string::npos) {
-        return false;
-      }
-      std::istringstream events(
-          read_file("/sys/fs/cgroup" + control_group + "/cgroup.events"));
-      std::string key;
-      std::string value;
-      while (events >> key >> value) {
-        if (key == "populated") return value == "0";
-      }
-    } catch (...) {
-    }
-    return false;
+    return !cgroup_relative_.empty() &&
+           process_witness_cgroup_unpopulated(cgroup_relative_);
   }
 
   std::string reference_file_sha256(int descriptor) const {
@@ -498,7 +487,11 @@ class HostCausalMaterialCell {
           uid_ = process_uid(pid_);
           gid_ = process_gid(pid_);
           pidfd_ = UniqueFd(open_pidfd(pid_));
-          if (authenticated()) break;
+          if (authenticated()) {
+            cgroup_relative_ =
+                process_witness_cgroup_path(process_cgroup(pid_));
+            break;
+          }
         }
       } catch (...) {
       }
@@ -581,6 +574,7 @@ class HostCausalMaterialCell {
   std::string principal_sha256_;
   std::string descriptor_binding_sha256_;
   std::string expected_descriptor_binding_sha256_;
+  std::string cgroup_relative_;
   std::string output_buffer_;
   UniqueFd input_;
   UniqueFd output_;
