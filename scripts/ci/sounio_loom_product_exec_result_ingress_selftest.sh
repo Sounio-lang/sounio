@@ -229,7 +229,7 @@ for binding in \
   "material_exec_cell_source_sha256:tools/loom/src/loom_product_exec_cell_host_canary.inc" \
   "material_broker_source_sha256:tools/loom/src/loom_kernel_principal_broker.cpp" \
   "gate_sha256:scripts/ci/sounio_loom_product_exec_result_ingress_selftest.sh" \
-  "host_evidence_sha256:tools/loom/evidence/loom-hostd-exec-cell-boot-gate-v1-20260830.txt"
+  "host_evidence_sha256:tools/loom/evidence/loom-provider-lifecycle-exec-cell-host-v1-20260830.txt"
 do
   IFS=: read -r key relative <<<"$binding"
   [[ "$(evidence_value "$key")" == \
@@ -240,7 +240,8 @@ done
    "$(evidence_value material_exec_cell)" == true &&
    "$(evidence_value exact_fixture_result_attached)" == true &&
    "$(evidence_value general_exec_attached)" == false &&
-   "$(evidence_value provider_hook_switched)" == false &&
+   "$(evidence_value provider_hook_switched)" == true &&
+   "$(evidence_value provider_lifecycle_attached)" == true &&
    "$(evidence_value production_activation)" == false ]] ||
   fail 'evidence posture or result drifted'
 printf '%s\n' "$result"
