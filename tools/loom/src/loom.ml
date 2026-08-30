@@ -12441,6 +12441,39 @@ let exec_catalog_material_probe_command cli =
     result.stderr_sha256 result.diagnostics_sha256;
   0
 
+let exec_result_record_probe_command cli =
+  if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
+    failf "exec-result-record-probe requires SOUNIO_LOOM_HOOK_TEST_MODE=1";
+  let root = required cli "--root" |> Unix.realpath in
+  let mode = required cli "--mode" in
+  if mode = "artifact-binding" then (
+    let policy, decision = Loom_exec_result_record.artifact_binding_control ~root in
+    Printf.printf
+      "LOOM_EXEC_RESULT_RECORD_CONTROL semantic_authority=Sounio action=9036 mode=artifact-binding manifest_sha256=%s decision=%s control_refused=true material_mutation=false ocaml_record_projection_attached=true dynamic_user_host_attached=false provider_result_returned=false production_activation=false\n%!"
+      policy.manifest_sha256 decision;
+    0)
+  else if mode = "issue" then (
+    let material =
+      Loom_exec_catalog.execute_sounio_check ~root
+        ~source:(required cli "--source") ~output:(required cli "--output")
+    in
+    let binding : Loom_exec_result_record.binding =
+      { event_sha256 = required cli "--event";
+        generation_sha256 = required cli "--generation";
+        principal_sha256 = required cli "--principal";
+        descriptor_binding_sha256 = required cli "--descriptor-binding";
+        grant_receipt_sha256 = required cli "--grant-receipt" }
+    in
+    let result = Loom_exec_result_record.issue ~root ~material ~binding in
+    Printf.printf
+      "LOOM_EXEC_RESULT_RECORD_PROJECTION semantic_authority=Sounio action=9036 operational_kernel=OCaml operation=sounio-check event_sha256=%s generation_sha256=%s source_sha256=%s artifact_sha256=%s record_sha256=%s handle=%s manifest_sha256=%s authority_output_sha256=%s handle_is_bearer=false handle_is_execution_authority=false artifact_executed=false ocaml_record_projection_attached=true dynamic_user_host_attached=false provider_result_returned=false production_activation=false\n%s%!"
+      binding.event_sha256 binding.generation_sha256
+      (Option.get material.plan.projection.source_sha256)
+      material.artifact_sha256 result.record_sha256 result.handle
+      result.manifest_sha256 result.authority_output_sha256 result.record;
+    0)
+  else failf "exec-result-record-probe mode must be issue or artifact-binding"
+
 let exec_result_present_command cli =
   let result =
     Loom_exec_result.validate_transport
@@ -12472,6 +12505,8 @@ let usage () =
     "  exec-catalog-probe --root DIR --operation calibration|sounio-check [--source RELATIVE.sio] (test mode only)\n";
   Printf.eprintf
     "  exec-catalog-material-probe --root DIR --source RELATIVE.sio --output ABSOLUTE.elf (test mode only)\n";
+  Printf.eprintf
+    "  exec-result-record-probe --root DIR --mode issue|artifact-binding [issue bindings] (test mode only)\n";
   Printf.eprintf
     "  exec-result-present --root DIR --event SHA --command SHA --handle HANDLE --receipt-sha256 SHA --receipt-hex HEX --manifest-sha256 SHA\n";
   Printf.eprintf
@@ -12556,6 +12591,7 @@ let main () =
     | "exec-catalog-probe" -> exec_catalog_probe_command cli
     | "exec-catalog-material-probe" ->
         exec_catalog_material_probe_command cli
+    | "exec-result-record-probe" -> exec_result_record_probe_command cli
     | "exec-result-probe" -> exec_result_probe_command cli
     | "exec-result-present" -> exec_result_present_command cli
     | "peer-activation-capsule-probe" ->
@@ -12667,6 +12703,8 @@ let () =
   | Loom_exec_grant_cell.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_exec_intent.Error error
   | Loom_exec_catalog.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
+  | Loom_exec_result_record.Error error ->
+      Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_exec_result.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_peer_activation_capsule.Error error ->
       Printf.eprintf "error: %s\n%!" error; exit 1
