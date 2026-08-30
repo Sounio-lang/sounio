@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # gemini-analyze.sh — Analyze Sounio code using Gemini CLI
-# Usage: ./scripts/gemini-analyze.sh <file.sio> [context]
+# Usage: ./scripts/mcp/gemini-analyze.sh <file.sio> [context]
 # Authentication: Set GEMINI_API_KEY environment variable, or use interactive login
 
 set -euo pipefail

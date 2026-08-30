@@ -20,7 +20,7 @@ This document lifts the current **V0-A boundary** (parser rejection of `f128`/`f
 - New CI gates that exercise the ladder without claiming semantic arithmetic or epistemic surface until V0-E.
 - Updates to `docs/EXACT_CORE.md`, `docs/compiler/KNOWN_LIMITATIONS.md`, and the epistemic trust map.
 
-The ladder aligns with the semantic clock (`docs/decisions/adr-008-claim-oracle-semantic-clock.md`), precision preservation (`docs/internal/concepts/precision-preservation.md`), and the `Verdict` enum evolution in `stdlib/algebra/sedenion_verdict.sio`.
+The ladder aligns with the single-semantic-clock rule (executable meaning for language and library claims is owned by Sounio under the default compiler, Madaros / `bin/souc`), precision preservation (`docs/internal/concepts/precision-preservation.md`), and the `Verdict` enum evolution in `stdlib/algebra/sedenion_verdict.sio`. The semantic-clock rule was drafted as ADR-008 on a branch that never landed, so there is no ADR of record for it — `docs/decisions/` stops at ADR-007.
 
 ## Current V0-A Boundary (as of Madaros v0.80.0)
 

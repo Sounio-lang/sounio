@@ -656,7 +656,7 @@ cargo test -p souc --features gpu --test integration_octonion_basic -- --nocaptu
 cargo bench -p souc --bench octonion_benchmark -- --noplot
 
 # Generate roofline CSV points from Criterion output (for LaTeX/pgfplots)
-python3 scripts/roofline_octonion_matmul.py \
+python3 scripts/benchmarks/roofline_octonion_matmul.py \
   --criterion-dir target/criterion/octonion_matmul \
   --out-csv docs/compiler/figures/octonion_matmul_points.csv
 
@@ -689,7 +689,7 @@ octonion_matmul/16x16     time: [57.6 µs 59.0 µs 60.4 µs]
 | Moufang tests | `crates/souc/tests/integration_octonion_moufang.rs` |
 | Numerical tests | `crates/souc/tests/integration_octonion_numerical.rs` |
 | Benchmarks | `benches/compiler/octonion_benchmark.rs` |
-| One-shot reproduction script | `scripts/reproduce_octonion_preprint.sh` |
+| One-shot reproduction script | `scripts/paper/reproduce_octonion_preprint.sh` |
 
 ---
 

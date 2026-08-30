@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # gemini-generate-test.sh — Generate Sounio test cases using Gemini CLI
-# Usage: ./scripts/gemini-generate-test.sh <function_name> <source_file> [test_type]
-# Example: ./scripts/gemini-generate-test.sh "propagate_bmi" "stdlib/epistemic/gum.sio" unit
+# Usage: ./scripts/mcp/gemini-generate-test.sh <function_name> <source_file> [test_type]
+# Example: ./scripts/mcp/gemini-generate-test.sh "propagate_bmi" "stdlib/epistemic/gum.sio" unit
 
 set -euo pipefail
 

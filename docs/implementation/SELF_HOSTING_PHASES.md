@@ -17,7 +17,40 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation
 
 ## Cutover Status (No-Rust Build+Run)
 
-Current cutover contract is bundle/state driven:
+This section recorded a cutover contract that was bundle/state driven:
+
+> **These commands do not exist.** `bootstrap` and `opt` were subcommands of the
+> Rust `souc` (`crates/souc/src/main.rs`), removed on 2026-02-26 by
+> `79acc192e1 [cutover] Remove Rust crates -- compiler is self-hosted`. The
+> Madaros compiler shipped as `bin/souc` has no `bootstrap` or `opt` verb --
+> `souc --help` does not list them. They do fail loudly rather than silently:
+> `souc bootstrap verify --bundle bootstrap` exits **1**, because `souc` falls
+> back to treating an unrecognised argument as a source filename and
+> reports `error: at bootstrap:0:0 - could not read input file`. The diagnostic
+> names a missing file rather than a missing subcommand, so it misdirects, but
+> it is a real refusal and no script relying on it can pass silently. (Note that
+> `souc --help` is not a complete inventory of what the binary dispatches --
+> `souc ontology`, for instance, is a real, working subcommand that the help
+> text omits. Absence from `--help` is not by itself proof a verb is gone;
+> running it is.) The signed
+> data these verbs operated on is still in the tree
+> (`bootstrap/artifacts/manifest.v2.json`, `bootstrap/policies/policy.v1.json`),
+> but nothing in the shipped compiler reads it, and every in-repo wrapper that
+> still calls these verbs (`scripts/selfhost/selfhost_independence_gate.sh`,
+> `scripts/selfhost/selfhost_cycle_gate.sh`,
+> `scripts/omega/omega_strict_closure_gate.sh`,
+> `scripts/bootstrap/bootstrap_verify_artifacts.sh`,
+> `scripts/omega/omega_prepare_policy_smoke.sh`,
+> `scripts/omega/omega_policy_status.sh`,
+> `scripts/bootstrap/omega_canonical_policy_sign.sh`,
+> `scripts/dev/diverse_double_compile_check.sh`) is dead for the same reason.
+> The bootstrap chain that is actually exercised today is
+> `scripts/ci/bootstrap_chain_gate.sh`, which drives `bootstrap/stage0.c` ->
+> `bootstrap/boot1.sio` directly without any `souc` subcommand, alongside
+> `scripts/bootstrap/bootstrap_full_gate.sh`. Seed rebuilds go through
+> `scripts/bootstrap/build_bootstrap_seed.sh` and
+> `scripts/dev/refresh_lean_seed.sh`. The optimization-policy lane has no
+> surviving entrypoint at all. The list below is retained for lineage only.
 
 - `souc bootstrap verify --bundle <dir>`
 - `souc bootstrap init --bundle <dir> --state <dir>`
@@ -29,8 +62,9 @@ Current cutover contract is bundle/state driven:
 
 Artifacts are validated from `manifest.v2.json` with Ed25519 signatures.
 Legacy Rust-bridge transition env knobs are removed and treated as hard errors.
-Optimization policy decisions are tracked by `bootstrap/policies/policy.v1.json`
-(`schema = "sounio.optimization.policy.v1"`).
+Optimization policy decisions were tracked by `bootstrap/policies/policy.v1.json`
+(`schema = "sounio.optimization.policy.v1"`); the file survives, the CLI that
+read it does not.
 
 ## Overview
 
