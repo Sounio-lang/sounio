@@ -161,6 +161,8 @@ grep -Fq ' --property=ReadWritePaths=/run ' "$unit" ||
   fail 'isolated ExecCell boot gate lacks its bounded transient write policy'
 grep -Fq ' --property=PrivateTmp=yes ' "$unit" ||
   fail 'isolated ExecCell boot gate lacks a private writable temporary root'
+grep -Fq ' --setenv=SOUNIO_LOOM_RESIDENT_RECEIPT_LOG=/var/lib/sounio/loom/exec-cell-gate-authority.tsv ' \
+  "$unit" || fail 'isolated ExecCell boot gate does not separate audit state from frozen code'
 grep -Fq ' -- /opt/sounio/loom-hostd/exec-cell/releases/' "$unit" ||
   fail 'isolated boot gate is not wired to the frozen ExecCell release'
 grep -Fq ' --selftest-product-exec-cell-host ' "$unit" ||
