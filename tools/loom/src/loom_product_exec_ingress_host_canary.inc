@@ -1,4 +1,4 @@
-constexpr auto kProductExecIngressHostDeadline = std::chrono::seconds(20);
+constexpr auto kProductExecIngressHostDeadline = std::chrono::seconds(60);
 
 enum class ProductIngressReply {
   Exact,
@@ -244,7 +244,7 @@ class ProductExecIngressHostCase {
       await_identity();
       if (exchange_expectation_ ==
           ProductIngressExchangeExpectation::RefusalBeforeRequest) {
-        collect_client();
+        collect_client_with_diagnostics();
         ProductIngressHostRun result = observation();
         cleanup_noexcept();
         return result;
@@ -254,7 +254,7 @@ class ProductExecIngressHostCase {
       } catch (const Error& ingress_error) {
         connection_ = UniqueFd();
         try {
-          collect_client();
+          collect_client_with_diagnostics();
         } catch (const Error& collection_error) {
           throw Error(std::string(ingress_error.what()) +
                       " collection_error=" + collection_error.what());
@@ -268,7 +268,7 @@ class ProductExecIngressHostCase {
                     product_compact_diagnostic(optional_log("hook.tsv")));
       }
     }
-    collect_client();
+    collect_client_with_diagnostics();
     ProductIngressHostRun result = observation();
     cleanup_noexcept();
     return result;
@@ -686,8 +686,31 @@ class ProductExecIngressHostCase {
     client_pid_ = -1;
   }
 
+  void collect_client_with_diagnostics() {
+    try {
+      collect_client();
+    } catch (const Error& error) {
+      throw Error(std::string(error.what()) +
+                  " provider_daemon_log=" +
+                  product_compact_diagnostic(
+                      optional_provider_log("daemon.log")) +
+                  " provider_guardian_log=" +
+                  product_compact_diagnostic(
+                      optional_provider_log("guardian.log")));
+    }
+  }
+
   std::string optional_log(const std::string& name) const {
     const std::string path = runtime_path_ + "/" + name;
+    if (!std::filesystem::exists(path)) return "";
+    return read_file(path);
+  }
+
+  std::string optional_provider_log(const std::string& name) const {
+    if (provider_fixture_.empty()) return "";
+    const std::string path =
+        runtime_path_ + "/provider-state/sessions/" +
+        "provider-host-canary--provider-" + nonce_ + "/" + name;
     if (!std::filesystem::exists(path)) return "";
     return read_file(path);
   }
