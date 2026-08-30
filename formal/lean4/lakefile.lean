@@ -639,6 +639,15 @@ lean_lib «EpistemicEffects» where
 @[default_target]
 lean_lib «EpistemicEffectsV2» where
 
+-- NS-extended calculus: `Knowledge⟨T, N⟩` with a noise-symbol source-set and the
+-- E230 disjointness premise on kadd/kmul (Paper A §5–§6). Runtime values carry their
+-- true affine form; proves Lemma 1 (general, Mathlib-free), Lemma 2 (support
+-- over-approximation), NS progress + preservation, exactness preservation, and
+-- Theorem 6.4 (no reached operator is an anti-garbling); x+x sabotage witness in
+-- the kernel. No sorry; axioms ⊆ {propext, Quot.sound, Classical.choice}.
+@[default_target]
+lean_lib «EpistemicEffectsNS» where
+
 -- Cayley–Dickson erasure ladder: the native-erasure law ker = 2^(n-1) − 4.
 -- Algebra-level exact ℤ-rank of the verified cdSigma product certifies the
 -- kernel dimensions L4–L8 (native_decide), matching the runtime float-Gauss
