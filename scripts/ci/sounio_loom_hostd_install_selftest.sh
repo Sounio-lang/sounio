@@ -159,6 +159,8 @@ grep -Fq 'ExecStartPre=/usr/bin/systemd-run --quiet --wait --pipe --collect ' \
   "$unit" || fail 'unit is not wired to an isolated ExecCell boot gate'
 grep -Fq ' --property=ReadWritePaths=/run ' "$unit" ||
   fail 'isolated ExecCell boot gate lacks its bounded transient write policy'
+grep -Fq ' --property=PrivateTmp=yes ' "$unit" ||
+  fail 'isolated ExecCell boot gate lacks a private writable temporary root'
 grep -Fq ' -- /opt/sounio/loom-hostd/exec-cell/releases/' "$unit" ||
   fail 'isolated boot gate is not wired to the frozen ExecCell release'
 grep -Fq ' --selftest-product-exec-cell-host ' "$unit" ||
