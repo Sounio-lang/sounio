@@ -3512,7 +3512,7 @@ let input_request paths data =
           instance
       | _ -> failf "invalid interactive ATTACHED response fields")
 
-let start_command ?(launch_source = "start") cli =
+let start_command ?(launch_source = "start") ?(ready_timeout = 8.0) cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
   let agent = required cli "--agent" in
@@ -3555,7 +3555,7 @@ let start_command ?(launch_source = "start") cli =
       let code = serve_session paths agent lane session_id cwd command in
       exit code
   | daemon_pid ->
-      let deadline = Unix.gettimeofday () +. 8.0 in
+      let deadline = Unix.gettimeofday () +. ready_timeout in
       let rec wait () =
         if Unix.gettimeofday () >= deadline then failf "Loom daemon did not become ready";
         if Sys.file_exists paths.descriptor_path then
@@ -8425,7 +8425,9 @@ let provider_start_command cli =
   Fun.protect
     ~finally:(fun () ->
       Unix.putenv ready_key (Option.value ~default:"" previous_ready_path))
-    (fun () -> start_command ~launch_source:"provider-start" start_cli);
+    (fun () ->
+      start_command ~launch_source:"provider-start" ~ready_timeout:30.0
+        start_cli);
   atomic_write ready_path "ready\n";
   Printf.printf
     "LOOM_PROVIDER_STARTED schema=%s provider=%s stream=%s session_binding=%s prompt_sha256=%s argv_sha256=%s unsafe_auto=%s context_isolation=%s\n%!"

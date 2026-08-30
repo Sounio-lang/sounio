@@ -77,7 +77,7 @@ case "$name:${1:-}:${2:-}" in
     printf 'FAKE_CODEX_OUTPUT:%s\n' "$prompt"
     if [[ "$prompt" == PROVIDER_ABI_FAST_EXIT_WITNESS ]]; then
       [[ "${SOUNIO_LOOM_PROVIDER_START_READY_PATH:-}" == /* ]] || exit 48
-      for _ in $(seq 1 800); do
+      for _ in $(seq 1 3000); do
         [[ -f "$SOUNIO_LOOM_PROVIDER_START_READY_PATH" ]] && break
         sleep 0.01
       done

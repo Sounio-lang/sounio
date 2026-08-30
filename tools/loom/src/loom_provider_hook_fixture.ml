@@ -31,7 +31,7 @@ let await_provider_start_ready () =
     | Some _ -> fail "provider-start-ready-path-must-be-absolute"
     | None -> fail "provider-start-ready-path-is-required"
   in
-  let deadline = Unix.gettimeofday () +. 8.0 in
+  let deadline = Unix.gettimeofday () +. 30.0 in
   let rec wait () =
     if Sys.file_exists path then ()
     else if Unix.gettimeofday () >= deadline then fail "provider-start-ready-timeout"
