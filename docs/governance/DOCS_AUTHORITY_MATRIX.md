@@ -697,6 +697,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.loom-exec-intent-envelope | repo_only | docs/internal/concepts/loom-exec-intent-envelope.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.loom-exec-operation-catalog | repo_only | docs/internal/concepts/loom-exec-operation-catalog.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.loom-exec-result-handle | repo_only | docs/internal/concepts/loom-exec-result-handle.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.loom-exec-result-record | repo_only | docs/internal/concepts/loom-exec-result-record.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.loom-host-boot-reconciler | repo_only | docs/internal/concepts/loom-host-boot-reconciler.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.loom-host-durable-lane-supervisor | repo_only | docs/internal/concepts/loom-host-durable-lane-supervisor.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.loom-kernel-exec-grant-cell | repo_only | docs/internal/concepts/loom-kernel-exec-grant-cell.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
