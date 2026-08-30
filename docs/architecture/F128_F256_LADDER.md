@@ -13,7 +13,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.f
 **Owner**: grok-cli3 (lane `ws-g-f128-spec`).  
 **Claim**: `bin/sounio-coord claim --agent grok-cli3 --lane ws-g-f128-spec --intent 'WS-G f128/f256 ladder spec' --files docs/architecture/F128_F256_LADDER.md` (active).
 
-This document lifts the current **V0-A boundary** (parser rejection of `f128`/`f256` source forms with E218 before any check/IR/SOIR/ABI/native lowering) into a staged, gate-defined ladder. No changes to `self-hosted/` are authorized in this phase. All progress is expressed through:
+This document lifts the current **V0-A boundary** (parser rejection of `f128`/`f256` source forms with E249 before any check/IR/SOIR/ABI/native lowering) into a staged, gate-defined ladder. No changes to `self-hosted/` are authorized in this phase. All progress is expressed through:
 
 - New/updated test fixtures and compile-fail cases.
 - Extension of the three existing scaffolds in `self-hosted/compiler/` (`f128_f256_format_descriptor_probe.sio`, `f128_f256_numeric_payload_probe.sio`, `f128_f256_numeric_wire_probe.sio`).
@@ -27,7 +27,7 @@ The ladder aligns with the semantic clock (`docs/decisions/adr-008-claim-oracle-
 From `docs/EXACT_CORE.md:55-57` and `self-hosted/parser/types.sio:27-45`:
 
 ```sounio
-// Parser immediately rejects with E218
+// Parser immediately rejects with E249
 fn identity_f128(x: f128) -> f128 { x }  // compile-fail
 let a: f128 = 1.0                         // compile-fail
 let b = a + 1.0f128                       // compile-fail
@@ -45,16 +45,16 @@ This boundary is **structural-only** and enforced **on Madaros** before type che
 
 | Engine | `f128`/`f256` type spellings + arithmetic/casts |
 |---|---|
-| **Madaros** (default `bin/souc`) | Rejects at parser with **`error[E218]`** and the reserved-message note. Matches this ladder's V0-A claim. |
-| **lean_single** (bootstrap seed; CI Full Test Suite stage2) | **Does not emit E218.** Compiles `fn add(a: f128, b: f128) -> f128 { a + b }` and `x as f128` to an ELF (`rc=0`, no diagnostic). Implicit `f128`→`f256` still fails lean_single typecheck (`tail type mismatch` / `typecheck: failed`). |
+| **Madaros** (default `bin/souc`) | Rejects at parser with **`error[E249]`** and the reserved-message note. Matches this ladder's V0-A claim. |
+| **lean_single** (bootstrap seed; CI Full Test Suite stage2) | **Does not emit E249.** Compiles `fn add(a: f128, b: f128) -> f128 { a + b }` and `x as f128` to an ELF (`rc=0`, no diagnostic). Implicit `f128`→`f256` still fails lean_single typecheck (`tail type mismatch` / `typecheck: failed`). |
 
-So the V0-A boundary in this document is **Madaros-owned**, not universal. The CI Full Test Suite runs lean_single: compile-fail fixtures that only see Madaros E218 must carry `//@ known-failure: lean_single-only gap…` and `//@ error-pattern: error[E218]` (same pattern as `tests/compile-fail/f128_f256_arithmetic_unimplemented.sio`). That is documentation of an engine gap, **not** permission to treat f128 arithmetic as accepted under Madaros.
+So the V0-A boundary in this document is **Madaros-owned**, not universal. The CI Full Test Suite runs lean_single: compile-fail fixtures that only see Madaros E249 must carry `//@ known-failure: lean_single-only gap…` and `//@ error-pattern: error[E249]` (same pattern as `tests/compile-fail/f128_f256_arithmetic_unimplemented.sio`). That is documentation of an engine gap, **not** permission to treat f128 arithmetic as accepted under Madaros.
 
 The authoritative V0-B contract remains `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b` under default Madaros.
 
 ## The V0-B..E Ladder
 
-Each stage has a **gate definition** (CI command, positive/negative witnesses, success receipt, semantic-lane ID, acceptance criteria). Gates are additive; later stages subsume earlier ones. **V0-B green is judged on Madaros** (`madaros_f128_f256_ladder_gate.sh`); lean_single suite participation uses known-failure annotations until the seed gains E218 or is retired from this surface. Success receipts must be exact-string matched in gate scripts.
+Each stage has a **gate definition** (CI command, positive/negative witnesses, success receipt, semantic-lane ID, acceptance criteria). Gates are additive; later stages subsume earlier ones. **V0-B green is judged on Madaros** (`madaros_f128_f256_ladder_gate.sh`); lean_single suite participation uses known-failure annotations until the seed gains E249 or is retired from this surface. Success receipts must be exact-string matched in gate scripts.
 
 ### V0-B: Literals Accepted End-to-End Through Check
 
@@ -76,11 +76,11 @@ bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b
 
 **Success receipt**:
 ```
-PASS f128_f256_v0b_literals check=green parser=E218_lifted typecheck=distinct_no_implicit literals=decimal+hex+binary negative_arithmetic=8
+PASS f128_f256_v0b_literals check=green parser=E249_lifted typecheck=distinct_no_implicit literals=decimal+hex+binary negative_arithmetic=8
 ```
 
 **Acceptance criteria**:
-- All `f128`/`f256` literals parse without E218.
+- All `f128`/`f256` literals parse without E249.
 - `check` succeeds on pure-type/literal probes; `souc run` may still fail (no codegen).
 - No change to IR constant emission yet (still uses existing numeric payload path).
 - Updates `docs/EXACT_CORE.md` and `KNOWN_LIMITATIONS.md` to mark literals as "V0-B green".

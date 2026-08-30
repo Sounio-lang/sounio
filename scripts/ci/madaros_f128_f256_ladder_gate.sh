@@ -7,10 +7,10 @@
 # V0-B intent: literals + type spellings accepted end-to-end through `check`.
 # Arithmetic/casts/implicit conversion remain rejected.
 #
-# CRITICAL SHAPE: this gate must FAIL under current V0-A (parser E218 on
+# CRITICAL SHAPE: this gate must FAIL under current V0-A (parser E249 on
 # f128/f256) and PASS only when V0-B is genuinely implemented. A silent no-op
 # cannot pass — the positive control must fire, and positives must reach
-# `check: OK` without error[E218].
+# `check: OK` without error[E249].
 #
 # External oracle (not Sounio): tests/vectors/f128_f256/literal_boundary_*.jsonl
 # from MPFR via gen/literal_boundary_gen.c (GENERATION_RECEIPT.md). Probes embed
@@ -18,7 +18,7 @@
 # shortcut cannot green-wash against self-consistency. Arithmetic corpora
 # f128.jsonl/f256.jsonl are intentionally NOT consumed at V0-B (V0-D only).
 #
-# Note: Madaros may exit 0 while still printing E218 (diagnostic muting).
+# Note: Madaros may exit 0 while still printing E249 (diagnostic muting).
 # The gate judges stdout/stderr content, not exit code alone.
 #
 # Usage:
@@ -77,7 +77,7 @@ if [[ ! -d "$SOUNIO_STDLIB_PATH" ]]; then
 fi
 
 # V0-B is a Madaros check-path gate. lean_single does not print `check: OK` and
-# does not own the E218 reserved-wide surface the same way — refuse silent
+# does not own the E249 reserved-wide surface the same way — refuse silent
 # engine fallback that would green-wash or mis-diagnose.
 if [[ "${SOUNIO_SOUC_ENGINE:-}" == "lean_single" ]]; then
   echo "FAIL stage=v0b requires default Madaros check path; SOUNIO_SOUC_ENGINE=lean_single is refused" >&2
@@ -118,8 +118,8 @@ run_check() {
   "$SOUC" check "$src" >"$log" 2>&1 || true
 }
 
-has_e218() {
-  grep -Fq 'error[E218' "$1"
+has_e249() {
+  grep -Fq 'error[E249' "$1"
 }
 
 has_check_ok() {
@@ -270,17 +270,17 @@ if [[ ! -f "$ROOT_DIR/$CONTROL_SRC" ]]; then
   note_fail "positive_control_missing:$CONTROL_SRC"
 else
   run_check "$CONTROL_SRC" "$CONTROL_LOG"
-  if has_check_ok "$CONTROL_LOG" && ! has_e218 "$CONTROL_LOG"; then
+  if has_check_ok "$CONTROL_LOG" && ! has_e249 "$CONTROL_LOG"; then
     note_pass "positive_control_f64_check_ok"
   else
-    note_fail "positive_control_did_not_fire (expected check: OK without E218 on $CONTROL_SRC)"
+    note_fail "positive_control_did_not_fire (expected check: OK without E249 on $CONTROL_SRC)"
     cat "$CONTROL_LOG" >&2 || true
   fi
 fi
 
 # ---------------------------------------------------------------------------
-# V0-B positive witnesses — must check green WITHOUT E218.
-# Under V0-A these print E218 → stage FAIL (correct today).
+# V0-B positive witnesses — must check green WITHOUT E249.
+# Under V0-A these print E249 → stage FAIL (correct today).
 # ---------------------------------------------------------------------------
 POSITIVE_SOURCES=(
   tests/run-pass/f128_v0b_literal_smoke.sio
@@ -295,18 +295,18 @@ for src in "${POSITIVE_SOURCES[@]}"; do
     continue
   fi
   run_check "$src" "$log"
-  if has_e218 "$log"; then
+  if has_e249 "$log"; then
     # Expected under V0-A — record exact diagnostic for the receipt.
-    e218_line="$(grep -F 'error[E218' "$log" | head -1 || true)"
+    e249_line="$(grep -F 'error[E249' "$log" | head -1 || true)"
     reserved_hit=0
     grep -Fq "$RESERVED_MSG" "$log" && reserved_hit=1
-    note_fail "positive_still_E218:$label :: ${e218_line} reserved_msg=${reserved_hit}"
+    note_fail "positive_still_E249:$label :: ${e249_line} reserved_msg=${reserved_hit}"
     continue
   fi
   if has_check_ok "$log"; then
     note_pass "positive_check_ok:$label"
   else
-    note_fail "positive_no_check_ok:$label (no E218 but check did not print check: OK)"
+    note_fail "positive_no_check_ok:$label (no E249 but check did not print check: OK)"
     tail -40 "$log" >&2 || true
   fi
 done
@@ -350,7 +350,7 @@ echo "NEGATIVE_REJECTED=$NEGATIVE_OK/${#NEGATIVE_SOURCES[@]}"
 
 if [[ "$FAIL" -eq 0 ]]; then
   # Exact success receipt from docs/architecture/F128_F256_LADDER.md
-  echo "PASS f128_f256_v0b_literals check=green parser=E218_lifted typecheck=distinct_no_implicit literals=decimal+hex+binary negative_arithmetic=${#NEGATIVE_SOURCES[@]}"
+  echo "PASS f128_f256_v0b_literals check=green parser=E249_lifted typecheck=distinct_no_implicit literals=decimal+hex+binary negative_arithmetic=${#NEGATIVE_SOURCES[@]}"
   echo "PASS madaros_f128_f256_ladder_gate stage=v0b"
   exit 0
 fi
@@ -361,9 +361,9 @@ for f in "${FAILURES[@]}"; do
   echo "  - $f" >&2
 done
 
-# Explicit V0-A diagnosis when positives are still E218 (today's expected state).
-if printf '%s\n' "${FAILURES[@]}" | grep -q 'positive_still_E218'; then
-  echo "diagnosis=V0-A_parser_E218_still_active (expected until V0-B implementation lands)" >&2
+# Explicit V0-A diagnosis when positives are still E249 (today's expected state).
+if printf '%s\n' "${FAILURES[@]}" | grep -q 'positive_still_E249'; then
+  echo "diagnosis=V0-A_parser_E249_still_active (expected until V0-B implementation lands)" >&2
   echo "observed_reserved_message=$RESERVED_MSG" >&2
 fi
 

@@ -2,15 +2,15 @@
 # P0-F POSIX extern "C" builtin gate — the durable artefact of the P0-F feature.
 #
 # Two things, both mandatory:
-#   1. REFRAME arms — proves the E219 fail-closed guard still holds for names
+#   1. REFRAME arms — proves the E250 fail-closed guard still holds for names
 #      NOT on the allowlist (so the reframe that reclassified P0-F stays true).
 #      Includes the refutation branch: if an unimplemented extern ever COMPILES
 #      and returns a fabricated 0 again, this gate FAILS.
 #   2. Per-name EXECUTION witnesses — proves each allowlisted name actually RUNS
 #      (real pid, real memory round trip, real exit/abort status, real system
-#      side effect + wait status), not merely that it stopped raising E219.
-#      Adding a name to name_is_native_backend_builtin turns off its E219 guard,
-#      so "no longer E219" and "correct" are different claims; this gate asserts
+#      side effect + wait status), not merely that it stopped raising E250.
+#      Adding a name to name_is_native_backend_builtin turns off its E250 guard,
+#      so "no longer E250" and "correct" are different claims; this gate asserts
 #      the second.
 #
 # Self-attesting: records the exact commit under test and FAILS if it cannot.
@@ -50,7 +50,7 @@ fail(){ echo "  FAIL  $1"; FAILED=1; }
 # STRUCTURAL arm (the func_ref-path guard). A per-name EXECUTION witness proves
 # only the path it happens to exercise; it says nothing about the func_ref
 # authority the mirror checks. So assert the #1622 mirror directly: every name
-# the checker allowlists (removes E219 for) must appear in the backend authority
+# the checker allowlists (removes E250 for) must appear in the backend authority
 # native_v2_builtin_id_for_func_ref under the SAME spelling. This is exactly the
 # invariant a name like `free` vs recogniser `free_extern` violated silently —
 # a byte-match that resolves at runtime while the declared authority disagrees.
@@ -64,27 +64,27 @@ run(){ timeout 120 "$SOUC" run "$1" 2>&1; }
 check(){ timeout 120 "$SOUC" check "$1" 2>&1; }
 compile(){ timeout 120 "$SOUC" compile "$1" -o "$2" 2>&1; }
 
-echo "--- REFRAME arms (E219 guard must still hold; refutation branch live) ---"
+echo "--- REFRAME arms (E250 guard must still hold; refutation branch live) ---"
 # Control A: an implemented extern must execute (path is exercised).
 run "$W/arm_control_implemented.sio" | grep -q 'CONTROL_A implemented-extern OK' && pass "arm_A implemented-extern executes" || fail "arm_A"
 # Control B: the zero-detector must fire on a genuine zero (positive control).
 run "$W/arm_control_plain_zero.sio" | grep -q 'CONTROL_B ZERO_OBSERVED' && pass "arm_B zero-detector fires" || fail "arm_B"
-# Control C: undeclared plain call is E137, not E219 (extern-specificity).
+# Control C: undeclared plain call is E137, not E250 (extern-specificity).
 CU="$(check "$W/arm_control_undeclared.sio")"
-{ echo "$CU" | grep -q 'E137' && ! echo "$CU" | grep -q 'E219'; } && pass "arm_C undeclared->E137" || fail "arm_C"
-# CLAIM / refutation: a garbage unimplemented extern MUST be refused (E219) and
+{ echo "$CU" | grep -q 'E137' && ! echo "$CU" | grep -q 'E250'; } && pass "arm_C undeclared->E137" || fail "arm_C"
+# CLAIM / refutation: a garbage unimplemented extern MUST be refused (E250) and
 # MUST NOT compile-and-return-0. If it ever fabricates a zero, this fails.
 UC="$(check "$W/arm_claim_unimplemented.sio")"
 UR="$(run "$W/arm_claim_unimplemented.sio")"
 if echo "$UR" | grep -q 'CLAIM fabricated-zero v=0'; then
   fail "arm_CLAIM REGRESSION: unimplemented extern fabricated a zero"
-elif echo "$UC" | grep -q 'E219'; then
-  pass "arm_CLAIM unimplemented->E219 (fail-closed intact)"
+elif echo "$UC" | grep -q 'E250'; then
+  pass "arm_CLAIM unimplemented->E250 (fail-closed intact)"
 else
-  fail "arm_CLAIM inconclusive (no E219, no fabricated zero)"
+  fail "arm_CLAIM inconclusive (no E250, no fabricated zero)"
 fi
 
-echo "--- per-name EXECUTION witnesses (must actually run, not just no-E219) ---"
+echo "--- per-name EXECUTION witnesses (must actually run, not just no-E250) ---"
 # getpid / getppid: nonzero, distinct, AND getpid() == the process's real OS pid.
 # Launch the ELF in the background so $! is its actual kernel-assigned pid, then
 # assert the value getpid() printed equals it — the direct "equal to the real

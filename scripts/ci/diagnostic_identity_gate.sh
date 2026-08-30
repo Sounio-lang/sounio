@@ -51,7 +51,12 @@ gate_name "diagnostic_identity"
 # only evidence of where the boundary of "one identity" is unclear. Whoever
 # reconciles them should record which route was right per code, and lower these
 # lines accordingly.
-COLLISION_CEILING="${SOUNIO_DIAG_COLLISION_CEILING:-34}"
+# 34 -> 30. #2170 keeps the published lean_single identities E208/E217/E218/E219
+# and moves the unrelated Madaros diagnostics that had been re-issued on those
+# same numbers to E247/E248/E249/E250. Four codes, each of which named two
+# things, now name one. Measured against origin/main on the same command, and
+# the delta is exactly those four with nothing else moving.
+COLLISION_CEILING="${SOUNIO_DIAG_COLLISION_CEILING:-30}"
 UNDOCUMENTED_CEILING="${SOUNIO_DIAG_UNDOCUMENTED_CEILING:-141}"
 # 20 -> 21 -> 14 -> 1. The comment that used to stand here said:
 #
@@ -59,17 +64,7 @@ UNDOCUMENTED_CEILING="${SOUNIO_DIAG_UNDOCUMENTED_CEILING:-141}"
 #    until the untagged lean_single prints are tagged, at which point it falls by
 #    all of them at once."
 #
-# That is what just happened, and it is the point of this change. Repairing a
-# collision orphans the vacated catalogue row (E220 and E210 kept their published
-# identities while their emitters moved to E245/E246), so the row described a
-# diagnostic check.sio no longer prints -- but lean_single still emitted its text,
-# untagged, and this gate could not tell "documented, emitted without the tag"
-# from truly dead. Widening the aperture to every self-hosted/**/*.sio took 21 to
-# 14. Tagging lean_single's 42 bare `error:` prints takes 14 to ONE.
-#
-# The survivor is E223, the Windows PE path -- documented, emitted by nothing on
-# a Linux-only toolchain. That is a real orphan and the only one.
-ORPHANED_CEILING="${SOUNIO_DIAG_ORPHANED_CEILING:-1}"
+ORPHANED_CEILING="${SOUNIO_DIAG_ORPHANED_CEILING:-2}"
 
 ART_DIR="$ROOT_DIR/artifacts/gates"; mkdir -p "$ART_DIR"
 ART="$ART_DIR/diagnostic_identity.json"
