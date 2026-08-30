@@ -255,6 +255,7 @@ AUTHORITY_FILES=(
   tools/loom/exec_operation_grant_fixture.freeze.v1
   scripts/ci/sounio_loom_exec_operation_ingress_selftest.sh
   tools/loom/evidence/loom-exec-operation-ingress-v1-20260830.txt
+  tests/verify-ir/call_a.sio
   tests/verify-ir/call_b.sio
   bin/souc
   bin/souc-lean-single-x86_64
