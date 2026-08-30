@@ -78,7 +78,7 @@ One could instead have baked `m.gumVar = trueVar a` into `t_kraw` and called pre
 | Lemma 1, products | `trueVar_mul : trueVar (scale y a ++ scale x b) = y²·trueVar a + x²·trueVar b + 2xy·inner a b` | first-order, matches `gMulMeta` up to the covariance term |
 | DISJ ⟹ zero cov | `inner_disjoint`, `coeff_absent` | |
 | lattice `L` | `NS`, `nsUnion` (⊤ absorbing), `nsMem`, `nsDisjoint` (Bool), `nsDisjoint_sound`, `nsDisjoint_of_shared` | a shared member refutes disjointness for **every** annotation incl. ⊤ |
-| Lemma 2 (abstraction) | `Covers`, `covers_single`, `covers_empty`, `covers_union`, `covers_scale`, `support_over_approx` | transfer soundness per operator; extraction from any derivation |
+| Lemma 2 (abstraction) | `Covers`, `covers_single`, `covers_empty`, `covers_union`, `covers_scale`, `support_over_approx`, `covers_coeff` (nonzero-coefficient form) | transfer soundness per operator; extraction from any derivation |
 | Crux #1 composed | `covers_disjoint`, `inner_zero_of_ns` | NS-disjoint + covered ⟹ `⟨a,b⟩ = 0` |
 | NS type safety | `progress`, `preservation` (+ `weakening`, `substClosed`, `value_emptyE`, canonical forms) | port of V2's proofs with the `N` index and the `Covers` obligation at every `kraw` construction |
 | Soundness | `Exact`, `exact_shift`, `exact_subst`, `exact_preservation` | |
@@ -112,6 +112,11 @@ leak — the footprint proves it.
 4. **The escape valve (§5.5).** `add_correlated(a, b, ρ)` is not in the calculus. Its
    exactness would be a *hypothesis* (the claimed `ρ` equals the true `⟨a,b⟩`), not a
    theorem — which is the paper's point about it being a typed claim.
+5. **Honest labelling (the noise-symbol axiom).** Distinct `measure` labels are distinct
+   physical sources. The type system *tracks* sources; it does not *discover* them — two
+   physically correlated measurements given different labels type as disjoint. This is the
+   modelling axiom of every noise-symbol system (Comba–Stolfi, Fluctuat) and is stated, not
+   discharged. (xai review 2026-08-30, item 3 — `paper_A_ns_metatheory_xai_review_2026-08-30.md`.)
 
 ## 5. Reproduce
 

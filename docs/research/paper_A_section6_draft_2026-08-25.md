@@ -125,10 +125,10 @@ operator reached during evaluation. ∎
 | Base calculus progress + preservation | ✅ mechanized — `EpistemicEffectsV2.lean` (Lean 4.33.1) |
 | `gAddMeta`/`gMulMeta` = the §2 operators; validity preserved | ✅ mechanized — `gAddMeta_valid`, `gMulMeta_valid` |
 | Local criterion: disjoint support ⟹ zero cov ⟹ exact (Lemma 1) | ✅ kernel-checked, axiom-free — `SounioAntiGarblingModel.lean` |
-| Analysis soundness: `N` over-approximates true support (Lemma 2) | ✅ mechanized — `EpistemicEffectsNS.lean`: `Covers N a` is a typing invariant of runtime values (`t_kraw`), preserved by every transfer (`covers_single`, `covers_union`, `covers_scale`), extracted by `support_over_approx` |
+| Analysis soundness: `N` over-approximates true support (Lemma 2) | ✅ mechanized — `EpistemicEffectsNS.lean`: `Covers N a` is a typing invariant of runtime values (`t_kraw`), preserved by every transfer (`covers_single`, `covers_union`, `covers_scale`), extracted by `support_over_approx`; `covers_coeff` gives the nonzero-coefficient form |
 | NS-extended preservation (disjointness premise preserved under Step) | ✅ mechanized — `EpistemicEffectsNS.preservation` (and `progress`) for the `N`-annotated `tknow` |
 | Lemma 1 in **general form** (all affine forms, not Int witnesses; Mathlib-free) | ✅ mechanized — `trueVar_append`, `trueVar_mul` (delta method), `inner_disjoint` |
-| Exactness preservation: reported variance = true variance along every step | ✅ mechanized — `exact_preservation`: under the premise the defective `gAddMeta`/`gMulMeta` are exact |
+| Exactness preservation: reported variance = true first-order variance along every step | ✅ mechanized — `exact_preservation`: under the premise the defective `gAddMeta`/`gMulMeta` are exact |
 | **Theorem 6.4** — no reached independence-assuming operator has correlated operands | ✅ mechanized — `typed_agfree`, `soundness_star` (along `⇒*`) |
 | Sabotage witness in the kernel: `x+x` steps to an inexact value and is untypable for **every** `N`; `x+⊤` rejected; `x+y` admitted and exact | ✅ kernel-checked — `x_plus_x_understates`, `x_plus_x_untypable`, `x_plus_top_untypable`, `x_plus_y_exact` |
 
@@ -142,7 +142,10 @@ invariant `Exact` — "every value reports its true variance" — which type saf
 not give (§6.1) and NS typing does. What is **not** mechanized, and stated as such: (i) the
 correspondence between this core calculus and the production checker's E230 rule — the wire
 is source-verified and sabotage-gated (§8.2) but not proven equivalent to `HasTy`; (ii)
-interprocedural summaries (§5.6), absent from the calculus; (iii) second-order terms (§6.5).
+interprocedural summaries (§5.6), absent from the calculus; (iii) second-order terms (§6.5);
+(iv) the noise-symbol axiom itself — distinct `measure` labels are distinct physical sources;
+the type system tracks sources, it does not discover them (xai adversarial review 2026-08-30:
+6 OK / 3 tightenable / 0 fail, `paper_A_ns_metatheory_xai_review_2026-08-30.md`).
 
 ### 6.5 Two boundaries carried as hypotheses
 
