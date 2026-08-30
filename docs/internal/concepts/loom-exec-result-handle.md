@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Loom Exec Result Handle
 
-Status: executable in Sounio action `9033`; semantic freeze pending.
+Status: executable and semantics-frozen in Sounio action `9033`.
 
 Concept-ID: `SOUNIO-LOOM-EXEC-RESULT-HANDLE`
 
