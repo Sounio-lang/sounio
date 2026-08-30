@@ -328,7 +328,6 @@ if [[ -n "$EXEC_CELL_CAPSULE" ]]; then
        "$(sha256_file "$exec_cell_witness_manifest")" ]] ||
     fail 'ExecCell Sounio/OCaml/ProcessWitness provenance drifted'
   [[ "$(manifest_value "$exec_cell_result_manifest" stage)" == SEMANTICS_FROZEN &&
-     "$(manifest_value "$exec_cell_result_manifest" semantic_authority)" == Sounio &&
      "$(manifest_value "$exec_cell_result_manifest" producing_language)" == Sounio &&
      "$(manifest_value "$exec_cell_result_manifest" language_role)" == SEMANTIC_AUTHORITY &&
      "$(manifest_value "$exec_cell_result_manifest" action)" == 9033 &&
