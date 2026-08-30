@@ -247,6 +247,9 @@ SOUNIO_LOOM_CAUSAL_WORKFLOW_OUTPUT="$CAUSAL_WORKFLOW_RUNTIME" \
 chmod 0555 "$BIN"/*
 chmod 0444 "$DATA"/*
 chmod -R go-w "$STAGE"
+while IFS= read -r -d '' directory; do
+  chmod 0555 "$directory"
+done < <(find "$RELEASE" -type d -print0)
 
 ENTRIES="$META/payload.entries.v1"
 : > "$ENTRIES"
@@ -306,6 +309,7 @@ claim_ready=false
 production_activation=false
 EOF
 chmod 0444 "$MANIFEST"
+chmod 0555 "$META" "$STAGE"
 
 parent="$(dirname "$OUTPUT")"
 mkdir -p "$parent"

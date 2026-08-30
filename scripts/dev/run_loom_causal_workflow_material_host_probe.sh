@@ -119,6 +119,9 @@ host_failure_context() {
   host_exec "$pod" cat "$HOST_ROOT/result.log" 2>&1 || true
   printf '} journal={'
   host_exec "$pod" journalctl -u "$UNIT" -n 80 --no-pager 2>&1 || true
+  printf '} internal_cells={'
+  host_exec "$pod" journalctl --since=-10min \
+    '--grep=sounio-loom-(operation|causal-material)-cell' -n 160 --no-pager 2>&1 || true
   printf '}'
 }
 
@@ -184,8 +187,8 @@ POD_A_UID="$(kubectl -n "$NAMESPACE" get pod "$POD_A" -o jsonpath='{.metadata.ui
 [[ "$POD_A_UID" =~ ^[0-9a-f-]{36}$ ]] || fail 'Pod-A UID is non-canonical'
 
 HOST_ROOT="/var/tmp/sounio-loom-causal-workflow-material-${RUN_ID}"
-kubectl -n "$NAMESPACE" exec "$POD_A" -- sh -c "umask 077; rm -rf '/proc/1/root$HOST_ROOT'; mkdir -p '/proc/1/root$HOST_ROOT/capsule'; chmod 0700 '/proc/1/root$HOST_ROOT' '/proc/1/root$HOST_ROOT/capsule'"
-tar -C "$CAPSULE" -cf - . | kubectl -n "$NAMESPACE" exec -i "$POD_A" -- sh -c "tar -xf - -C '/proc/1/root$HOST_ROOT/capsule'; chown -R 0:0 '/proc/1/root$HOST_ROOT/capsule'"
+kubectl -n "$NAMESPACE" exec "$POD_A" -- sh -c "umask 077; rm -rf '/proc/1/root$HOST_ROOT'; mkdir -p '/proc/1/root$HOST_ROOT/capsule'; chmod 0711 '/proc/1/root$HOST_ROOT'; chmod 0700 '/proc/1/root$HOST_ROOT/capsule'"
+tar -C "$CAPSULE" -cf - . | kubectl -n "$NAMESPACE" exec -i "$POD_A" -- sh -c "tar -xf - -C '/proc/1/root$HOST_ROOT/capsule'; chown -R 0:0 '/proc/1/root$HOST_ROOT/capsule'; chmod 0555 '/proc/1/root$HOST_ROOT/capsule'"
 kubectl -n "$NAMESPACE" exec -i "$POD_A" -- sh -c "cat > '/proc/1/root$HOST_ROOT/host-selftest.sh'; chmod 0500 '/proc/1/root$HOST_ROOT/host-selftest.sh'" < "$HOST_SELFTEST"
 remote_hashes="$(kubectl -n "$NAMESPACE" exec "$POD_A" -- sh -c "sha256sum '/proc/1/root$HOST_ROOT/capsule/capsule.manifest.v1' '/proc/1/root$HOST_ROOT/host-selftest.sh' | cut -d ' ' -f 1")"
 mapfile -t hash_lines <<< "$remote_hashes"

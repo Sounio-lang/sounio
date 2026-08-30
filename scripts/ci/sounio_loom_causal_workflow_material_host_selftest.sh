@@ -57,7 +57,7 @@ for tool in sha256sum stat find sort systemctl systemd-run timeout readlink mkdi
 done
 [[ -d "$CAPSULE" && ! -L "$CAPSULE" && -z "$(find "$CAPSULE" -type l -print -quit)" ]] ||
   fail 'capsule is absent, linked, or contains a link'
-[[ "$(stat -c '%u:%g:%a' "$CAPSULE")" == 0:0:700 ]] || fail 'capsule root metadata drifted'
+[[ "$(stat -c '%u:%g:%a' "$CAPSULE")" == 0:0:555 ]] || fail 'capsule root metadata drifted'
 MANIFEST="$CAPSULE/capsule.manifest.v1"
 [[ -f "$MANIFEST" && ! -L "$MANIFEST" && "$(stat -c '%u:%g:%a' "$MANIFEST")" == 0:0:444 ]] ||
   fail 'capsule manifest metadata drifted'
