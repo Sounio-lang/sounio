@@ -247,6 +247,8 @@ if [[ "$PHASE" == prepare ]]; then
   supervisor_start_a="$(process_start_tick "$supervisor_a")"
   grep -Fxq 'KillMode=process' "/etc/systemd/system/$HOSTD_UNIT" ||
     fail 'activated unit lost KillMode=process'
+  grep -Fxq 'PrivateTmp=false' "/etc/systemd/system/$HOSTD_UNIT" ||
+    fail 'activated unit isolated the lane socket namespace'
   grep -Fxq 'production_activation=true' "$PREFIX/manifest.v1" ||
     fail 'activated installer manifest remained dark'
   grep -Fxq 'semantic_authority=Sounio' \

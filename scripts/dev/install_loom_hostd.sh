@@ -186,7 +186,7 @@ Restart=on-failure
 RestartSec=2s
 KillMode=process
 NoNewPrivileges=true
-PrivateTmp=true
+PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=$STATE_DIR
@@ -220,6 +220,8 @@ install_default=disabled
 service_enabled=false
 production_activation=false
 automatic_lineage_resurrection=false
+socket_namespace=host-shared-tmp
+private_tmp=false
 python_executable_invoked=false
 rust_executable_invoked=false
 EOF

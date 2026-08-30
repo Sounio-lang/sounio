@@ -75,6 +75,8 @@ grep -Fxq 'KillMode=process' "$unit" || fail 'unit would kill recovered lane pro
 grep -Fxq 'Restart=on-failure' "$unit" || fail 'unit does not restart after refusal or crash'
 grep -Fxq 'NoNewPrivileges=true' "$unit" || fail 'unit lacks no-new-privileges boundary'
 grep -Fxq 'ProtectSystem=strict' "$unit" || fail 'unit lacks strict filesystem protection'
+grep -Fxq 'PrivateTmp=false' "$unit" ||
+  fail 'unit cannot observe the lane socket namespace'
 grep -Fxq 'ExecStart=/opt/sounio/loom-hostd/bin/sounio-loom-runtime host-supervise --state-dir /var/lib/sounio/loom --service-enabled --apply' "$unit" ||
   fail 'unit is not wired to the Sounio-authorized supervisor'
 grep -Fxq 'Environment=SOUNIO_LOOM_HOST_BOOT_AUTHORITY=/opt/sounio/loom-hostd/bin/sounio-loom-host-boot-reconciler' "$unit" ||
@@ -82,6 +84,10 @@ grep -Fxq 'Environment=SOUNIO_LOOM_HOST_BOOT_AUTHORITY=/opt/sounio/loom-hostd/bi
 grep -Fxq 'install_default=disabled' "$manifest" || fail 'install default is not disabled'
 grep -Fxq 'service_enabled=false' "$manifest" || fail 'staged service was marked enabled'
 grep -Fxq 'production_activation=false' "$manifest" || fail 'staged service was marked production-active'
+grep -Fxq 'socket_namespace=host-shared-tmp' "$manifest" ||
+  fail 'manifest omitted the shared lane socket namespace'
+grep -Fxq 'private_tmp=false' "$manifest" ||
+  fail 'manifest disagrees with the unit socket namespace'
 [[ ! -e "$stage/etc/systemd/system/multi-user.target.wants/sounio-loom-hostd.service" ]] ||
   fail 'staged install created an enablement link'
 
@@ -149,4 +155,4 @@ fi
 grep -q 'Sounio authority hash drifted' "$TEST_ROOT/mutant.err" ||
   fail 'mutated authority was refused by the wrong boundary'
 
-printf 'sounio-loom-hostd-install-selftest: PASS installer_transport=shell runtime_language=OCaml runtime_role=EFFECT_PARITY semantic_authority=Sounio actions=9031,9041 installed_policy_root=PASS outside_checkout_start=PASS policy_tamper=DENIED_PRE_MUTATION systemd_unit=PASS kill_mode=process restart=on-failure install_default=disabled staged_activation=DENIED mutated_authority=DENIED byte_idempotent=PASS python_executed=false rust_executed=false production_activation=false\n'
+printf 'sounio-loom-hostd-install-selftest: PASS installer_transport=shell runtime_language=OCaml runtime_role=EFFECT_PARITY semantic_authority=Sounio actions=9031,9041 installed_policy_root=PASS outside_checkout_start=PASS policy_tamper=DENIED_PRE_MUTATION systemd_unit=PASS socket_namespace=host-shared-tmp private_tmp=false kill_mode=process restart=on-failure install_default=disabled staged_activation=DENIED mutated_authority=DENIED byte_idempotent=PASS python_executed=false rust_executed=false production_activation=false\n'
