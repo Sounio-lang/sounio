@@ -128,6 +128,18 @@ install_manifest_closure() {
   done
 }
 
+install_manifest_binding() {
+  local manifest="$1" path_key="$2" hash_key="$3" label="$4"
+  local relative expected
+  relative="$(manifest_value "$manifest" "$path_key")"
+  expected="$(manifest_value "$manifest" "$hash_key")"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "manifest dependency hash is not canonical: $label"
+  install_root_file "$relative"
+  [[ "$(sha256_file "$AUTHORITY_ROOT/$relative")" == "$expected" ]] ||
+    fail "manifest dependency drifted: $label"
+}
+
 # These files are the Sounio semantic authorities and frozen manifests whose
 # digests are consumed by the host broker. They are copied before the release
 # is made read-only, so the host never reads the source checkout.
@@ -136,6 +148,7 @@ AUTHORITY_FILES=(
   bin/souc-lean-single-x86_64
   tests/verify-ir/call_b.sio
   tools/loom/kernel_exec_grant_cell_authority.freeze.v1
+  tools/loom/host_exec_quorum_fixture.freeze.v1
   tools/loom/exec_intent_envelope.freeze.v1
   tools/loom/exec_operation_grant_fixture.freeze.v1
   tools/loom/exec_operation_catalog.freeze.v1
@@ -164,6 +177,38 @@ AUTHORITY_FILES=(
 )
 for relative in "${AUTHORITY_FILES[@]}"; do
   install_root_file "$relative"
+done
+
+# The frozen OCaml controller first validates its Sounio fixture manifest. Its
+# grant cell then loads the 9030 authority, and the single resident process
+# validates the v4 routing closure. Install all declared file/hash bindings
+# before any controller can emit a receipt.
+HOST_QUORUM_MANIFEST="$ROOT_DIR/tools/loom/host_exec_quorum_fixture.freeze.v1"
+install_manifest_closure "$HOST_QUORUM_MANIFEST" \
+  garden source authority_manifest build_script selftest freeze_selftest \
+  toolchain_wrapper toolchain_compiler evidence
+
+KERNEL_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
+install_manifest_closure "$KERNEL_GRANT_MANIFEST" \
+  garden source entrypoint parent_9029_manifest parent_9021_manifest \
+  parent_9022_manifest toolchain_wrapper toolchain_compiler build_script \
+  command_script freeze_selftest
+
+for binding in \
+  parent_9023_manifest_path:parent_9023_sha256:parent_9023 \
+  parent_9024_manifest_path:parent_9024_sha256:parent_9024 \
+  parent_9025_manifest_path:parent_9025_sha256:parent_9025 \
+  parent_9029_manifest_path:parent_9029_sha256:parent_9029 \
+  parent_9030_manifest_path:parent_9030_sha256:parent_9030 \
+  parent_resident_v3_manifest_path:parent_resident_v3_sha256:parent_resident_v3 \
+  dispatcher_path:dispatcher_sha256:dispatcher \
+  build_script_path:build_script_sha256:build_script \
+  gate_script_path:gate_script_sha256:gate_script \
+  freeze_selftest_path:freeze_selftest_sha256:freeze_selftest \
+  toolchain_wrapper_path:toolchain_wrapper_sha256:toolchain_wrapper \
+  toolchain_compiler_path:toolchain_compiler_sha256:toolchain_compiler; do
+  IFS=: read -r path_key hash_key label <<< "$binding"
+  install_manifest_binding "$RESIDENT_RUNTIME_MANIFEST" "$path_key" "$hash_key" "$label"
 done
 
 # The product ExecCell loads the 9030 grant fixture, then projects and executes
