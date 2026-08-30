@@ -267,7 +267,7 @@ unit_after_invocation_id="$(record_value <(printf '%s\n' "${unit_after_record:-}
 unit_after_exec_start="$(record_value <(printf '%s\n' "${unit_after_record:-}") ExecMainStartTimestampMonotonic)"
 [[ "$unit_after_id" == "$UNIT" && "$unit_after_state" == active &&
    "$unit_after_invocation_id" == "$unit_invocation_id" && "$unit_after_exec_start" == "$unit_exec_start" ]] ||
-  fail "same host-owned unit instance did not survive replacement transport: ${unit_after_record:-absent}"
+  fail "same host-owned unit instance did not survive replacement transport: ${unit_after_record:-absent} context=$(host_failure_context "$POD_B")"
 host_output="$(host_exec "$POD_B" cat "$HOST_ROOT/result.log")"
 [[ "$host_output" == *'sounio-loom-causal-workflow-material-host-selftest: HOST_MEASUREMENT_PASS '* && "$host_output" == *'LOOM_CAUSAL_WORKFLOW_MATERIAL_HOST PASS '* ]] ||
   fail "host selftest receipt was absent after replacement transport: $host_output"
