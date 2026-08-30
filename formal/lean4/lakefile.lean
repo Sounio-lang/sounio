@@ -219,6 +219,12 @@ lean_lib «SounioPireusOperatorNoveltyFeedbackAtlas» where
 lean_lib «SounioPireusOperatorNoveltyFeedback» where
   moreLeanArgs := #["-j", "1"]
 
+-- FORMAL_PARITY for the Sounio-owned Pireus Operator Discovery Engine v10.
+-- Non-default: reconstructs the 4096-cell candidate/atlas tensors, all six
+-- C2_diag separators, the 49152-cell action census, and the full law spectrum.
+lean_lib «SounioPireusOperatorDiscoveryEngine» where
+  moreLeanArgs := #["-j", "1"]
+
 -- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
 -- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
 -- sweeps (16x16 complex greedy over 1..15) build in ~10s, so kept as a default_target.
