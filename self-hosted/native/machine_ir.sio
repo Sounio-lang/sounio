@@ -144,8 +144,12 @@ pub struct NativeV2LegalizeSummary {
     pub legal_instr_count: i64,
 }
 
+pub struct MachineFunctionTable {
+    pub entries: [MachineFunction; 32],
+}
+
 pub struct MachineModule {
-    pub functions: [MachineFunction; 32],
+    pub functions: *mut MachineFunctionTable,
     pub fn_count: i64,
     pub total_ir_instr_count: i64,
     pub total_machine_instr_count: i64,
@@ -283,9 +287,27 @@ pub fn native_v2_legalize_summary_new() -> NativeV2LegalizeSummary with Mut, Pan
     }
 }
 
-pub fn machine_module_new() -> MachineModule with Mut, Panic, Div {
+fn machine_function_table_alloc() -> *mut MachineFunctionTable with Alloc {
+    heap_alloc(67108864) as *mut MachineFunctionTable
+}
+
+pub fn machine_module_function_get(module: &MachineModule, idx: i64) -> MachineFunction with Mut, Panic, Div {
+    if idx < 0 || idx >= 32 || (*module).functions == (0 as *mut MachineFunctionTable) {
+        return machine_function_new()
+    }
+    (*(*module).functions).entries[idx as usize]
+}
+
+pub fn machine_module_function_set(module: &! MachineModule, idx: i64, func: MachineFunction) with Mut, Panic, Div {
+    if idx < 0 || idx >= 32 || (*module).functions == (0 as *mut MachineFunctionTable) {
+        return
+    }
+    (*(*module).functions).entries[idx as usize] = func
+}
+
+pub fn machine_module_new() -> MachineModule with Mut, Panic, Div, Alloc {
     MachineModule {
-        functions: [machine_function_new(); 32],
+        functions: machine_function_table_alloc(),
         fn_count: 0,
         total_ir_instr_count: 0,
         total_machine_instr_count: 0,
@@ -1694,10 +1716,10 @@ pub fn native_v2_build_machine_module(module: &IrModule, enable_x86: bool) -> Ma
 
     var i: i64 = 0
     while i < module.fn_count {
-        let lowered = native_v2_lower_function_to_machine(module.functions[i as usize])
+        let lowered = native_v2_lower_function_to_machine(ir_fn_get(module, i as usize))
         out.total_ir_instr_count = out.total_ir_instr_count + lowered.source_instr_count
         let legal = native_v2_legalize_function(lowered)
-        out.functions[i as usize] = legal
+        machine_module_function_set(&! out, i, legal)
         let legal_count = if legal.legal_instr_count > 0 { legal.legal_instr_count } else { legal.blocks[0].instr_count }
         out.total_machine_instr_count = out.total_machine_instr_count + legal_count
         if !legal.supported && out.supported {

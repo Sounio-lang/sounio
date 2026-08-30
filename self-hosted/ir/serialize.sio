@@ -4421,7 +4421,7 @@ fn serialize_ir_module_into(module: IrModule, out_buf: &![i8; 131072], out_len: 
     // Write functions
     var i: i64 = 0
     while i < module.fn_count {
-        let func_pair = serialize_ir_function(buf, pos, module.functions[i])
+        let func_pair = serialize_ir_function(buf, pos, ir_fn_get(&module, i))
         buf = func_pair.0
         pos = func_pair.1
         i = i + 1
@@ -4490,24 +4490,17 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     let fn_count = fn_count_pair.0
     pos = fn_count_pair.1
 
-    // Read functions.
-    // The array literal MUST match IR_MAX_FUNCS (ir.sio:35). Sounio array sizes
-    // are literals; the coherence gate verifies IR_MAX_FUNCS. The runtime bounds
-    // check below uses IR_MAX_FUNCS directly, so an oversized module is REFUSED
-    // (returns empty module) rather than written past the buffer.
+    // Read functions. Oversized modules are refused before any table growth.
     if fn_count < 0 || fn_count > IR_MAX_FUNCS {
         soir_note_deser_refusal()
         return ir_empty_module()
     }
-    // Literal MUST equal IR_MAX_FUNCS. Sounio array sizes are compile-time
-    // literals, so this cannot be written `[IrFunction; IR_MAX_FUNCS]`.
-    // scripts/ci/irfunction_instr_capacity_coherence_gate.sh fails if the
-    // handwritten 16384 drifts from the constant.
-    var functions: [IrFunction; 16384] = [ir_empty_function(); 16384]
+    var module = ir_empty_module()
     var i: i64 = 0
     while i < fn_count {
         let func_pair = deserialize_ir_function(buf, pos, version)
-        functions[i] = func_pair.0
+        ir_fn_pool_ensure(&module, i)
+        ir_fn_set(&! module, i, func_pair.0)
         pos = func_pair.1
         i = i + 1
     }
@@ -4533,8 +4526,6 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
         j = j + 1
     }
 
-    var module = ir_empty_module()
-    module.functions = functions
     module.fn_count = fn_count
     module.string_table = string_table
     module.string_count = string_count
