@@ -36,6 +36,8 @@ struct OperationExecCellFixtures {
   std::string source;
   std::string command_mismatch_result;
   std::string command_mismatch_code;
+  std::string parent_bindings;
+  std::map<std::string, std::string> frame_prefixes;
   std::map<std::string, std::string> frames;
 };
 
@@ -352,7 +354,7 @@ OperationExecCellFixtures load_operation_exec_cell_fixtures(
   if (lines[4].rfind(parents_prefix, 0) != 0) {
     throw Error("operation ExecCell parent bindings absent");
   }
-  const std::string parents = lines[4].substr(parents_prefix.size());
+  fixtures.parent_bindings = lines[4].substr(parents_prefix.size());
   std::map<std::string, std::string> bindings;
   for (std::size_t index = 5; index < 11; ++index) {
     constexpr std::string_view prefix = "BINDING ";
@@ -394,11 +396,18 @@ OperationExecCellFixtures load_operation_exec_cell_fixtures(
       throw Error("operation ExecCell frame line malformed");
     }
     const std::size_t label_end = lines[index].find(' ', prefix.size());
-    if (label_end == std::string::npos ||
+    const std::string label =
+        label_end == std::string::npos
+            ? std::string()
+            : lines[index].substr(prefix.size(), label_end - prefix.size());
+    const std::string frame_prefix =
+        label_end == std::string::npos ? std::string()
+                                      : lines[index].substr(label_end + 1);
+    if (label_end == std::string::npos || label.empty() ||
+        !fixtures.frame_prefixes.emplace(label, frame_prefix).second ||
         !fixtures.frames
-             .emplace(lines[index].substr(prefix.size(), label_end - prefix.size()),
-                      lines[index].substr(label_end + 1) + " " + parents +
-                          encoded_bindings)
+             .emplace(label, frame_prefix + " " + fixtures.parent_bindings +
+                                 encoded_bindings)
              .second) {
       throw Error("operation ExecCell frame label malformed");
     }
@@ -413,6 +422,24 @@ OperationExecCellFixtures load_operation_exec_cell_fixtures(
     throw Error("unexpected operation ExecCell fixture count");
   }
   return fixtures;
+}
+
+std::string operation_live_grant_frame(
+    const OperationExecCellFixtures& fixtures, const std::string& label,
+    const std::map<std::string, std::string>& bindings) {
+  std::string frame = fixtures.frame_prefixes.at(label) + " " +
+                      fixtures.parent_bindings;
+  for (const std::string key : {"grant_identity", "command_environment",
+                                "peer_vector", "transition_journal",
+                                "source_semantics_toolchain",
+                                "result_receipt"}) {
+    const auto found = bindings.find(key);
+    if (found == bindings.end()) {
+      throw Error("operation live grant binding absent: " + key);
+    }
+    frame += product_hex_digest_u32_limbs(found->second);
+  }
+  return frame;
 }
 
 OperationExecResultPolicy load_operation_exec_result_policy(
@@ -530,8 +557,12 @@ struct HostSounioCheckObservation {
   std::string record_sha256;
   std::string artifact_sha256;
   std::string source_sha256;
+  std::string unit;
+  std::string principal_sha256;
   uid_t uid = 0;
   gid_t gid = 0;
+  pid_t pid = 0;
+  std::uint64_t start_tick = 0;
   bool ready = false;
   bool identity_authenticated = false;
   bool arm_sent = false;
@@ -599,6 +630,9 @@ class HostSounioCheckCell {
   gid_t gid() const { return gid_; }
   const std::string& principal_sha256() const { return principal_sha256_; }
   const std::string& descriptor_sha256() const { return descriptor_sha256_; }
+  const std::string& unit() const { return unit_; }
+  pid_t pid() const { return pid_; }
+  std::uint64_t start_tick() const { return start_tick_; }
 
   bool authenticated_before_arm() const {
     try {
@@ -639,8 +673,12 @@ class HostSounioCheckCell {
             grant_receipt_sha256 + "\n",
         deadline);
     HostSounioCheckObservation observation;
+    observation.unit = unit_;
+    observation.principal_sha256 = principal_sha256_;
     observation.uid = uid_;
     observation.gid = gid_;
+    observation.pid = pid_;
+    observation.start_tick = start_tick_;
     observation.ready = ready_;
     observation.identity_authenticated = true;
     observation.arm_sent = true;
@@ -746,17 +784,32 @@ class HostSounioCheckCell {
     }
     if (fsync(output.get()) != 0 || fchmod(output.get(), 0555) != 0 ||
         fsync(output.get()) != 0 ||
-        link(temporary.c_str(), target.c_str()) != 0 ||
-        unlink(temporary.c_str()) != 0) {
+        file_sha256(temporary) != observation.artifact_sha256) {
       unlink(temporary.c_str());
-      unlink(target.c_str());
       throw Error("operation artifact atomic seal failed");
+    }
+    if (link(temporary.c_str(), target.c_str()) != 0) {
+      const int publish_error = errno;
+      unlink(temporary.c_str());
+      if (publish_error == EEXIST) {
+        if (lstat(target.c_str(), &target_info) != 0 ||
+            !S_ISREG(target_info.st_mode) || target_info.st_uid != 0 ||
+            target_info.st_gid != 0 || target_info.st_nlink != 1 ||
+            (target_info.st_mode & 0777) != 0555 ||
+            file_sha256(target) != observation.artifact_sha256) {
+          throw Error("raced operation artifact seal disagreed");
+        }
+        return target;
+      }
+      throw Error("operation artifact atomic seal failed");
+    }
+    if (unlink(temporary.c_str()) != 0) {
+      throw Error("operation artifact temporary unlink failed");
     }
     UniqueFd directory(open(artifacts.c_str(), O_RDONLY | O_DIRECTORY |
                                                   O_CLOEXEC | O_NOFOLLOW));
     if (directory.get() < 0 || fsync(directory.get()) != 0 ||
         file_sha256(target) != observation.artifact_sha256) {
-      unlink(target.c_str());
       throw Error("operation artifact seal did not persist");
     }
     return target;

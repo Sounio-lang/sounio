@@ -2,14 +2,24 @@ let workflow_id = "canonical-call-b-v1"
 let source_sha256 =
   "899d05ffe60528a6b71871e24fa0d1bc105cd033b7ae2c5a0a6d2bb808cdcad9"
 
+let empty_sha256 =
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 let identity label = Loom_causal_workflow.sha256 label
+
+let option_value = function Some value -> value | None -> "absent"
+let option_int = function Some value -> string_of_int value | None -> "absent"
 
 let print_snapshot label snapshot =
   Printf.printf
-    "%s phase=%s sequence=%d compile_count=%d ticket_count=%d launch_count=%d head_sha256=%s controller_generation=%s\n%!"
+    "%s phase=%s sequence=%d compile_count=%d ticket_count=%d launch_count=%d head_sha256=%s controller_generation=%s start_receipt=%s run_pid_identity=%s exit_code=%s stdout_sha256=%s stderr_sha256=%s result_record=%s attestation_record=%s\n%!"
     label (Loom_causal_workflow.phase_name snapshot.Loom_causal_workflow.phase)
     snapshot.sequence snapshot.compile_count snapshot.ticket_count
     snapshot.launch_count snapshot.head_sha256 snapshot.controller_generation
+    (option_value snapshot.start_receipt) (option_value snapshot.run_pid_identity)
+    (option_int snapshot.exit_code) (option_value snapshot.stdout_sha256)
+    (option_value snapshot.stderr_sha256) (option_value snapshot.result_record)
+    (option_value snapshot.attestation_record)
 
 let phase_a ~repo_root ~state_root ~wait =
   let open Loom_causal_workflow in
@@ -74,11 +84,16 @@ let phase_b ~repo_root ~state_root =
         ~run_pid_identity:(identity "run-pid-identity-v2"));
   if running.launch_count <> 1 then failf "fixture-launch-count-diverged";
   let measured =
-    seal_run_result ~repo_root ~state_root ~workflow_id
+    seal_run_result ~repo_root ~state_root ~workflow_id ~exit_code:0
+      ~stdout_sha256:empty_sha256 ~stderr_sha256:empty_sha256
       ~result_record:(identity "run-result-record-v1")
       ~result_handle:(identity "run-result-handle-v1")
   in
-  let closed = close_run ~repo_root ~state_root ~workflow_id in
+  let closed =
+    close_run ~repo_root ~state_root ~workflow_id ~pid_extinct:true
+      ~descendants_extinct:true ~cgroup_unit_extinct:true ~grant_extinct:true
+      ~capsule_extinct:true
+  in
   let attest_armed = arm_attest ~repo_root ~state_root ~workflow_id in
   let attest_running = start_attest ~repo_root ~state_root ~workflow_id in
   let final =
@@ -90,7 +105,9 @@ let phase_b ~repo_root ~state_root =
   if final.phase <> Attested_closed || final.compile_count <> 1 ||
      final.ticket_count <> 1 || final.launch_count <> 1 then
     failf "fixture-final-state-diverged";
-  print_snapshot "PHASE_B_COMPLETE recompile=REFUSED duplicate_ticket=REFUSED duplicate_launch=REFUSED" final
+  print_snapshot
+    "PHASE_B_COMPLETE recompile=REFUSED duplicate_ticket=REFUSED duplicate_launch=REFUSED"
+    final
 
 let wrong_recovery ~repo_root ~state_root =
   ignore
@@ -100,26 +117,140 @@ let wrong_recovery ~repo_root ~state_root =
        ~journal_id:(identity "journal-id-v1") ~store_id:(identity "store-id-v1"));
   Loom_causal_workflow.failf "fixture-wrong-recovery-unexpectedly-allowed"
 
-let status ~repo_root ~state_root =
-  let snapshot =
-    Loom_causal_workflow.load_snapshot ~repo_root ~state_root ~workflow_id
-  in
-  print_snapshot "STATUS" snapshot
+let status ~repo_root ~state_root ~workflow_id label =
+  Loom_causal_workflow.load_snapshot ~repo_root ~state_root ~workflow_id
+  |> print_snapshot label
+
+let require_arity expected =
+  if Array.length Sys.argv <> expected then
+    Loom_causal_workflow.failf "fixture-usage"
+
+let bool_argument index =
+  match Sys.argv.(index) with
+  | "true" -> true
+  | "false" -> false
+  | _ -> Loom_causal_workflow.failf "fixture-boolean-invalid"
+
+let int_argument index =
+  try int_of_string Sys.argv.(index)
+  with _ -> Loom_causal_workflow.failf "fixture-integer-invalid"
+
+let wait_if requested = if requested then ignore (Unix.sleep 300)
+
+let material_command command =
+  let open Loom_causal_workflow in
+  match command with
+  | "material-open" ->
+      require_arity 11;
+      let repo_root, state_root, workflow_id =
+        (Sys.argv.(2), Sys.argv.(3), Sys.argv.(4))
+      in
+      open_workflow ~repo_root ~state_root ~workflow_id
+        ~workflow_generation:Sys.argv.(5) ~guardian_generation:Sys.argv.(6)
+        ~journal_id:Sys.argv.(7) ~store_id:Sys.argv.(8)
+        ~controller_generation:Sys.argv.(9) ~source_sha256:Sys.argv.(10)
+      |> print_snapshot "MATERIAL_OPENED"
+  | "material-arm-compile" ->
+      require_arity 5;
+      arm_compile ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+        ~workflow_id:Sys.argv.(4)
+      |> print_snapshot "MATERIAL_COMPILE_ARMED"
+  | "material-start-compile" ->
+      require_arity 5;
+      start_compile ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+        ~workflow_id:Sys.argv.(4)
+      |> print_snapshot "MATERIAL_COMPILE_RUNNING"
+  | "material-close-compile" ->
+      require_arity 8;
+      close_compile ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+        ~workflow_id:Sys.argv.(4) ~compile_receipt:Sys.argv.(5)
+        ~artifact_record:Sys.argv.(6) ~artifact_handle:Sys.argv.(7)
+      |> print_snapshot "MATERIAL_COMPILED"
+  | "material-recover" ->
+      require_arity 9;
+      recover_controller ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+        ~workflow_id:Sys.argv.(4)
+        ~successor_controller_generation:Sys.argv.(5)
+        ~guardian_generation:Sys.argv.(6) ~journal_id:Sys.argv.(7)
+        ~store_id:Sys.argv.(8)
+      |> print_snapshot "MATERIAL_RECOVERED"
+  | "material-recompile" ->
+      require_arity 5;
+      arm_compile ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+        ~workflow_id:Sys.argv.(4)
+      |> print_snapshot "MATERIAL_RECOMPILE"
+  | "material-arm-run" | "material-arm-run-wait" ->
+      require_arity 8;
+      let snapshot =
+        commit_run_ticket ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+          ~workflow_id:Sys.argv.(4) ~run_ticket:Sys.argv.(5)
+          ~run_grant:Sys.argv.(6) ~run_grant_generation:Sys.argv.(7)
+      in
+      print_snapshot "MATERIAL_RUN_ARMED" snapshot;
+      wait_if (command = "material-arm-run-wait")
+  | "material-mark-running" | "material-mark-running-wait" ->
+      require_arity 7;
+      let snapshot =
+        mark_run_launched ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+          ~workflow_id:Sys.argv.(4) ~start_receipt:Sys.argv.(5)
+          ~run_pid_identity:Sys.argv.(6)
+      in
+      print_snapshot "MATERIAL_RUNNING" snapshot;
+      wait_if (command = "material-mark-running-wait")
+  | "material-record-result" ->
+      require_arity 10;
+      seal_run_result ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+        ~workflow_id:Sys.argv.(4) ~exit_code:(int_argument 5)
+        ~stdout_sha256:Sys.argv.(6) ~stderr_sha256:Sys.argv.(7)
+        ~result_record:Sys.argv.(8) ~result_handle:Sys.argv.(9)
+      |> print_snapshot "MATERIAL_RUN_MEASURED"
+  | "material-close-run" ->
+      require_arity 10;
+      close_run ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+        ~workflow_id:Sys.argv.(4) ~pid_extinct:(bool_argument 5)
+        ~descendants_extinct:(bool_argument 6)
+        ~cgroup_unit_extinct:(bool_argument 7)
+        ~grant_extinct:(bool_argument 8) ~capsule_extinct:(bool_argument 9)
+      |> print_snapshot "MATERIAL_RUN_CLOSED"
+  | "material-arm-attest" ->
+      require_arity 5;
+      arm_attest ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+        ~workflow_id:Sys.argv.(4)
+      |> print_snapshot "MATERIAL_ATTEST_ARMED"
+  | "material-start-attest" ->
+      require_arity 5;
+      start_attest ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+        ~workflow_id:Sys.argv.(4)
+      |> print_snapshot "MATERIAL_ATTEST_RUNNING"
+  | "material-close-attest" ->
+      require_arity 7;
+      close_attest ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+        ~workflow_id:Sys.argv.(4) ~attestation_record:Sys.argv.(5)
+        ~attestation_handle:Sys.argv.(6)
+      |> print_snapshot "MATERIAL_ATTESTED_CLOSED"
+  | "material-status" ->
+      require_arity 5;
+      status ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+        ~workflow_id:Sys.argv.(4) "MATERIAL_STATUS"
+  | _ -> failf "fixture-command-unknown"
 
 let () =
   try
-    if Array.length Sys.argv <> 4 then
-      Loom_causal_workflow.failf "fixture-usage";
+    if Array.length Sys.argv < 2 then Loom_causal_workflow.failf "fixture-usage";
     let command = Sys.argv.(1) in
-    let repo_root = Sys.argv.(2) in
-    let state_root = Sys.argv.(3) in
     match command with
-    | "phase-a" -> phase_a ~repo_root ~state_root ~wait:false
-    | "phase-a-wait" -> phase_a ~repo_root ~state_root ~wait:true
-    | "phase-b" -> phase_b ~repo_root ~state_root
-    | "wrong-recovery" -> wrong_recovery ~repo_root ~state_root
-    | "status" -> status ~repo_root ~state_root
-    | _ -> Loom_causal_workflow.failf "fixture-command-unknown"
+    | "phase-a" | "phase-a-wait" | "phase-b" | "wrong-recovery" | "status" ->
+        require_arity 4;
+        let repo_root = Sys.argv.(2) in
+        let state_root = Sys.argv.(3) in
+        (match command with
+        | "phase-a" -> phase_a ~repo_root ~state_root ~wait:false
+        | "phase-a-wait" -> phase_a ~repo_root ~state_root ~wait:true
+        | "phase-b" -> phase_b ~repo_root ~state_root
+        | "wrong-recovery" -> wrong_recovery ~repo_root ~state_root
+        | "status" -> status ~repo_root ~state_root ~workflow_id "STATUS"
+        | _ -> assert false)
+    | _ -> material_command command
   with
   | Loom_causal_workflow.Error reason ->
       prerr_endline ("CAUSAL_WORKFLOW_FIXTURE_ERROR " ^ reason);

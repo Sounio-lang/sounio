@@ -6,16 +6,21 @@
 #include <openssl/evp.h>
 
 #include <sys/stat.h>
+#include <sys/prctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <initializer_list>
+#include <limits>
 #include <map>
 #include <poll.h>
 #include <sstream>
@@ -29,7 +34,15 @@ extern char** environ;
 namespace {
 
 constexpr std::size_t kMaximumRecordBytes = 64 * 1024;
-constexpr auto kExecutionTimeout = std::chrono::seconds(15);
+constexpr std::size_t kMaximumStdoutBytes = 1024 * 1024;
+constexpr std::size_t kMaximumStderrBytes = 1024 * 1024;
+constexpr long long kExecutionTimeoutMilliseconds = 15'000;
+constexpr long long kExtinctionTimeoutMilliseconds = 2'000;
+constexpr auto kExecutionTimeout =
+    std::chrono::milliseconds(kExecutionTimeoutMilliseconds);
+constexpr auto kExtinctionTimeout =
+    std::chrono::milliseconds(kExtinctionTimeoutMilliseconds);
+constexpr int kCapturePollMilliseconds = 20;
 
 class Error : public std::runtime_error {
  public:
@@ -73,7 +86,7 @@ std::string sha256(std::string_view value) {
 bool digest(const std::string& value) {
   if (value.size() != 64) return false;
   for (const unsigned char character : value) {
-    if (!std::isdigit(character) &&
+    if (!(character >= '0' && character <= '9') &&
         !(character >= 'a' && character <= 'f')) {
       return false;
     }
@@ -245,6 +258,14 @@ std::map<std::string, int> inherited_descriptors() {
   }
   std::map<std::string, int> descriptors;
   for (long index = 0; index < count; ++index) {
+    if (names[index].empty()) throw Error("named descriptor name absent");
+    for (const unsigned char character : names[index]) {
+      if (!(character >= 'a' && character <= 'z') &&
+          !(character >= '0' && character <= '9') &&
+          character != '_') {
+        throw Error("named descriptor name is not canonical");
+      }
+    }
     const int descriptor = 3 + static_cast<int>(index);
     struct stat info {};
     if (fstat(descriptor, &info) != 0 || !S_ISREG(info.st_mode) ||
@@ -264,12 +285,27 @@ std::map<std::string, int> inherited_descriptors() {
 
 std::string descriptor_binding(const std::map<std::string, int>& descriptors) {
   std::ostringstream canonical;
-  canonical << "LOOM_CAUSAL_MATERIAL_DESCRIPTORS/1";
+  canonical << "LOOM_CAUSAL_MATERIAL_DESCRIPTORS/2";
   for (const auto& [name, descriptor] : descriptors) {
-    struct stat info {};
-    if (fstat(descriptor, &info) != 0) throw Error("descriptor fstat failed");
-    canonical << '|' << name << '=' << info.st_dev << ':' << info.st_ino
-              << ':' << info.st_size;
+    struct stat before {};
+    struct stat after {};
+    if (fstat(descriptor, &before) != 0) throw Error("descriptor fstat failed");
+    const std::string content_sha256 = file_sha256(descriptor);
+    if (fstat(descriptor, &after) != 0 || before.st_dev != after.st_dev ||
+        before.st_ino != after.st_ino || before.st_size != after.st_size ||
+        before.st_mode != after.st_mode || before.st_uid != after.st_uid ||
+        before.st_gid != after.st_gid ||
+        before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+        before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) {
+      throw Error("descriptor identity changed while binding");
+    }
+    canonical << "|name=" << name << "|dev=" << before.st_dev
+              << "|ino=" << before.st_ino << "|size=" << before.st_size
+              << "|mode=" << before.st_mode << "|uid=" << before.st_uid
+              << "|gid=" << before.st_gid
+              << "|content_sha256=" << content_sha256;
   }
   return sha256(canonical.str());
 }
@@ -304,6 +340,27 @@ std::map<std::string, std::string> record_fields(const std::string& record) {
   return fields;
 }
 
+std::map<std::string, std::string> key_value_fields(
+    const std::string& record) {
+  if (record.empty() || record.back() != '\n') {
+    throw Error("key-value record missing final newline");
+  }
+  std::istringstream input(record);
+  std::string line;
+  std::map<std::string, std::string> fields;
+  while (std::getline(input, line)) {
+    if (line.empty()) continue;
+    const std::size_t equals = line.find('=');
+    if (equals == std::string::npos || equals == 0 ||
+        equals + 1 >= line.size() ||
+        !fields.emplace(line.substr(0, equals), line.substr(equals + 1)).second) {
+      throw Error("key-value record field malformed or duplicated");
+    }
+  }
+  if (fields.empty()) throw Error("key-value record empty");
+  return fields;
+}
+
 const std::string& require(const std::map<std::string, std::string>& fields,
                            const std::string& key) {
   const auto found = fields.find(key);
@@ -313,42 +370,167 @@ const std::string& require(const std::map<std::string, std::string>& fields,
   return found->second;
 }
 
-struct Execution {
-  int exit_code = 255;
-  std::string stdout_text;
-  std::string stderr_text;
-};
-
-std::string read_pipe(int descriptor, std::size_t limit) {
-  std::string output;
-  std::array<char, 4096> buffer{};
-  for (;;) {
-    const ssize_t count = read(descriptor, buffer.data(), buffer.size());
-    if (count > 0) {
-      output.append(buffer.data(), static_cast<std::size_t>(count));
-      if (output.size() > limit) throw Error("artifact output too large");
-    } else if (count == 0) {
-      return output;
-    } else if (errno != EINTR) {
-      throw Error("artifact output read failed");
+void require_exact_fields(
+    const std::map<std::string, std::string>& fields,
+    std::initializer_list<std::string_view> expected,
+    const std::string& record_name) {
+  if (fields.size() != expected.size()) {
+    throw Error(record_name + " schema cardinality invalid");
+  }
+  for (const std::string_view name : expected) {
+    if (!fields.contains(std::string(name))) {
+      throw Error(record_name + " schema omitted " + std::string(name));
     }
   }
 }
 
+bool decimal(const std::string& value) {
+  return !value.empty() &&
+         std::all_of(value.begin(), value.end(), [](unsigned char character) {
+           return character >= '0' && character <= '9';
+         });
+}
+
+bool atom(const std::string& value) {
+  return !value.empty() && value.size() <= 256 &&
+         std::all_of(value.begin(), value.end(), [](unsigned char character) {
+           return std::isalnum(character) || character == '.' ||
+                  character == '_' || character == '-';
+         });
+}
+
+struct Execution {
+  int exit_code = 255;
+  std::string stdout_text;
+  std::string stderr_text;
+  bool process_group_owned = false;
+  bool process_group_extinct = false;
+  bool cell_local_descendants_extinct = false;
+};
+
+void make_nonblocking(int descriptor) {
+  const int flags = fcntl(descriptor, F_GETFL);
+  if (flags < 0 || fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != 0) {
+    throw Error("cannot make artifact capture pipe nonblocking");
+  }
+}
+
+void drain_pipe(Fd& descriptor, bool& open, std::string& output,
+                bool& overflowed, std::size_t limit,
+                const std::string& stream, std::string& failure) {
+  std::array<char, 16 * 1024> buffer{};
+  for (;;) {
+    const ssize_t count = read(descriptor.get(), buffer.data(), buffer.size());
+    if (count > 0) {
+      const std::size_t size = static_cast<std::size_t>(count);
+      if (!overflowed && size <= limit - output.size()) {
+        output.append(buffer.data(), size);
+      } else {
+        overflowed = true;
+        if (failure.empty()) {
+          failure = "artifact " + stream + " exceeded " +
+                    std::to_string(limit) + "-byte limit";
+        }
+      }
+    } else if (count == 0) {
+      descriptor = Fd();
+      open = false;
+      return;
+    } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return;
+    } else if (errno != EINTR) {
+      if (failure.empty()) failure = "artifact " + stream + " read failed";
+      return;
+    }
+  }
+}
+
+void kill_execution_group(pid_t leader, std::string& failure) {
+  if (kill(-leader, SIGKILL) != 0 && errno != ESRCH && failure.empty()) {
+    failure = std::string("artifact process-group kill failed: ") +
+              std::strerror(errno);
+  }
+  if (kill(leader, SIGKILL) != 0 && errno != ESRCH && failure.empty()) {
+    failure = std::string("artifact leader kill failed: ") +
+              std::strerror(errno);
+  }
+}
+
+std::vector<pid_t> direct_children() {
+  const std::string path = "/proc/self/task/" + std::to_string(getpid()) +
+                           "/children";
+  const std::string text = trim(read_small_path(path));
+  std::istringstream input(text);
+  std::vector<pid_t> children;
+  long long value = 0;
+  while (input >> value) {
+    if (value <= 0 || value > std::numeric_limits<pid_t>::max()) {
+      throw Error("adopted descendant pid malformed");
+    }
+    children.push_back(static_cast<pid_t>(value));
+  }
+  if (!input.eof()) throw Error("adopted descendant vector malformed");
+  return children;
+}
+
+void kill_adopted_descendants(pid_t leader, std::string& failure) {
+  try {
+    for (const pid_t child : direct_children()) {
+      if (child == leader) continue;
+      if (kill(child, SIGKILL) != 0 && errno != ESRCH && failure.empty()) {
+        failure = std::string("adopted descendant kill failed: ") +
+                  std::strerror(errno);
+      }
+    }
+  } catch (const Error& error) {
+    if (failure.empty()) failure = error.what();
+  }
+}
+
+bool process_group_extinct(pid_t leader) {
+  if (kill(-leader, 0) == 0 || errno == EPERM) return false;
+  return errno == ESRCH;
+}
+
+bool reap_execution_leader(pid_t leader, int& status, std::string& failure) {
+  pid_t reaped = -1;
+  do {
+    reaped = waitpid(leader, &status, 0);
+  } while (reaped < 0 && errno == EINTR);
+  if (reaped == leader) return true;
+  if (failure.empty()) {
+    failure = std::string("artifact leader reap failed: ") +
+              (reaped < 0 ? std::strerror(errno) : "identity mismatch");
+  }
+  return false;
+}
+
 Execution run_artifact(int artifact) {
-  int stdout_pipe[2];
-  int stderr_pipe[2];
-  if (pipe2(stdout_pipe, O_CLOEXEC) != 0 ||
-      pipe2(stderr_pipe, O_CLOEXEC) != 0) {
-    throw Error("cannot create artifact capture pipes");
+  if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) {
+    throw Error("cannot become artifact descendant subreaper");
+  }
+  int stdout_pipe[2] = {-1, -1};
+  if (pipe2(stdout_pipe, O_CLOEXEC) != 0) {
+    throw Error("cannot create artifact stdout capture pipe");
   }
   Fd stdout_read(stdout_pipe[0]);
   Fd stdout_write(stdout_pipe[1]);
+  int stderr_pipe[2] = {-1, -1};
+  if (pipe2(stderr_pipe, O_CLOEXEC) != 0) {
+    throw Error("cannot create artifact stderr capture pipe");
+  }
   Fd stderr_read(stderr_pipe[0]);
   Fd stderr_write(stderr_pipe[1]);
+  make_nonblocking(stdout_read.get());
+  make_nonblocking(stderr_read.get());
+  const pid_t parent = getpid();
   const pid_t pid = fork();
   if (pid < 0) throw Error("cannot fork artifact");
   if (pid == 0) {
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0 ||
+        getppid() != parent || setpgid(0, 0) != 0) {
+      _exit(126);
+    }
     if (dup2(stdout_write.get(), STDOUT_FILENO) < 0 ||
         dup2(stderr_write.get(), STDERR_FILENO) < 0) {
       _exit(126);
@@ -369,27 +551,137 @@ Execution run_artifact(int artifact) {
     fexecve(artifact, arguments, environment);
     _exit(127);
   }
+  if (setpgid(pid, pid) != 0 && errno != EACCES && errno != ESRCH) {
+    std::string ignored;
+    kill_execution_group(pid, ignored);
+    while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {
+    }
+    throw Error("cannot own artifact process group");
+  }
   stdout_write = Fd();
   stderr_write = Fd();
-  const auto deadline = std::chrono::steady_clock::now() + kExecutionTimeout;
-  int status = 0;
-  for (;;) {
-    const pid_t waited = waitpid(pid, &status, WNOHANG);
-    if (waited == pid) break;
-    if (waited < 0 && errno != EINTR) throw Error("artifact wait failed");
-    if (std::chrono::steady_clock::now() >= deadline) {
-      kill(pid, SIGKILL);
-      while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
-      }
-      throw Error("artifact execution timed out");
-    }
-    poll(nullptr, 0, 5);
-  }
+
   Execution result;
+  result.process_group_owned = true;
+  bool stdout_open = true;
+  bool stderr_open = true;
+  bool stdout_overflowed = false;
+  bool stderr_overflowed = false;
+  bool leader_exited = false;
+  bool leader_reaped = false;
+  bool termination_started = false;
+  bool descendants_extinct = false;
+  int status = 0;
+  std::string failure;
+  const auto deadline = std::chrono::steady_clock::now() + kExecutionTimeout;
+  auto extinction_deadline = deadline + kExtinctionTimeout;
+
+  for (;;) {
+    std::array<struct pollfd, 2> poll_descriptors{};
+    nfds_t count = 0;
+    if (stdout_open) {
+      poll_descriptors[count++] =
+          {stdout_read.get(), static_cast<short>(POLLIN | POLLHUP | POLLERR), 0};
+    }
+    if (stderr_open) {
+      poll_descriptors[count++] =
+          {stderr_read.get(), static_cast<short>(POLLIN | POLLHUP | POLLERR), 0};
+    }
+    const int polled = poll(poll_descriptors.data(), count,
+                            kCapturePollMilliseconds);
+    if (polled < 0 && errno != EINTR && failure.empty()) {
+      failure = std::string("artifact capture poll failed: ") +
+                std::strerror(errno);
+    }
+    if (stdout_open) {
+      drain_pipe(stdout_read, stdout_open, result.stdout_text,
+                 stdout_overflowed, kMaximumStdoutBytes, "stdout", failure);
+    }
+    if (stderr_open) {
+      drain_pipe(stderr_read, stderr_open, result.stderr_text,
+                 stderr_overflowed, kMaximumStderrBytes, "stderr", failure);
+    }
+
+    if (!leader_exited) {
+      siginfo_t observed {};
+      if (waitid(P_PID, static_cast<id_t>(pid), &observed,
+                 WEXITED | WNOHANG | WNOWAIT) != 0) {
+        if (errno != EINTR && failure.empty()) {
+          failure = std::string("artifact wait failed: ") +
+                    std::strerror(errno);
+        }
+      } else if (observed.si_pid == pid) {
+        leader_exited = true;
+      }
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (!leader_exited && now >= deadline && failure.empty()) {
+      failure = "artifact execution exceeded " +
+                std::to_string(kExecutionTimeoutMilliseconds) +
+                "-millisecond limit";
+    }
+    if ((leader_exited || !failure.empty()) && !termination_started) {
+      termination_started = true;
+      extinction_deadline = now + kExtinctionTimeout;
+    }
+    if (termination_started) {
+      kill_execution_group(pid, failure);
+      if (leader_exited) kill_adopted_descendants(pid, failure);
+    }
+
+    if (leader_exited) {
+      descendants_extinct = true;
+      try {
+        for (const pid_t child : direct_children()) {
+          if (child == pid) continue;
+          descendants_extinct = false;
+          const pid_t reaped = waitpid(child, nullptr, WNOHANG);
+          if (reaped < 0 && errno != EINTR && errno != ECHILD &&
+              failure.empty()) {
+            failure = std::string("artifact descendant wait failed: ") +
+                      std::strerror(errno);
+          }
+        }
+      } catch (const Error& error) {
+        descendants_extinct = false;
+        if (failure.empty()) failure = error.what();
+      }
+    }
+
+    if (leader_exited && !stdout_open && !stderr_open && descendants_extinct) {
+      kill_execution_group(pid, failure);
+      leader_reaped = reap_execution_leader(pid, status, failure);
+      result.process_group_extinct = process_group_extinct(pid);
+      result.cell_local_descendants_extinct =
+          descendants_extinct && result.process_group_extinct;
+      if (!result.process_group_extinct && failure.empty()) {
+        failure = "artifact process group persisted after descendant reaping; "
+                  "host cgroup extinction required";
+      }
+      break;
+    }
+    if (termination_started && now >= extinction_deadline) {
+      kill_execution_group(pid, failure);
+      kill_adopted_descendants(pid, failure);
+      if (failure.empty()) {
+        failure = "artifact descendants resisted cell-local extinction; "
+                  "host cgroup extinction required";
+      }
+      break;
+    }
+  }
+
+  if (!leader_reaped) {
+    kill_execution_group(pid, failure);
+    leader_reaped = reap_execution_leader(pid, status, failure);
+  }
+  if (!failure.empty()) throw Error(failure);
+  if (!result.cell_local_descendants_extinct) {
+    throw Error("artifact cell-local descendant extinction incomplete");
+  }
   result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status)
                                       : 128 + WTERMSIG(status);
-  result.stdout_text = read_pipe(stdout_read.get(), 64 * 1024);
-  result.stderr_text = read_pipe(stderr_read.get(), 64 * 1024);
   return result;
 }
 
@@ -422,6 +714,9 @@ int run_cell(const Principal& identity,
             << " start_tick=" << identity.start << " uid=" << identity.uid
             << " gid=" << identity.gid
             << " principal_sha256=" << identity.sha256
+            << " executable_sha256=" << identity.executable_sha256
+            << " cgroup_sha256=" << identity.cgroup_sha256
+            << " descriptor_binding_schema=LOOM_CAUSAL_MATERIAL_DESCRIPTORS/2"
             << " descriptor_binding_sha256=" << descriptor_sha256
             << " inherited_descriptors=true arbitrary_path=false\n" << std::flush;
   std::string line;
@@ -448,18 +743,47 @@ int run_cell(const Principal& identity,
          << "descriptor_binding_sha256=" << descriptor_sha256 << '\n'
          << "exit_code=" << result.exit_code << '\n'
          << "stdout_sha256=" << stdout_sha256 << '\n'
-         << "stderr_sha256=" << stderr_sha256 << '\n';
+         << "stderr_sha256=" << stderr_sha256 << '\n'
+         << "stdout_bytes=" << result.stdout_text.size() << '\n'
+         << "stderr_bytes=" << result.stderr_text.size() << '\n'
+         << "stdout_limit_bytes=" << kMaximumStdoutBytes << '\n'
+         << "stderr_limit_bytes=" << kMaximumStderrBytes << '\n'
+         << "execution_timeout_milliseconds="
+         << kExecutionTimeoutMilliseconds << '\n'
+         << "extinction_timeout_milliseconds="
+         << kExtinctionTimeoutMilliseconds << '\n'
+         << "process_group_owned="
+         << (result.process_group_owned ? "true" : "false") << '\n'
+         << "process_group_extinct="
+         << (result.process_group_extinct ? "true" : "false") << '\n'
+         << "cell_local_descendants_extinct="
+         << (result.cell_local_descendants_extinct ? "true" : "false")
+         << '\n'
+         << "host_cgroup_extinction_measured=false\n";
   const std::string record_text = record.str();
   const std::string record_sha256 = sha256(record_text);
   const std::string handle =
       "loom-result-v3:" + artifact_sha256 + ":" + record_sha256;
   std::cout << "LOOM_CAUSAL_MATERIAL_CELL_RESULT_V1 mode=RUN_EXACT"
             << " record_sha256=" << record_sha256
+            << " handle_type=loom-result-v3"
+            << " handle=" << handle
             << " handle_sha256=" << sha256(handle)
             << " artifact_sha256=" << artifact_sha256
             << " exit_code=" << result.exit_code
             << " stdout_sha256=" << stdout_sha256
             << " stderr_sha256=" << stderr_sha256
+            << " stdout_bytes=" << result.stdout_text.size()
+            << " stderr_bytes=" << result.stderr_text.size()
+            << " stdout_limit_bytes=" << kMaximumStdoutBytes
+            << " stderr_limit_bytes=" << kMaximumStderrBytes
+            << " execution_timeout_milliseconds="
+            << kExecutionTimeoutMilliseconds
+            << " extinction_timeout_milliseconds="
+            << kExtinctionTimeoutMilliseconds
+            << " process_group_owned=true process_group_extinct=true"
+            << " cell_local_descendants_extinct=true"
+            << " host_cgroup_extinction_measured=false"
             << " record_bytes=" << record_text.size()
             << " handle_is_bearer=false handle_is_execution_authority=false\n"
             << "LOOM_CAUSAL_MATERIAL_RECORD_BEGIN\n" << record_text
@@ -486,6 +810,9 @@ int attest_cell(const Principal& identity,
             << " start_tick=" << identity.start << " uid=" << identity.uid
             << " gid=" << identity.gid
             << " principal_sha256=" << identity.sha256
+            << " executable_sha256=" << identity.executable_sha256
+            << " cgroup_sha256=" << identity.cgroup_sha256
+            << " descriptor_binding_schema=LOOM_CAUSAL_MATERIAL_DESCRIPTORS/2"
             << " descriptor_binding_sha256=" << descriptor_sha256
             << " inherited_descriptors=true arbitrary_path=false\n" << std::flush;
   std::string line;
@@ -508,25 +835,101 @@ int attest_cell(const Principal& identity,
   }
   const auto compile = record_fields(compile_text);
   const auto result = record_fields(result_text);
+  const auto semantics = key_value_fields(semantics_text);
+  const auto hardware = key_value_fields(hardware_text);
+  require_exact_fields(
+      compile,
+      {"schema", "operation", "source_sha256", "compiler_sha256",
+       "artifact_sha256", "exit_code"},
+      "ATTEST compile record");
+  require_exact_fields(
+      result,
+      {"schema", "semantic_authority", "semantic_action", "mode",
+       "run_ticket_sha256", "artifact_sha256", "principal_sha256",
+       "descriptor_binding_sha256", "exit_code", "stdout_sha256",
+       "stderr_sha256", "stdout_bytes", "stderr_bytes",
+       "stdout_limit_bytes", "stderr_limit_bytes",
+       "execution_timeout_milliseconds", "extinction_timeout_milliseconds",
+       "process_group_owned", "process_group_extinct",
+       "cell_local_descendants_extinct",
+       "host_cgroup_extinction_measured"},
+      "ATTEST result record");
+  require_exact_fields(hardware, {"schema", "hostname", "kernel", "boot_id"},
+                       "ATTEST hardware record");
+  if (require(compile, "schema") != "loom-exec-result-record-v1" ||
+      require(compile, "operation") != "sounio-check" ||
+      require(compile, "exit_code") != "0" ||
+      !digest(require(compile, "source_sha256")) ||
+      !digest(require(compile, "compiler_sha256")) ||
+      !digest(require(compile, "artifact_sha256"))) {
+    throw Error("ATTEST compile record posture invalid");
+  }
   if (require(compile, "artifact_sha256") !=
       require(result, "artifact_sha256")) {
     throw Error("ATTEST artifact lineage mismatch");
   }
-  if (require(result, "semantic_action") != "9037" ||
+  if (require(result, "schema") != "loom-causal-run-result-v1" ||
+      require(result, "semantic_authority") != "Sounio" ||
+      require(result, "semantic_action") != "9037" ||
       require(result, "mode") != "RUN_EXACT" ||
-      require(result, "exit_code") != "0") {
+      require(result, "exit_code") != "0" ||
+      !digest(require(result, "run_ticket_sha256")) ||
+      !digest(require(result, "principal_sha256")) ||
+      !digest(require(result, "descriptor_binding_sha256")) ||
+      !digest(require(result, "stdout_sha256")) ||
+      !digest(require(result, "stderr_sha256")) ||
+      !decimal(require(result, "stdout_bytes")) ||
+      !decimal(require(result, "stderr_bytes")) ||
+      require(result, "stdout_limit_bytes") !=
+          std::to_string(kMaximumStdoutBytes) ||
+      require(result, "stderr_limit_bytes") !=
+          std::to_string(kMaximumStderrBytes) ||
+      require(result, "execution_timeout_milliseconds") !=
+          std::to_string(kExecutionTimeoutMilliseconds) ||
+      require(result, "extinction_timeout_milliseconds") !=
+          std::to_string(kExtinctionTimeoutMilliseconds) ||
+      require(result, "process_group_owned") != "true" ||
+      require(result, "process_group_extinct") != "true" ||
+      require(result, "cell_local_descendants_extinct") != "true" ||
+      require(result, "host_cgroup_extinction_measured") != "false") {
     throw Error("ATTEST result posture invalid");
+  }
+  if (require(semantics, "schema") !=
+          "loom-causal-workflow-kernel-freeze-v1" ||
+      require(semantics, "stage") != "SEMANTICS_FROZEN" ||
+      require(semantics, "producing_language") != "Sounio" ||
+      require(semantics, "language_role") != "SEMANTIC_AUTHORITY" ||
+      require(semantics, "action") != "9037" ||
+      !digest(require(semantics, "semantics_sha256"))) {
+    throw Error("ATTEST frozen semantics posture invalid");
+  }
+  if (require(hardware, "schema") != "loom-causal-hardware-record-v1" ||
+      !atom(require(hardware, "hostname")) ||
+      !atom(require(hardware, "kernel")) ||
+      !atom(require(hardware, "boot_id"))) {
+    throw Error("ATTEST hardware record posture invalid");
   }
   std::ostringstream record;
   record << "loom-causal-attestation-record-v1\n"
          << "semantic_authority=Sounio\nsemantic_action=9037\n"
          << "source_sha256=" << require(compile, "source_sha256") << '\n'
-         << "frozen_semantics_sha256=" << frame[4] << '\n'
+         << "frozen_semantics_manifest_sha256=" << frame[4] << '\n'
+         << "frozen_semantics_sha256="
+         << require(semantics, "semantics_sha256") << '\n'
          << "artifact_sha256=" << require(compile, "artifact_sha256") << '\n'
          << "artifact_record_sha256=" << frame[2] << '\n'
          << "result_record_sha256=" << frame[3] << '\n'
          << "toolchain_sha256=" << require(compile, "compiler_sha256") << '\n'
          << "hardware_record_sha256=" << frame[5] << '\n'
+         << "run_ticket_sha256=" << require(result, "run_ticket_sha256")
+         << '\n'
+         << "run_principal_sha256=" << require(result, "principal_sha256")
+         << '\n'
+         << "run_descriptor_binding_sha256="
+         << require(result, "descriptor_binding_sha256") << '\n'
+         << "exit_code=" << require(result, "exit_code") << '\n'
+         << "stdout_sha256=" << require(result, "stdout_sha256") << '\n'
+         << "stderr_sha256=" << require(result, "stderr_sha256") << '\n'
          << "principal_sha256=" << identity.sha256 << '\n'
          << "descriptor_binding_sha256=" << descriptor_sha256 << '\n'
          << "producing_language=C++20\n"
@@ -539,6 +942,8 @@ int attest_cell(const Principal& identity,
                              frame[3] + ":" + record_sha256;
   std::cout << "LOOM_CAUSAL_MATERIAL_CELL_RESULT_V1 mode=ATTEST"
             << " record_sha256=" << record_sha256
+            << " handle_type=loom-attestation-v1"
+            << " handle=" << handle
             << " handle_sha256=" << sha256(handle)
             << " artifact_sha256=" << require(compile, "artifact_sha256")
             << " result_record_sha256=" << frame[3]

@@ -1981,8 +1981,10 @@ struct Options {
   std::string causal_attest_grant_manifest;
   std::string causal_attest_grant_bundle;
   std::string causal_workflow_manifest;
+  std::string causal_workflow_journal_runtime;
   std::string causal_material_cell;
   std::string causal_material_store;
+  std::string causal_pod_loss_control;
   std::string systemd_run;
   std::string systemctl;
   std::string frame;
@@ -2071,10 +2073,14 @@ Options parse_options(int argc, char** argv) {
       options.causal_attest_grant_bundle = value;
     } else if (argument == "--causal-workflow-manifest") {
       options.causal_workflow_manifest = value;
+    } else if (argument == "--causal-workflow-journal-runtime") {
+      options.causal_workflow_journal_runtime = value;
     } else if (argument == "--causal-material-cell") {
       options.causal_material_cell = value;
     } else if (argument == "--causal-material-store") {
       options.causal_material_store = value;
+    } else if (argument == "--causal-pod-loss-control") {
+      options.causal_pod_loss_control = value;
     } else if (argument == "--systemd-run") {
       options.systemd_run = value;
     } else if (argument == "--systemctl") {
@@ -2197,6 +2203,7 @@ void require_causal_workflow_material_host_artifacts(const Options& options) {
       options.causal_attest_grant_manifest.empty() ||
       options.causal_attest_grant_bundle.empty() ||
       options.causal_workflow_manifest.empty() ||
+      options.causal_workflow_journal_runtime.empty() ||
       options.causal_material_cell.empty() ||
       options.causal_material_store.empty() || options.systemd_run.empty() ||
       options.systemctl.empty()) {
@@ -2300,9 +2307,18 @@ int main(int argc, char** argv) {
           options.causal_run_grant_bundle,
           options.causal_attest_grant_manifest,
           options.causal_attest_grant_bundle,
-          options.causal_workflow_manifest, options.causal_material_cell,
-          options.causal_material_store, options.systemd_run,
+          options.causal_workflow_manifest,
+          options.causal_workflow_journal_runtime,
+          options.causal_material_cell,
+          options.causal_material_store, options.causal_pod_loss_control,
+          options.systemd_run,
           options.systemctl);
+    }
+    if (options.mode == "--selftest-causal-atomic-publish") {
+      if (options.causal_material_store.empty()) {
+        throw Error("causal material store is required");
+      }
+      return selftest_causal_atomic_publish(options.causal_material_store);
     }
     if (options.mode == "--selftest-journal") {
       if (options.journal.empty()) throw Error("journal is required");

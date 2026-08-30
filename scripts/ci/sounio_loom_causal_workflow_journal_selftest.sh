@@ -126,6 +126,108 @@ status="$(SOUNIO_LOOM_CAUSAL_WORKFLOW_RUNTIME="$SOUNIO_RUNTIME" \
 [[ "$status" == STATUS\ phase=ATTESTED_CLOSED\ sequence=12\ compile_count=1\ ticket_count=1\ launch_count=1* ]] ||
   fail "final replay diverged: $status"
 
+digest_of() {
+  printf '%s' "$1" | sha256sum | cut -d ' ' -f 1
+}
+
+material() {
+  local command="$1"
+  shift
+  SOUNIO_LOOM_CAUSAL_WORKFLOW_RUNTIME="$SOUNIO_RUNTIME" \
+    PATH="$TEST_ROOT:$PATH" "$RUNTIME_TWO" "$command" "$ROOT_DIR" \
+    "$MATERIAL_STATE_ROOT" "$MATERIAL_WORKFLOW_ID" "$@"
+}
+
+MATERIAL_STATE_ROOT="$TEST_ROOT/material-state"
+MATERIAL_WORKFLOW_ID=material-controller-loss-at-running
+WORKFLOW_GENERATION="$(digest_of workflow-generation)"
+GUARDIAN_GENERATION="$(digest_of guardian-generation)"
+JOURNAL_ID="$(digest_of journal-id)"
+STORE_ID="$(digest_of store-id)"
+CONTROLLER_ONE="$(digest_of controller-one)"
+CONTROLLER_TWO="$(digest_of controller-two)"
+SOURCE_SHA256="$(digest_of source)"
+COMPILE_RECEIPT="$(digest_of compile-receipt)"
+ARTIFACT_RECORD="$(digest_of artifact-record)"
+ARTIFACT_HANDLE="$(digest_of artifact-handle)"
+RUN_TICKET="$(digest_of run-ticket)"
+RUN_GRANT="$(digest_of run-grant)"
+RUN_GENERATION="$(digest_of run-generation)"
+START_RECEIPT="$(digest_of start-receipt)"
+RUN_PID_IDENTITY="$(digest_of run-pid-identity)"
+EMPTY_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+RESULT_RECORD="$(digest_of result-record)"
+RESULT_HANDLE="$(digest_of result-handle)"
+ATTEST_RECORD="$(digest_of attestation-record)"
+ATTEST_HANDLE="$(digest_of attestation-handle)"
+
+material material-open "$WORKFLOW_GENERATION" "$GUARDIAN_GENERATION" \
+  "$JOURNAL_ID" "$STORE_ID" "$CONTROLLER_ONE" "$SOURCE_SHA256" >/dev/null
+material material-arm-compile >/dev/null
+material material-start-compile >/dev/null
+material material-close-compile "$COMPILE_RECEIPT" "$ARTIFACT_RECORD" \
+  "$ARTIFACT_HANDLE" >/dev/null
+material material-arm-run "$RUN_TICKET" "$RUN_GRANT" "$RUN_GENERATION" >/dev/null
+
+MATERIAL_RUNNING_OUTPUT="$TEST_ROOT/material-running.out"
+SOUNIO_LOOM_CAUSAL_WORKFLOW_RUNTIME="$SOUNIO_RUNTIME" \
+PATH="$TEST_ROOT:$PATH" "$RUNTIME_TWO" material-mark-running-wait "$ROOT_DIR" \
+  "$MATERIAL_STATE_ROOT" "$MATERIAL_WORKFLOW_ID" "$START_RECEIPT" \
+  "$RUN_PID_IDENTITY" >"$MATERIAL_RUNNING_OUTPUT" 2>&1 &
+material_controller_pid=$!
+material_ready=false
+for _ in $(seq 1 200); do
+  if grep -Fq 'MATERIAL_RUNNING phase=RUNNING sequence=6 compile_count=1 ticket_count=1 launch_count=1' \
+      "$MATERIAL_RUNNING_OUTPUT"; then
+    material_ready=true
+    break
+  fi
+  kill -0 "$material_controller_pid" 2>/dev/null || break
+  sleep 0.01
+done
+[[ "$material_ready" == true ]] ||
+  fail "material controller did not durably enter RUNNING: $(cat "$MATERIAL_RUNNING_OUTPUT")"
+kill -9 "$material_controller_pid"
+set +e
+wait "$material_controller_pid" 2>/dev/null
+material_kill_code=$?
+set -e
+[[ $material_kill_code -eq 137 ]] ||
+  fail "material controller SIGKILL returned $material_kill_code"
+
+material material-recover "$CONTROLLER_TWO" "$GUARDIAN_GENERATION" \
+  "$JOURNAL_ID" "$STORE_ID" >/dev/null
+material_running_status="$(material material-status)"
+[[ "$material_running_status" == MATERIAL_STATUS\ phase=RUNNING\ sequence=7\ compile_count=1\ ticket_count=1\ launch_count=1* ]] ||
+  fail "RUNNING recovery replay diverged: $material_running_status"
+
+set +e
+material_recompile="$(material material-recompile 2>&1)"
+material_recompile_code=$?
+material_relaunch="$(material material-mark-running "$START_RECEIPT" "$RUN_PID_IDENTITY" 2>&1)"
+material_relaunch_code=$?
+set -e
+[[ $material_recompile_code -eq 70 ]] ||
+  fail "material recompile was not refused: $material_recompile"
+[[ $material_relaunch_code -eq 70 ]] ||
+  fail "material relaunch was not refused: $material_relaunch"
+
+material material-record-result 0 "$EMPTY_SHA256" "$EMPTY_SHA256" \
+  "$RESULT_RECORD" "$RESULT_HANDLE" >/dev/null
+set +e
+incomplete_extinction="$(material material-close-run true true false true true 2>&1)"
+incomplete_extinction_code=$?
+set -e
+[[ $incomplete_extinction_code -eq 70 ]] ||
+  fail "incomplete extinction was not refused: $incomplete_extinction"
+material material-close-run true true true true true >/dev/null
+material material-arm-attest >/dev/null
+material material-start-attest >/dev/null
+material material-close-attest "$ATTEST_RECORD" "$ATTEST_HANDLE" >/dev/null
+material_final_status="$(material material-status)"
+[[ "$material_final_status" == MATERIAL_STATUS\ phase=ATTESTED_CLOSED\ sequence=12\ compile_count=1\ ticket_count=1\ launch_count=1* ]] ||
+  fail "material recovery completion diverged: $material_final_status"
+
 mapfile -t journals < <(find "$STATE_ROOT/causal-workflows" -maxdepth 1 -type f -name '*.journal' -print)
 [[ ${#journals[@]} -eq 1 ]] || fail 'journal cardinality diverged'
 JOURNAL="${journals[0]}"
@@ -151,7 +253,7 @@ DEPENDENCIES="$(ldd "$RUNTIME_ONE" 2>&1 || true)"
 printf '%s\n' "$DEPENDENCIES" | grep -Eqi 'python|rust' &&
   fail 'OCaml journal runtime has a prohibited dependency'
 
-result="$(printf 'sounio-loom-causal-workflow-journal-selftest: PASS semantic_authority=Sounio action=9037 operational_language=OCaml operational_role=EFFECT_PARITY controller_sigkill=true tmux_used=false journal_replay_after_sigkill=true state_before=COMPILED_CLOSED state_after=ATTESTED_CLOSED sequence=12 compile_count=1 ticket_count=1 launch_count=1 recompile=REFUSED duplicate_ticket=REFUSED duplicate_launch=REFUSED wrong_guardian=REFUSED journal_tamper=REFUSED journal_mode=0600 store_mode=0700 hash_chain=verified fsync_before_reply=true sounio_rechecked_each_transition=true run_ticket_bearer=false run_ticket_execution_authority=false launch_authority=action-9030 python_executed=false rust_executed=false runtime_dependencies=clean module_sha256=%s fixture_sha256=%s executable_sha256=%s hostguardian_pidfd_attached=false dynamic_user_workflow_attached=false material_execution=false pod_loss_measured=false production_activation=false parity_open=false claim_ready=false' \
+result="$(printf 'sounio-loom-causal-workflow-journal-selftest: PASS semantic_authority=Sounio action=9037 operational_language=OCaml operational_role=EFFECT_PARITY controller_sigkill=true controller_sigkill_at=RUNNING controller_recovery_at_running=true tmux_used=false journal_replay_after_sigkill=true state_before=RUNNING state_after=ATTESTED_CLOSED sequence=12 compile_count=1 ticket_count=1 launch_count=1 recompile=REFUSED duplicate_ticket=REFUSED duplicate_launch=REFUSED incomplete_extinction=REFUSED wrong_guardian=REFUSED journal_tamper=REFUSED journal_mode=0600 store_mode=0700 hash_chain=verified fsync_before_reply=true sounio_rechecked_each_transition=true run_ticket_bearer=false run_ticket_execution_authority=false launch_authority=action-9030 python_executed=false rust_executed=false runtime_dependencies=clean module_sha256=%s fixture_sha256=%s executable_sha256=%s hostguardian_pidfd_attached=false dynamic_user_workflow_attached=false material_execution=false pod_loss_measured=false production_activation=false parity_open=false claim_ready=false' \
   "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_causal_workflow.ml" | cut -d ' ' -f 1)" \
   "$(sha256sum "$ROOT_DIR/tools/loom/causal_workflow_journal_fixture.ml" | cut -d ' ' -f 1)" \
   "$(sha256sum "$RUNTIME_ONE" | cut -d ' ' -f 1)")"

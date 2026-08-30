@@ -218,7 +218,23 @@ let set_range word first last =
 
 let level current next = max current next
 
-let authority_words ~transition ~current ~next =
+let expected_exit_code = 0
+
+let expected_empty_sha256 =
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+let authority_field fields key =
+  match Hashtbl.find_opt fields key with
+  | Some value -> value
+  | None -> failf "causal-workflow-payload-field-missing:%s" key
+
+let authority_bool fields key =
+  match authority_field fields key with
+  | "true" -> true
+  | "false" -> false
+  | _ -> failf "causal-workflow-payload-boolean-invalid:%s" key
+
+let authority_words ~transition ~current ~next ~fields =
   let reached = level current next in
   let word0 = set_range 0L 0 19 in
   let word0 =
@@ -231,8 +247,35 @@ let authority_words ~transition ~current ~next =
   let word0 = if reached >= 3 then set_range word0 33 37 else word0 in
   let word0 = if reached >= 6 then set_range word0 38 40 else word0 in
   let word0 = if reached >= 10 then set_range word0 41 43 else word0 in
-  let word0 = if reached >= 6 then set_range word0 57 59 else word0 in
-  let word0 = if reached >= 7 then set_bit word0 60 else word0 in
+  let word0 =
+    if reached < 6 then word0
+    else if transition <> 6 then set_range word0 57 59
+    else
+      let value =
+        if authority_field fields "exit_code" = string_of_int expected_exit_code then
+          set_bit word0 57
+        else word0
+      in
+      let value =
+        if authority_field fields "stdout_sha256" = expected_empty_sha256 then
+          set_bit value 58
+        else value
+      in
+      if authority_field fields "stderr_sha256" = expected_empty_sha256 then
+        set_bit value 59
+      else value
+  in
+  let word0 =
+    if reached < 7 then word0
+    else if transition <> 7 ||
+            (authority_bool fields "pid_extinct" &&
+             authority_bool fields "descendants_extinct" &&
+             authority_bool fields "cgroup_unit_extinct" &&
+             authority_bool fields "grant_extinct" &&
+             authority_bool fields "capsule_extinct") then
+      set_bit word0 60
+    else word0
+  in
   let word0 = if reached >= 10 then set_bit word0 61 else word0 in
   let word1 = set_range 0L 33 40 |> fun value -> set_range value 49 51 in
   let word1 = if reached >= 3 then set_range word1 3 5 |> fun value -> set_bit value 0 else word1 in
@@ -259,7 +302,20 @@ let authority_words ~transition ~current ~next =
       |> fun value -> set_bit value 47
     else word1
   in
-  let word1 = if reached >= 7 then set_range word1 17 21 else word1 in
+  let word1 =
+    if reached < 7 then word1
+    else if transition <> 7 then set_range word1 17 21
+    else
+      let value = if authority_bool fields "pid_extinct" then set_bit word1 17 else word1 in
+      let value =
+        if authority_bool fields "descendants_extinct" then set_bit value 18 else value
+      in
+      let value =
+        if authority_bool fields "cgroup_unit_extinct" then set_bit value 19 else value
+      in
+      let value = if authority_bool fields "grant_extinct" then set_bit value 20 else value in
+      if authority_bool fields "capsule_extinct" then set_bit value 21 else value
+  in
   let word1 = if reached >= 10 then set_bit word1 48 else word1 in
   let word1 =
     if transition = 11 then
@@ -276,8 +332,8 @@ let starts_with value prefix =
   String.length value >= String.length prefix
   && String.sub value 0 (String.length prefix) = prefix
 
-let authorize_transition (policy : policy) ~transition ~current ~next =
-  let word0, word1 = authority_words ~transition ~current ~next in
+let authorize_transition (policy : policy) ~transition ~current ~next ~fields =
+  let word0, word1 = authority_words ~transition ~current ~next ~fields in
   let frame = Printf.sprintf "9037 %Ld %Ld\n" word0 word1 in
   let code, output = process_exchange policy.runtime frame in
   let decision =
@@ -506,6 +562,9 @@ type snapshot = {
   run_pid_identity : string option;
   result_record : string option;
   result_handle : string option;
+  exit_code : int option;
+  stdout_sha256 : string option;
+  stderr_sha256 : string option;
   attestation_record : string option;
   attestation_handle : string option;
   sequence : int;
@@ -533,6 +592,7 @@ let initial_snapshot event =
     artifact_handle = None; run_ticket = None; run_grant = None;
     run_grant_generation = None; start_receipt = None;
     run_pid_identity = None; result_record = None; result_handle = None;
+    exit_code = None; stdout_sha256 = None; stderr_sha256 = None;
     attestation_record = None; attestation_handle = None;
     sequence = event.sequence; head_sha256 = event.event_sha256 }
 
@@ -549,7 +609,7 @@ let apply_transition (policy : policy) (snapshot : snapshot) (event : event) =
     failf "causal-workflow-current-state-mismatch";
   if field fields "observed_predecessor_sha256" <> snapshot.head_sha256 then
     failf "causal-workflow-predecessor-receipt-mismatch";
-  ignore (authorize_transition policy ~transition ~current ~next);
+  ignore (authorize_transition policy ~transition ~current ~next ~fields);
   let next_phase = phase_of_code next in
   let base = { snapshot with phase = next_phase; sequence = event.sequence;
     head_sha256 = event.event_sha256 } in
@@ -582,14 +642,16 @@ let apply_transition (policy : policy) (snapshot : snapshot) (event : event) =
         start_receipt = Some (field fields "start_receipt" |> digest "start-receipt");
         run_pid_identity = Some (field fields "run_pid_identity" |> digest "run-pid") }
   | "RUN_RESULT_SEALED", 6 ->
-      exact fields "exit_code" "0";
-      exact fields "stdout_sha256"
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-      exact fields "stderr_sha256"
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+      let exit_code = int_field fields "exit_code" in
+      if exit_code < 0 || exit_code > 255 then
+        failf "causal-workflow-exit-code-invalid";
+      let stdout_sha256 = field fields "stdout_sha256" |> digest "stdout" in
+      let stderr_sha256 = field fields "stderr_sha256" |> digest "stderr" in
       { base with
         result_record = Some (field fields "result_record" |> digest "result-record");
-        result_handle = Some (field fields "result_handle" |> digest "result-handle") }
+        result_handle = Some (field fields "result_handle" |> digest "result-handle");
+        exit_code = Some exit_code; stdout_sha256 = Some stdout_sha256;
+        stderr_sha256 = Some stderr_sha256 }
   | "RUN_CLOSED", 7 ->
       if not (bool_field fields "pid_extinct" &&
               bool_field fields "descendants_extinct" &&
@@ -783,21 +845,26 @@ let mark_run_launched ~repo_root ~state_root ~workflow_id ~start_receipt
     ~extra_fields:[ ("run_ticket", run_ticket); ("start_receipt", start_receipt);
       ("run_pid_identity", run_pid_identity) ]
 
-let seal_run_result ~repo_root ~state_root ~workflow_id ~result_record
-    ~result_handle =
+let seal_run_result ~repo_root ~state_root ~workflow_id ~exit_code
+    ~stdout_sha256 ~stderr_sha256 ~result_record ~result_handle =
   append_transition ~repo_root ~state_root ~workflow_id
     ~kind:"RUN_RESULT_SEALED" ~transition:6 ~expected:Running ~next:Run_measured
-    ~extra_fields:[ ("exit_code", "0");
-      ("stdout_sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-      ("stderr_sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    ~extra_fields:[ ("exit_code", string_of_int exit_code);
+      ("stdout_sha256", stdout_sha256);
+      ("stderr_sha256", stderr_sha256);
       ("result_record", result_record); ("result_handle", result_handle) ]
 
-let close_run ~repo_root ~state_root ~workflow_id =
+let string_of_bool value = if value then "true" else "false"
+
+let close_run ~repo_root ~state_root ~workflow_id ~pid_extinct
+    ~descendants_extinct ~cgroup_unit_extinct ~grant_extinct ~capsule_extinct =
   append_transition ~repo_root ~state_root ~workflow_id ~kind:"RUN_CLOSED"
     ~transition:7 ~expected:Run_measured ~next:Run_closed
-    ~extra_fields:[ ("pid_extinct", "true"); ("descendants_extinct", "true");
-      ("cgroup_unit_extinct", "true"); ("grant_extinct", "true");
-      ("capsule_extinct", "true") ]
+    ~extra_fields:[ ("pid_extinct", string_of_bool pid_extinct);
+      ("descendants_extinct", string_of_bool descendants_extinct);
+      ("cgroup_unit_extinct", string_of_bool cgroup_unit_extinct);
+      ("grant_extinct", string_of_bool grant_extinct);
+      ("capsule_extinct", string_of_bool capsule_extinct) ]
 
 let arm_attest ~repo_root ~state_root ~workflow_id =
   append_transition ~repo_root ~state_root ~workflow_id ~kind:"ATTEST_ARMED"
