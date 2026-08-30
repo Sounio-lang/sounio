@@ -249,8 +249,20 @@ if [[ "$PHASE" == prepare ]]; then
     fail 'activated unit lost KillMode=process'
   grep -Fxq 'PrivateTmp=false' "/etc/systemd/system/$HOSTD_UNIT" ||
     fail 'activated unit isolated the lane socket namespace'
+  grep -Fxq 'Environment=XDG_RUNTIME_DIR=/tmp' "/etc/systemd/system/$HOSTD_UNIT" ||
+    fail 'activated unit did not bind the managed socket namespace'
+  grep -Fxq "ReadWritePaths=$STATE_DIR /tmp/sounio-loom-0" \
+    "/etc/systemd/system/$HOSTD_UNIT" ||
+    fail 'activated unit lost the exact socket write boundary'
+  [[ -d /tmp/sounio-loom-0 && ! -L /tmp/sounio-loom-0 &&
+     "$(stat -c '%u:%g:%a' /tmp/sounio-loom-0)" == 0:0:700 ]] ||
+    fail 'managed host socket namespace is absent, linked, or weakly owned'
   grep -Fxq 'production_activation=true' "$PREFIX/manifest.v1" ||
     fail 'activated installer manifest remained dark'
+  grep -Fxq 'service_uid=0' "$PREFIX/manifest.v1" ||
+    fail 'activated manifest lost the service uid'
+  grep -Fxq 'socket_root=/tmp/sounio-loom-0' "$PREFIX/manifest.v1" ||
+    fail 'activated manifest lost the managed socket root'
   grep -Fxq 'semantic_authority=Sounio' \
     "$PREFIX/share/product-activation-policy.v1" ||
     fail 'installed policy root lost Sounio authority'
@@ -258,6 +270,7 @@ if [[ "$PHASE" == prepare ]]; then
   systemd-run --quiet --unit="$START_UNIT" --property=Type=oneshot \
     --property=RemainAfterExit=yes --property=KillMode=control-group \
     --property=TimeoutStartSec=120 --setenv=SOUNIO_LOOM_DURABLE_LANE_CANARY=1 \
+    --setenv=XDG_RUNTIME_DIR=/tmp \
     "$LOOM" start --state-dir "$STATE_DIR" --agent "$AGENT" --lane "$LANE" \
       --session-id "$SESSION_ID" --cwd "$WORK_DIR" -- \
       "$LOOM" _durable-lane-canary

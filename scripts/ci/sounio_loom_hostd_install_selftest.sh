@@ -8,6 +8,9 @@ INSTALLER="$ROOT_DIR/scripts/dev/install_loom_hostd.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-hostd-install.XXXXXX")"
 INSTALLED_AGENT=loom-hostd-installed-test
 INSTALLED_LANE=outside-checkout
+SERVICE_USER="$(id -un)"
+SERVICE_UID="$(id -u)"
+SERVICE_GID="$(id -g)"
 
 fail() {
   printf 'sounio-loom-hostd-install-selftest: FAIL: %s test_root=%s\n' "$*" "$TEST_ROOT" >&2
@@ -37,7 +40,7 @@ mkdir -p "$stage"
 
 first="$(bash "$INSTALLER" --install-root "$stage" \
   --runtime "$runtime" --authority "$authority" --resident "$resident" \
-  --policy-root "$ROOT_DIR" --user loom-test)"
+  --policy-root "$ROOT_DIR" --user "$SERVICE_USER")"
 [[ "$first" == *'activated=false automatic_lineage_resurrection=false'* ]] ||
   fail "staged installer widened activation: $first"
 
@@ -49,10 +52,13 @@ installed_authority="$prefix/bin/sounio-loom-host-boot-reconciler"
 installed_resident="$prefix/bin/sounio-loom-resident-membrane-runtime-v5"
 policy_root="$prefix/policy/product-activation"
 policy_manifest="$prefix/share/product-activation-policy.v1"
+socket_root="$stage/tmp/sounio-loom-$SERVICE_UID"
 [[ -x "$installed_runtime" && -x "$installed_authority" && \
    -x "$installed_resident" && -f "$unit" && -f "$manifest" && \
-   -f "$policy_manifest" ]] ||
+   -f "$policy_manifest" && -d "$socket_root" ]] ||
   fail 'staged installation omitted an artifact'
+[[ "$(stat -c %a "$socket_root")" == 700 ]] ||
+  fail 'staged socket namespace is not mode 0700'
 [[ "$(sha256sum "$installed_authority" | cut -d ' ' -f 1)" == \
    '99f5062729a171ac2d8c1b9b181497fbe1b8c9317859ee0fdc4d2cd4acaedb5b' ]] ||
   fail 'installed Sounio authority hash drifted'
@@ -77,6 +83,10 @@ grep -Fxq 'NoNewPrivileges=true' "$unit" || fail 'unit lacks no-new-privileges b
 grep -Fxq 'ProtectSystem=strict' "$unit" || fail 'unit lacks strict filesystem protection'
 grep -Fxq 'PrivateTmp=false' "$unit" ||
   fail 'unit cannot observe the lane socket namespace'
+grep -Fxq 'Environment=XDG_RUNTIME_DIR=/tmp' "$unit" ||
+  fail 'unit does not bind recovery to the managed socket namespace'
+grep -Fxq "ReadWritePaths=/var/lib/sounio/loom /tmp/sounio-loom-$SERVICE_UID" "$unit" ||
+  fail 'unit can neither mutate the managed namespace nor limits its write surface'
 grep -Fxq 'ExecStart=/opt/sounio/loom-hostd/bin/sounio-loom-runtime host-supervise --state-dir /var/lib/sounio/loom --service-enabled --apply' "$unit" ||
   fail 'unit is not wired to the Sounio-authorized supervisor'
 grep -Fxq 'Environment=SOUNIO_LOOM_HOST_BOOT_AUTHORITY=/opt/sounio/loom-hostd/bin/sounio-loom-host-boot-reconciler' "$unit" ||
@@ -86,6 +96,14 @@ grep -Fxq 'service_enabled=false' "$manifest" || fail 'staged service was marked
 grep -Fxq 'production_activation=false' "$manifest" || fail 'staged service was marked production-active'
 grep -Fxq 'socket_namespace=host-shared-tmp' "$manifest" ||
   fail 'manifest omitted the shared lane socket namespace'
+grep -Fxq "service_user=$SERVICE_USER" "$manifest" ||
+  fail 'manifest service user drifted'
+grep -Fxq "service_uid=$SERVICE_UID" "$manifest" ||
+  fail 'manifest service uid drifted'
+grep -Fxq "service_gid=$SERVICE_GID" "$manifest" ||
+  fail 'manifest service gid drifted'
+grep -Fxq "socket_root=/tmp/sounio-loom-$SERVICE_UID" "$manifest" ||
+  fail 'manifest omitted the managed socket root'
 grep -Fxq 'private_tmp=false' "$manifest" ||
   fail 'manifest disagrees with the unit socket namespace'
 [[ ! -e "$stage/etc/systemd/system/multi-user.target.wants/sounio-loom-hostd.service" ]] ||
@@ -96,7 +114,7 @@ manifest_sha_before="$(sha256sum "$manifest" | cut -d ' ' -f 1)"
 policy_sha_before="$(sha256sum "$policy_manifest" | cut -d ' ' -f 1)"
 bash "$INSTALLER" --install-root "$stage" --runtime "$runtime" \
   --authority "$authority" --resident "$resident" --policy-root "$ROOT_DIR" \
-  --user loom-test >/dev/null
+  --user "$SERVICE_USER" >/dev/null
 [[ "$(sha256sum "$unit" | cut -d ' ' -f 1)" == "$unit_sha_before" && \
    "$(sha256sum "$manifest" | cut -d ' ' -f 1)" == "$manifest_sha_before" && \
    "$(sha256sum "$policy_manifest" | cut -d ' ' -f 1)" == "$policy_sha_before" ]] ||
@@ -135,7 +153,7 @@ chmod 0444 "$action_manifest"
 
 if bash "$INSTALLER" --install-root "$stage" --runtime "$runtime" \
   --authority "$authority" --resident "$resident" --policy-root "$ROOT_DIR" \
-  --user loom-test --activate \
+  --user "$SERVICE_USER" --activate \
   >"$TEST_ROOT/activate.out" 2>"$TEST_ROOT/activate.err"; then
   fail 'staged installer accepted activation'
 fi
@@ -148,11 +166,11 @@ chmod 0755 "$TEST_ROOT/authority-mutant"
 mkdir -p "$TEST_ROOT/mutant-stage"
 if bash "$INSTALLER" --install-root "$TEST_ROOT/mutant-stage" \
   --runtime "$runtime" --authority "$TEST_ROOT/authority-mutant" \
-  --resident "$resident" --policy-root "$ROOT_DIR" --user loom-test \
+  --resident "$resident" --policy-root "$ROOT_DIR" --user "$SERVICE_USER" \
   >"$TEST_ROOT/mutant.out" 2>"$TEST_ROOT/mutant.err"; then
   fail 'installer admitted a mutated Sounio authority'
 fi
 grep -q 'Sounio authority hash drifted' "$TEST_ROOT/mutant.err" ||
   fail 'mutated authority was refused by the wrong boundary'
 
-printf 'sounio-loom-hostd-install-selftest: PASS installer_transport=shell runtime_language=OCaml runtime_role=EFFECT_PARITY semantic_authority=Sounio actions=9031,9041 installed_policy_root=PASS outside_checkout_start=PASS policy_tamper=DENIED_PRE_MUTATION systemd_unit=PASS socket_namespace=host-shared-tmp private_tmp=false kill_mode=process restart=on-failure install_default=disabled staged_activation=DENIED mutated_authority=DENIED byte_idempotent=PASS python_executed=false rust_executed=false production_activation=false\n'
+printf 'sounio-loom-hostd-install-selftest: PASS installer_transport=shell runtime_language=OCaml runtime_role=EFFECT_PARITY semantic_authority=Sounio actions=9031,9041 installed_policy_root=PASS outside_checkout_start=PASS policy_tamper=DENIED_PRE_MUTATION systemd_unit=PASS socket_namespace=host-shared-tmp socket_root=/tmp/sounio-loom-%s socket_mode=0700 private_tmp=false kill_mode=process restart=on-failure install_default=disabled staged_activation=DENIED mutated_authority=DENIED byte_idempotent=PASS python_executed=false rust_executed=false production_activation=false\n' "$SERVICE_UID"

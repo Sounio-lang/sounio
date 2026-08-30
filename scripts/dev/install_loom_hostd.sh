@@ -11,6 +11,9 @@ STATE_DIR=/var/lib/sounio/loom
 UNIT_DIR=/etc/systemd/system
 UNIT_NAME=sounio-loom-hostd.service
 SERVICE_USER="$(id -un)"
+SERVICE_UID=''
+SERVICE_GID=''
+SOCKET_ROOT=''
 RUNTIME=''
 AUTHORITY=''
 RESIDENT=''
@@ -78,6 +81,13 @@ done
   fail 'prefix, state directory, and unit directory cannot be the filesystem root'
 [[ "$SERVICE_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*$ ]] || fail 'service user is invalid'
 [[ "$UNIT_NAME" =~ ^[a-zA-Z0-9_.@-]+\.service$ ]] || fail 'systemd unit name is invalid'
+SERVICE_UID="$(id -u "$SERVICE_USER" 2>/dev/null)" ||
+  fail "service user does not exist: $SERVICE_USER"
+SERVICE_GID="$(id -g "$SERVICE_USER" 2>/dev/null)" ||
+  fail "service group does not exist: $SERVICE_USER"
+[[ "$SERVICE_UID" =~ ^[0-9]+$ && "$SERVICE_GID" =~ ^[0-9]+$ ]] ||
+  fail "service identity is non-canonical: user=$SERVICE_USER uid=$SERVICE_UID gid=$SERVICE_GID"
+SOCKET_ROOT="/tmp/sounio-loom-$SERVICE_UID"
 INSTALL_ROOT="$(cd "$INSTALL_ROOT" && pwd -P)"
 if [[ $ACTIVATE -eq 1 && "$INSTALL_ROOT" != / ]]; then
   fail '--activate is forbidden for a staged install root'
@@ -140,10 +150,16 @@ policy_tree_sha256="$(printf '%s' "$policy_material" | sha256sum | cut -d ' ' -f
 dest_prefix="$INSTALL_ROOT$PREFIX"
 dest_state="$INSTALL_ROOT$STATE_DIR"
 dest_unit_dir="$INSTALL_ROOT$UNIT_DIR"
+dest_socket_root="$INSTALL_ROOT$SOCKET_ROOT"
 dest_policy_root="$dest_prefix/policy/product-activation"
 install -d -m 0755 "$dest_prefix/bin" "$dest_prefix/share" "$dest_unit_dir" \
   "$dest_policy_root"
-install -d -m 0700 "$dest_state"
+if [[ "$INSTALL_ROOT" == / ]]; then
+  install -d -m 0700 -o "$SERVICE_UID" -g "$SERVICE_GID" \
+    "$dest_state" "$dest_socket_root"
+else
+  install -d -m 0700 "$dest_state" "$dest_socket_root"
+fi
 install -m 0755 "$RUNTIME" "$dest_prefix/bin/sounio-loom-runtime"
 install -m 0755 "$AUTHORITY" "$dest_prefix/bin/sounio-loom-host-boot-reconciler"
 install -m 0755 "$RESIDENT" \
@@ -181,6 +197,7 @@ ConditionPathIsDirectory=$STATE_DIR
 Type=simple
 User=$SERVICE_USER
 Environment=SOUNIO_LOOM_HOST_BOOT_AUTHORITY=$PREFIX/bin/sounio-loom-host-boot-reconciler
+Environment=XDG_RUNTIME_DIR=/tmp
 ExecStart=$PREFIX/bin/sounio-loom-runtime host-supervise --state-dir $STATE_DIR --service-enabled --apply
 Restart=on-failure
 RestartSec=2s
@@ -189,7 +206,7 @@ NoNewPrivileges=true
 PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=$STATE_DIR
+ReadWritePaths=$STATE_DIR $SOCKET_ROOT
 UMask=0077
 
 [Install]
@@ -216,11 +233,14 @@ prefix=$PREFIX
 state_dir=$STATE_DIR
 unit_path=$UNIT_DIR/$UNIT_NAME
 service_user=$SERVICE_USER
+service_uid=$SERVICE_UID
+service_gid=$SERVICE_GID
 install_default=disabled
 service_enabled=false
 production_activation=false
 automatic_lineage_resurrection=false
 socket_namespace=host-shared-tmp
+socket_root=$SOCKET_ROOT
 private_tmp=false
 python_executable_invoked=false
 rust_executable_invoked=false
@@ -241,8 +261,8 @@ if [[ $ACTIVATE -eq 1 ]]; then
   mv -f "$manifest_stage" "$manifest"
 fi
 
-printf 'LOOM_HOSTD_INSTALLED prefix=%s state_dir=%s unit=%s language=OCaml role=EFFECT_PARITY semantic_authority=Sounio action=9041 semantics_sha256=%s authority_runtime_sha256=%s ocaml_runtime_sha256=%s resident_runtime_sha256=%s product_activation_policy_sha256=%s activated=%s automatic_lineage_resurrection=false python_executed=false rust_executed=false\n' \
-  "$PREFIX" "$STATE_DIR" "$UNIT_DIR/$UNIT_NAME" \
+printf 'LOOM_HOSTD_INSTALLED prefix=%s state_dir=%s socket_root=%s unit=%s language=OCaml role=EFFECT_PARITY semantic_authority=Sounio action=9041 semantics_sha256=%s authority_runtime_sha256=%s ocaml_runtime_sha256=%s resident_runtime_sha256=%s product_activation_policy_sha256=%s activated=%s automatic_lineage_resurrection=false python_executed=false rust_executed=false\n' \
+  "$PREFIX" "$STATE_DIR" "$SOCKET_ROOT" "$UNIT_DIR/$UNIT_NAME" \
   '0d5174cd87b8c18b5f3bbfa7ed44d0258795a96f146730c879c46167abdddf7d' \
   "$authority_sha256" "$runtime_sha256" "$resident_sha256" \
   "$policy_tree_sha256" "$activated"
