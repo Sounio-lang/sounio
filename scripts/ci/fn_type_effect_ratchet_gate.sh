@@ -23,6 +23,7 @@ cd "$(git rev-parse --show-toplevel)"
 gate_name "fn_type_effect_ratchet"
 
 REF="scripts/ci/fn_type_effect_ratchet.frozen"
+REF_LIST="scripts/ci/fn_type_effect_ratchet.frozen.list"
 OUT="${GATE_ARTIFACT:-artifacts/gates/fn_type_effect_ratchet.json}"
 
 # A function TYPE is `fn(` — no name between `fn` and `(`. A function
@@ -106,10 +107,25 @@ ficheiros=$(git ls-files '*.sio' | grep -vE '^(archive|bootstrap)/' | wc -l | tr
 require_nonempty "$ficheiros" "the .sio file list came back empty"
 require_min_count "$ficheiros" 500 "live .sio files"
 
+[ "${1:-}" = "--list" ] && { enumerate | sort; exit 0; }
+
 atual=$(enumerate | wc -l | tr -d ' ')
 require_nonempty "$atual" "the bare-function-type count came back empty"
 [ -f "$REF" ] || printf '%s\n' "$atual" | gate_write_artifact "$REF"
 congelado=$(head -1 "$REF" | tr -d ' ')
+
+# The count and the list must describe the same corpus. The sibling ratchet
+# carried .frozen=472 against a 474-line .frozen.list for weeks, which is how a
+# count gets lowered without regenerating what it summarises.
+if [ -f "$REF_LIST" ]; then
+  lista_n=$(wc -l < "$REF_LIST" | tr -d ' ')
+  if [ "$lista_n" != "$congelado" ]; then
+    echo "REFUSE: ${REF} says ${congelado} but ${REF_LIST} holds ${lista_n} lines." >&2
+    echo "  They must describe the same corpus. Regenerate the list:" >&2
+    echo "    bash $0 --list > ${REF_LIST}" >&2
+    exit 1
+  fi
+fi
 
 mkdir -p "$(dirname "$OUT")"
 estado=pass; falhou=0
@@ -118,8 +134,24 @@ if [ "$atual" -gt "$congelado" ]; then
   echo "REFUSE: bare function types rose ${congelado} -> ${atual}."
   echo "SOUNIO-SPEC-06 §6.0 rules that a function type carries the function's effects."
   echo "A new function type without a 'with' clause widens the gap to that ruling."
-  echo "New or changed sites:"
-  enumerate | tail -n "$(( atual - congelado ))" | sed 's/^/  /'
+  # Name the sites by SET DIFFERENCE, never by `tail -n <delta>`.
+  #
+  # This used to print `enumerate | tail -n $(( atual - congelado ))` -- the last
+  # N lines of the whole corpus in git ls-files order, which has nothing to do
+  # with which sites are new. Measured 2026-08-30 on #2225: it named six sites in
+  # tools/test-framework/src/lib.sio, a file that PR does not touch, while the
+  # six real ones were in examples/higher_order.sio and examples/newton_root.sio.
+  # A gate that reports a violation and points at the wrong file sends the reader
+  # to edit innocent code; that is worse than reporting a bare count.
+  if [ -f "$REF_LIST" ]; then
+    echo "New sites (present now, absent from ${REF_LIST}):"
+    comm -13 "$REF_LIST" <(enumerate | sort) | sed 's/^/  /'
+  else
+    echo "New sites: cannot say -- ${REF_LIST} is missing, so there is nothing to"
+    echo "  diff against. Regenerate it with:"
+    echo "    bash $0 --list > ${REF_LIST}"
+    echo "  Reporting the count only, rather than guessing at filenames."
+  fi
 elif [ "$atual" -lt "$congelado" ]; then
   echo "OK: bare function types fell ${congelado} -> ${atual}. Lower the frozen count:"
   echo "  printf '%s\\n' ${atual} > ${REF}"
