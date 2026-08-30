@@ -247,6 +247,7 @@ if [[ -n "$EXEC_CELL_CAPSULE" ]]; then
      "$(manifest_value "$exec_cell_manifest" semantic_authority)" == Sounio &&
      "$(manifest_value "$exec_cell_manifest" semantic_action)" == 9030 &&
      "$(manifest_value "$exec_cell_manifest" product_exec_ingress_action)" == 9031 &&
+     "$(manifest_value "$exec_cell_manifest" product_exec_result_action)" == 9033 &&
      "$(manifest_value "$exec_cell_manifest" controller_language)" == OCaml &&
      "$(manifest_value "$exec_cell_manifest" controller_role)" == EFFECT_PARITY &&
      "$(manifest_value "$exec_cell_manifest" material_language)" == C++20+Linux+systemd &&
@@ -293,6 +294,10 @@ if [[ -n "$EXEC_CELL_CAPSULE" ]]; then
   exec_cell_fixture_bundle="$(verify_exec_cell_binding \
     product_exec_cell_fixture_bundle_path \
     product_exec_cell_fixture_bundle_sha256 444)"
+  exec_cell_result_manifest="$(verify_exec_cell_binding \
+    product_exec_result_manifest_path product_exec_result_manifest_sha256 444)"
+  exec_cell_result_runtime="$(verify_exec_cell_binding \
+    product_exec_result_runtime_path product_exec_result_runtime_sha256 555)"
   exec_cell_product_runtime="$(verify_exec_cell_binding \
     product_exec_ingress_runtime_path product_exec_ingress_runtime_sha256 555)"
   exec_cell_language_runtime="$(verify_exec_cell_binding \
@@ -301,7 +306,8 @@ if [[ -n "$EXEC_CELL_CAPSULE" ]]; then
     product_resident_runtime_path product_resident_runtime_sha256 555)"
   : "$exec_cell_broker" "$exec_cell_controller_runtime" \
     "$exec_cell_witness_cell" "$exec_cell_product_runtime" \
-    "$exec_cell_language_runtime" "$exec_cell_resident_runtime"
+    "$exec_cell_language_runtime" "$exec_cell_resident_runtime" \
+    "$exec_cell_result_runtime"
   [[ "$(manifest_value "$exec_cell_controller_manifest" semantic_authority)" == Sounio &&
      "$(manifest_value "$exec_cell_controller_manifest" action)" == 9030 &&
      "$(manifest_value "$exec_cell_controller_manifest" producing_language)" == OCaml &&
@@ -321,6 +327,20 @@ if [[ -n "$EXEC_CELL_CAPSULE" ]]; then
      "$(manifest_value "$exec_cell_fixture_manifest" payload_manifest_sha256)" == \
        "$(sha256_file "$exec_cell_witness_manifest")" ]] ||
     fail 'ExecCell Sounio/OCaml/ProcessWitness provenance drifted'
+  [[ "$(manifest_value "$exec_cell_result_manifest" stage)" == SEMANTICS_FROZEN &&
+     "$(manifest_value "$exec_cell_result_manifest" semantic_authority)" == Sounio &&
+     "$(manifest_value "$exec_cell_result_manifest" producing_language)" == Sounio &&
+     "$(manifest_value "$exec_cell_result_manifest" language_role)" == SEMANTIC_AUTHORITY &&
+     "$(manifest_value "$exec_cell_result_manifest" action)" == 9033 &&
+     "$(sha256_file "$exec_cell_result_manifest")" == \
+       7c1955299f2b308c331760764c289b6617910549b5dfc6bc4cf1969457306a55 &&
+     "$(manifest_value "$exec_cell_result_manifest" executable_sha256)" == \
+       "$(sha256_file "$exec_cell_result_runtime")" &&
+     "$(manifest_value "$exec_cell_result_manifest" python_executable_invoked)" == false &&
+     "$(manifest_value "$exec_cell_result_manifest" rust_executable_invoked)" == false &&
+     "$(manifest_value "$exec_cell_result_manifest" provider_hook_switched)" == false &&
+     "$(manifest_value "$exec_cell_result_manifest" production_activation)" == false ]] ||
+    fail 'ExecCell Sounio 9033 result authority provenance drifted'
   exec_cell_release_id="$(manifest_value "$exec_cell_manifest" release_id)"
   [[ "$exec_cell_release_id" =~ ^9030-hostq-[0-9a-f]{32}$ ]] ||
     fail 'ExecCell release identity is non-canonical'
@@ -414,7 +434,7 @@ exec_cell_manifest_stage="$(mktemp "$dest_prefix/share/.exec-cell-bundle.v1.XXXX
 cat > "$exec_cell_manifest_stage" <<EOF
 schema=loom-hostd-exec-cell-bundle-v1
 semantic_authority=Sounio
-semantic_actions=9030,9031
+semantic_actions=9030,9031,9033
 bundle_present=$exec_cell_bundle_present
 capsule_sha256=${EXEC_CELL_CAPSULE_SHA256:-absent}
 release_id=$exec_cell_release_id
@@ -430,6 +450,8 @@ rust_executable_invoked=false
 exec_cell_canary_frozen=$exec_cell_bundle_present
 exec_cell_boot_gate_configured=$exec_cell_bundle_present
 exec_cell_boot_gate_test_only=true
+exec_result_transport_configured=$exec_cell_bundle_present
+exact_fixture_result_attached=false
 exec_attached=false
 production_activation=false
 EOF
@@ -443,7 +465,7 @@ if [[ "$exec_cell_bundle_present" == true ]]; then
   unit_value() {
     manifest_value "$exec_cell_manifest" "$1"
   }
-  exec_cell_exec_start_pre="ExecStartPre=$systemd_run_path --quiet --wait --pipe --collect --unit=$unit_exec_cell_gate --service-type=exec --setenv=SOUNIO_LOOM_RESIDENT_RECEIPT_LOG=$STATE_DIR/exec-cell-gate-authority.tsv --property=UMask=0077 --property=NoNewPrivileges=yes --property=PrivateTmp=yes --property=PrivateDevices=yes --property=PrivateNetwork=yes --property=ProtectSystem=strict --property=ProtectHome=yes --property=ReadWritePaths=/run\x20$STATE_DIR --property=RestrictAddressFamilies=AF_UNIX --property=TimeoutStartSec=220s -- $unit_exec_cell_release/$(unit_value broker_path) --selftest-product-exec-cell-host --controller-manifest $unit_exec_cell_release/$(unit_value controller_manifest_path) --controller-runtime $unit_exec_cell_release/$(unit_value controller_runtime_path) --controller-root $unit_exec_cell_release/$exec_cell_authority_root_relative --resident-runtime $unit_exec_cell_release/$(unit_value resident_runtime_path) --process-witness-runtime $unit_exec_cell_release/$(unit_value process_witness_cell_path) --process-witness-payload $unit_exec_cell_release/$(unit_value process_witness_payload_path) --process-witness-manifest $unit_exec_cell_release/$(unit_value process_witness_manifest_path) --product-root $unit_exec_cell_release/$exec_cell_product_root_relative --product-runtime $unit_exec_cell_release/$(unit_value product_exec_ingress_runtime_path) --product-language-runtime $unit_exec_cell_release/$(unit_value product_language_runtime_path) --product-resident-runtime $unit_exec_cell_release/$(unit_value product_resident_runtime_path) --product-exec-cell-fixture-manifest $unit_exec_cell_release/$(unit_value product_exec_cell_fixture_manifest_path) --product-exec-cell-fixture-bundle $unit_exec_cell_release/$(unit_value product_exec_cell_fixture_bundle_path) --systemd-run $systemd_run_path --systemctl $systemctl_path"
+  exec_cell_exec_start_pre="ExecStartPre=$systemd_run_path --quiet --wait --pipe --collect --unit=$unit_exec_cell_gate --service-type=exec --setenv=SOUNIO_LOOM_RESIDENT_RECEIPT_LOG=$STATE_DIR/exec-cell-gate-authority.tsv --property=UMask=0077 --property=NoNewPrivileges=yes --property=PrivateTmp=yes --property=PrivateDevices=yes --property=PrivateNetwork=yes --property=ProtectSystem=strict --property=ProtectHome=yes --property=ReadWritePaths=/run\x20$STATE_DIR --property=RestrictAddressFamilies=AF_UNIX --property=TimeoutStartSec=220s -- $unit_exec_cell_release/$(unit_value broker_path) --selftest-product-exec-cell-host --controller-manifest $unit_exec_cell_release/$(unit_value controller_manifest_path) --controller-runtime $unit_exec_cell_release/$(unit_value controller_runtime_path) --controller-root $unit_exec_cell_release/$exec_cell_authority_root_relative --resident-runtime $unit_exec_cell_release/$(unit_value resident_runtime_path) --process-witness-runtime $unit_exec_cell_release/$(unit_value process_witness_cell_path) --process-witness-payload $unit_exec_cell_release/$(unit_value process_witness_payload_path) --process-witness-manifest $unit_exec_cell_release/$(unit_value process_witness_manifest_path) --product-root $unit_exec_cell_release/$exec_cell_product_root_relative --product-runtime $unit_exec_cell_release/$(unit_value product_exec_ingress_runtime_path) --product-language-runtime $unit_exec_cell_release/$(unit_value product_language_runtime_path) --product-resident-runtime $unit_exec_cell_release/$(unit_value product_resident_runtime_path) --product-exec-cell-fixture-manifest $unit_exec_cell_release/$(unit_value product_exec_cell_fixture_manifest_path) --product-exec-cell-fixture-bundle $unit_exec_cell_release/$(unit_value product_exec_cell_fixture_bundle_path) --product-exec-result-manifest $unit_exec_cell_release/$(unit_value product_exec_result_manifest_path) --systemd-run $systemd_run_path --systemctl $systemctl_path"
 fi
 
 unit="$dest_unit_dir/$UNIT_NAME"
@@ -500,6 +522,8 @@ exec_cell_release_tree_sha256=$exec_cell_release_tree_sha256
 exec_cell_canary_frozen=$exec_cell_bundle_present
 exec_cell_boot_gate_configured=$exec_cell_bundle_present
 exec_cell_boot_gate_test_only=true
+exec_result_transport_configured=$exec_cell_bundle_present
+exact_fixture_result_attached=false
 exec_attached=false
 prefix=$PREFIX
 state_dir=$STATE_DIR
@@ -533,10 +557,11 @@ if [[ $ACTIVATE -eq 1 ]]; then
   mv -f "$manifest_stage" "$manifest"
 fi
 
-printf 'LOOM_HOSTD_INSTALLED prefix=%s state_dir=%s socket_root=%s unit=%s language=OCaml role=EFFECT_PARITY semantic_authority=Sounio actions=9030,9031,9041 semantics_sha256=%s authority_runtime_sha256=%s ocaml_runtime_sha256=%s resident_runtime_sha256=%s product_activation_policy_sha256=%s exec_cell_bundle_present=%s exec_cell_release_id=%s exec_cell_release_manifest_sha256=%s exec_cell_release_tree_sha256=%s exec_cell_canary_frozen=%s exec_cell_boot_gate_configured=%s exec_cell_boot_gate_test_only=true exec_attached=false activated=%s automatic_lineage_resurrection=false python_executed=false rust_executed=false\n' \
+printf 'LOOM_HOSTD_INSTALLED prefix=%s state_dir=%s socket_root=%s unit=%s language=OCaml role=EFFECT_PARITY semantic_authority=Sounio actions=9030,9031,9033,9041 semantics_sha256=%s authority_runtime_sha256=%s ocaml_runtime_sha256=%s resident_runtime_sha256=%s product_activation_policy_sha256=%s exec_cell_bundle_present=%s exec_cell_release_id=%s exec_cell_release_manifest_sha256=%s exec_cell_release_tree_sha256=%s exec_cell_canary_frozen=%s exec_cell_boot_gate_configured=%s exec_cell_boot_gate_test_only=true exec_result_transport_configured=%s exact_fixture_result_attached=false exec_attached=false activated=%s automatic_lineage_resurrection=false python_executed=false rust_executed=false\n' \
   "$PREFIX" "$STATE_DIR" "$SOCKET_ROOT" "$UNIT_DIR/$UNIT_NAME" \
   '0d5174cd87b8c18b5f3bbfa7ed44d0258795a96f146730c879c46167abdddf7d' \
   "$authority_sha256" "$runtime_sha256" "$resident_sha256" \
   "$policy_tree_sha256" "$exec_cell_bundle_present" "$exec_cell_release_id" \
   "$exec_cell_release_manifest_sha256" "$exec_cell_release_tree_sha256" \
-  "$exec_cell_bundle_present" "$exec_cell_bundle_present" "$activated"
+  "$exec_cell_bundle_present" "$exec_cell_bundle_present" \
+  "$exec_cell_bundle_present" "$activated"

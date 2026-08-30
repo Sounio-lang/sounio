@@ -18,6 +18,7 @@ type observation = {
   peer_distinct_uid : bool;
   activation_code : int;
   activation_generation_sha256 : string;
+  result : Loom_exec_result.transported_result option;
 }
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
@@ -52,6 +53,16 @@ let required_mode () =
   | Some _ -> failf "product-exec-ingress-required-mode-invalid"
 
 let probe_only () = exact_test_flag "SOUNIO_LOOM_EXEC_INGRESS_PROBE_ONLY"
+
+let event_binding raw_event_sha256 =
+  match Sys.getenv_opt "SOUNIO_LOOM_EXEC_RESULT_EVENT_SHA256" with
+  | None | Some "" -> raw_event_sha256
+  | Some value ->
+      if not (test_mode () && probe_only ()) then
+        failf "product-exec-result-event-override-requires-probe-only";
+      if not (valid_sha256 value) then
+        failf "product-exec-result-event-override-invalid";
+      value
 
 let utc_now () =
   let tm = Unix.gmtime (Unix.gettimeofday ()) in
@@ -221,8 +232,9 @@ let descriptor_from_environment () =
        with Failure _ -> failf "product-exec-ingress-descriptor-unavailable")
 
 let append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
-    ~command_sha256 ~descriptor_present ~descriptor_bound ~peer_pid ~peer_uid
-    ~peer_gid ~peer_distinct_uid ~decision ~reason evaluation =
+    ~raw_event_sha256 ~command_sha256 ~descriptor_present ~descriptor_bound
+    ~peer_pid ~peer_uid ~peer_gid ~peer_distinct_uid ~decision ~reason ~result
+    evaluation =
   let path = audit_path root in
   mkdir_p (Filename.dirname path);
   let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
@@ -261,11 +273,23 @@ let append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
               "authority_sequence=" ^ string_of_int authority.sequence ]
       in
       let line =
+        let result_fields =
+          match result with
+          | None ->
+              [ "result_returned=false"; "result_handle_sha256=-";
+                "result_receipt_sha256=-"; "result_manifest_sha256=-" ]
+          | Some (value : Loom_exec_result.transported_result) ->
+              [ "result_returned=true";
+                "result_handle_sha256=" ^ sha256 value.handle;
+                "result_receipt_sha256=" ^ value.receipt_sha256;
+                "result_manifest_sha256=" ^ value.manifest_sha256 ]
+        in
         String.concat "\t"
           ([ "schema=loom-product-exec-ingress-dark-decision-v1";
              "utc=" ^ utc_now (); "decision=" ^ decision; "reason=" ^ reason;
              "authorizing=false"; "production_activation=false";
-             "exec_attached=false"; "descriptor_present=" ^
+             "exec_attached=" ^ string_of_bool (Option.is_some result);
+             "descriptor_present=" ^
                string_of_bool descriptor_present;
              "descriptor_bound=" ^ string_of_bool descriptor_bound;
              "descriptor_transport=unix-stream-inherited";
@@ -282,10 +306,13 @@ let append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
              "peer_distinct_uid=" ^ string_of_bool peer_distinct_uid;
              "agent_sha256=" ^ sha256 agent; "lane_sha256=" ^ sha256 lane;
              "session_id_sha256=" ^ sha256 session_id;
-             "cwd_sha256=" ^ sha256 cwd; "event_sha256=" ^ event_sha256;
+             "cwd_sha256=" ^ sha256 cwd;
+             "raw_event_sha256=" ^ raw_event_sha256;
+             "event_sha256=" ^ event_sha256;
              "command_sha256=" ^ command_sha256;
              "operational_language=OCaml";
-             "operational_role=OPERATIONAL_ATTACHMENT" ] @ activation_fields)
+             "operational_role=OPERATIONAL_ATTACHMENT" ] @ result_fields
+             @ activation_fields)
         ^ "\n"
       in
       write_all descriptor line;
@@ -295,15 +322,18 @@ let append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
 let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command_sha256 =
   if not (valid_sha256 event_sha256 && valid_sha256 command_sha256) then
     failf "product-exec-ingress-digest-invalid";
+  let raw_event_sha256 = event_sha256 in
+  let event_sha256 = event_binding raw_event_sha256 in
   let root = Unix.realpath root in
   let cwd = Unix.realpath cwd in
   match descriptor_from_environment () with
   | None ->
       append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
-        ~command_sha256 ~descriptor_present:false ~descriptor_bound:false
+        ~raw_event_sha256 ~command_sha256 ~descriptor_present:false
+        ~descriptor_bound:false
         ~peer_pid:0 ~peer_uid:(Unix.geteuid ()) ~peer_gid:(Unix.getegid ())
         ~peer_distinct_uid:false ~decision:"DENY" ~reason:"descriptor-absent"
-        None;
+        ~result:None None;
       if required_mode () then failf "product-exec-ingress-descriptor-absent";
       None
   | Some descriptor ->
@@ -329,17 +359,20 @@ let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command_sha256 =
               try same_uid_fixture_allowed () with
               | Error reason as error ->
                   append_audit ~root ~agent ~lane ~session_id ~cwd
-                    ~event_sha256 ~command_sha256 ~descriptor_present:true
+                    ~event_sha256 ~raw_event_sha256 ~command_sha256
+                    ~descriptor_present:true
                     ~descriptor_bound:false ~peer_pid ~peer_uid ~peer_gid
-                    ~peer_distinct_uid:false ~decision:"DENY" ~reason None;
+                    ~peer_distinct_uid:false ~decision:"DENY" ~reason
+                    ~result:None None;
                   raise error
           in
           if not peer_admitted
           then (
             append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
-              ~command_sha256 ~descriptor_present:true ~descriptor_bound:false
+              ~raw_event_sha256 ~command_sha256 ~descriptor_present:true
+              ~descriptor_bound:false
               ~peer_pid ~peer_uid ~peer_gid ~peer_distinct_uid:false
-              ~decision:"DENY" ~reason:"peer-not-distinct" None;
+              ~decision:"DENY" ~reason:"peer-not-distinct" ~result:None None;
             failf "product-exec-ingress-peer-not-distinct");
           let deadline = Unix.gettimeofday () +. descriptor_deadline_seconds in
           write_all descriptor
@@ -347,12 +380,23 @@ let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command_sha256 =
                [ "LOOM_EXEC_INGRESS/1"; event_sha256; command_sha256 ] ^ "\n");
           Unix.shutdown descriptor SHUTDOWN_SEND;
           let response = read_line descriptor deadline in
-          let expected =
-            String.concat "\t"
-              [ "LOOM_EXEC_INGRESS_BOUND/1"; event_sha256; command_sha256 ]
+          let result =
+            match String.split_on_char '\t' response with
+            | [ "LOOM_EXEC_INGRESS_BOUND/1"; response_event; response_command ]
+              when response_event = event_sha256
+                   && response_command = command_sha256 ->
+                None
+            | [ "LOOM_EXEC_RESULT/1"; response_event; response_command; handle;
+                receipt_sha256; receipt_hex; manifest_sha256 ]
+              when response_event = event_sha256
+                   && response_command = command_sha256 ->
+                Some
+                  (Loom_exec_result.validate_transport ~root
+                     ~event_sha256:response_event
+                     ~command_sha256:response_command ~handle ~receipt_sha256
+                     ~receipt_hex ~manifest_sha256)
+            | _ -> failf "product-exec-ingress-response-binding-mismatch"
           in
-          if response <> expected then
-            failf "product-exec-ingress-response-binding-mismatch";
           require_eof descriptor deadline;
           let evaluation =
             Loom_membrane.evaluate_product_activation_dark ~policy_root:root
@@ -360,14 +404,19 @@ let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command_sha256 =
           in
           let authority = evaluation.activation_decision in
           append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
-            ~command_sha256 ~descriptor_present:true ~descriptor_bound:true
+            ~raw_event_sha256 ~command_sha256 ~descriptor_present:true
+            ~descriptor_bound:true
             ~peer_pid ~peer_uid ~peer_gid ~peer_distinct_uid
             ~decision:(if authority.code = 0 then "ALLOW" else "DENY")
-            ~reason:"descriptor-bound-action-9031" (Some evaluation);
+            ~reason:(if Option.is_some result then
+                       "descriptor-result-bound-actions-9030+9031+9033"
+                     else "descriptor-bound-action-9031")
+            ~result (Some evaluation);
           if authority.code = 0 then
             failf "product-exec-ingress-dark-unexpected-allow";
           Some
             { descriptor_present = true; descriptor_bound = true; peer_pid;
               peer_uid; peer_gid; peer_distinct_uid;
               activation_code = authority.code;
-              activation_generation_sha256 = authority.generation_sha256 })
+              activation_generation_sha256 = authority.generation_sha256;
+              result })

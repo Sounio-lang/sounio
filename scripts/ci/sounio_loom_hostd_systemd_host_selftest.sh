@@ -117,10 +117,15 @@ wait_exec_cell_boot_receipts() {
     if [[ "$count" =~ ^[0-9]+$ ]] && (( count >= minimum )); then
       latest="$(journalctl --unit "$EXEC_CELL_GATE_UNIT" --no-pager --output=cat \
         2>/dev/null | grep '^loom-product-exec-cell-host: PASS ' | tail -n 1)"
-      [[ "$latest" == *'semantic_authority=Sounio action=9030 lane_action=9031 '* &&
+      [[ "$latest" == *'semantic_authority=Sounio action=9030 lane_action=9031 result_action=9033 '* &&
          "$latest" == *'simultaneous_distinct_dynamic_users=true '* &&
          "$latest" == *'outcome=DONE extinction_complete=true '* &&
          "$latest" == *'command_mismatch=DENY492 causal_sabotage=PASS '* &&
+         "$latest" == *'result_returned=true result_presenter=read-only '* &&
+         "$latest" == *'result_binding_sabotage=closed result_receipt_sabotage=closed result_manifest_sabotage=closed '* &&
+         "$latest" == *'exact_fixture_hook_switched=true local_exec_capability_used=false '* &&
+         "$latest" == *'raw_event_separate=true event_override=test-only+probe-only '* &&
+         "$latest" == *'exec_cell_attached=true material_execution=true '* &&
          "$latest" == *'python_executed=false rust_executed=false '* &&
          "$latest" == *'test_only=true production_activation=false '* ]] ||
         fail "ExecCell boot receipt widened or diverged: $latest"
@@ -409,7 +414,7 @@ exec_cell_boot_receipts=$exec_cell_boot_receipts_a
 exec_cell_capsule_sha256=$EXEC_CELL_CAPSULE_SHA256
 EOF
   chmod 0400 "$PHASE_A"
-  printf 'sounio-loom-hostd-systemd-host-selftest: PHASE_A_PASS run_id=%s unit=%s enabled=true supervisor_pid=%s guardian_pid=%s harness_pid=%s kernel_pid_before=%s kernel_crashed=true transport_pod_deleted=false semantic_authority=Sounio actions=9030,9031,9041 exec_cell_boot_gate=true exec_cell_boot_receipts=%s exec_cell_boot_gate_test_only=true exec_attached=false python_executed=false rust_executed=false\n' \
+  printf 'sounio-loom-hostd-systemd-host-selftest: PHASE_A_PASS run_id=%s unit=%s enabled=true supervisor_pid=%s guardian_pid=%s harness_pid=%s kernel_pid_before=%s kernel_crashed=true transport_pod_deleted=false semantic_authority=Sounio actions=9030,9031,9033,9041 exec_cell_boot_gate=true exec_cell_boot_receipts=%s exec_cell_boot_gate_test_only=true exact_fixture_result_attached=true result_returned=true result_presenter=read-only exec_attached=false python_executed=false rust_executed=false\n' \
     "$RUN_ID" "$HOSTD_UNIT" "$supervisor_a" "$guardian_a" "$harness_a" \
     "$daemon_a" "$exec_cell_boot_receipts_a"
   exit 0
@@ -551,5 +556,5 @@ systemctl daemon-reload
 systemctl is-enabled --quiet "$HOSTD_UNIT" 2>/dev/null &&
   fail 'canary unit remained boot-enabled after cleanup'
 
-receipt="sounio-loom-hostd-systemd-host-selftest: HOST_MEASUREMENT_PASS semantic_authority=Sounio actions=9030,9031,9041 operational_language=OCaml operational_role=EFFECT_PARITY material_platform=Linux+systemd host=$(hostname) kernel=$(uname -r) systemd_version=$(systemctl --version | sed -n '1s/^systemd //p') boot_id=$(record_value "$PHASE_A" boot_id) transport_a_uid=$TRANSPORT_A_UID transport_b_uid=$TRANSPORT_B_UID transport_replaced=true predecessor_transport_extinct=true unit=$HOSTD_UNIT boot_enabled=true real_systemd_activation=true exec_cell_boot_gate=true exec_cell_boot_gate_test_only=true exec_cell_boot_receipts=$exec_cell_boot_receipts_final exec_cell_outcome=DONE exec_cell_extinction=true exec_cell_command_mismatch=DENY492 exec_attached=false supervisor_pid_before=$supervisor_a supervisor_pid_after=$supervisor_b supervisor_restarted=true kill_mode_process_preserved_lane=true guardian_pid=$guardian guardian_start_tick=$guardian_start guardian_equal=true harness_pid=$harness harness_start_tick=$harness_start harness_equal=true instance_id=$instance instance_equal=true kernel_pid_before=$(record_value "$PHASE_A" daemon_pid) kernel_pid_after=$daemon_recovered_c automatic_recovery=true repeated_recovery=true output_prefix_preserved=true semantic_journal_verified=true guardian_journal_verified=true receipt_count=$receipt_count receipt_chain=PASS sabotage_decision=DENY545 sabotage_process_created=false causal_sabotage=PASS same_physical_recovery=true same_pty_claim_after_guardian_loss=false full_extinction=true tmux_used=false python_executed=false rust_executed=false production_activation=canary-only"
+receipt="sounio-loom-hostd-systemd-host-selftest: HOST_MEASUREMENT_PASS semantic_authority=Sounio actions=9030,9031,9033,9041 operational_language=OCaml operational_role=EFFECT_PARITY material_platform=Linux+systemd host=$(hostname) kernel=$(uname -r) systemd_version=$(systemctl --version | sed -n '1s/^systemd //p') boot_id=$(record_value "$PHASE_A" boot_id) transport_a_uid=$TRANSPORT_A_UID transport_b_uid=$TRANSPORT_B_UID transport_replaced=true predecessor_transport_extinct=true unit=$HOSTD_UNIT boot_enabled=true real_systemd_activation=true exec_cell_boot_gate=true exec_cell_boot_gate_test_only=true exec_cell_boot_receipts=$exec_cell_boot_receipts_final exec_cell_outcome=DONE exec_cell_extinction=true exec_cell_command_mismatch=DENY492 exact_fixture_result_attached=true result_returned=true result_presenter=read-only result_binding_sabotage=closed result_receipt_sabotage=closed result_manifest_sabotage=closed exact_fixture_hook_switched=true local_exec_capability_used=false exec_attached=false supervisor_pid_before=$supervisor_a supervisor_pid_after=$supervisor_b supervisor_restarted=true kill_mode_process_preserved_lane=true guardian_pid=$guardian guardian_start_tick=$guardian_start guardian_equal=true harness_pid=$harness harness_start_tick=$harness_start harness_equal=true instance_id=$instance instance_equal=true kernel_pid_before=$(record_value "$PHASE_A" daemon_pid) kernel_pid_after=$daemon_recovered_c automatic_recovery=true repeated_recovery=true output_prefix_preserved=true semantic_journal_verified=true guardian_journal_verified=true receipt_count=$receipt_count receipt_chain=PASS sabotage_decision=DENY545 sabotage_process_created=false causal_sabotage=PASS same_physical_recovery=true same_pty_claim_after_guardian_loss=false full_extinction=true tmux_used=false python_executed=false rust_executed=false production_activation=canary-only"
 printf '%s\n' "$receipt" | tee "$HOST_RECEIPT"

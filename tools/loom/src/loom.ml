@@ -12102,13 +12102,23 @@ let exec_ingress_probe_command cli =
   let root = required cli "--root" |> Unix.realpath in
   let mode = required cli "--mode" in
   let event_path = required cli "--event" in
+  let result_mode =
+    List.mem mode
+      [ "result"; "result-binding"; "result-receipt"; "result-manifest" ]
+  in
   if mode <> "inherited" && mode <> "forged" && mode <> "missing"
-     && mode <> "fixture-escape"
+     && mode <> "fixture-escape" && not result_mode
   then
     failf
-      "exec-ingress-probe mode must be inherited, forged, missing, or fixture-escape";
+      "exec-ingress-probe mode must be inherited, forged, missing, fixture-escape, result, result-binding, result-receipt, or result-manifest";
   let event = read_file event_path in
   if event = "" then failf "exec-ingress-probe event is empty";
+  let result_policy =
+    if result_mode then Some (Loom_exec_result.load ~root) else None
+  in
+  let result_receipt =
+    if result_mode then read_file (required cli "--receipt") else ""
+  in
   let channel =
     if mode = "missing" then None else Some (Unix.socketpair PF_UNIX SOCK_STREAM 0)
   in
@@ -12127,10 +12137,39 @@ let exec_ingress_probe_command cli =
                   | [ "LOOM_EXEC_INGRESS/1"; event_sha256; command_sha256 ]
                     when String.length event_sha256 = 64
                          && String.length command_sha256 = 64 ->
-                      write_all server
-                        (String.concat "\t"
-                           [ "LOOM_EXEC_INGRESS_BOUND/1"; event_sha256;
-                             command_sha256 ] ^ "\n");
+                      (match result_policy with
+                      | None ->
+                          write_all server
+                            (String.concat "\t"
+                               [ "LOOM_EXEC_INGRESS_BOUND/1"; event_sha256;
+                                 command_sha256 ] ^ "\n")
+                      | Some policy ->
+                          let response_command =
+                            if mode = "result-binding" then
+                              String.sub command_sha256 0 63 ^
+                              (if command_sha256.[63] = '0' then "1" else "0")
+                            else command_sha256
+                          in
+                          let response_receipt =
+                            if mode = "result-receipt" then
+                              String.sub policy.result_receipt_sha256 0 63 ^
+                              (if policy.result_receipt_sha256.[63] = '0'
+                               then "1" else "0")
+                            else policy.result_receipt_sha256
+                          in
+                          let response_manifest =
+                            if mode = "result-manifest" then
+                              String.sub policy.manifest_sha256 0 63 ^
+                              (if policy.manifest_sha256.[63] = '0'
+                               then "1" else "0")
+                            else policy.manifest_sha256
+                          in
+                          write_all server
+                            (String.concat "\t"
+                               [ "LOOM_EXEC_RESULT/1"; event_sha256;
+                                 response_command; policy.canonical_handle;
+                                 response_receipt; hex_of_string result_receipt;
+                                 response_manifest ] ^ "\n"));
                       Unix.shutdown server SHUTDOWN_ALL;
                       0
                   | _ -> 91
@@ -12160,6 +12199,13 @@ let exec_ingress_probe_command cli =
     |> set_environment "SOUNIO_COORD_NATIVE_HOOK_SELFTEST" "1"
   in
   let environment =
+    match result_policy with
+    | None -> environment
+    | Some policy ->
+        set_environment "SOUNIO_LOOM_EXEC_RESULT_EVENT_SHA256"
+          policy.event_sha256 environment
+  in
+  let environment =
     if mode = "fixture-escape" then
       environment |> Array.to_list
       |> List.filter (fun binding ->
@@ -12183,7 +12229,7 @@ let exec_ingress_probe_command cli =
           set_environment "SOUNIO_LOOM_EXEC_INGRESS_FD"
             (string_of_int (int_of_file_descr descriptor)) environment
         in
-        if mode = "inherited" || mode = "fixture-escape" then
+        if mode = "inherited" || mode = "fixture-escape" || result_mode then
           set_environment "SOUNIO_LOOM_EXEC_INGRESS_ALLOW_SAME_UID_TEST" "1"
             environment
         else
@@ -12244,8 +12290,10 @@ let exec_ingress_probe_command cli =
   in
   let hook_output = Buffer.contents output in
   Printf.printf
-    "LOOM_PRODUCT_EXEC_INGRESS_PROBE mode=%s hook_code=%d broker_code=%d output_sha256=%s production_activation=false exec_attached=false\n%s%!"
-    mode (status_code hook_status) broker_code (sha256 hook_output) hook_output;
+    "LOOM_PRODUCT_EXEC_INGRESS_PROBE mode=%s hook_code=%d broker_code=%d output_sha256=%s result_returned=%s exact_fixture_hook_switched=%s production_activation=false exec_attached=false\n%s%!"
+    mode (status_code hook_status) broker_code (sha256 hook_output)
+    (if mode = "result" then "true" else "false")
+    (if mode = "result" then "true" else "false") hook_output;
   0
 
 let exec_result_probe_command cli =
@@ -12254,7 +12302,7 @@ let exec_result_probe_command cli =
   let root = required cli "--root" |> Unix.realpath in
   let store_root = required cli "--store" in
   let mode = required cli "--mode" in
-  let print_result mode result =
+  let print_result mode (result : Loom_exec_result.stored_result) =
     Printf.printf
       "LOOM_EXEC_RESULT_STORE_PROBE mode=%s semantic_authority=Sounio action=9033 operational_kernel=OCaml manifest_sha256=%s handle=%s record_sha256=%s receipt_sha256=%s authority_output_sha256=%s record_path=%s receipt_hex=%s material_result_store=true result_store_attached=false handle_is_bearer=false handle_is_execution_authority=false exec_attached=false provider_hook_switched=false production_activation=false\n%!"
       mode (Loom_exec_result.manifest_sha256 result) result.handle
@@ -12284,14 +12332,31 @@ let exec_result_probe_command cli =
       "exec-result-probe mode must be publish, resolve, command-mismatch, or promote-authority";
   0
 
+let exec_result_present_command cli =
+  let result =
+    Loom_exec_result.validate_transport
+      ~root:(required cli "--root")
+      ~event_sha256:(required cli "--event")
+      ~command_sha256:(required cli "--command")
+      ~handle:(required cli "--handle")
+      ~receipt_sha256:(required cli "--receipt-sha256")
+      ~receipt_hex:(required cli "--receipt-hex")
+      ~manifest_sha256:(required cli "--manifest-sha256")
+  in
+  print_string result.receipt;
+  flush Stdlib.stdout;
+  0
+
 let usage () =
   Printf.eprintf
     "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  host-enroll --agent A --lane L [--replace] [--state-dir DIR]\n  host-reconcile [--agent A --lane L] [--apply] [--service-enabled] [--state-dir DIR]\n  host-supervise [--once] [--interval-seconds N] [--apply] [--service-enabled] [--state-dir DIR]\n  host-verify --agent A --lane L [--state-dir DIR]\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
   Printf.eprintf
-    "  exec-ingress-probe --root DIR --mode inherited|forged|missing|fixture-escape --event FILE (test mode only)\n";
+    "  exec-ingress-probe --root DIR --mode inherited|forged|missing|fixture-escape|result|result-binding|result-receipt|result-manifest --event FILE [--receipt FILE] (test mode only)\n";
   Printf.eprintf
     "  exec-result-probe --root DIR --store DIR --mode publish|resolve|command-mismatch|promote-authority [--receipt FILE] [--handle HANDLE] (test mode only)\n";
+  Printf.eprintf
+    "  exec-result-present --root DIR --event SHA --command SHA --handle HANDLE --receipt-sha256 SHA --receipt-hex HEX --manifest-sha256 SHA\n";
   Printf.eprintf
     "  peer-activation-capsule-probe --root DIR --mode current|python|happy|deny-preserves|poison|replay|mismatch|timeout|eof --seal FILE [--consume FILE] [--extinguish FILE] [--poison FILE] [--deny FILE] --deadline-ms N (test mode only)\n";
   Printf.eprintf "  provider-open persistent providers: claude, codex, kimi\n";
@@ -12371,6 +12436,7 @@ let main () =
     | "exec-grant-cell-probe" -> exec_grant_cell_probe_command cli
     | "exec-ingress-probe" -> exec_ingress_probe_command cli
     | "exec-result-probe" -> exec_result_probe_command cli
+    | "exec-result-present" -> exec_result_present_command cli
     | "peer-activation-capsule-probe" ->
         peer_activation_capsule_probe_command cli
     | "start" -> start_command cli; 0

@@ -61,7 +61,8 @@ first="$(bash "$INSTALLER" --install-root "$stage" \
 [[ "$first" == *'exec_cell_bundle_present=true '* &&
    "$first" == *'exec_cell_canary_frozen=true '* &&
    "$first" == *'exec_cell_boot_gate_configured=true '* &&
-   "$first" == *'exec_cell_boot_gate_test_only=true exec_attached=false '* &&
+   "$first" == *'exec_cell_boot_gate_test_only=true exec_result_transport_configured=true '* &&
+   "$first" == *'exact_fixture_result_attached=false exec_attached=false '* &&
    "$first" == *'activated=false automatic_lineage_resurrection=false'* ]] ||
   fail "staged installer widened activation: $first"
 
@@ -101,7 +102,7 @@ grep -Eq '^policy_file_count=[1-9][0-9]*$' "$policy_manifest" ||
   fail 'installed product activation policy file count is absent'
 grep -Fxq 'semantic_authority=Sounio' "$exec_cell_manifest" ||
   fail 'installed ExecCell bundle lost Sounio authority'
-grep -Fxq 'semantic_actions=9030,9031' "$exec_cell_manifest" ||
+grep -Fxq 'semantic_actions=9030,9031,9033' "$exec_cell_manifest" ||
   fail 'installed ExecCell bundle lost the frozen action order'
 grep -Fxq 'bundle_present=true' "$exec_cell_manifest" ||
   fail 'installed ExecCell bundle is not present'
@@ -125,6 +126,10 @@ grep -Fxq 'exec_cell_boot_gate_configured=true' "$exec_cell_manifest" ||
   fail 'installed ExecCell boot gate is not configured'
 grep -Fxq 'exec_cell_boot_gate_test_only=true' "$exec_cell_manifest" ||
   fail 'installed ExecCell boot gate was misrepresented as general execution'
+grep -Fxq 'exec_result_transport_configured=true' "$exec_cell_manifest" ||
+  fail 'installed ExecCell bundle omitted the Sounio 9033 result transport'
+grep -Fxq 'exact_fixture_result_attached=false' "$exec_cell_manifest" ||
+  fail 'installer preclaimed execution of the exact result fixture'
 grep -Fxq 'exec_attached=false' "$exec_cell_manifest" ||
   fail 'installer preclaimed product ExecCell attachment'
 exec_cell_release_id="$(sed -n 's/^release_id=//p' "$exec_cell_manifest")"
@@ -135,6 +140,8 @@ exec_cell_release="$prefix/exec-cell/releases/$exec_cell_release_id"
    -x "$exec_cell_release/bin/loom-exec-grant-controller" &&
    -x "$exec_cell_release/bin/loom-process-witness-principal-cell" &&
    -x "$exec_cell_release/bin/sounio-loom-process-witness-handshake-v1" &&
+   -x "$exec_cell_release/bin/sounio-loom-exec-result-handle" &&
+   -f "$exec_cell_release/authority-root/tools/loom/exec_result_handle.freeze.v1" &&
    -f "$exec_cell_release/data/product-exec-cell-fixtures.v1" ]] ||
   fail 'installed ExecCell release omitted a bound runtime'
 grep -Fxq 'semantic_action=9030' "$exec_cell_release/release.manifest.v1" ||
@@ -142,6 +149,9 @@ grep -Fxq 'semantic_action=9030' "$exec_cell_release/release.manifest.v1" ||
 grep -Fxq 'product_exec_ingress_action=9031' \
   "$exec_cell_release/release.manifest.v1" ||
   fail 'installed ExecCell release lost action 9031'
+grep -Fxq 'product_exec_result_action=9033' \
+  "$exec_cell_release/release.manifest.v1" ||
+  fail 'installed ExecCell release lost action 9033'
 
 grep -Fxq 'KillMode=process' "$unit" || fail 'unit would kill recovered lane processes'
 grep -Fxq 'Restart=on-failure' "$unit" || fail 'unit does not restart after refusal or crash'
@@ -169,6 +179,8 @@ grep -Fq ' --selftest-product-exec-cell-host ' "$unit" ||
   fail 'unit boot gate does not execute the composed ExecCell canary'
 grep -Fq ' --product-exec-cell-fixture-manifest ' "$unit" ||
   fail 'unit boot gate omitted the Sounio fixture manifest'
+grep -Fq ' --product-exec-result-manifest ' "$unit" ||
+  fail 'unit boot gate omitted the Sounio 9033 result manifest'
 grep -Fxq 'TimeoutStartSec=240s' "$unit" ||
   fail 'unit boot gate lacks a bounded startup deadline'
 grep -Fxq 'Environment=SOUNIO_LOOM_HOST_BOOT_AUTHORITY=/opt/sounio/loom-hostd/bin/sounio-loom-host-boot-reconciler' "$unit" ||
@@ -180,6 +192,10 @@ grep -Fxq 'exec_cell_boot_gate_configured=true' "$manifest" ||
   fail 'hostd manifest omitted the ExecCell boot gate'
 grep -Fxq 'exec_cell_boot_gate_test_only=true' "$manifest" ||
   fail 'hostd manifest widened the ExecCell boot gate'
+grep -Fxq 'exec_result_transport_configured=true' "$manifest" ||
+  fail 'hostd manifest omitted the Sounio 9033 result transport'
+grep -Fxq 'exact_fixture_result_attached=false' "$manifest" ||
+  fail 'hostd manifest preclaimed execution of the exact result fixture'
 grep -Fxq 'socket_namespace=host-shared-tmp' "$manifest" ||
   fail 'manifest omitted the shared lane socket namespace'
 grep -Fxq "service_user=$SERVICE_USER" "$manifest" ||
@@ -293,4 +309,4 @@ fi
 grep -q 'Sounio authority hash drifted' "$TEST_ROOT/mutant.err" ||
   fail 'mutated authority was refused by the wrong boundary'
 
-printf 'sounio-loom-hostd-install-selftest: PASS installer_transport=shell runtime_language=OCaml runtime_role=EFFECT_PARITY semantic_authority=Sounio actions=9030,9031,9041 installed_policy_root=PASS exec_cell_bundle=IMMUTABLE exec_cell_canary_frozen=true exec_attached=false outside_checkout_start=PASS policy_tamper=DENIED_PRE_MUTATION capsule_hash_mismatch=DENIED_PRE_INSTALL capsule_inner_tamper=DENIED_PRE_INSTALL systemd_unit=PASS socket_namespace=host-shared-tmp socket_root=/tmp/sounio-loom-%s socket_mode=0700 private_tmp=false kill_mode=process restart=on-failure install_default=disabled staged_activation=DENIED mutated_authority=DENIED byte_idempotent=PASS python_executed=false rust_executed=false production_activation=false\n' "$SERVICE_UID"
+printf 'sounio-loom-hostd-install-selftest: PASS installer_transport=shell runtime_language=OCaml runtime_role=EFFECT_PARITY semantic_authority=Sounio actions=9030,9031,9033,9041 installed_policy_root=PASS exec_cell_bundle=IMMUTABLE exec_cell_canary_frozen=true exec_result_transport_configured=true exact_fixture_result_attached=false exec_attached=false outside_checkout_start=PASS policy_tamper=DENIED_PRE_MUTATION capsule_hash_mismatch=DENIED_PRE_INSTALL capsule_inner_tamper=DENIED_PRE_INSTALL systemd_unit=PASS socket_namespace=host-shared-tmp socket_root=/tmp/sounio-loom-%s socket_mode=0700 private_tmp=false kill_mode=process restart=on-failure install_default=disabled staged_activation=DENIED mutated_authority=DENIED byte_idempotent=PASS python_executed=false rust_executed=false production_activation=false\n' "$SERVICE_UID"

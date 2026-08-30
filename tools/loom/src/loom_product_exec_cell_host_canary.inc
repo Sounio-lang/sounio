@@ -1,5 +1,7 @@
 constexpr std::string_view kFrozenProductExecCellFixtureManifestSha256 =
     "c06fc76a5fc24ec430b843a4f6e11f99c0e1fd034af61a304fdee11a0889498e";
+constexpr std::string_view kFrozenExecResultHandleManifestSha256 =
+    "7c1955299f2b308c331760764c289b6617910549b5dfc6bc4cf1969457306a55";
 
 struct ProductExecCellFixtures {
   std::string command;
@@ -9,6 +11,57 @@ struct ProductExecCellFixtures {
   std::string command_mismatch_code;
   std::map<std::string, std::string> frames;
 };
+
+struct ProductExecResultPolicy {
+  std::string event_sha256;
+  std::string command_sha256;
+  std::string receipt_sha256;
+  std::string handle;
+  std::string manifest_sha256;
+};
+
+ProductExecResultPolicy load_product_exec_result_policy(
+    const std::string& manifest_path,
+    const ProductExecCellFixtures& fixtures,
+    const Manifest& payload_manifest) {
+  const Manifest manifest = parse_frozen_manifest(
+      manifest_path, kFrozenExecResultHandleManifestSha256,
+      "product ExecResult handle");
+  if (manifest.require("schema") != "loom-exec-result-handle-freeze-v1" ||
+      manifest.require("stage") != "SEMANTICS_FROZEN" ||
+      manifest.require("producing_language") != "Sounio" ||
+      manifest.require("language_role") != "SEMANTIC_AUTHORITY" ||
+      manifest.require("action") != "9033" ||
+      manifest.require("fixture_manifest_sha256") !=
+          kFrozenProductExecCellFixtureManifestSha256 ||
+      manifest.require("result_receipt_sha256") !=
+          payload_manifest.require("positive_stdout_sha256") ||
+      manifest.require("handle_is_bearer") != "false" ||
+      manifest.require("handle_is_execution_authority") != "false" ||
+      manifest.require("expected_results_encoded_in_material_layer") != "false" ||
+      manifest.require("material_execution") != "false" ||
+      manifest.require("exec_cell_attached") != "false" ||
+      manifest.require("provider_hook_switched") != "false" ||
+      manifest.require("production_activation") != "false") {
+    throw Error("product ExecResult manifest state invalid");
+  }
+  ProductExecResultPolicy policy;
+  policy.event_sha256 = manifest.require("event_sha256");
+  policy.command_sha256 = fixtures.command_sha256;
+  policy.receipt_sha256 = manifest.require("result_receipt_sha256");
+  policy.handle = manifest.require("canonical_handle");
+  policy.manifest_sha256 = std::string(kFrozenExecResultHandleManifestSha256);
+  const std::string expected_handle =
+      "loom-result-v1:" + policy.event_sha256 + ":" +
+      manifest.require("grant_generation") + ":" + policy.receipt_sha256;
+  if (!lowercase_digest(policy.event_sha256) ||
+      !lowercase_digest(policy.command_sha256) ||
+      !lowercase_digest(policy.receipt_sha256) ||
+      policy.handle != expected_handle) {
+    throw Error("product ExecResult manifest binding invalid");
+  }
+  return policy;
+}
 
 std::string product_hex_digest_u32_limbs(std::string_view digest) {
   if (!lowercase_digest(digest)) {
@@ -190,6 +243,7 @@ int selftest_product_exec_cell_host(
     const std::string& product_resident_runtime,
     const std::string& product_fixture_manifest_path,
     const std::string& product_fixture_bundle_path,
+    const std::string& product_exec_result_manifest_path,
     const std::string& systemd_run_path,
     const std::string& systemctl_path) {
   if (getuid() != 0 || geteuid() != 0 || getgid() != 0 || getegid() != 0 ||
@@ -215,6 +269,8 @@ int selftest_product_exec_cell_host(
       product_fixture_manifest_path, product_fixture_bundle_path);
   const Manifest payload_manifest =
       load_process_witness_payload_manifest(process_witness_manifest_path);
+  const ProductExecResultPolicy result_policy = load_product_exec_result_policy(
+      product_exec_result_manifest_path, fixtures, payload_manifest);
   if (file_sha256(process_witness_payload_path) !=
           payload_manifest.require("executable_sha256") ||
       payload_manifest.require("executable_sha256") !=
@@ -235,6 +291,7 @@ int selftest_product_exec_cell_host(
   gid_t exec_gid = 0;
   std::string product_event_sha256;
   std::string product_command_sha256;
+  std::string positive_receipt;
   const std::string positive_generation = random_generation_sha256();
   ExecQuorumController positive_controller(
       controller_runtime_path, root, resident_runtime_path,
@@ -243,7 +300,8 @@ int selftest_product_exec_cell_host(
       product_root, product_runtime, product_language_runtime,
       product_resident_runtime, systemd_run_path, systemctl_path,
       "current_material", fixtures.command, true, true,
-      ProductIngressReply::Exact, ProductIngressExchangeExpectation::Request,
+      ProductIngressReply::ResultExact,
+      ProductIngressExchangeExpectation::Request,
       [&](const ProductIngressHostRun& lane) {
         positive_callback = true;
         lane_uid = lane.main_uid;
@@ -280,10 +338,19 @@ int selftest_product_exec_cell_host(
                                    exec_gid != lane_gid;
         const ProcessWitnessObservation observation =
             principal.execute(semantic_consumed, "CLOSE\n");
+        positive_receipt = observation.receipt;
         positive_done = semantic_consumed && distinct_live_principals &&
-                        observation.success_complete();
+                        observation.success_complete() &&
+                        sha256(positive_receipt) == result_policy.receipt_sha256;
         static_cast<void>(positive_controller.command(
             "CLOSE", fixtures.frames.at("close")));
+      },
+      result_policy.event_sha256,
+      [&](const ProductIngressHostRun&) {
+        return ProductIngressResult{result_policy.handle,
+                                    result_policy.receipt_sha256,
+                                    positive_receipt,
+                                    result_policy.manifest_sha256};
       });
   const ProductIngressHostRun positive_lane = positive_case.execute();
   const auto controller_deadline =
@@ -297,10 +364,22 @@ int selftest_product_exec_cell_host(
       positive_callback && positive_done && distinct_live_principals &&
           controller_extinct && positive_lane.hook_code == 0 &&
           positive_lane.identity_authenticated &&
+          positive_lane.raw_event_sha256 != result_policy.event_sha256 &&
+          positive_lane.event_sha256 == result_policy.event_sha256 &&
           positive_lane.command_sha256 == fixtures.command_sha256 &&
           product_contains(positive_lane.ingress_log, "decision=DENY\t") &&
           product_contains(positive_lane.ingress_log,
-                           "reason=descriptor-bound-action-9031\t"),
+                           "reason=descriptor-result-bound-actions-9030+9031+9033\t") &&
+          product_contains(positive_lane.ingress_log, "result_returned=true\t") &&
+          product_contains(positive_lane.ingress_log,
+                           "raw_event_sha256=" + positive_lane.raw_event_sha256 +
+                               "\t") &&
+          product_contains(positive_lane.ingress_log,
+                           "event_sha256=" + result_policy.event_sha256 + "\t") &&
+          product_contains(positive_lane.ingress_log, "exec_attached=true\t") &&
+          product_contains(positive_lane.output, "exec-result-present") &&
+          product_contains(positive_lane.output, result_policy.handle) &&
+          !product_contains(positive_lane.output, "exec-capability"),
       "product ExecCell positive composition failed", positive_lane);
 
   bool sabotage_callback = false;
@@ -347,12 +426,47 @@ int selftest_product_exec_cell_host(
           product_contains(sabotage_lane.ingress_log, "decision=DENY\t"),
       "product ExecCell command sabotage did not fail closed", sabotage_lane);
 
+  auto result_transport_refused = [&](ProductIngressReply reply,
+                                      std::string_view expected_reason) {
+    ProductExecIngressHostCase candidate(
+        product_root, product_runtime, product_language_runtime,
+        product_resident_runtime, systemd_run_path, systemctl_path,
+        "current_material", fixtures.command, true, true, reply,
+        ProductIngressExchangeExpectation::Request, {},
+        result_policy.event_sha256,
+        [&](const ProductIngressHostRun&) {
+          return ProductIngressResult{result_policy.handle,
+                                      result_policy.receipt_sha256,
+                                      positive_receipt,
+                                      result_policy.manifest_sha256};
+        });
+    const ProductIngressHostRun lane = candidate.execute();
+    return lane.hook_code == 2 &&
+           product_contains(lane.output, expected_reason) &&
+           !product_contains(lane.output, "exec-result-present") &&
+           !product_contains(lane.output, "exec-capability");
+  };
+  const bool result_binding_closed = result_transport_refused(
+      ProductIngressReply::ResultBindingMismatch,
+      "product-exec-ingress-response-binding-mismatch");
+  const bool result_receipt_closed = result_transport_refused(
+      ProductIngressReply::ResultReceiptMismatch,
+      "result-transport-receipt-not-frozen-fixture");
+  const bool result_manifest_closed = result_transport_refused(
+      ProductIngressReply::ResultManifestMismatch,
+      "result-transport-manifest-not-frozen-fixture");
+  if (!result_binding_closed || !result_receipt_closed ||
+      !result_manifest_closed) {
+    throw Error("product ExecResult transport sabotage did not fail closed");
+  }
+
   std::cout
       << "loom-product-exec-cell-host: PASS semantic_authority=Sounio"
-      << " action=9030 lane_action=9031"
+      << " action=9030 lane_action=9031 result_action=9033"
       << " intent_sha256=" << fixtures.intent_sha256
       << " command_sha256=" << fixtures.command_sha256
       << " product_event_sha256=" << product_event_sha256
+      << " raw_product_event_sha256=" << positive_lane.raw_event_sha256
       << " product_command_sha256=" << product_command_sha256
       << " lane_uid=" << lane_uid << " lane_gid=" << lane_gid
       << " exec_uid=" << exec_uid << " exec_gid=" << exec_gid
@@ -363,6 +477,15 @@ int selftest_product_exec_cell_host(
       << " causal_sabotage=PASS"
       << " sabotage_exec_cell_created=false"
       << " sabotage_payload_executed=false"
+      << " result_handle=" << result_policy.handle
+      << " result_receipt_sha256=" << result_policy.receipt_sha256
+      << " result_manifest_sha256=" << result_policy.manifest_sha256
+      << " result_returned=true result_presenter=read-only"
+      << " result_binding_sabotage=closed"
+      << " result_receipt_sabotage=closed"
+      << " result_manifest_sabotage=closed"
+      << " exact_fixture_hook_switched=true local_exec_capability_used=false"
+      << " raw_event_separate=true event_override=test-only+probe-only"
       << " python_executed=false rust_executed=false"
       << " exec_cell_attached=true material_execution=true"
       << " test_only=true production_activation=false launch_open=false"

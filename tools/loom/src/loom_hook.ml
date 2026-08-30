@@ -419,15 +419,16 @@ let execution_cwd event input root =
   in
   if Filename.is_relative selected then Filename.concat event_cwd selected else selected
 
-let execution_hook_output input field replacement =
+let execution_hook_output ?(reason =
+    "Sounio 9021 authorized one single-use execution capability") input field
+    replacement =
   let updated_input = replace_object_field input field (Json_string replacement) in
   Json_object
     [ ("hookSpecificOutput",
        Json_object
          [ ("hookEventName", Json_string "PreToolUse");
            ("permissionDecision", Json_string "allow");
-           ("permissionDecisionReason",
-            Json_string "Sounio 9021 authorized one single-use execution capability");
+           ("permissionDecisionReason", Json_string reason);
            ("updatedInput", updated_input) ]) ]
 
 let rec collect_named_strings names value =
@@ -1063,18 +1064,25 @@ let execute_event tool_root root event agent lane raw_session_id
       in
       let field, command = execution_command input in
       let cwd = execution_cwd event input root in
-      ignore
-        (Loom_exec_ingress.observe ~root ~agent ~lane ~session_id:raw_session_id
-           ~cwd ~event_sha256 ~command_sha256:(sha256 command));
-      if Loom_exec_ingress.probe_only () then None
-      else (
-        refresh_presence tool_root presence_root root agent lane raw_session_id;
-        refresh_hook_capability tool_root presence_root agent lane raw_session_id;
-        refresh_endpoint tool_root presence_root agent lane raw_session_id;
-        let replacement =
-          Loom_exec.authorize_and_issue ~file_capability_fixture ~root ~cwd ~command
-        in
-        Some (execution_hook_output input field replacement)))
+      let ingress =
+        Loom_exec_ingress.observe ~root ~agent ~lane ~session_id:raw_session_id
+          ~cwd ~event_sha256 ~command_sha256:(sha256 command)
+      in
+      match ingress with
+      | Some { Loom_exec_ingress.result = Some result; _ } ->
+          Some
+            (execution_hook_output
+               ~reason:"Sounio 9033 returned a read-only ExecCell result"
+               input field (Loom_exec_result.presentation_command result))
+      | _ when Loom_exec_ingress.probe_only () -> None
+      | _ ->
+          refresh_presence tool_root presence_root root agent lane raw_session_id;
+          refresh_hook_capability tool_root presence_root agent lane raw_session_id;
+          refresh_endpoint tool_root presence_root agent lane raw_session_id;
+          let replacement =
+            Loom_exec.authorize_and_issue ~file_capability_fixture ~root ~cwd ~command
+          in
+          Some (execution_hook_output input field replacement))
     else None)
   else (
     let claim =
@@ -1154,6 +1162,7 @@ let run arguments =
   with
   | Error message
   | Loom_exec.Error message
+  | Loom_exec_result.Error message
   | Loom_exec_ingress.Error message
   | Loom_membrane.Error message
   | Sys_error message ->

@@ -173,10 +173,11 @@ host_gate_sha256=$(sha256_file "$HOST_GATE")
 staged_manifest_sha256=$(sha256_file "$BUNDLE/stage/opt/sounio/loom-hostd/manifest.v1")
 exec_cell_capsule_sha256=$EXEC_CELL_CAPSULE_SHA256
 semantic_authority=Sounio
-semantic_actions=9030,9031,9041
+semantic_actions=9030,9031,9033,9041
 operational_language=OCaml
 exec_cell_boot_gate_configured=true
 exec_cell_boot_gate_test_only=true
+exact_fixture_result_attached=false
 exec_attached=false
 production_activation=false
 python_executed=false
@@ -236,12 +237,14 @@ set -e
 [[ $host_status -eq 0 && "$host_output" == \
   'sounio-loom-hostd-systemd-host-selftest: HOST_MEASUREMENT_PASS '* &&
    "$host_output" == *' real_systemd_activation=true '* &&
+   "$host_output" == *' exact_fixture_result_attached=true '* &&
+   "$host_output" == *' result_returned=true result_presenter=read-only '* &&
    "$host_output" == *' supervisor_restarted=true '* &&
    "$host_output" == *' sabotage_decision=DENY545 '* &&
    "$host_output" == *' full_extinction=true '* ]] ||
   fail "host measurement failed or timed out status=$host_status output=$host_output"
 
-transport_receipt="LOOM_HOSTD_SYSTEMD_TRANSPORT PASS namespace=$NAMESPACE node=$NODE pod_a=$POD_A pod_a_uid=$POD_A_UID pod_a_deleted=true pod_b=$POD_B pod_b_uid=$POD_B_UID distinct_transport=true archive_sha256=$ARCHIVE_SHA256 host_gate_sha256=$HOST_GATE_SHA256 host_output_sha256=$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1) source_commit=$(git -C "$ROOT_DIR" rev-parse HEAD) semantic_authority=Sounio actions=9030,9031,9041 operational_language=OCaml material_platform=Linux+systemd exec_cell_boot_gate=true exec_cell_boot_gate_test_only=true exec_attached=false real_systemd_activation=true same_physical_recovery=true causal_sabotage=PASS full_extinction=true tmux_used=false python_executed=false rust_executed=false production_activation=canary-only"
+transport_receipt="LOOM_HOSTD_SYSTEMD_TRANSPORT PASS namespace=$NAMESPACE node=$NODE pod_a=$POD_A pod_a_uid=$POD_A_UID pod_a_deleted=true pod_b=$POD_B pod_b_uid=$POD_B_UID distinct_transport=true archive_sha256=$ARCHIVE_SHA256 host_gate_sha256=$HOST_GATE_SHA256 host_output_sha256=$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1) source_commit=$(git -C "$ROOT_DIR" rev-parse HEAD) semantic_authority=Sounio actions=9030,9031,9033,9041 operational_language=OCaml material_platform=Linux+systemd exec_cell_boot_gate=true exec_cell_boot_gate_test_only=true exact_fixture_result_attached=true result_returned=true result_presenter=read-only exec_attached=false real_systemd_activation=true same_physical_recovery=true causal_sabotage=PASS full_extinction=true tmux_used=false python_executed=false rust_executed=false production_activation=canary-only"
 if [[ -n "$RECEIPT_OUTPUT" ]]; then
   mkdir -p "$(dirname "$RECEIPT_OUTPUT")"
   receipt_stage="$(mktemp "$(dirname "$RECEIPT_OUTPUT")/.loom-hostd-systemd-receipt.XXXXXX")"

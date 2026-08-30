@@ -4,6 +4,10 @@ enum class ProductIngressReply {
   Exact,
   BindingMismatch,
   CloseWithoutReply,
+  ResultExact,
+  ResultBindingMismatch,
+  ResultReceiptMismatch,
+  ResultManifestMismatch,
 };
 
 enum class ProductIngressExchangeExpectation {
@@ -29,12 +33,34 @@ struct ProductIngressHostRun {
   std::uint64_t descriptor_peer_start_tick = 0;
   bool identity_authenticated = false;
   bool dynamic_user = false;
+  std::string raw_event_sha256;
   std::string event_sha256;
   std::string command_sha256;
 };
 
 using ProductIngressBoundCallback =
     std::function<void(const ProductIngressHostRun&)>;
+
+struct ProductIngressResult {
+  std::string handle;
+  std::string receipt_sha256;
+  std::string receipt;
+  std::string manifest_sha256;
+};
+
+using ProductIngressResultCallback =
+    std::function<ProductIngressResult(const ProductIngressHostRun&)>;
+
+std::string product_hex_encode(std::string_view value) {
+  static constexpr char hex[] = "0123456789abcdef";
+  std::string output(value.size() * 2, '0');
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    const auto byte = static_cast<unsigned char>(value[index]);
+    output[index * 2] = hex[byte >> 4];
+    output[index * 2 + 1] = hex[byte & 0x0f];
+  }
+  return output;
+}
 
 std::string product_json_string(std::string_view value) {
   std::ostringstream output;
@@ -165,7 +191,9 @@ class ProductExecIngressHostCase {
       std::string command, bool dynamic_user, bool descriptor_present,
       ProductIngressReply reply,
       ProductIngressExchangeExpectation exchange_expectation,
-      ProductIngressBoundCallback on_bound = {})
+      ProductIngressBoundCallback on_bound = {},
+      std::string result_event_sha256 = {},
+      ProductIngressResultCallback on_result = {})
       : product_root_(canonical_path(product_root)),
         product_runtime_(canonical_path(product_runtime)),
         language_runtime_(canonical_path(language_runtime)),
@@ -179,6 +207,8 @@ class ProductExecIngressHostCase {
         reply_(reply),
         exchange_expectation_(exchange_expectation),
         on_bound_(std::move(on_bound)),
+        result_event_sha256_(std::move(result_event_sha256)),
+        on_result_(std::move(on_result)),
         nonce_(random_generation_sha256().substr(0, 16)),
         unit_("sounio-loom-product-ingress-" + std::to_string(getpid()) + "-" +
               nonce_ + ".service"),
@@ -349,6 +379,10 @@ class ProductExecIngressHostCase {
               "/activation.tsv",
           "--setenv=SOUNIO_LOOM_RESIDENT_RECEIPT_LOG=" + runtime_path_ +
               "/resident.tsv"};
+      if (!result_event_sha256_.empty()) {
+        arguments.push_back("--setenv=SOUNIO_LOOM_EXEC_RESULT_EVENT_SHA256=" +
+                            result_event_sha256_);
+      }
       if (dynamic_user_) {
         arguments.push_back("--property=DynamicUser=yes");
       } else {
@@ -385,6 +419,7 @@ class ProductExecIngressHostCase {
     output_ = std::move(output_read);
     const std::string event = product_hook_event(
         product_root_, "product-dynamic-user-" + nonce_, command_);
+    raw_event_sha256_ = sha256(event);
     const auto deadline =
         std::chrono::steady_clock::now() + kProductExecIngressHostDeadline;
     quorum_write_all(input_.get(), event, deadline);
@@ -474,6 +509,10 @@ class ProductExecIngressHostCase {
                                       "GIT_CONFIG_KEY_0=safe.directory") &&
               product_environment_has(environment,
                                       "GIT_CONFIG_VALUE_0=" + product_root_) &&
+              (result_event_sha256_.empty() ||
+               product_environment_has(
+                   environment, "SOUNIO_LOOM_EXEC_RESULT_EVENT_SHA256=" +
+                                    result_event_sha256_)) &&
               (!descriptor_present_ ||
                (product_environment_has(environment, "LISTEN_FDS=1") &&
                 product_environment_has(
@@ -537,6 +576,37 @@ class ProductExecIngressHostCase {
     if (reply_ == ProductIngressReply::BindingMismatch) {
       command_sha.back() = command_sha.back() == '0' ? '1' : '0';
     }
+    if (reply_ == ProductIngressReply::ResultExact ||
+        reply_ == ProductIngressReply::ResultBindingMismatch ||
+        reply_ == ProductIngressReply::ResultReceiptMismatch ||
+        reply_ == ProductIngressReply::ResultManifestMismatch) {
+      if (!on_result_) throw Error("product ExecResult callback absent");
+      ProductIngressResult result = on_result_(observation());
+      if (!lowercase_digest(result.receipt_sha256) ||
+          !lowercase_digest(result.manifest_sha256) || result.handle.empty() ||
+          result.handle.size() > 512 || result.receipt.size() > 1024) {
+        throw Error("product ExecResult callback malformed");
+      }
+      if (reply_ == ProductIngressReply::ResultBindingMismatch) {
+        command_sha.back() = command_sha.back() == '0' ? '1' : '0';
+      } else if (reply_ == ProductIngressReply::ResultReceiptMismatch) {
+        result.receipt_sha256.back() =
+            result.receipt_sha256.back() == '0' ? '1' : '0';
+      } else if (reply_ == ProductIngressReply::ResultManifestMismatch) {
+        result.manifest_sha256.back() =
+            result.manifest_sha256.back() == '0' ? '1' : '0';
+      }
+      quorum_write_all(
+          connection_.get(),
+          "LOOM_EXEC_RESULT/1\t" + event_sha + "\t" + command_sha + "\t" +
+              result.handle + "\t" + result.receipt_sha256 + "\t" +
+              product_hex_encode(result.receipt) + "\t" +
+              result.manifest_sha256 + "\n",
+          deadline);
+      shutdown(connection_.get(), SHUT_WR);
+      connection_ = UniqueFd();
+      return;
+    }
     quorum_write_all(connection_.get(),
                      "LOOM_EXEC_INGRESS_BOUND/1\t" + event_sha + "\t" +
                          command_sha + "\n",
@@ -593,6 +663,7 @@ class ProductExecIngressHostCase {
     result.descriptor_peer_start_tick = descriptor_peer_start_tick_;
     result.identity_authenticated = identity_authenticated_;
     result.dynamic_user = dynamic_user_;
+    result.raw_event_sha256 = raw_event_sha256_;
     result.event_sha256 = event_sha256_;
     result.command_sha256 = command_sha256_;
     return result;
@@ -635,6 +706,8 @@ class ProductExecIngressHostCase {
   ProductIngressExchangeExpectation exchange_expectation_ =
       ProductIngressExchangeExpectation::Request;
   ProductIngressBoundCallback on_bound_;
+  std::string result_event_sha256_;
+  ProductIngressResultCallback on_result_;
   std::string nonce_;
   std::string unit_;
   std::string runtime_directory_;
@@ -662,6 +735,7 @@ class ProductExecIngressHostCase {
   int hook_code_ = 255;
   bool client_reaped_ = false;
   bool identity_authenticated_ = false;
+  std::string raw_event_sha256_;
   std::string event_sha256_;
   std::string command_sha256_;
 };

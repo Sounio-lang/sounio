@@ -47,6 +47,17 @@ type stored_result = {
   authority_output_sha256 : string;
 }
 
+type transported_result = {
+  root : string;
+  event_sha256 : string;
+  command_sha256 : string;
+  handle : string;
+  receipt_sha256 : string;
+  receipt_hex : string;
+  receipt : string;
+  manifest_sha256 : string;
+}
+
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 
 let sha256 value =
@@ -576,6 +587,52 @@ let parse_handle handle =
       (event, generation, receipt)
   | _ -> failf "result-handle-malformed"
 
+let validate_transport ~root ~event_sha256 ~command_sha256 ~handle
+    ~receipt_sha256 ~receipt_hex ~manifest_sha256 =
+  let policy = load ~root in
+  let event_sha256 = digest "transport-event" event_sha256 in
+  let command_sha256 = digest "transport-command" command_sha256 in
+  let receipt_sha256 = digest "transport-receipt" receipt_sha256 in
+  let manifest_sha256 = digest "transport-manifest" manifest_sha256 in
+  let event, generation, handle_receipt = parse_handle handle in
+  if event_sha256 <> policy.event_sha256 || event <> policy.event_sha256 then
+    failf "result-transport-event-not-frozen-fixture";
+  if command_sha256 <> policy.command_sha256 then
+    failf "result-transport-command-not-frozen-fixture";
+  if generation <> policy.grant_generation then
+    failf "result-transport-generation-not-frozen-fixture";
+  if handle <> policy.canonical_handle then
+    failf "result-transport-handle-not-frozen-fixture";
+  if receipt_sha256 <> policy.result_receipt_sha256
+     || handle_receipt <> policy.result_receipt_sha256
+  then failf "result-transport-receipt-not-frozen-fixture";
+  if manifest_sha256 <> policy.manifest_sha256 then
+    failf "result-transport-manifest-not-frozen-fixture";
+  if String.length receipt_hex > max_receipt_bytes * 2 then
+    failf "result-transport-receipt-too-large";
+  let receipt = string_of_hex receipt_hex in
+  if sha256 receipt <> receipt_sha256 then
+    failf "result-transport-receipt-hash-mismatch";
+  ignore
+    (invoke_allow policy ~word0:policy.resolve_word0
+       ~decision:policy.resolve_decision);
+  { root = policy.root; event_sha256; command_sha256; handle; receipt_sha256;
+    receipt_hex; receipt; manifest_sha256 }
+
+let shell_quote value =
+  "'" ^ String.concat "'\"'\"'" (String.split_on_char '\'' value) ^ "'"
+
+let presentation_command result =
+  String.concat " "
+    [ shell_quote (Unix.realpath Sys.executable_name); "exec-result-present";
+      "--root"; shell_quote result.root;
+      "--event"; result.event_sha256;
+      "--command"; result.command_sha256;
+      "--handle"; shell_quote result.handle;
+      "--receipt-sha256"; result.receipt_sha256;
+      "--receipt-hex"; result.receipt_hex;
+      "--manifest-sha256"; result.manifest_sha256 ]
+
 let resolve ~root ~store_root ~handle ~purpose =
   if purpose = Authority_promotion then
     failf "result-handle-authority-promotion-refused";
@@ -592,5 +649,6 @@ let resolve ~root ~store_root ~handle ~purpose =
        ~decision:policy.resolve_decision);
   result
 
-let manifest_sha256 result = result.manifest_sha256
-let authority_output_sha256 result = result.authority_output_sha256
+let manifest_sha256 (result : stored_result) = result.manifest_sha256
+let authority_output_sha256 (result : stored_result) =
+  result.authority_output_sha256
