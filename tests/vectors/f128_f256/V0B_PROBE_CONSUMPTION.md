@@ -58,7 +58,7 @@ Probes:
 | `tests/vectors/f128_f256_v0d/arith_hard_f128.jsonl` (27) + `arith_hard_f256.jsonl` (25) | V0-D **hard cases** (halfway results, sticky-bit, tie-to-even, subnormals, Rump sign-inversion under short precision). Present in-tree from #1761 for the softfloat lane; **not** V0-B literals. |
 | `gen/mpfr_vector_gen.c` / `f128_f256_v0d/gen/arith_hard_gen.c` | Generators for arithmetic corpora — V0-D. |
 | Source spellings with leading `-` (e.g. `-0`, `-1`, `-0x1p-16494`) | **Sounio has no unary minus** (`0 - x` only). Rows remain in the JSONL and as `ORACLE_*` limb tables in the probe, but are **not** emitted as source literals. |
-| Live bit-identity assert (`literal bits == expected.limbs`) | Requires limb extraction / run path after E218 lifts. Tables are embedded now so a widen-f64 implementer has the external expected vs via_f64 pair in-tree; gate today only checks embedding + E218. |
+| Live bit-identity assert (`literal bits == expected.limbs`) | Requires limb extraction / run path after E249 lifts. Tables are embedded now so a widen-f64 implementer has the external expected vs via_f64 pair in-tree; gate today only checks embedding + E249. |
 
 ## Gate behaviour (must remain FAIL on V0-A)
 
@@ -66,14 +66,14 @@ Probes:
 2. Verify every `double_rounds_differs` row has `expected.limbs != via_f64.limbs`.
 3. Verify probes embed those source strings + oracle tables.
 4. Positive control `hello.sio` → `check: OK`.
-5. Positive probes → must be `check: OK` without `error[E218]` to pass stage.
+5. Positive probes → must be `check: OK` without `error[E249]` to pass stage.
 6. Negatives (arith/cast/implicit) → must not `check: OK`.
 
-Under current Madaros V0-A, step 5 fails with E218 — **correct**.
+Under current Madaros V0-A, step 5 fails with E249 — **correct**.
 
 ### Ladder contract for implementers (fable-1)
 
-**Required for gate green (V0-B only):** steps 4–6 above — literals/types through `check`, no E218; arithmetic/casts/implicit still rejected.
+**Required for gate green (V0-B only):** steps 4–6 above — literals/types through `check`, no E249; arithmetic/casts/implicit still rejected.
 
 **Not required by the ladder / this gate for green today:**
 

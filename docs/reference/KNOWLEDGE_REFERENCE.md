@@ -82,5 +82,5 @@ Guidelines:
 ## Related References
 
 - Standard library index: `docs/reference/STDLIB_REFERENCE.md`
-- Full module inventory: `docs/STDLIB_REFERENCE.md`
+- Full module inventory: `docs/stdlib/STDLIB_REFERENCE.md`
 - Language specification: `spec/LANGUAGE_SPECIFICATION.md`

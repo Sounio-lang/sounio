@@ -161,3 +161,26 @@ Clocks:
 - **DYNAMIC / source-built** (Madaros Witness): `bash scripts/ci/knowledge_unknown_component_live_refuse.sh` against `MADAROS_RAW_BIN`. The committed ELF is expected to still swallow these until it is rebuilt.
 
 `tests/compile-fail/knowledge_unknown_component_{ident,int}.sio` are `//@ requires: madaros` so the default suite does not score them against the stale ELF.
+
+## Addendum 2026-08-27 (Input) — one of the three unreachable cases is now reachable
+
+`Input` left the unreachable set. Under the founder ruling of 2026-08-19
+(`asserted → Input`) the lexer gained `TokenKind::Input` and both Knowledge
+component loops in `self-hosted/parser/types.sio` gained an arm constructing
+`AstProvenanceKind::AstProvInput` (PR #2062). `Source` and `Literature` are
+unchanged: still declared, still not keywords, still with no construction site.
+
+The census line therefore moves **3-of-6 → 4-of-6**, and
+`scripts/dev/knowledge_annotation_parser_coverage.sh` now pins
+`constructed=4 unreachable=Source,Literature`. That pin was re-pointed, not
+removed: it still enumerates exactly which provenance words the parser may
+construct, so a fourth one cannot appear without a human reading the diff.
+
+The 2026-08-23 rows above stay as written — they were measured before the
+keyword existed. What they no longer describe is `Input` specifically:
+
+| Input | 2026-08-23 (E241, no keyword) | 2026-08-27 (E241 + Input keyword) |
+|---|---|---|
+| `Knowledge[f64, Input]` | `error[E241]` (bare Ident, no comparison) | parses, provenance = `AstProvInput` |
+| `Knowledge<f64, Input>` | parse error (`Input` was `Ident`, `>` eaten as `CmpGt`) | parses |
+| `Knowledge[f64, Source]` | `error[E241]` | `error[E241]` (unchanged) |

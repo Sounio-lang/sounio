@@ -55,5 +55,5 @@ Strict gate must confirm:
 
 ## Notes
 
-- This v1 spec is additive and compatible with `docs/KAXI_BIDIRECTIONAL_RETURN_CHANNEL.md`.
+- This v1 spec is additive and compatible with `docs/architecture/KAXI_BIDIRECTIONAL_RETURN_CHANNEL.md`.
 - It is intentionally hardware-first and self-hosted oriented.

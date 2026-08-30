@@ -24,11 +24,11 @@
 # be skipped silently, so `expect-stdout-contains` asserted nothing.
 #
 # Usage:
-#   bash scripts/run_sio_test_suite_v2.sh [--filter PATTERN] [--verbose] [--format junit] [--jobs N]
-#   bash scripts/run_sio_test_suite_v2.sh --filter-prefix PREFIX [--verbose] [--format junit] [--jobs N]
-#   bash scripts/run_sio_test_suite_v2.sh --filter-exact BASENAME [--verbose] [--format junit] [--jobs N]
-#   bash scripts/run_sio_test_suite_v2.sh [--filter PATTERN] --list-tests
-#   bash scripts/run_sio_test_suite_v2.sh --test-list FILE [--verbose] [--format junit] [--jobs N]
+#   bash scripts/dev/run_sio_test_suite_v2.sh [--filter PATTERN] [--verbose] [--format junit] [--jobs N]
+#   bash scripts/dev/run_sio_test_suite_v2.sh --filter-prefix PREFIX [--verbose] [--format junit] [--jobs N]
+#   bash scripts/dev/run_sio_test_suite_v2.sh --filter-exact BASENAME [--verbose] [--format junit] [--jobs N]
+#   bash scripts/dev/run_sio_test_suite_v2.sh [--filter PATTERN] --list-tests
+#   bash scripts/dev/run_sio_test_suite_v2.sh --test-list FILE [--verbose] [--format junit] [--jobs N]
 
 set -uo pipefail
 

@@ -2,7 +2,7 @@
 # plot-export.sh — Convert SVG plots to PNG or PDF
 #
 # Usage:
-#   bash scripts/plot-export.sh <input.svg> <format>
+#   bash scripts/ops/plot-export.sh <input.svg> <format>
 #
 # Arguments:
 #   input.svg   Path to the SVG file
@@ -17,8 +17,8 @@
 #   3. convert        (ImageMagick — widely available, may rasterize poorly)
 #
 # Examples:
-#   bash scripts/plot-export.sh output/decay_curve.svg png
-#   bash scripts/plot-export.sh results/pk_profile.svg pdf
+#   bash scripts/ops/plot-export.sh output/decay_curve.svg png
+#   bash scripts/ops/plot-export.sh results/pk_profile.svg pdf
 
 set -euo pipefail
 
