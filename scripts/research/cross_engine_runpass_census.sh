@@ -5,8 +5,8 @@
 # Known 2026-08-17 anecdotes this instrument is meant to absorb:
 #   #1798 E158 forward inverse_of (CLOSED — both should reject once source-aligned)
 #   #1792 var=0.000000 vs ~1e-5 (OPEN — runtime / fabricated variance)
-#   #1801 E219 Madaros-only (non-allowlisted extern)
-#   V0-A / E218 f128-f256 (Madaros rejects; lean_single accepts arithmetic)
+#   #1801 E250 Madaros-only (non-allowlisted extern; remapped by #2170)
+#   V0-A / E249 f128-f256 (Madaros rejects; lean_single accepts arithmetic)
 #   tilde operator semantics differ by engine (doc surface; not every fixture hits it)
 #
 # CI oracles often pin lean_single. This census reports how often the default
@@ -105,7 +105,7 @@ printf '[census] lean_via=SOUNIO_SOUC_ENGINE=lean_single bin/souc → %s\n' "$LE
 
 # --- helpers -----------------------------------------------------------------
 
-# Extract primary error code like E158 / E218 / E219 from compiler stderr/stdout.
+# Extract primary error code like E158 / E249 / E250 from compiler stderr/stdout.
 primary_errcode() {
   local f="$1"
   local code
@@ -225,13 +225,13 @@ else
   pc_fail=1
 fi
 
-# MADAROS_ONLY on f256 arithmetic reserved (E218) — compile-fail under Madaros,
+# MADAROS_ONLY on f256 arithmetic reserved (E249) — compile-fail under Madaros,
 # may accept under lean_single (V0-A class).
-pc e218_f256 MADAROS_ONLY_REJECT tests/compile-fail/f256_v0b_arithmetic_rejected.sio
+pc e249_f256 MADAROS_ONLY_REJECT tests/compile-fail/f256_v0b_arithmetic_rejected.sio
 
-# E219 Madaros-only on non-allowlisted extern (if fixture present)
+# E250 Madaros-only on non-allowlisted extern (if fixture present)
 if [[ -f tests/compile-fail/extern_c_unimplemented_builtin.sio ]]; then
-  pc e219_extern MADAROS_ONLY_REJECT tests/compile-fail/extern_c_unimplemented_builtin.sio
+  pc e250_extern MADAROS_ONLY_REJECT tests/compile-fail/extern_c_unimplemented_builtin.sio
 elif [[ -f tests/ffi_posix/arm_claim_unimplemented.sio ]]; then
   pc e219_extern MADAROS_ONLY_REJECT tests/ffi_posix/arm_claim_unimplemented.sio
 fi

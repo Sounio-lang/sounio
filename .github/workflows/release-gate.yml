@@ -22,13 +22,60 @@ jobs:
       - uses: actions/checkout@v4
       - name: Resolve souc binary
         run: bash scripts/build/fix_ci_binary.sh
-      - name: Verify no-rust policy
+      # This step was green and inoperative from 2026-02-26 until 2026-08-26.
+      #
+      # It runs a gate that calls `souc opt policy status`. The DEFAULT bin/souc
+      # is Madaros, which has no `opt` verb, so the gate could not run -- and
+      # `|| echo SEED_POLICY_WARN` turned that certainty into a printed word and
+      # a passing step named "Verify no-rust policy".
+      #
+      # The verb is not gone from the repository. The checked artifact
+      # artifacts/omega/souc-bin/souc-linux-x86_64-gpu has it and answers for it,
+      # so the gate is runnable and this step now actually runs it.
+      #
+      # What it cannot decide here: the gate ends in a canonical SIGNATURE
+      # verdict, and the canonical key (artifacts/omega/canonical_key.env) is not
+      # in the repository -- it is generated locally by the key-bootstrap step.
+      # Run locally against a freshly generated key the policy reads
+      # `signature=invalid`, which is what a different key produces and is NOT
+      # evidence the checked-in policy is bad. So a signature verdict is surfaced
+      # loudly and left UNRESOLVED rather than being turned into a red build on a
+      # question this step cannot answer. Losing the verb again IS fatal.
+      - name: Seed policy status
         run: |
-          if [ -f scripts/omega/omega_policy_status.sh ]; then
-            bash scripts/omega/omega_policy_status.sh || echo "SEED_POLICY_WARN"
-          else
+          if [ ! -f scripts/omega/omega_policy_status.sh ]; then
             echo "SEED_POLICY_SKIP (script not found)"
+            exit 0
           fi
+          souc="${SOUC_BIN:-}"
+          checked="artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
+          if [ -x "$checked" ]; then souc="$checked"; fi
+          if [ -z "$souc" ]; then
+            echo "SEED_POLICY_SKIP (no souc binary with the opt verb available)"
+            exit 0
+          fi
+          echo "souc=$souc"
+          set +e
+          out="$(bash scripts/omega/omega_policy_status.sh \
+                   --policy bootstrap/policies/policy.v1.json --souc "$souc" 2>&1)"
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+          if [ "$rc" -eq 0 ]; then
+            echo "SEED_POLICY_OK"
+            exit 0
+          fi
+          if printf '%s' "$out" | grep -q 'is not a subcommand of this binary'; then
+            echo "SEED_POLICY_FAIL: the opt verb is gone from every binary this step can reach."
+            echo "  That is a regression, not the known gap. See scripts/lib/souc_verb_guard.sh for why."
+            exit 1
+          fi
+          echo "SEED_POLICY_UNRESOLVED: the gate RAN and did not pass."
+          echo "  Read the verdict above. If it is a signature verdict, note that the"
+          echo "  canonical key is not in the repository, so an invalid signature here"
+          echo "  may mean the key, not the policy. Resolve by provisioning the real"
+          echo "  verify key in CI, then make this step fail on a bad verdict."
+          exit 0
 
   rust-free-proof:
     name: Rust-Free Proof

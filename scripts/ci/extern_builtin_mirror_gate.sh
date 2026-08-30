@@ -6,11 +6,11 @@
 # self-hosted/native/codegen_x86_linux.sio maps such a stub to a builtin id
 # 1..27 and returns 0 -- "emit nothing" -- for every other name, so a call to an
 # unlisted extern reads whatever is in rax. check/check.sio refuses that call at
-# type-check time (E219) using name_is_native_backend_builtin.
+# type-check time (E250) using name_is_native_backend_builtin.
 #
 # Two lists, one truth. If the backend gains a builtin and the checker does not
 # hear about it, the checker rejects a name that now works -- a false refusal,
-# strictly worse than the bug E219 was written to kill. If the backend LOSES one,
+# strictly worse than the bug E250 was written to kill. If the backend LOSES one,
 # the checker accepts a call that silently returns 0 again. This gate diffs them.
 #
 # Track A added a second route to the same backend. For twelve names the parser

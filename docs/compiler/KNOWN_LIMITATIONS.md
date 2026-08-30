@@ -278,8 +278,15 @@ The two engines do not share an arbitrary native linker:
 - **Madaros math:** #2079 added checked `ffi_` wrappers and execution vectors for
   the implemented math names, including `pow` and `tgamma`.
 - **Fail-closed boundary:** a non-allowlisted Madaros extern is rejected by the
-  backend-builtin guard with **E219**. It is not silently replaced with zero and
-  the current diagnostic is not E137.
+  backend-builtin guard with **E250** — measured at the raise site
+  (`checker_report_error_at_inplace(c, e.span, 250, ...)`, `check.sio:8659`),
+  not read off prose. It is not silently replaced with zero, and the current
+  diagnostic is neither E137 nor E219; #2191 renumbered that code.
+- **What it replaced:** under Madaros this surface was once silently
+  non-functional — `docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md`
+  found `system()`/`getpid()` returning 0 while doing nothing, no diagnostic.
+  Closed for the allowlisted names by #1755 (`1e8d48cdc8`), each backed by a
+  per-name EXECUTION witness rather than a clean `check`.
 - **Residual:** aggregate-reference arguments are not sound through the
   signatureless `ffi_` path. `tests/run-pass/ffi_system_array_arg.sio` still
   fails at execution, while the pointer-scalar/string form works. Arbitrary

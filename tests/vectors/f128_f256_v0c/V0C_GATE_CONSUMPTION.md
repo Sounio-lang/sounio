@@ -17,9 +17,9 @@ source_of_truth: scripts/ci/madaros_f128_f256_v0c_wire_gate.sh
 | Path | Engine |
 |---|---|
 | Scaffold probes (descriptor / payload / wire) | **lean_single seed ELF** (`bin/souc-lean-single-x86_64`), same as existing `madaros_f128_f256_numeric_*_gate.sh` |
-| Corpus green / V0-C complete | Requires a **codec consumer** that maps the external JSONL through limb/wire encode–decode — not claimed as lean_single-only and not silent Madaros E218 |
+| Corpus green / V0-C complete | Requires a **codec consumer** that maps the external JSONL through limb/wire encode–decode — not claimed as lean_single-only and not silent Madaros E249 |
 
-This gate does **not** assert “E218 on Madaros” (that is V0-B). V0-C fails today because the **external corpus is unconsumed**, while scaffolds still pass on hard-coded cases.
+This gate does **not** assert “E249 on Madaros” (that is V0-B). V0-C fails today because the **external corpus is unconsumed**, while scaffolds still pass on hard-coded cases.
 
 ## Consumed today
 
