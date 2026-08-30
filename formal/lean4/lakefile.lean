@@ -225,6 +225,11 @@ lean_lib «SounioPireusOperatorNoveltyFeedback» where
 lean_lib «SounioPireusOperatorDiscoveryEngine» where
   moreLeanArgs := #["-j", "1"]
 
+-- FORMAL_PARITY for the frozen Sounio Pireus Operator Novelty Frontier v11.
+-- Non-default: checks all 7200 codec entries and proves the support corollaries.
+lean_lib «SounioPireusOperatorNoveltyFrontier» where
+  moreLeanArgs := #["-j", "1"]
+
 -- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
 -- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
 -- sweeps (16x16 complex greedy over 1..15) build in ~10s, so kept as a default_target.

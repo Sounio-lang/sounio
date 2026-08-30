@@ -1,0 +1,12 @@
+/- Axiom audit for every exported Pireus Operator Novelty Frontier v11 theorem. -/
+import SounioPireusOperatorNoveltyFrontier
+
+open SounioPireusOperatorNoveltyFrontier
+
+#print axioms formal_parity_summary_matches_frozen_sounio
+#print axioms grammar_codec_bijection_exact
+#print axioms non_singleton_atlas_support_excludes_one_sparse_collision
+#print axioms support_176_plus_one_transport_cannot_have_support_one
+#print axioms c2_involution_and_outside_singleton_partition
+#print axioms separator_count_is_7200_times_6
+#print axioms n2_does_not_promote_stronger_or_public_claims
