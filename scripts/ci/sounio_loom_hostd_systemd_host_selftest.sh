@@ -262,14 +262,21 @@ if [[ "$PHASE" == prepare ]]; then
   status_a="$(wait_machine_status active)"
   "$LOOM" host-enroll --state-dir "$STATE_DIR" --cwd "$WORK_DIR" \
     --agent "$AGENT" --lane "$LANE" >/dev/null
-  for _ in $(seq 1 200); do
+  for _ in $(seq 1 400); do
     "$LOOM" host-verify --state-dir "$STATE_DIR" --cwd "$WORK_DIR" \
       --agent "$AGENT" --lane "$LANE" >/dev/null 2>&1 && break
     sleep 0.05
   done
-  "$LOOM" host-verify --state-dir "$STATE_DIR" --cwd "$WORK_DIR" \
-    --agent "$AGENT" --lane "$LANE" >/dev/null ||
-    fail 'systemd supervisor did not observe the enrolled active lane'
+  if ! "$LOOM" host-verify --state-dir "$STATE_DIR" --cwd "$WORK_DIR" \
+    --agent "$AGENT" --lane "$LANE" >/dev/null 2>&1; then
+    supervisor_state='absent'
+    [[ -f "$STATE_DIR/hostd/supervisor.state" ]] &&
+      supervisor_state="$(tr '\n' ',' < "$STATE_DIR/hostd/supervisor.state")"
+    unit_state="$(systemctl show "$HOSTD_UNIT" --property ActiveState \
+      --property SubState --property Result --property MainPID 2>/dev/null | tr '\n' ',')"
+    journal_tail="$(journalctl --unit "$HOSTD_UNIT" --no-pager -n 12 2>/dev/null | tr '\n' ',')"
+    fail "systemd supervisor omitted enrolled-lane receipt supervisor=$supervisor_state unit=$unit_state journal=$journal_tail"
+  fi
 
   guardian_a="$(status_value "$status_a" guardian_pid)"
   guardian_start_a="$(status_value "$status_a" guardian_pid_start)"
