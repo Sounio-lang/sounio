@@ -46,6 +46,7 @@ adversarial gates.
 | tests use independent operands only | `knowledge.sio:290–310` | source |
 | naive add sound ⟺ zero-cov; gap = 2·cov (Lemma 1) | `docs/research/lean/SounioAntiGarblingModel.lean` | kernel-checked, axiom-free |
 | base calculus progress + preservation; `gAddMeta`/`gMulMeta` = the §2 ops; validity preserved | `formal/lean4/EpistemicEffectsV2.lean` (`:92,94,223,324,559,626`) | mechanized (Lean 4.33.1) |
+| **NS-extended calculus**: Lemma 1 general form, Lemma 2 (`Covers`), NS progress + preservation, `exact_preservation`, Theorem 6.4 (`typed_agfree`, `soundness_star`), x+x sabotage witness | `formal/lean4/EpistemicEffectsNS.lean` (gate `scripts/ci/ns_metatheory_lean_gate.sh`) | mechanized 2026-08-30 (Lean 4.33.1, Mathlib-free, no sorry) |
 | NS carrier + sound add runs (`x+x`→4, naive→2) | `docs/research/sounio/noise_symbols.sio` | souc-green |
 | NS dataflow flags shared-source add | `docs/research/sounio/ns_dataflow.sio` | souc-green |
 | five acceptance controls incl. sabotage causality | `docs/research/sounio/ns_contract.sio` | souc-green (5/5 PASS) |
@@ -57,7 +58,7 @@ adversarial gates.
 Now **measured on the wired compiler**: the corpus false-positive rate (RQ3, 6/95, all
 characterized) and the compiler-level sabotage witness (RQ2, `ns_antigarbling_gate.sh`).
 Still genuinely `[pending]`: the full two-compartment vancomycin flip rate (RQ4, needs the
-clinical model's two-compartment extension), the NS-extended Lean preservation (§6), and
+clinical model's two-compartment extension) and
 interprocedural parameter projection (§10) — all named in the closed draft's top note.
 
 ---

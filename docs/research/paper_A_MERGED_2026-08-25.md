@@ -1,7 +1,7 @@
 # Manufacturing Precision Is a Type Error
 ## Compile-Time Anti-Garbling for Uncertainty-Typed Languages
 
-> **Closed draft, 2026-08-26.** Single-file merge of the per-section drafts (`paper_A_*_draft_2026-08-25.md`) in submission order, updated after the E230 gate was **wired into the production checker, built from source, and verified** (Madaros v0.80.0; integration commit `4ac63da51f` on base `06e85a6ada`, branch `fable/ns-antigarbling-integration-20260825`, xai+zai math-reviewed). §8's evaluation now reports measured wired-compiler results; only genuinely-future items (the two-compartment clinical model in §8.4, the NS-extended Lean preservation in §6, and interprocedural parameter projection in §10) remain marked as such. Target: PLDI/OOPSLA. Grounding index and prior-art citations: `paper_A_README.md`; prior-art sign-off: `paper_A_priorart_gate_signoff_2026-08-25.md`. Notation is unified: `m`=mean, `v`=variance, `Cov`/`⟨·,·⟩`=covariance/inner product, `Knowledge⟨T,N⟩`=epistemic type with noise-set `N`.
+> **Closed draft, 2026-08-26.** Single-file merge of the per-section drafts (`paper_A_*_draft_2026-08-25.md`) in submission order, updated after the E230 gate was **wired into the production checker, built from source, and verified** (Madaros v0.80.0; integration commit `4ac63da51f` on base `06e85a6ada`, branch `fable/ns-antigarbling-integration-20260825`, xai+zai math-reviewed). §8's evaluation now reports measured wired-compiler results; only genuinely-future items (the two-compartment clinical model in §8.4, and interprocedural parameter projection in §10) remain marked as such. **Update 2026-08-30:** the NS-extended metatheory of §6 is now fully mechanized (`formal/lean4/EpistemicEffectsNS.lean`) — Lemma 2, NS progress/preservation, exactness preservation and Theorem 6.4 itself carry kernel proofs; §6.4's table and §6.3 are updated accordingly. Target: PLDI/OOPSLA. Grounding index and prior-art citations: `paper_A_README.md`; prior-art sign-off: `paper_A_priorart_gate_signoff_2026-08-25.md`. Notation is unified: `m`=mean, `v`=variance, `Cov`/`⟨·,·⟩`=covariance/inner product, `Knowledge⟨T,N⟩`=epistemic type with noise-set `N`.
 
 ## Abstract
 
@@ -21,10 +21,11 @@ uncertainty-typed language that carries the **noise-symbol source-set** of each 
 its type — reusing the source-identity idea of affine arithmetic, but in the type rather
 than in an external analyzer — and turns the independence assumption into a **checked
 precondition**: an independence-assuming operator over operands with non-disjoint (or
-unknown) source-sets is rejected unless a proved-disjoint certificate holds. We prove
-the core soundness criterion in Lean (kernel-checked, axiom-free): the naive scalar
-operation is sound iff the operand covariance is zero, and the disjoint-support check is
-conservatively sound. We implement the discipline in the Sounio compiler and show it
+unknown) source-sets is rejected unless a proved-disjoint certificate holds. We mechanize
+the soundness theorem in Lean for the core calculus (kernel-checked, Mathlib-free): the
+naive scalar operation is sound iff the operand covariance is zero, the tracked source-set
+over-approximates the true support, and along every evaluation of a well-typed program each
+uncertainty value reports its true first-order variance. We implement the discipline in the Sounio compiler and show it
 eliminates the defect class while accepting correlated-aware code, evaluated on a
 physiologically-based pharmacokinetic model where every inter-compartmental sum shares
 measured rate constants.
@@ -114,9 +115,10 @@ anti-garbling like QIF, and enforce it in the type like neither.
    lattice and its transfer functions, and the proved-disjoint / correlation-aware escape
    valves (§5).
 3. **A soundness result** — no well-typed program contains a first-order anti-garbling —
-   whose two load-bearing lemmas (the covariance-exactness criterion and the base calculus's
-   type safety) are machine-checked in Lean, with the remaining step scoped honestly to the
-   pending checker extension (§6).
+   mechanized end to end in Lean for the NS-extended core calculus: the covariance-exactness
+   criterion in general form, the soundness of the source-set abstraction, NS type safety,
+   and the theorem itself — along every evaluation of a well-typed program each Knowledge
+   value reports its true first-order variance (§6).
 4. **An implementation and evaluation** in the self-hosted Sounio compiler: running
    prototypes and a kernel-checked model that reproduce the defect, establish that the
    rejection is *caused* by source-set propagation (a sabotage-controlled experiment), and a
@@ -660,6 +662,14 @@ assume-sharing interprocedural default (§5.6) can never mistake a correlated pa
 disjoint one. They can only err toward rejecting a sound program — the completeness side,
 not the soundness side.
 
+*Mechanization.* Lemma 2 is now a kernel fact rather than a schema: in
+`EpistemicEffectsNS.lean` every runtime Knowledge value `kraw v m a` carries its true affine
+form `a`, its typing rule demands `Covers N a` (every source of `a` is a member of `N`, `⊤`
+trivially), each transfer preserves it (`covers_single` for `measure`, `covers_union` for
+`kadd`, `covers_scale`+`covers_union` for the first-order form of `kmul`), and
+`support_over_approx` reads the over-approximation off any typing derivation — so
+preservation (§6.4) carries it to every value reached during evaluation.
+
 ### 6.4 The soundness theorem
 
 > **Theorem (no first-order anti-garbling).** Let `e` be a program well-typed under the
@@ -685,15 +695,24 @@ operator reached during evaluation. ∎
 | Base calculus progress + preservation | ✅ mechanized — `EpistemicEffectsV2.lean` (Lean 4.33.1) |
 | `gAddMeta`/`gMulMeta` = the §2 operators; validity preserved | ✅ mechanized — `gAddMeta_valid`, `gMulMeta_valid` |
 | Local criterion: disjoint support ⟹ zero cov ⟹ exact (Lemma 1) | ✅ kernel-checked, axiom-free — `SounioAntiGarblingModel.lean` |
-| Analysis soundness: `N` over-approximates true support (Lemma 2) | ◻ argued here; abstraction-soundness schema, not yet mechanized |
-| NS-extended preservation (disjointness premise preserved under Step) | ◻ **[pending wire]** — extends the mechanized `preservation'` to the `N`-annotated `tknow` |
+| Analysis soundness: `N` over-approximates true support (Lemma 2) | ✅ mechanized — `EpistemicEffectsNS.lean`: `Covers N a` is a typing invariant of runtime values (`t_kraw`), preserved by every transfer (`covers_single`, `covers_union`, `covers_scale`), extracted by `support_over_approx` |
+| NS-extended preservation (disjointness premise preserved under Step) | ✅ mechanized — `EpistemicEffectsNS.preservation` (and `progress`) for the `N`-annotated `tknow` |
+| Lemma 1 in **general form** (all affine forms, not Int witnesses; Mathlib-free) | ✅ mechanized — `trueVar_append`, `trueVar_mul` (delta method), `inner_disjoint` |
+| Exactness preservation: reported variance = true variance along every step | ✅ mechanized — `exact_preservation`: under the premise the defective `gAddMeta`/`gMulMeta` are exact |
+| **Theorem 6.4** — no reached independence-assuming operator has correlated operands | ✅ mechanized — `typed_agfree`, `soundness_star` (along `⇒*`) |
+| Sabotage witness in the kernel: `x+x` steps to an inexact value and is untypable for **every** `N`; `x+⊤` rejected; `x+y` admitted and exact | ✅ kernel-checked — `x_plus_x_understates`, `x_plus_x_untypable`, `x_plus_top_untypable`, `x_plus_y_exact` |
 
-So the two *numeric* facts the theorem turns on — the defect operators and the local
-soundness criterion — carry machine proofs today; what remains to mechanize is the
-extension of the existing preservation proof to the source-set-annotated Knowledge type,
-which is the same artifact as the N-phase compiler wire (§7.3). We claim the theorem at
-paper level and the two load-bearing lemmas at kernel level, and we do not claim the
-NS-extended preservation is mechanized until it is.
+Every ingredient of the theorem now carries a machine proof (`formal/lean4/EpistemicEffectsNS.lean`,
+Lean 4.33.1, Mathlib-free, no `sorry`; axiom footprint ⊆ {`propext`, `Quot.sound`,
+`Classical.choice`}; gate: `scripts/ci/ns_metatheory_lean_gate.sh`). The calculus makes the
+ground truth explicit: a runtime Knowledge value carries its true first-order affine form
+beside the scalar metadata it *reports*, the operational semantics is deliberately the
+defective one (`gAddMeta` = `ep_add`, no covariance term), and soundness is the separate
+invariant `Exact` — "every value reports its true variance" — which type safety alone does
+not give (§6.1) and NS typing does. What is **not** mechanized, and stated as such: (i) the
+correspondence between this core calculus and the production checker's E230 rule — the wire
+is source-verified and sabotage-gated (§8.2) but not proven equivalent to `HasTy`; (ii)
+interprocedural summaries (§5.6), absent from the calculus; (iii) second-order terms (§6.5).
 
 ### 6.5 Two boundaries carried as hypotheses
 
@@ -777,8 +796,7 @@ module, the transfer/join dataflow, and the `SOUNIO_NS_DISABLE` sabotage knob). 
 soundness prototypes (`noise_symbols.sio`, `ns_dataflow.sio`, `ns_contract.sio`) remain the
 kernel-of-the-argument at the analysis level; §8 now reports the *wired-compiler* results
 alongside them. The remaining `[pending wire]` items are the genuinely-future ones named in
-the closing note (two-compartment clinical model, NS-extended Lean preservation,
-interprocedural parameter projection).
+the closing note (two-compartment clinical model, interprocedural parameter projection).
 
 ### 7.4 Coexistence with provenance
 

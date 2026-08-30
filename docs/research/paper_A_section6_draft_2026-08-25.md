@@ -3,9 +3,10 @@
 > Draft prose for the metatheory. Mechanized results are grounded in
 > `formal/lean4/EpistemicEffectsV2.lean` (629 lines; progress + preservation, Lean
 > 4.33.1) and `docs/research/lean/SounioAntiGarblingModel.lean` (Lemma 1, kernel-checked,
-> axiom-free). Claims that the NS extension's re-run of preservation is not yet mechanized
-> are labelled **[pending wire]** — we state the metatheorem at paper level and mark
-> exactly which lemmas carry a machine proof today.
+> axiom-free). **2026-08-30:** the NS extension is mechanized in
+> `formal/lean4/EpistemicEffectsNS.lean` (Lemma 2, NS progress + preservation, exactness
+> preservation, Theorem 6.4, x+x sabotage witness) — the former **[pending wire]** rows of
+> §6.4's table are closed; see `paper_A_ns_metatheory_mechanized_2026-08-30.md`.
 
 ---
 
@@ -91,6 +92,14 @@ assume-sharing interprocedural default (§5.6) can never mistake a correlated pa
 disjoint one. They can only err toward rejecting a sound program — the completeness side,
 not the soundness side.
 
+*Mechanization.* Lemma 2 is now a kernel fact rather than a schema: in
+`EpistemicEffectsNS.lean` every runtime Knowledge value `kraw v m a` carries its true affine
+form `a`, its typing rule demands `Covers N a` (every source of `a` is a member of `N`, `⊤`
+trivially), each transfer preserves it (`covers_single` for `measure`, `covers_union` for
+`kadd`, `covers_scale`+`covers_union` for the first-order form of `kmul`), and
+`support_over_approx` reads the over-approximation off any typing derivation — so
+preservation (§6.4) carries it to every value reached during evaluation.
+
 ### 6.4 The soundness theorem
 
 > **Theorem (no first-order anti-garbling).** Let `e` be a program well-typed under the
@@ -116,15 +125,24 @@ operator reached during evaluation. ∎
 | Base calculus progress + preservation | ✅ mechanized — `EpistemicEffectsV2.lean` (Lean 4.33.1) |
 | `gAddMeta`/`gMulMeta` = the §2 operators; validity preserved | ✅ mechanized — `gAddMeta_valid`, `gMulMeta_valid` |
 | Local criterion: disjoint support ⟹ zero cov ⟹ exact (Lemma 1) | ✅ kernel-checked, axiom-free — `SounioAntiGarblingModel.lean` |
-| Analysis soundness: `N` over-approximates true support (Lemma 2) | ◻ argued here; abstraction-soundness schema, not yet mechanized |
-| NS-extended preservation (disjointness premise preserved under Step) | ◻ **[pending wire]** — extends the mechanized `preservation'` to the `N`-annotated `tknow` |
+| Analysis soundness: `N` over-approximates true support (Lemma 2) | ✅ mechanized — `EpistemicEffectsNS.lean`: `Covers N a` is a typing invariant of runtime values (`t_kraw`), preserved by every transfer (`covers_single`, `covers_union`, `covers_scale`), extracted by `support_over_approx` |
+| NS-extended preservation (disjointness premise preserved under Step) | ✅ mechanized — `EpistemicEffectsNS.preservation` (and `progress`) for the `N`-annotated `tknow` |
+| Lemma 1 in **general form** (all affine forms, not Int witnesses; Mathlib-free) | ✅ mechanized — `trueVar_append`, `trueVar_mul` (delta method), `inner_disjoint` |
+| Exactness preservation: reported variance = true variance along every step | ✅ mechanized — `exact_preservation`: under the premise the defective `gAddMeta`/`gMulMeta` are exact |
+| **Theorem 6.4** — no reached independence-assuming operator has correlated operands | ✅ mechanized — `typed_agfree`, `soundness_star` (along `⇒*`) |
+| Sabotage witness in the kernel: `x+x` steps to an inexact value and is untypable for **every** `N`; `x+⊤` rejected; `x+y` admitted and exact | ✅ kernel-checked — `x_plus_x_understates`, `x_plus_x_untypable`, `x_plus_top_untypable`, `x_plus_y_exact` |
 
-So the two *numeric* facts the theorem turns on — the defect operators and the local
-soundness criterion — carry machine proofs today; what remains to mechanize is the
-extension of the existing preservation proof to the source-set-annotated Knowledge type,
-which is the same artifact as the N-phase compiler wire (§7.3). We claim the theorem at
-paper level and the two load-bearing lemmas at kernel level, and we do not claim the
-NS-extended preservation is mechanized until it is.
+Every ingredient of the theorem now carries a machine proof (`formal/lean4/EpistemicEffectsNS.lean`,
+Lean 4.33.1, Mathlib-free, no `sorry`; axiom footprint ⊆ {`propext`, `Quot.sound`,
+`Classical.choice`}; gate: `scripts/ci/ns_metatheory_lean_gate.sh`). The calculus makes the
+ground truth explicit: a runtime Knowledge value carries its true first-order affine form
+beside the scalar metadata it *reports*, the operational semantics is deliberately the
+defective one (`gAddMeta` = `ep_add`, no covariance term), and soundness is the separate
+invariant `Exact` — "every value reports its true variance" — which type safety alone does
+not give (§6.1) and NS typing does. What is **not** mechanized, and stated as such: (i) the
+correspondence between this core calculus and the production checker's E230 rule — the wire
+is source-verified and sabotage-gated (§8.2) but not proven equivalent to `HasTy`; (ii)
+interprocedural summaries (§5.6), absent from the calculus; (iii) second-order terms (§6.5).
 
 ### 6.5 Two boundaries carried as hypotheses
 
