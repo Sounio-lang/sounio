@@ -242,6 +242,11 @@ lean_lib «SounioPireusOperatorOrbitCanonicalization» where
 lean_lib «SounioPireusOperatorOrbitArchiveReconstruction» where
   moreLeanArgs := #["-j", "1"]
 
+-- Concrete FORMAL_PARITY census of the 30 frozen declared-action classes.
+-- Non-default: canonicalizes all 128 tables across GL(4,F2) x swap x gauge.
+lean_lib «SounioPireusOperatorOrbitClassReconstruction» where
+  moreLeanArgs := #["-j", "1"]
+
 -- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
 -- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
 -- sweeps (16x16 complex greedy over 1..15) build in ~10s, so kept as a default_target.

@@ -1,0 +1,9 @@
+/- Axiom audit for the concrete V13 30-class reconstruction theorems. -/
+import SounioPireusOperatorOrbitClassReconstruction
+
+open SounioPireusOperatorOrbitClassReconstruction
+
+#print axioms concrete_class_reconstruction_matches_declared_frozen_summary
+#print axioms reconstructed_128_image_archive_has_exactly_30_canonical_tables
+#print axioms every_reconstructed_image_maps_to_one_of_30_distinct_classes
+#print axioms class_census_does_not_yet_prove_canonical_iff_orbit
