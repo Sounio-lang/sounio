@@ -53,10 +53,12 @@ for input in \
   scripts/dev/build_sounio_loom_resident_membrane_v4.sh \
   scripts/dev/build_sounio_loom_product_exec_cell_fixture.sh \
   scripts/dev/build_sounio_loom_exec_operation_grant_fixture.sh \
+  scripts/dev/build_sounio_loom_exec_operation_catalog_fixture.sh \
+  scripts/dev/build_sounio_loom_exec_result_record_fixture.sh \
   scripts/dev/build_sounio_loom_causal_workflow_run_grant_fixture.sh \
-	  scripts/dev/build_sounio_loom_causal_workflow_attest_grant_fixture.sh \
-	  scripts/dev/build_sounio_loom_causal_workflow_kernel_fixture.sh \
-	  scripts/dev/build_loom_causal_workflow_journal_fixture.sh; do
+  scripts/dev/build_sounio_loom_causal_workflow_attest_grant_fixture.sh \
+  scripts/dev/build_sounio_loom_causal_workflow_kernel_fixture.sh \
+  scripts/dev/build_loom_causal_workflow_journal_fixture.sh; do
   [[ -x "$ROOT_DIR/$input" && ! -L "$ROOT_DIR/$input" ]] ||
     fail "required source-fresh builder is absent, linked, or non-executable: $input"
 done
@@ -103,10 +105,27 @@ chmod 0555 "$AUTHORITY_ROOT/.git"
 
 install_root_file() {
   local relative="$1" source="$ROOT_DIR/$1" destination="$AUTHORITY_ROOT/$1" mode=0444
+  [[ "$relative" =~ ^[A-Za-z0-9._/-]+$ && "$relative" != /* &&
+     "/$relative/" != *'/../'* ]] || fail "authority-root path is unsafe: $relative"
   [[ -f "$source" && ! -L "$source" ]] || fail "frozen authority input is absent or linked: $relative"
   [[ -x "$source" ]] && mode=0555
   install -d -m 0755 "$(dirname "$destination")"
   install -m "$mode" "$source" "$destination"
+}
+
+install_manifest_closure() {
+  local manifest="$1"
+  shift
+  local key relative expected
+  for key in "$@"; do
+    relative="$(manifest_value "$manifest" "${key}_path")"
+    expected="$(manifest_value "$manifest" "${key}_sha256")"
+    [[ "$expected" =~ ^[0-9a-f]{64}$ ]] ||
+      fail "manifest dependency hash is not canonical: $key"
+    install_root_file "$relative"
+    [[ "$(sha256_file "$AUTHORITY_ROOT/$relative")" == "$expected" ]] ||
+      fail "manifest dependency drifted: $key"
+  done
 }
 
 # These files are the Sounio semantic authorities and frozen manifests whose
@@ -117,6 +136,7 @@ AUTHORITY_FILES=(
   bin/souc-lean-single-x86_64
   tests/verify-ir/call_b.sio
   tools/loom/kernel_exec_grant_cell_authority.freeze.v1
+  tools/loom/exec_intent_envelope.freeze.v1
   tools/loom/exec_operation_grant_fixture.freeze.v1
   tools/loom/exec_operation_catalog.freeze.v1
   tools/loom/exec_result_record.freeze.v1
@@ -145,6 +165,26 @@ AUTHORITY_FILES=(
 for relative in "${AUTHORITY_FILES[@]}"; do
   install_root_file "$relative"
 done
+
+# The product ExecCell loads the 9030 grant fixture, then projects and executes
+# through the 9035 catalog before issuing the 9036 result record. Copy every
+# direct file/hash edge those three OCaml validators consume. This is an
+# executable dependency closure, not a second source of semantic truth.
+EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/exec_operation_grant_fixture.freeze.v1"
+install_manifest_closure "$EXEC_GRANT_MANIFEST" \
+  garden source authority_manifest catalog_manifest result_manifest \
+  build_script selftest freeze_selftest evidence toolchain_wrapper toolchain_compiler
+
+EXEC_CATALOG_MANIFEST="$ROOT_DIR/tools/loom/exec_operation_catalog.freeze.v1"
+install_manifest_closure "$EXEC_CATALOG_MANIFEST" \
+  garden contract source entrypoint build_script selftest evidence \
+  parent_9030_manifest parent_9031_manifest parent_9033_manifest \
+  parent_9034_manifest toolchain_wrapper toolchain_compiler
+
+EXEC_RESULT_MANIFEST="$ROOT_DIR/tools/loom/exec_result_record.freeze.v1"
+install_manifest_closure "$EXEC_RESULT_MANIFEST" \
+  garden contract source entrypoint build_script selftest evidence \
+  parent_9035_manifest toolchain_wrapper toolchain_compiler
 
 CAUSAL_MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_kernel.freeze.v1"
 CAUSAL_DEPENDENCY_KEYS=(
@@ -220,6 +260,16 @@ SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_OUTPUT="$BIN/sounio-loom-resident-membrane-runt
   fail 'resident runtime is not reproducible from its frozen dependency commit'
 SOUNIO_LOOM_PRODUCT_EXEC_CELL_FIXTURE_OUTPUT="$BIN/sounio-loom-product-exec-cell-fixture" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_product_exec_cell_fixture.sh" >/dev/null
+SOUNIO_LOOM_EXEC_OPERATION_CATALOG_OUTPUT="$BIN/sounio-loom-exec-operation-catalog" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_exec_operation_catalog_fixture.sh" >/dev/null
+SOUNIO_LOOM_EXEC_RESULT_RECORD_OUTPUT="$BIN/sounio-loom-exec-result-record" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_exec_result_record_fixture.sh" >/dev/null
+[[ "$(sha256_file "$BIN/sounio-loom-exec-operation-catalog")" == \
+   "$(manifest_value "$EXEC_CATALOG_MANIFEST" executable_sha256)" ]] ||
+  fail 'source-fresh operation catalog runtime drifted from its freeze'
+[[ "$(sha256_file "$BIN/sounio-loom-exec-result-record")" == \
+   "$(manifest_value "$EXEC_RESULT_MANIFEST" executable_sha256)" ]] ||
+  fail 'source-fresh result record runtime drifted from its freeze'
 dune build --root "$ROOT_DIR/tools/loom" src/loom.exe >/dev/null
 install -m 0555 "$ROOT_DIR/tools/loom/_build/default/src/loom.exe" \
   "$BIN/sounio-loom-runtime"
@@ -303,6 +353,14 @@ product_runtime_role=EFFECT_PARITY
 product_fixture_runtime_path=release/bin/sounio-loom-product-exec-cell-fixture
 product_fixture_runtime_language=Sounio
 product_fixture_runtime_role=SEMANTIC_FIXTURE_PRODUCER
+operation_catalog_runtime_path=release/bin/sounio-loom-exec-operation-catalog
+operation_catalog_runtime_sha256=$(sha256_file "$BIN/sounio-loom-exec-operation-catalog")
+operation_catalog_runtime_language=Sounio
+operation_catalog_runtime_role=SEMANTIC_AUTHORITY
+operation_result_runtime_path=release/bin/sounio-loom-exec-result-record
+operation_result_runtime_sha256=$(sha256_file "$BIN/sounio-loom-exec-result-record")
+operation_result_runtime_language=Sounio
+operation_result_runtime_role=SEMANTIC_AUTHORITY
 material_cell_path=release/bin/loom-causal-workflow-material-cell
 journal_runtime_path=release/bin/loom-causal-workflow-journal-fixture
 causal_workflow_runtime_path=release/authority-root/tools/loom/_build/default/src/sounio-loom-causal-workflow-kernel
