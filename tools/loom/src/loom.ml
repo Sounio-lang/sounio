@@ -8412,7 +8412,21 @@ let provider_start_command cli =
     { options = Hashtbl.copy cli.options; flags = Hashtbl.create 2;
       rest = runtime :: "_provider-exec" :: plan.plan_argv }
   in
-  start_command ~launch_source:"provider-start" start_cli;
+  let ready_key = "SOUNIO_LOOM_PROVIDER_START_READY_PATH" in
+  let ready_paths =
+    session_paths (root_option cli plan.plan_cwd) (required cli "--agent")
+      (required cli "--lane")
+  in
+  let ready_path = Filename.concat ready_paths.session_dir "provider-start.ready" in
+  mkdir_p ready_paths.session_dir;
+  (try Unix.unlink ready_path with Unix_error (ENOENT, _, _) -> ());
+  let previous_ready_path = Sys.getenv_opt ready_key in
+  Unix.putenv ready_key ready_path;
+  Fun.protect
+    ~finally:(fun () ->
+      Unix.putenv ready_key (Option.value ~default:"" previous_ready_path))
+    (fun () -> start_command ~launch_source:"provider-start" start_cli);
+  atomic_write ready_path "ready\n";
   Printf.printf
     "LOOM_PROVIDER_STARTED schema=%s provider=%s stream=%s session_binding=%s prompt_sha256=%s argv_sha256=%s unsafe_auto=%s context_isolation=%s\n%!"
     provider_abi_schema plan.plan_spec.provider_id plan.plan_spec.provider_stream
@@ -8421,8 +8435,20 @@ let provider_start_command cli =
     (if plan.plan_unsafe_auto then "true" else "false")
     (if plan.plan_context_isolation then "true" else "false");
   if flag cli "--wait" then (
-    stream_command cli false;
     let _, paths = session_locator cli in
+    let descriptor_state () =
+      table_value (parse_key_values paths.descriptor_path) "state"
+    in
+    let replay_terminal () =
+      Hashtbl.replace cli.options "--cursor" "0";
+      snapshot_command cli
+    in
+    if descriptor_state () = "exited" then replay_terminal ()
+    else
+      (try stream_command cli false
+       with error ->
+         if descriptor_state () = "exited" then replay_terminal ()
+         else raise error);
     let deadline = Unix.gettimeofday () +. 30.0 in
     let rec await_terminal_state () =
       let values = parse_key_values paths.descriptor_path in

@@ -75,7 +75,16 @@ case "$name:${1:-}:${2:-}" in
     fi
     printf '{"type":"thread.started","thread_id":"provider-abi-thread"}\n'
     printf 'FAKE_CODEX_OUTPUT:%s\n' "$prompt"
-    sleep 1
+    if [[ "$prompt" == PROVIDER_ABI_FAST_EXIT_WITNESS ]]; then
+      [[ "${SOUNIO_LOOM_PROVIDER_START_READY_PATH:-}" == /* ]] || exit 48
+      for _ in $(seq 1 800); do
+        [[ -f "$SOUNIO_LOOM_PROVIDER_START_READY_PATH" ]] && break
+        sleep 0.01
+      done
+      [[ -f "$SOUNIO_LOOM_PROVIDER_START_READY_PATH" ]] || exit 49
+    else
+      sleep 1
+    fi
     ;;
   fake-codex:--no-alt-screen:*)
     if [[ -n "${CODEX_SESSION_ID+x}${CODEX_THREAD_ID+x}${CODEX_CI+x}${CLAUDECODE+x}${CLAUDE_CODE_ENTRYPOINT+x}${CLAUDE_CODE_SESSION_ID+x}${TMUX+x}${TMUX_PANE+x}${TMUX_TMPDIR+x}" ]]; then
@@ -464,7 +473,7 @@ grep -q "FAKE_CODEX_OUTPUT:$run_prompt" <<< "$replay" || \
 grep -q 'source=offline' "$TEST_ROOT/snapshot.meta" || \
   fail 'terminal provider replay did not use verified offline custody'
 
-wait_prompt='PROVIDER_ABI_WAIT_WITNESS'
+wait_prompt='PROVIDER_ABI_FAST_EXIT_WITNESS'
 "$LOOM" provider-start --wait --provider codex --state-dir "$STATE_DIR" \
   --agent "$AGENT" --lane "$WAIT_LANE" --session-id "$SESSION_ID" \
   --cwd "$TEST_ROOT" --prompt "$wait_prompt" --isolate-context \

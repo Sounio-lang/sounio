@@ -24,6 +24,23 @@ let event_argument () =
   if count < 3 || Sys.argv.(1) <> "exec" then fail "codex-exec-abi-required";
   Sys.argv.(count - 1)
 
+let await_provider_start_ready () =
+  let path =
+    match Sys.getenv_opt "SOUNIO_LOOM_PROVIDER_START_READY_PATH" with
+    | Some value when not (Filename.is_relative value) -> value
+    | Some _ -> fail "provider-start-ready-path-must-be-absolute"
+    | None -> fail "provider-start-ready-path-is-required"
+  in
+  let deadline = Unix.gettimeofday () +. 8.0 in
+  let rec wait () =
+    if Sys.file_exists path then ()
+    else if Unix.gettimeofday () >= deadline then fail "provider-start-ready-timeout"
+    else (
+      Unix.sleepf 0.01;
+      wait ())
+  in
+  wait ()
+
 let exit_with_status = function
   | WEXITED code -> exit code
   | WSIGNALED signal | WSTOPPED signal -> exit (128 + signal)
@@ -43,4 +60,5 @@ let () =
      raise error);
   Unix.close write_descriptor;
   let _, status = Unix.waitpid [] child in
+  await_provider_start_ready ();
   exit_with_status status
