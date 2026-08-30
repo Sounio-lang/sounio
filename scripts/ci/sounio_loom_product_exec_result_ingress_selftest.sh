@@ -48,6 +48,16 @@ SOUNIO_LOOM_EXEC_RESULT_HANDLE_OUTPUT="$AUTHORITY_RUNTIME" \
    "$(manifest_value executable_sha256)" ]] ||
   fail 'source-fresh Sounio 9033 runtime hash drifted'
 
+INTENT_RUNTIME="$TEST_ROOT/sounio-loom-exec-intent-envelope"
+SOUNIO_LOOM_EXEC_INTENT_ENVELOPE_OUTPUT="$INTENT_RUNTIME" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_exec_intent_envelope_fixture.sh" \
+  >/dev/null
+intent_runtime_sha256="$(sed -n 's/^executable_sha256=//p' \
+  "$ROOT_DIR/tools/loom/exec_intent_envelope.freeze.v1")"
+[[ "$(sha256sum "$INTENT_RUNTIME" | cut -d ' ' -f 1)" == \
+   "$intent_runtime_sha256" ]] ||
+  fail 'source-fresh Sounio 9034 runtime hash drifted'
+
 PAYLOAD="$TEST_ROOT/sounio-process-witness-handshake"
 SOUNIO_LOOM_PROCESS_WITNESS_HANDSHAKE_OUTPUT="$PAYLOAD" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_process_witness_handshake_payload.sh" \
@@ -90,6 +100,7 @@ probe() {
   SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_RUNTIME="$RESIDENT_RUNTIME" \
   SOUNIO_LOOM_RESIDENT_RECEIPT_LOG="$TEST_ROOT/$tag.resident.tsv" \
   SOUNIO_LOOM_EXEC_RESULT_HANDLE_RUNTIME="$AUTHORITY_RUNTIME" \
+  SOUNIO_LOOM_EXEC_INTENT_ENVELOPE_RUNTIME="$INTENT_RUNTIME" \
   SOUNIO_LOOM_EXEC_INGRESS_DARK_LOG="$TEST_ROOT/$tag.ingress.tsv" \
     "$LOOM" exec-ingress-probe --root "$ROOT_DIR" --mode "$mode" \
       --event "$TEST_ROOT/event.json" --receipt "$TEST_ROOT/result.receipt"
@@ -103,9 +114,12 @@ positive="$(probe positive result)"
    "$positive" == *"$(manifest_value canonical_handle)"* && \
    "$positive" != *'exec-capability'* ]] ||
   fail "positive result transport diverged: $positive"
-grep -Fq $'reason=descriptor-result-bound-actions-9030+9031+9033\tauthorizing=false\tproduction_activation=false\texec_attached=true' \
+grep -Fq $'reason=descriptor-result-bound-actions-9030+9031+9033+9034\tauthorizing=false\tproduction_activation=false\texec_attached=true' \
   "$TEST_ROOT/positive.ingress.tsv" ||
   fail 'positive ingress receipt did not join the returned result'
+grep -Fq $'exec_intent_projected=true\texec_intent_action=9034\texec_intent_manifest_sha256=8a95e587ccc81c16da17d56b9649d04bc9c3e764d66fc938c195d95568e7608e\t' \
+  "$TEST_ROOT/positive.ingress.tsv" ||
+  fail 'positive ingress receipt omitted the Sounio 9034 projection'
 grep -Fq $'result_returned=true\t' "$TEST_ROOT/positive.ingress.tsv" ||
   fail 'positive ingress receipt omitted result_returned=true'
 raw_event="$(sed -n 's/.*\traw_event_sha256=\([^[:space:]]*\).*/\1/p' "$TEST_ROOT/positive.ingress.tsv")"
@@ -113,7 +127,7 @@ semantic_event="$(sed -n 's/.*\tevent_sha256=\([^[:space:]]*\).*/\1/p' "$TEST_RO
 [[ "$raw_event" =~ ^[0-9a-f]{64}$ && \
    "$semantic_event" == "$(manifest_value event_sha256)" && \
    "$raw_event" != "$semantic_event" ]] ||
-  fail 'test-only semantic event binding was not explicit and separate'
+  fail 'Sounio semantic event projection was not explicit and separate'
 
 receipt_hex="$(od -An -tx1 -v "$TEST_ROOT/result.receipt" | tr -d ' \n')"
 SOUNIO_LOOM_HOOK_TEST_MODE=1 \
@@ -196,16 +210,19 @@ for name in python python3 rustc cargo; do
 done
 PATH="$TEST_ROOT/oracles:$PATH" probe oracle result >/dev/null
 [[ ! -e "$oracle_sentinel" ]] || fail 'a prohibited Python or Rust oracle executed'
-dependencies="$(ldd "$LOOM" 2>&1 || true; ldd "$AUTHORITY_RUNTIME" 2>&1 || true)"
+dependencies="$(ldd "$LOOM" 2>&1 || true; ldd "$AUTHORITY_RUNTIME" 2>&1 || true; \
+  ldd "$INTENT_RUNTIME" 2>&1 || true)"
 printf '%s\n' "$dependencies" | grep -Eqi 'python|rust' &&
   fail 'a runtime has a prohibited Python or Rust dependency'
 
-result="$(printf 'sounio-loom-product-exec-result-ingress-selftest: PASS semantic_authority=Sounio actions=9030+9031+9033 operational_attachment=OCaml transport=authenticated-inherited-descriptor result_returned=true presenter=read-only receipt_sha256=%s manifest_sha256=%s raw_event_separate=true event_override=test-only+probe-only exact_fixture_hook_switched=true local_exec_capability_used=false binding_sabotage=REFUSED receipt_sabotage=REFUSED manifest_sabotage=REFUSED causal_rule=manifest_sha256_equal causal_mutant=ADMITTED python_executed=false rust_executed=false material_exec_cell=false production_activation=false parity_open=false claim_ready=false' \
+result="$(printf 'sounio-loom-product-exec-result-ingress-selftest: PASS semantic_authority=Sounio actions=9030+9031+9033+9034 operational_attachment=OCaml transport=authenticated-inherited-descriptor result_returned=true presenter=read-only receipt_sha256=%s manifest_sha256=%s raw_event_separate=true event_projection=Sounio-9034 event_override=false exact_fixture_hook_switched=true local_exec_capability_used=false binding_sabotage=REFUSED receipt_sabotage=REFUSED manifest_sabotage=REFUSED causal_rule=manifest_sha256_equal causal_mutant=ADMITTED python_executed=false rust_executed=false material_exec_cell=false production_activation=false parity_open=false claim_ready=false' \
   "$(manifest_value result_receipt_sha256)" \
   "$(sha256sum "$ROOT_DIR/tools/loom/exec_result_handle.freeze.v1" | cut -d ' ' -f 1)")"
 for binding in \
   "sounio_semantics_manifest_sha256:tools/loom/exec_result_handle.freeze.v1" \
+  "sounio_intent_manifest_sha256:tools/loom/exec_intent_envelope.freeze.v1" \
   "operational_result_source_sha256:tools/loom/src/loom_exec_result.ml" \
+  "operational_intent_source_sha256:tools/loom/src/loom_exec_intent.ml" \
   "operational_ingress_source_sha256:tools/loom/src/loom_exec_ingress.ml" \
   "operational_hook_source_sha256:tools/loom/src/loom_hook.ml" \
   "material_ingress_source_sha256:tools/loom/src/loom_product_exec_ingress_host_canary.inc" \

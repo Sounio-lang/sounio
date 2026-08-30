@@ -54,15 +54,23 @@ let required_mode () =
 
 let probe_only () = exact_test_flag "SOUNIO_LOOM_EXEC_INGRESS_PROBE_ONLY"
 
-let event_binding raw_event_sha256 =
-  match Sys.getenv_opt "SOUNIO_LOOM_EXEC_RESULT_EVENT_SHA256" with
-  | None | Some "" -> raw_event_sha256
-  | Some value ->
-      if not (test_mode () && probe_only ()) then
-        failf "product-exec-result-event-override-requires-probe-only";
-      if not (valid_sha256 value) then
-        failf "product-exec-result-event-override-invalid";
-      value
+let event_binding ~root ~command_sha256 raw_event_sha256 =
+  match Sys.getenv_opt "SOUNIO_LOOM_EXEC_INTENT_PROJECTION" with
+  | Some "1" ->
+      let projection =
+        Loom_exec_intent.project ~root ~raw_event_sha256 ~command_sha256
+      in
+      (projection.event_sha256, Some projection)
+  | Some _ -> failf "product-exec-intent-projection-mode-invalid"
+  | None ->
+      (match Sys.getenv_opt "SOUNIO_LOOM_EXEC_RESULT_EVENT_SHA256" with
+      | None | Some "" -> (raw_event_sha256, None)
+      | Some value ->
+          if not (test_mode () && probe_only ()) then
+            failf "product-exec-result-event-override-requires-probe-only";
+          if not (valid_sha256 value) then
+            failf "product-exec-result-event-override-invalid";
+          (value, None))
 
 let utc_now () =
   let tm = Unix.gmtime (Unix.gettimeofday ()) in
@@ -234,7 +242,7 @@ let descriptor_from_environment () =
 let append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
     ~raw_event_sha256 ~command_sha256 ~descriptor_present ~descriptor_bound
     ~peer_pid ~peer_uid ~peer_gid ~peer_distinct_uid ~decision ~reason ~result
-    evaluation =
+    ~intent_projection evaluation =
   let path = audit_path root in
   mkdir_p (Filename.dirname path);
   let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
@@ -273,6 +281,22 @@ let append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
               "authority_sequence=" ^ string_of_int authority.sequence ]
       in
       let line =
+        let intent_fields =
+          match intent_projection with
+          | None ->
+              [ "exec_intent_projected=false"; "exec_intent_action=-";
+                "exec_intent_manifest_sha256=-";
+                "exec_intent_source_sha256=-";
+                "exec_intent_executable_sha256=-";
+                "exec_intent_authority_output_sha256=-" ]
+          | Some (value : Loom_exec_intent.projection) ->
+              [ "exec_intent_projected=true"; "exec_intent_action=9034";
+                "exec_intent_manifest_sha256=" ^ value.manifest_sha256;
+                "exec_intent_source_sha256=" ^ value.source_sha256;
+                "exec_intent_executable_sha256=" ^ value.executable_sha256;
+                "exec_intent_authority_output_sha256=" ^
+                value.authority_output_sha256 ]
+        in
         let result_fields =
           match result with
           | None ->
@@ -311,7 +335,7 @@ let append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
              "event_sha256=" ^ event_sha256;
              "command_sha256=" ^ command_sha256;
              "operational_language=OCaml";
-             "operational_role=OPERATIONAL_ATTACHMENT" ] @ result_fields
+             "operational_role=OPERATIONAL_ATTACHMENT" ] @ intent_fields @ result_fields
              @ activation_fields)
         ^ "\n"
       in
@@ -322,25 +346,28 @@ let append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
 let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command_sha256 =
   if not (valid_sha256 event_sha256 && valid_sha256 command_sha256) then
     failf "product-exec-ingress-digest-invalid";
-  let raw_event_sha256 = event_sha256 in
-  let event_sha256 = event_binding raw_event_sha256 in
   let root = Unix.realpath root in
+  let inherited_descriptor = descriptor_from_environment () in
+  Option.iter Unix.set_close_on_exec inherited_descriptor;
+  let raw_event_sha256 = event_sha256 in
+  let event_sha256, intent_projection =
+    event_binding ~root ~command_sha256 raw_event_sha256
+  in
   let cwd = Unix.realpath cwd in
-  match descriptor_from_environment () with
+  match inherited_descriptor with
   | None ->
       append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
         ~raw_event_sha256 ~command_sha256 ~descriptor_present:false
         ~descriptor_bound:false
         ~peer_pid:0 ~peer_uid:(Unix.geteuid ()) ~peer_gid:(Unix.getegid ())
         ~peer_distinct_uid:false ~decision:"DENY" ~reason:"descriptor-absent"
-        ~result:None None;
+        ~result:None ~intent_projection None;
       if required_mode () then failf "product-exec-ingress-descriptor-absent";
       None
   | Some descriptor ->
       Fun.protect
         ~finally:(fun () -> try Unix.close descriptor with _ -> ())
         (fun () ->
-          Unix.set_close_on_exec descriptor;
           let info = Unix.fstat descriptor in
           if info.st_kind <> S_SOCK then
             failf "product-exec-ingress-descriptor-not-socket";
@@ -363,7 +390,7 @@ let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command_sha256 =
                     ~descriptor_present:true
                     ~descriptor_bound:false ~peer_pid ~peer_uid ~peer_gid
                     ~peer_distinct_uid:false ~decision:"DENY" ~reason
-                    ~result:None None;
+                    ~result:None ~intent_projection None;
                   raise error
           in
           if not peer_admitted
@@ -372,7 +399,8 @@ let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command_sha256 =
               ~raw_event_sha256 ~command_sha256 ~descriptor_present:true
               ~descriptor_bound:false
               ~peer_pid ~peer_uid ~peer_gid ~peer_distinct_uid:false
-              ~decision:"DENY" ~reason:"peer-not-distinct" ~result:None None;
+              ~decision:"DENY" ~reason:"peer-not-distinct" ~result:None
+              ~intent_projection None;
             failf "product-exec-ingress-peer-not-distinct");
           let deadline = Unix.gettimeofday () +. descriptor_deadline_seconds in
           write_all descriptor
@@ -409,9 +437,11 @@ let observe ~root ~agent ~lane ~session_id ~cwd ~event_sha256 ~command_sha256 =
             ~peer_pid ~peer_uid ~peer_gid ~peer_distinct_uid
             ~decision:(if authority.code = 0 then "ALLOW" else "DENY")
             ~reason:(if Option.is_some result then
-                       "descriptor-result-bound-actions-9030+9031+9033"
+                       "descriptor-result-bound-actions-9030+9031+9033+9034"
+                     else if Option.is_some intent_projection then
+                       "descriptor-bound-actions-9031+9034"
                      else "descriptor-bound-action-9031")
-            ~result (Some evaluation);
+            ~result ~intent_projection (Some evaluation);
           if authority.code = 0 then
             failf "product-exec-ingress-dark-unexpected-allow";
           Some

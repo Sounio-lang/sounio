@@ -1162,6 +1162,7 @@ let run arguments =
   with
   | Error message
   | Loom_exec.Error message
+  | Loom_exec_intent.Error message
   | Loom_exec_result.Error message
   | Loom_exec_ingress.Error message
   | Loom_membrane.Error message

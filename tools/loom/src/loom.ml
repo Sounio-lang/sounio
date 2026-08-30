@@ -12201,9 +12201,8 @@ let exec_ingress_probe_command cli =
   let environment =
     match result_policy with
     | None -> environment
-    | Some policy ->
-        set_environment "SOUNIO_LOOM_EXEC_RESULT_EVENT_SHA256"
-          policy.event_sha256 environment
+    | Some _ ->
+        set_environment "SOUNIO_LOOM_EXEC_INTENT_PROJECTION" "1" environment
   in
   let environment =
     if mode = "fixture-escape" then
@@ -12332,6 +12331,31 @@ let exec_result_probe_command cli =
       "exec-result-probe mode must be publish, resolve, command-mismatch, or promote-authority";
   0
 
+let exec_intent_probe_command cli =
+  if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
+    failf "exec-intent-probe requires SOUNIO_LOOM_HOOK_TEST_MODE=1";
+  let root = required cli "--root" |> Unix.realpath in
+  let mode = required cli "--mode" in
+  if mode = "project" then (
+    let projection =
+      Loom_exec_intent.project ~root
+        ~raw_event_sha256:(required cli "--raw-event")
+        ~command_sha256:(required cli "--command")
+    in
+    Printf.printf
+      "LOOM_EXEC_INTENT_PROJECTION mode=project semantic_authority=Sounio action=9034 operational_kernel=OCaml manifest_sha256=%s source_sha256=%s executable_sha256=%s raw_event_sha256=%s event_sha256=%s command_sha256=%s authority_output_sha256=%s raw_event_is_semantic_identity=false ocaml_projection_attached=true provider_lifecycle_attached=false arbitrary_command_projection=false exec_attached=false production_activation=false\n%!"
+      projection.manifest_sha256 projection.source_sha256
+      projection.executable_sha256 projection.raw_event_sha256
+      projection.event_sha256 projection.command_sha256
+      projection.authority_output_sha256)
+  else if mode = "command-mismatch" then (
+    let policy, decision = Loom_exec_intent.command_mismatch_control ~root in
+    Printf.printf
+      "LOOM_EXEC_INTENT_PROJECTION_CONTROL mode=command-mismatch semantic_authority=Sounio action=9034 operational_kernel=OCaml manifest_sha256=%s decision=%s control_refused=true material_mutation=false ocaml_projection_attached=true provider_lifecycle_attached=false arbitrary_command_projection=false exec_attached=false production_activation=false\n%!"
+      policy.manifest_sha256 decision)
+  else failf "exec-intent-probe mode must be project or command-mismatch";
+  0
+
 let exec_result_present_command cli =
   let result =
     Loom_exec_result.validate_transport
@@ -12355,6 +12379,8 @@ let usage () =
     "  exec-ingress-probe --root DIR --mode inherited|forged|missing|fixture-escape|result|result-binding|result-receipt|result-manifest --event FILE [--receipt FILE] (test mode only)\n";
   Printf.eprintf
     "  exec-result-probe --root DIR --store DIR --mode publish|resolve|command-mismatch|promote-authority [--receipt FILE] [--handle HANDLE] (test mode only)\n";
+  Printf.eprintf
+    "  exec-intent-probe --root DIR --mode project|command-mismatch --raw-event SHA --command SHA (test mode only)\n";
   Printf.eprintf
     "  exec-result-present --root DIR --event SHA --command SHA --handle HANDLE --receipt-sha256 SHA --receipt-hex HEX --manifest-sha256 SHA\n";
   Printf.eprintf
@@ -12435,6 +12461,7 @@ let main () =
     | "invocation-cell-probe" -> invocation_cell_probe_command cli
     | "exec-grant-cell-probe" -> exec_grant_cell_probe_command cli
     | "exec-ingress-probe" -> exec_ingress_probe_command cli
+    | "exec-intent-probe" -> exec_intent_probe_command cli
     | "exec-result-probe" -> exec_result_probe_command cli
     | "exec-result-present" -> exec_result_present_command cli
     | "peer-activation-capsule-probe" ->
@@ -12544,6 +12571,7 @@ let () =
   | Loom_effect_closure.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_invocation_cell.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_exec_grant_cell.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
+  | Loom_exec_intent.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_exec_result.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_peer_activation_capsule.Error error ->
       Printf.eprintf "error: %s\n%!" error; exit 1
