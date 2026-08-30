@@ -136,9 +136,10 @@ set -e
    "$host_output" == *'LOOM_HOST_PROCESS_WITNESS_GATE PASS '* && \
    "$host_output" == *'LOOM_PRODUCT_EXEC_INGRESS_DYNAMIC_USER_HOST_GATE PASS '* && \
    "$host_output" == *'loom-product-exec-cell-host: PASS '* && \
+   "$host_output" == *' provider_hook_switched=true provider_lifecycle_attached=true '* && \
    "$host_output" == *'LOOM_HOST_EXEC_QUORUM_EXPERIMENT_INSTALL PASS '* ]] || fail 'host experiment receipts diverged'
 
-transport_receipt="LOOM_HOST_EXEC_QUORUM_TRANSPORT PASS namespace=$NAMESPACE node=$NODE pod=$POD archive_sha256=$EXPECTED_SHA256 promoter_sha256=$PROMOTER_SHA256 transport=kubectl+hostPID+nsenter production_activation=false process_witness_core=true affirmative_extinction=true complete_effects=false product_lane_cell_canary=true distinct_uid_product_broker_canary=true fleet_lane_cell_attached=false product_exec_cell_canary=true exec_cell_attached=true material_grant=true material_execution=true test_only=true launch_open=false parity_open=false claim_ready=false host_output_sha256=$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1)"
+transport_receipt="LOOM_HOST_EXEC_QUORUM_TRANSPORT PASS namespace=$NAMESPACE node=$NODE pod=$POD archive_sha256=$EXPECTED_SHA256 promoter_sha256=$PROMOTER_SHA256 transport=kubectl+hostPID+nsenter production_activation=false process_witness_core=true affirmative_extinction=true complete_effects=false product_lane_cell_canary=true distinct_uid_product_broker_canary=true fleet_lane_cell_attached=false product_exec_cell_canary=true provider_hook_switched=true provider_lifecycle_attached=true provider_fixture_language=OCaml exec_cell_attached=true material_grant=true material_execution=true test_only=true launch_open=false parity_open=false claim_ready=false host_output_sha256=$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1)"
 if [[ -n "$RECEIPT_OUTPUT" ]]; then
   receipt_stage="$(mktemp "$(dirname "$RECEIPT_OUTPUT")/.loom-hostq-receipt.XXXXXX")"
   printf '%s\n%s\n' "$transport_receipt" "$host_output" > "$receipt_stage"

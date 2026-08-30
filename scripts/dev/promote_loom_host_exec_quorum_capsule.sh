@@ -202,6 +202,7 @@ set -e
    "$host_output" == *' intent_action=9034 '* && \
    "$host_output" == *' result_returned=true result_presenter=read-only '* && \
    "$host_output" == *' exact_fixture_hook_switched=true local_exec_capability_used=false '* && \
+   "$host_output" == *' provider_hook_switched=true provider_lifecycle_attached=true provider_fixture_language=OCaml '* && \
    "$host_output" == *' raw_event_separate=true event_projection=Sounio-9034 event_override=false intent_command_mismatch=DENY555 '* && \
    "$host_output" == *' exec_cell_attached=true '* && \
    "$host_output" == *' material_execution=true '* && \
@@ -214,5 +215,5 @@ created_release=false
 cleanup
 trap - EXIT
 printf '%s\n' "$host_output"
-printf 'LOOM_HOST_EXEC_QUORUM_EXPERIMENT_INSTALL PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s experimental_release=%s production_current_unchanged=true production_broker_unchanged=true rollback=identity-operation semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_core=true affirmative_extinction=true complete_effects=false product_lane_cell_canary=true distinct_uid_product_broker_canary=true fleet_lane_cell_attached=false product_exec_cell_canary=true exact_fixture_result_attached=true result_returned=true result_presenter=read-only exact_fixture_hook_switched=true local_exec_capability_used=false event_projection=Sounio-9034 event_override=false intent_command_mismatch=DENY555 exec_cell_attached=true material_grant=true material_execution=true test_only=true production_activation=false launch_open=false parity_open=false claim_ready=false\n' \
+printf 'LOOM_HOST_EXEC_QUORUM_EXPERIMENT_INSTALL PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s experimental_release=%s production_current_unchanged=true production_broker_unchanged=true rollback=identity-operation semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_core=true affirmative_extinction=true complete_effects=false product_lane_cell_canary=true distinct_uid_product_broker_canary=true fleet_lane_cell_attached=false product_exec_cell_canary=true exact_fixture_result_attached=true result_returned=true result_presenter=read-only exact_fixture_hook_switched=true provider_hook_switched=true provider_lifecycle_attached=true provider_fixture_language=OCaml local_exec_capability_used=false event_projection=Sounio-9034 event_override=false intent_command_mismatch=DENY555 exec_cell_attached=true material_grant=true material_execution=true test_only=true production_activation=false launch_open=false parity_open=false claim_ready=false\n' \
   "$EXPECTED_SHA256" "$RELEASE_ID" "$RELEASE_MANIFEST_SHA256" "$HOST_RELEASE"
