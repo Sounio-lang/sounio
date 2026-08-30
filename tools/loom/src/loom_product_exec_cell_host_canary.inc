@@ -1723,7 +1723,8 @@ int selftest_product_exec_cell_host(
       product_root, product_runtime, product_language_runtime,
       product_resident_runtime, systemd_run_path, systemctl_path,
       "current_material", operation_sabotage_command, true, true,
-      ProductIngressReply::Exact, ProductIngressExchangeExpectation::Request,
+      ProductIngressReply::CloseWithoutReply,
+      ProductIngressExchangeExpectation::Request,
       [&](const ProductIngressHostRun& lane) {
         operation_sabotage_callback = true;
         if (lane.command_sha256 == operation_fixtures.command_sha256) {
@@ -1740,15 +1741,18 @@ int selftest_product_exec_cell_host(
             refusal.require("code") == operation_fixtures.command_mismatch_code &&
             refusal.require("quorum_ready") == "false" &&
             refusal.require("controller_terminal") == "true";
-      });
+      },
+      operation_fixtures.event_sha256);
   const ProductIngressHostRun operation_sabotage_lane =
       operation_sabotage_case.execute();
   require_product_case(
-      operation_sabotage_callback && operation_sabotage_denied &&
+          operation_sabotage_callback && operation_sabotage_denied &&
           !operation_sabotage_cell_created &&
-          operation_sabotage_lane.hook_code == 0 &&
+          operation_sabotage_lane.hook_code == 2 &&
           product_contains(operation_sabotage_lane.ingress_log,
                            "exec_intent_action=9035\t") &&
+          product_contains(operation_sabotage_lane.output,
+                           "product-exec-ingress-response-eof") &&
           !product_contains(operation_sabotage_lane.output,
                             "exec-result-record-present"),
       "operation command sabotage created an ExecCell",
