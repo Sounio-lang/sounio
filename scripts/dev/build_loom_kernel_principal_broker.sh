@@ -10,6 +10,8 @@ SOURCE="${SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_SOURCE:-$ROOT_DIR/tools/loom/src/l
 QUORUM_LAB="$ROOT_DIR/tools/loom/src/loom_exec_quorum_lab.inc"
 PROCESS_WITNESS_LAB="$ROOT_DIR/tools/loom/src/loom_process_witness_lab.inc"
 PRODUCT_EXEC_INGRESS_HOST_CANARY="$ROOT_DIR/tools/loom/src/loom_product_exec_ingress_host_canary.inc"
+PRODUCT_EXEC_CELL_HOST_CANARY="$ROOT_DIR/tools/loom/src/loom_product_exec_cell_host_canary.inc"
+CAUSAL_WORKFLOW_HOST_CANARY="$ROOT_DIR/tools/loom/src/loom_causal_workflow_host_canary.inc"
 OUTPUT="${SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT:-$ROOT_DIR/tools/loom/_build/default/src/loom-kernel-principal-broker}"
 
 fail() {
@@ -22,6 +24,8 @@ command -v "$CXX" >/dev/null 2>&1 || fail "C++ compiler is missing: $CXX"
 [[ -f "$QUORUM_LAB" && ! -L "$QUORUM_LAB" ]] || fail 'ExecQuorum broker module is absent or linked'
 [[ -f "$PROCESS_WITNESS_LAB" && ! -L "$PROCESS_WITNESS_LAB" ]] || fail 'ProcessWitness broker module is absent or linked'
 [[ -f "$PRODUCT_EXEC_INGRESS_HOST_CANARY" && ! -L "$PRODUCT_EXEC_INGRESS_HOST_CANARY" ]] || fail 'product ExecIngress host-canary module is absent or linked'
+[[ -f "$PRODUCT_EXEC_CELL_HOST_CANARY" && ! -L "$PRODUCT_EXEC_CELL_HOST_CANARY" ]] || fail 'product ExecCell host-canary module is absent or linked'
+[[ -f "$CAUSAL_WORKFLOW_HOST_CANARY" && ! -L "$CAUSAL_WORKFLOW_HOST_CANARY" ]] || fail 'causal workflow host-canary module is absent or linked'
 mkdir -p "$(dirname "$OUTPUT")"
 
 stage="$(mktemp "${TMPDIR:-/tmp}/loom-kernel-principal-broker.XXXXXX")"

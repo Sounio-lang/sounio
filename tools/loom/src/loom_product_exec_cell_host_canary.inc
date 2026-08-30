@@ -666,6 +666,102 @@ class HostSounioCheckCell {
     return observation;
   }
 
+  std::string seal_artifact(
+      const std::string& store_root,
+      const HostSounioCheckObservation& observation) const {
+    if (!observation.artifact_measured ||
+        observation.artifact_sha256 != kFrozenOperationArtifactSha256 ||
+        !authenticated_before_arm()) {
+      throw Error("operation ExecCell artifact not sealable");
+    }
+    const std::string store = canonical_path(store_root);
+    struct stat store_info {};
+    if (lstat(store.c_str(), &store_info) != 0 ||
+        !S_ISDIR(store_info.st_mode) || store_info.st_uid != 0 ||
+        store_info.st_gid != 0 || (store_info.st_mode & 0777) != 0700) {
+      throw Error("operation artifact store metadata unsafe");
+    }
+    const std::string artifacts = store + "/artifacts";
+    struct stat artifacts_info {};
+    if (mkdir(artifacts.c_str(), 0700) != 0 && errno != EEXIST) {
+      throw Error("cannot create operation artifact store");
+    }
+    if (lstat(artifacts.c_str(), &artifacts_info) != 0 ||
+        !S_ISDIR(artifacts_info.st_mode) || artifacts_info.st_uid != 0 ||
+        artifacts_info.st_gid != 0 ||
+        (artifacts_info.st_mode & 0777) != 0700) {
+      throw Error("operation artifact directory metadata unsafe");
+    }
+    const std::string source =
+        cell_storage_path() + "/loom-sounio-check-" +
+        observation.source_sha256.substr(0, 16) + ".elf";
+    if (file_sha256(source) != observation.artifact_sha256) {
+      throw Error("operation artifact changed before Guardian seal");
+    }
+    const std::string target =
+        artifacts + "/" + observation.artifact_sha256 + ".elf";
+    struct stat target_info {};
+    if (lstat(target.c_str(), &target_info) == 0) {
+      if (!S_ISREG(target_info.st_mode) || target_info.st_uid != 0 ||
+          target_info.st_gid != 0 || target_info.st_nlink != 1 ||
+          (target_info.st_mode & 0777) != 0555 ||
+          file_sha256(target) != observation.artifact_sha256) {
+        throw Error("existing operation artifact seal disagreed");
+      }
+      return target;
+    }
+    if (errno != ENOENT) throw Error("operation artifact target stat failed");
+    const std::string temporary =
+        artifacts + "/.artifact-" + std::to_string(getpid()) + "-" + nonce_;
+    UniqueFd input(open(source.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    UniqueFd output(open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL |
+                                               O_CLOEXEC | O_NOFOLLOW,
+                         0600));
+    if (input.get() < 0 || output.get() < 0) {
+      unlink(temporary.c_str());
+      throw Error("cannot open operation artifact seal descriptors");
+    }
+    std::array<char, 64 * 1024> bytes{};
+    for (;;) {
+      const ssize_t count = read(input.get(), bytes.data(), bytes.size());
+      if (count > 0) {
+        std::size_t offset = 0;
+        while (offset < static_cast<std::size_t>(count)) {
+          const ssize_t written =
+              write(output.get(), bytes.data() + offset,
+                    static_cast<std::size_t>(count) - offset);
+          if (written > 0) {
+            offset += static_cast<std::size_t>(written);
+          } else if (written < 0 && errno != EINTR) {
+            unlink(temporary.c_str());
+            throw Error("operation artifact seal write failed");
+          }
+        }
+      } else if (count == 0) {
+        break;
+      } else if (errno != EINTR) {
+        unlink(temporary.c_str());
+        throw Error("operation artifact seal read failed");
+      }
+    }
+    if (fsync(output.get()) != 0 || fchmod(output.get(), 0555) != 0 ||
+        fsync(output.get()) != 0 ||
+        link(temporary.c_str(), target.c_str()) != 0 ||
+        unlink(temporary.c_str()) != 0) {
+      unlink(temporary.c_str());
+      unlink(target.c_str());
+      throw Error("operation artifact atomic seal failed");
+    }
+    UniqueFd directory(open(artifacts.c_str(), O_RDONLY | O_DIRECTORY |
+                                                  O_CLOEXEC | O_NOFOLLOW));
+    if (directory.get() < 0 || fsync(directory.get()) != 0 ||
+        file_sha256(target) != observation.artifact_sha256) {
+      unlink(target.c_str());
+      throw Error("operation artifact seal did not persist");
+    }
+    return target;
+  }
+
   void close(HostSounioCheckObservation& observation,
              const std::string& close_receipt_sha256) {
     if (finished_) throw Error("operation ExecCell CLOSE already consumed");

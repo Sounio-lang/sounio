@@ -1941,6 +1941,7 @@ int serve(const std::string& manifest_path, const std::string& authority_path,
 #include "loom_process_witness_lab.inc"
 #include "loom_product_exec_ingress_host_canary.inc"
 #include "loom_product_exec_cell_host_canary.inc"
+#include "loom_causal_workflow_host_canary.inc"
 
 struct Options {
   std::string mode;
@@ -1975,6 +1976,13 @@ struct Options {
   std::string operation_fixture_bundle;
   std::string operation_catalog_manifest;
   std::string operation_result_manifest;
+  std::string causal_run_grant_manifest;
+  std::string causal_run_grant_bundle;
+  std::string causal_attest_grant_manifest;
+  std::string causal_attest_grant_bundle;
+  std::string causal_workflow_manifest;
+  std::string causal_material_cell;
+  std::string causal_material_store;
   std::string systemd_run;
   std::string systemctl;
   std::string frame;
@@ -2053,6 +2061,20 @@ Options parse_options(int argc, char** argv) {
       options.operation_catalog_manifest = value;
     } else if (argument == "--operation-result-manifest") {
       options.operation_result_manifest = value;
+    } else if (argument == "--causal-run-grant-manifest") {
+      options.causal_run_grant_manifest = value;
+    } else if (argument == "--causal-run-grant-bundle") {
+      options.causal_run_grant_bundle = value;
+    } else if (argument == "--causal-attest-grant-manifest") {
+      options.causal_attest_grant_manifest = value;
+    } else if (argument == "--causal-attest-grant-bundle") {
+      options.causal_attest_grant_bundle = value;
+    } else if (argument == "--causal-workflow-manifest") {
+      options.causal_workflow_manifest = value;
+    } else if (argument == "--causal-material-cell") {
+      options.causal_material_cell = value;
+    } else if (argument == "--causal-material-store") {
+      options.causal_material_store = value;
     } else if (argument == "--systemd-run") {
       options.systemd_run = value;
     } else if (argument == "--systemctl") {
@@ -2163,6 +2185,25 @@ void require_product_exec_cell_host_artifacts(const Options& options) {
   }
 }
 
+void require_causal_workflow_material_host_artifacts(const Options& options) {
+  if (options.controller_runtime.empty() || options.controller_root.empty() ||
+      options.resident_runtime.empty() || options.product_root.empty() ||
+      options.product_runtime.empty() || options.operation_fixture_manifest.empty() ||
+      options.operation_fixture_bundle.empty() ||
+      options.operation_catalog_manifest.empty() ||
+      options.operation_result_manifest.empty() ||
+      options.causal_run_grant_manifest.empty() ||
+      options.causal_run_grant_bundle.empty() ||
+      options.causal_attest_grant_manifest.empty() ||
+      options.causal_attest_grant_bundle.empty() ||
+      options.causal_workflow_manifest.empty() ||
+      options.causal_material_cell.empty() ||
+      options.causal_material_store.empty() || options.systemd_run.empty() ||
+      options.systemctl.empty()) {
+    throw Error("causal workflow material host artifacts are required");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2245,6 +2286,22 @@ int main(int argc, char** argv) {
           options.operation_fixture_bundle,
           options.operation_catalog_manifest,
           options.operation_result_manifest, options.systemd_run,
+          options.systemctl);
+    }
+    if (options.mode == "--selftest-causal-workflow-material-host") {
+      require_causal_workflow_material_host_artifacts(options);
+      return selftest_causal_workflow_material_host(
+          options.controller_root, options.controller_runtime,
+          options.resident_runtime, options.product_root,
+          options.product_runtime, options.operation_fixture_manifest,
+          options.operation_fixture_bundle, options.operation_catalog_manifest,
+          options.operation_result_manifest,
+          options.causal_run_grant_manifest,
+          options.causal_run_grant_bundle,
+          options.causal_attest_grant_manifest,
+          options.causal_attest_grant_bundle,
+          options.causal_workflow_manifest, options.causal_material_cell,
+          options.causal_material_store, options.systemd_run,
           options.systemctl);
     }
     if (options.mode == "--selftest-journal") {
