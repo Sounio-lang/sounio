@@ -40,7 +40,7 @@ parent="$(dirname "$OUTPUT")"
 mkdir -p "$parent"
 [[ -d "$parent" && ! -L "$parent" ]] || fail 'capsule output parent is absent or linked'
 
-for tool in git sha256sum stat install mktemp find sort chmod mv cp c++ ocamlfind; do
+for tool in git sha256sum stat install mktemp find sort chmod mv cp c++ ocamlfind dune; do
   command -v "$tool" >/dev/null 2>&1 || fail "required build tool is absent: $tool"
 done
 
@@ -220,6 +220,9 @@ SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_OUTPUT="$BIN/sounio-loom-resident-membrane-runt
   fail 'resident runtime is not reproducible from its frozen dependency commit'
 SOUNIO_LOOM_PRODUCT_EXEC_CELL_FIXTURE_OUTPUT="$BIN/sounio-loom-product-exec-cell-fixture" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_product_exec_cell_fixture.sh" >/dev/null
+dune build --root "$ROOT_DIR/tools/loom" src/loom.exe >/dev/null
+install -m 0555 "$ROOT_DIR/tools/loom/_build/default/src/loom.exe" \
+  "$BIN/sounio-loom-runtime"
 
 operation_fixture="$WORK/operation-fixture"
 SOUNIO_LOOM_EXEC_OPERATION_GRANT_FIXTURE_OUTPUT="$operation_fixture" \
@@ -293,7 +296,13 @@ authority_root_path=release/authority-root
 broker_path=release/bin/loom-kernel-principal-broker
 controller_runtime_path=release/bin/loom-exec-grant-controller
 resident_runtime_path=release/bin/sounio-loom-resident-membrane-runtime-v4
-product_runtime_path=release/bin/sounio-loom-product-exec-cell-fixture
+product_runtime_path=release/bin/sounio-loom-runtime
+product_runtime_sha256=$(sha256_file "$BIN/sounio-loom-runtime")
+product_runtime_language=OCaml
+product_runtime_role=EFFECT_PARITY
+product_fixture_runtime_path=release/bin/sounio-loom-product-exec-cell-fixture
+product_fixture_runtime_language=Sounio
+product_fixture_runtime_role=SEMANTIC_FIXTURE_PRODUCER
 material_cell_path=release/bin/loom-causal-workflow-material-cell
 journal_runtime_path=release/bin/loom-causal-workflow-journal-fixture
 causal_workflow_runtime_path=release/authority-root/tools/loom/_build/default/src/sounio-loom-causal-workflow-kernel

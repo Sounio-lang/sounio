@@ -108,7 +108,7 @@ require_payload_entry() {
   [[ "$count" == 1 ]] || fail "selected path is not uniquely inventoried: $field=$count"
 }
 
-for required in broker_path controller_runtime_path resident_runtime_path product_runtime_path \
+for required in broker_path controller_runtime_path resident_runtime_path product_runtime_path product_fixture_runtime_path \
   material_cell_path journal_runtime_path causal_workflow_runtime_path operation_fixture_manifest_path \
   operation_fixture_bundle_path operation_catalog_manifest_path operation_result_manifest_path \
   causal_run_grant_manifest_path causal_run_grant_bundle_path causal_attest_grant_manifest_path \
@@ -125,6 +125,13 @@ RELEASE="$CAPSULE/$(record_value "$MANIFEST" release_path)"
 AUTHORITY_ROOT="$CAPSULE/$(record_value "$MANIFEST" authority_root_path)"
 BROKER="$CAPSULE/$(record_value "$MANIFEST" broker_path)"
 [[ -d "$RELEASE" && -d "$AUTHORITY_ROOT/.git" && -x "$BROKER" ]] || fail 'capsule release topology drifted'
+PRODUCT_RUNTIME="$CAPSULE/$(record_value "$MANIFEST" product_runtime_path)"
+[[ "$(record_value "$MANIFEST" product_runtime_language)" == OCaml &&
+   "$(record_value "$MANIFEST" product_runtime_role)" == EFFECT_PARITY &&
+   "$(record_value "$MANIFEST" product_fixture_runtime_language)" == Sounio &&
+   "$(record_value "$MANIFEST" product_fixture_runtime_role)" == SEMANTIC_FIXTURE_PRODUCER &&
+   "$(record_value "$MANIFEST" product_runtime_sha256)" == "$(sha256_file "$PRODUCT_RUNTIME")" ]] ||
+  fail 'product ExecCell operational runtime provenance drifted'
 CONTROLLER_RUNTIME="$CAPSULE/$(record_value "$MANIFEST" controller_runtime_path)"
 RESIDENT_RUNTIME="$CAPSULE/$(record_value "$MANIFEST" resident_runtime_path)"
 CONTROLLER_RUNTIME_MANIFEST="$CAPSULE/$(record_value "$MANIFEST" controller_runtime_manifest_path)"
@@ -169,7 +176,7 @@ output="$(timeout --signal=TERM --kill-after=10s 420s "$BROKER" --selftest-causa
   --controller-runtime "$CONTROLLER_RUNTIME" \
   --resident-runtime "$RESIDENT_RUNTIME" \
   --product-root "$AUTHORITY_ROOT" \
-  --product-runtime "$CAPSULE/$(record_value "$MANIFEST" product_runtime_path)" \
+  --product-runtime "$PRODUCT_RUNTIME" \
   --operation-fixture-manifest "$CAPSULE/$(record_value "$MANIFEST" operation_fixture_manifest_path)" \
   --operation-fixture-bundle "$CAPSULE/$(record_value "$MANIFEST" operation_fixture_bundle_path)" \
   --operation-catalog-manifest "$CAPSULE/$(record_value "$MANIFEST" operation_catalog_manifest_path)" \
