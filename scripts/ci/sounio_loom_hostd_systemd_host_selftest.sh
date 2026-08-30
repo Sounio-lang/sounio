@@ -267,6 +267,7 @@ if [[ "$PHASE" == prepare ]]; then
      "$(sha256_file "$EXEC_CELL_CAPSULE")" == \
        "$EXEC_CELL_CAPSULE_SHA256" ]] ||
     fail 'staged installed topology is incomplete'
+  set +e
   bash "$INSTALLER" --prefix "$PREFIX" --state-dir "$STATE_DIR" \
     --unit-dir /etc/systemd/system --unit-name "$HOSTD_UNIT" --user root \
     --runtime "$STAGED_PREFIX/bin/sounio-loom-runtime" \
@@ -276,6 +277,10 @@ if [[ "$PHASE" == prepare ]]; then
     --exec-cell-capsule "$EXEC_CELL_CAPSULE" \
     --exec-cell-capsule-sha256 "$EXEC_CELL_CAPSULE_SHA256" --activate \
     > "$ROOT/install.out" 2> "$ROOT/install.err"
+  install_status=$?
+  set -e
+  [[ $install_status -eq 0 ]] ||
+    fail "activated installer refused status=$install_status stdout=$(tr '\n' ',' < "$ROOT/install.out") stderr=$(tr '\n' ',' < "$ROOT/install.err")"
   mkdir -m 0700 "$WORK_DIR"
   [[ "$(systemctl is-enabled "$HOSTD_UNIT")" == enabled ]] ||
     fail 'installer did not enable the canary unit'
