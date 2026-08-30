@@ -11,6 +11,7 @@ STATE_DIR="$TEST_ROOT/state"
 SESSION_ID='11111111-1111-4111-8111-111111111111'
 AGENT='provider-abi-test'
 LANE='codex-headless'
+WAIT_LANE='codex-headless-wait'
 PERSISTENT_LANE='codex-persistent'
 CLAUDE_PERSISTENT_LANE='claude-persistent'
 CLAUDE_RESUME_LANE='claude-resume'
@@ -25,6 +26,8 @@ fail() {
 cleanup() {
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
     --agent "$AGENT" --lane "$LANE" >/dev/null 2>&1 || true
+  "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+    --agent "$AGENT" --lane "$WAIT_LANE" >/dev/null 2>&1 || true
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
     --agent "$AGENT" --lane "$PERSISTENT_LANE" >/dev/null 2>&1 || true
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
@@ -171,7 +174,7 @@ export SOUNIO_LOOM_PROVIDER_OPENCODE="$TEST_ROOT/fake-opencode"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 version="$($LOOM runtime-version)"
-grep -q '^runtime_version=2026.08.27.39$' <<< "$version" || \
+grep -q '^runtime_version=2026.08.30.42$' <<< "$version" || \
   fail 'public loom launcher selected the wrong runtime'
 
 providers="$($LOOM provider-list --json)"
@@ -460,6 +463,17 @@ grep -q "FAKE_CODEX_OUTPUT:$run_prompt" <<< "$replay" || \
   fail 'provider output was not durably replayable'
 grep -q 'source=offline' "$TEST_ROOT/snapshot.meta" || \
   fail 'terminal provider replay did not use verified offline custody'
+
+wait_prompt='PROVIDER_ABI_WAIT_WITNESS'
+"$LOOM" provider-start --wait --provider codex --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$WAIT_LANE" --session-id "$SESSION_ID" \
+  --cwd "$TEST_ROOT" --prompt "$wait_prompt" --isolate-context \
+  > "$TEST_ROOT/wait-start.out"
+wait_descriptor="$STATE_DIR/sessions/$AGENT--$WAIT_LANE/session.state"
+[[ "$(sed -n 's/^state=//p' "$wait_descriptor")" == exited ]] || \
+  fail 'provider-start --wait returned before the provider reached terminal state'
+grep -q "FAKE_CODEX_OUTPUT:$wait_prompt" "$TEST_ROOT/wait-start.out" || \
+  fail 'provider-start --wait did not relay provider output'
 
 kimi_run_prompt='KIMI_ABI_RUN_WITNESS'
 CODEX_SESSION_ID=parent-session CODEX_THREAD_ID=parent-thread CODEX_CI=1 \

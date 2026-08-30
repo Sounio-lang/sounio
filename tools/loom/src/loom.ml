@@ -8419,7 +8419,22 @@ let provider_start_command cli =
     plan.plan_spec.provider_session_binding (sha256 plan.plan_prompt)
     (command_argv_digest (Array.of_list plan.plan_argv))
     (if plan.plan_unsafe_auto then "true" else "false")
-    (if plan.plan_context_isolation then "true" else "false")
+    (if plan.plan_context_isolation then "true" else "false");
+  if flag cli "--wait" then (
+    stream_command cli false;
+    let _, paths = session_locator cli in
+    let deadline = Unix.gettimeofday () +. 30.0 in
+    let rec await_terminal_state () =
+      let values = parse_key_values paths.descriptor_path in
+      match table_value values "state" with
+      | "exited" -> ()
+      | "active" when Unix.gettimeofday () < deadline ->
+          Unix.sleepf 0.01;
+          await_terminal_state ()
+      | "active" -> failf "provider-wait-terminal-state-timeout"
+      | state -> failf "provider-wait-invalid-terminal-state:%s" state
+    in
+    await_terminal_state ())
 
 let provider_open_command cli =
   let plan = provider_plan cli "persistent" in
@@ -12376,6 +12391,8 @@ let usage () =
     "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  host-enroll --agent A --lane L [--replace] [--state-dir DIR]\n  host-reconcile [--agent A --lane L] [--apply] [--service-enabled] [--state-dir DIR]\n  host-supervise [--once] [--interval-seconds N] [--apply] [--service-enabled] [--state-dir DIR]\n  host-verify --agent A --lane L [--state-dir DIR]\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
   Printf.eprintf
+    "  provider-start accepts --wait to observe the turn until terminal state\n";
+  Printf.eprintf
     "  exec-ingress-probe --root DIR --mode inherited|forged|missing|fixture-escape|result|result-binding|result-receipt|result-manifest --event FILE [--receipt FILE] (test mode only)\n";
   Printf.eprintf
     "  exec-result-probe --root DIR --store DIR --mode publish|resolve|command-mismatch|promote-authority [--receipt FILE] [--handle HANDLE] (test mode only)\n";
@@ -12448,7 +12465,7 @@ let main () =
       let booleans =
         [ "--no-raw"; "--meta"; "--machine"; "--allow-remote"; "--apply";
           "--replace"; "--adopt-active"; "--json"; "--once"; "--unsafe-auto";
-          "--isolate-context"; "--service-enabled" ]
+          "--isolate-context"; "--service-enabled"; "--wait" ]
       in
       let cli = parse_cli booleans (arguments_after_command ()) in
       match command with
