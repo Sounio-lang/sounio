@@ -1,0 +1,312 @@
+//@ run-pass
+//@ exit-code: 0
+//@ description: RQ4 (a) — probabilistic adequacy: Monte Carlo sampling truth vs first-order affine truth vs the naive ep_* chain, same 5 000-patient cohort, two-compartment vancomycin AUC24 WARN rule
+//! The four external reviewers of the NS mechanization left one item open: "probabilistic
+//! adequacy" — the affine forms are first-order truth, not sampling truth. The RQ4 cohort's
+//! 300× over-statement of the naive chain is measured against first-order truth. This program
+//! measures both against a Monte Carlo of the same chain:
+//!
+//!   per patient, K samples of (weight, SCr, Q, Vp) ~ Normal(nominal, u) (Irwin–Hall 12-sum,
+//!   deterministic LCG), the two-compartment AUC24 = A/α + B/β evaluated in plain f64 per sample,
+//!   then  mean_MC, Var_MC, and  P_MC[AUC < 400].
+//!
+//! Decision rules (point estimate = the nominal chain value in every case):
+//!   T      WARN iff point ≥ 400 and point − 2·sd_T  < 400   (affine, first-order)
+//!   N      WARN iff point ≥ 400 and point − 2·sd_N  < 400   (naive scalar ep_* chain, inline)
+//!   MC-sd  WARN iff point ≥ 400 and point − 2·sd_MC < 400   (sampling variance, same rule)
+//!   MC-q   WARN iff point ≥ 400 and P_MC[AUC < 400] > 0.025 (sampling quantile — no normality)
+//!
+//! Reported: WARN counts under each rule; agreement of T and N with MC-sd and MC-q; the mean
+//! variance ratios Var_MC/Var_T and Var_N/Var_MC. Runs under Madaros and lean_single (no
+//! stdlib import of knowledge.sio: the naive rules are inlined verbatim from it).
+
+use epistemic::affine::{af_measured, af_const, af_add, af_sub, af_scale, af_mul, af_div, af_sqrt, af_value, af_variance}
+
+fn nsqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 24 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// ── plain-value two-compartment chain (one sample) ──────────────────────────
+fn auc_value(w: f64, scr: f64, q: f64, vp: f64, dose: f64) -> f64 with Mut, Div, Panic {
+    let crcl = 75.0 * w / (72.0 * scr)
+    let cl = 0.695 * (crcl * 0.06) + 0.05
+    let vc = 0.5 * w
+    let k10 = cl / vc
+    let k12 = q / vc
+    let k21 = q / vp
+    let s = k10 + k12 + k21
+    let p = k10 * k21
+    let disc = nsqrt(s * s - 4.0 * p)
+    let alpha = 0.5 * (s + disc)
+    let beta = 0.5 * (s - disc)
+    let dvc = dose / vc
+    let ca = (alpha - k21) / (alpha - beta)
+    let cb = (k21 - beta) / (alpha - beta)
+    let a_ = dvc * ca
+    let b_ = dvc * cb
+    2.0 * (a_ / alpha + b_ / beta)
+}
+
+// ── naive scalar chain, the ep_* rules of stdlib/epistemic/knowledge.sio inlined ──
+struct Ep { v: f64, vr: f64 }
+fn ep_m(v: f64, sd: f64) -> Ep { Ep { v: v, vr: sd * sd } }
+fn ep_c(v: f64) -> Ep { Ep { v: v, vr: 0.0 } }
+fn ep_add_(a: &Ep, b: &Ep) -> Ep { Ep { v: a.v + b.v, vr: a.vr + b.vr } }
+fn ep_sub_(a: &Ep, b: &Ep) -> Ep { Ep { v: a.v - b.v, vr: a.vr + b.vr } }
+fn ep_mul_(a: &Ep, b: &Ep) -> Ep { Ep { v: a.v * b.v, vr: b.v * b.v * a.vr + a.v * a.v * b.vr } }
+fn ep_div_(a: &Ep, b: &Ep) -> Ep with Div, Panic {
+    let y2 = b.v * b.v
+    Ep { v: a.v / b.v, vr: a.vr / y2 + a.v * a.v * b.vr / (y2 * y2) }
+}
+fn ep_scale_(a: &Ep, c: f64) -> Ep { Ep { v: a.v * c, vr: a.vr * c * c } }
+fn ep_sqrt_(a: &Ep) -> Ep with Mut, Div, Panic {
+    let r = nsqrt(a.v)
+    let nv = if a.v > 0.0 { a.vr / (4.0 * a.v) } else { 0.0 }
+    Ep { v: r, vr: nv }
+}
+
+fn naive_cl(w: &Ep, sc: &Ep) -> Ep with Mut, Div, Panic {
+    let w75 = ep_scale_(w, 75.0)
+    let s72 = ep_scale_(sc, 72.0)
+    let crcl = ep_div_(&w75, &s72)
+    let renal = ep_scale_(&crcl, 0.06 * 0.695)
+    let nr = ep_c(0.05)
+    ep_add_(&renal, &nr)
+}
+fn naive_root(k10: &Ep, k12: &Ep, k21: &Ep, which: i64) -> Ep with Mut, Div, Panic {
+    let s01 = ep_add_(k10, k12)
+    let s = ep_add_(&s01, k21)
+    let p = ep_mul_(k10, k21)
+    let s2 = ep_mul_(&s, &s)
+    let p4 = ep_scale_(&p, 4.0)
+    let rad = ep_sub_(&s2, &p4)
+    let disc = ep_sqrt_(&rad)
+    if which == 0 { let spd = ep_add_(&s, &disc); return ep_scale_(&spd, 0.5) }
+    let smd = ep_sub_(&s, &disc)
+    ep_scale_(&smd, 0.5)
+}
+fn naive_phase(dvc: &Ep, alpha: &Ep, beta: &Ep, k21: &Ep, which: i64) -> Ep with Mut, Div, Panic {
+    let amb = ep_sub_(alpha, beta)
+    if which == 0 {
+        let amk = ep_sub_(alpha, k21)
+        let ca = ep_div_(&amk, &amb)
+        let a_ = ep_mul_(dvc, &ca)
+        let aa = ep_div_(&a_, alpha)
+        return ep_scale_(&aa, 2.0)
+    }
+    let kmb = ep_sub_(k21, beta)
+    let cb = ep_div_(&kmb, &amb)
+    let b_ = ep_mul_(dvc, &cb)
+    let bb = ep_div_(&b_, beta)
+    ep_scale_(&bb, 2.0)
+}
+// variance of the naive chain's AUC24 (phase sum with independence assumed everywhere)
+fn naive_auc_var(w: f64, scr: f64, q: f64, vp: f64, dose: f64) -> f64 with Mut, Div, Panic {
+    let ew = ep_m(w, 1.0)
+    let es = ep_m(scr, 0.10 * scr)
+    let eq = ep_m(q, 0.20 * q)
+    let ev = ep_m(vp, 0.20 * vp)
+    let cl = naive_cl(&ew, &es)
+    let vc = ep_scale_(&ew, 0.5)
+    let k10 = ep_div_(&cl, &vc)
+    let k12 = ep_div_(&eq, &vc)
+    let k21 = ep_div_(&eq, &ev)
+    let alpha = naive_root(&k10, &k12, &k21, 0)
+    let beta = naive_root(&k10, &k12, &k21, 1)
+    let d = ep_c(dose)
+    let dvc = ep_div_(&d, &vc)
+    let pa = naive_phase(&dvc, &alpha, &beta, &k21, 0)
+    let pb = naive_phase(&dvc, &alpha, &beta, &k21, 1)
+    let auc = ep_add_(&pa, &pb)
+    auc.vr
+}
+
+// ── affine (first-order) chain: variance of AUC24 via the phase sum ──────────
+fn aff_cl(w: &Affine, sc: &Affine) -> Affine with Mut, Div, Panic {
+    let w75 = af_scale(w, 75.0)
+    let s72 = af_scale(sc, 72.0)
+    let crcl = af_div(&w75, &s72)
+    let renal = af_scale(&crcl, 0.06 * 0.695)
+    let nr = af_const(0.05)
+    af_add(&renal, &nr)
+}
+fn aff_root(k10: &Affine, k12: &Affine, k21: &Affine, which: i64) -> Affine with Mut, Div, Panic {
+    let s01 = af_add(k10, k12)
+    let s = af_add(&s01, k21)
+    let p = af_mul(k10, k21)
+    let s2 = af_mul(&s, &s)
+    let p4 = af_scale(&p, 4.0)
+    let rad = af_sub(&s2, &p4)
+    let disc = af_sqrt(&rad)
+    if which == 0 { let spd = af_add(&s, &disc); return af_scale(&spd, 0.5) }
+    let smd = af_sub(&s, &disc)
+    af_scale(&smd, 0.5)
+}
+fn aff_phase(dvc: &Affine, alpha: &Affine, beta: &Affine, k21: &Affine, which: i64) -> Affine with Mut, Div, Panic {
+    let amb = af_sub(alpha, beta)
+    if which == 0 {
+        let amk = af_sub(alpha, k21)
+        let ca = af_div(&amk, &amb)
+        let a_ = af_mul(dvc, &ca)
+        let aa = af_div(&a_, alpha)
+        return af_scale(&aa, 2.0)
+    }
+    let kmb = af_sub(k21, beta)
+    let cb = af_div(&kmb, &amb)
+    let b_ = af_mul(dvc, &cb)
+    let bb = af_div(&b_, beta)
+    af_scale(&bb, 2.0)
+}
+fn aff_auc(w: f64, scr: f64, q: f64, vp: f64, dose: f64) -> Affine with Mut, Div, Panic {
+    let aw = af_measured(w, 1.0, 0)
+    let as_ = af_measured(scr, 0.10 * scr, 1)
+    let aq = af_measured(q, 0.20 * q, 2)
+    let av = af_measured(vp, 0.20 * vp, 3)
+    let cl = aff_cl(&aw, &as_)
+    let vc = af_scale(&aw, 0.5)
+    let k10 = af_div(&cl, &vc)
+    let k12 = af_div(&aq, &vc)
+    let k21 = af_div(&aq, &av)
+    let alpha = aff_root(&k10, &k12, &k21, 0)
+    let beta = aff_root(&k10, &k12, &k21, 1)
+    let d = af_const(dose)
+    let dvc = af_div(&d, &vc)
+    let pa = aff_phase(&dvc, &alpha, &beta, &k21, 0)
+    let pb = aff_phase(&dvc, &alpha, &beta, &k21, 1)
+    af_add(&pa, &pb)
+}
+
+// ── deterministic sampling ───────────────────────────────────────────────────
+fn lcg(seed: i64) -> i64 { (seed * 1103515245 + 12345) % 2147483648 }
+fn unit(seed: i64) -> f64 with Div { (seed % 1000000) as f64 / 1000000.0 }
+
+// Irwin–Hall: sum of 12 U(0,1) − 6 ≈ N(0,1) (kurtosis −0.1; adequate for a ±2σ rule)
+struct Draw { z: f64, seed: i64 }
+fn normal(seed: i64) -> Draw with Mut, Div {
+    var s = seed
+    var acc = 0.0
+    var i: i64 = 0
+    while i < 12 { s = lcg(s); acc = acc + unit(s); i = i + 1 }
+    Draw { z: acc - 6.0, seed: s }
+}
+
+fn warn(point: f64, sd: f64) -> i64 {
+    if point >= 400.0 && point - 2.0 * sd < 400.0 { 1 } else { 0 }
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let n: i64 = 5000
+    let k: i64 = 1000
+    let dose = 500.0
+    var seed: i64 = 20260831        // the RQ4 cohort seed: same 5 000 nominal patients
+    var mseed: i64 = 8311971         // independent stream for the Monte Carlo draws
+    var i: i64 = 0
+    var w_t: i64 = 0
+    var w_n: i64 = 0
+    var w_mcsd: i64 = 0
+    var w_mcq: i64 = 0
+    var t_and_mcsd: i64 = 0
+    var t_only_vs_mcsd: i64 = 0
+    var mcsd_only_vs_t: i64 = 0
+    var t_and_mcq: i64 = 0
+    var t_only_vs_mcq: i64 = 0
+    var mcq_only_vs_t: i64 = 0
+    var n_and_mcq: i64 = 0
+    var n_only_vs_mcq: i64 = 0
+    var mcq_only_vs_n: i64 = 0
+    var ratio_mc_t_acc = 0.0
+    var ratio_n_mc_acc = 0.0
+    var maxratio_mc_t = 0.0
+    var minratio_mc_t = 1000.0
+    var in_window: i64 = 0
+
+    while i < n {
+        seed = lcg(seed); let weight = 45.0 + 75.0 * unit(seed)
+        seed = lcg(seed); let scr = 0.6 + 2.0 * unit(seed)
+        seed = lcg(seed); let q = 7.0 * (0.7 + 0.6 * unit(seed))
+        seed = lcg(seed); let vp = 0.5 * weight * (0.7 + 0.6 * unit(seed))
+
+        let point = auc_value(weight, scr, q, vp, dose)
+        let aff = aff_auc(weight, scr, q, vp, dose)
+        let var_t = af_variance(&aff)
+        let var_n = naive_auc_var(weight, scr, q, vp, dose)
+
+        // Monte Carlo
+        var j: i64 = 0
+        var sum = 0.0
+        var sum2 = 0.0
+        var below: i64 = 0
+        while j < k {
+            let d1 = normal(mseed); mseed = d1.seed
+            let d2 = normal(mseed); mseed = d2.seed
+            let d3 = normal(mseed); mseed = d3.seed
+            let d4 = normal(mseed); mseed = d4.seed
+            var ws = weight + 1.0 * d1.z
+            var ss = scr + 0.10 * scr * d2.z
+            var qs = q + 0.20 * q * d3.z
+            var vs = vp + 0.20 * vp * d4.z
+            if ws < 20.0 { ws = 20.0 }
+            if ss < 0.2 { ss = 0.2 }
+            if qs < 0.5 { qs = 0.5 }
+            if vs < 2.0 { vs = 2.0 }
+            let a = auc_value(ws, ss, qs, vs, dose)
+            sum = sum + a
+            sum2 = sum2 + a * a
+            if a < 400.0 { below = below + 1 }
+            j = j + 1
+        }
+        let kf = k as f64
+        let mean_mc = sum / kf
+        var var_mc = sum2 / kf - mean_mc * mean_mc
+        if var_mc < 0.0 { var_mc = 0.0 }
+        let frac_below = below as f64 / kf
+
+        let wt = warn(point, nsqrt(var_t))
+        let wn = warn(point, nsqrt(var_n))
+        let wsd = warn(point, nsqrt(var_mc))
+        let wq = if point >= 400.0 && frac_below > 0.025 { 1 } else { 0 }
+        w_t = w_t + wt; w_n = w_n + wn; w_mcsd = w_mcsd + wsd; w_mcq = w_mcq + wq
+        if wt == 1 && wsd == 1 { t_and_mcsd = t_and_mcsd + 1 }
+        if wt == 1 && wsd == 0 { t_only_vs_mcsd = t_only_vs_mcsd + 1 }
+        if wt == 0 && wsd == 1 { mcsd_only_vs_t = mcsd_only_vs_t + 1 }
+        if wt == 1 && wq == 1 { t_and_mcq = t_and_mcq + 1 }
+        if wt == 1 && wq == 0 { t_only_vs_mcq = t_only_vs_mcq + 1 }
+        if wt == 0 && wq == 1 { mcq_only_vs_t = mcq_only_vs_t + 1 }
+        if wn == 1 && wq == 1 { n_and_mcq = n_and_mcq + 1 }
+        if wn == 1 && wq == 0 { n_only_vs_mcq = n_only_vs_mcq + 1 }
+        if wn == 0 && wq == 1 { mcq_only_vs_n = mcq_only_vs_n + 1 }
+        if point >= 400.0 && point <= 600.0 { in_window = in_window + 1 }
+        let r1 = var_mc / var_t
+        ratio_mc_t_acc = ratio_mc_t_acc + r1
+        if r1 > maxratio_mc_t { maxratio_mc_t = r1 }
+        if r1 < minratio_mc_t { minratio_mc_t = r1 }
+        ratio_n_mc_acc = ratio_n_mc_acc + var_n / var_mc
+        i = i + 1
+    }
+
+    let nf = n as f64
+    println("RQ4 (a) — Monte Carlo adequacy of the first-order affine truth (same cohort, K = 1000 per patient)")
+    print("patients / in [400,600]          = "); print(n); print(" / "); println(in_window)
+    print("WARN  T (affine, 1st order)      = "); println(w_t)
+    print("WARN  N (naive ep_* chain)       = "); println(w_n)
+    print("WARN  MC-sd (sampling variance)  = "); println(w_mcsd)
+    print("WARN  MC-q  (P[AUC<400] > 2.5%)  = "); println(w_mcq)
+    print("T vs MC-sd: both / T-only / MC-only = "); print(t_and_mcsd); print(" / "); print(t_only_vs_mcsd); print(" / "); println(mcsd_only_vs_t)
+    print("T vs MC-q : both / T-only / MC-only = "); print(t_and_mcq); print(" / "); print(t_only_vs_mcq); print(" / "); println(mcq_only_vs_t)
+    print("N vs MC-q : both / N-only / MC-only = "); print(n_and_mcq); print(" / "); print(n_only_vs_mcq); print(" / "); println(mcq_only_vs_n)
+    print("mean Var_MC / Var_T   (x1000)    = "); println((1000.0 * ratio_mc_t_acc / nf) as i64)
+    print("min  Var_MC / Var_T   (x1000)    = "); println((1000.0 * minratio_mc_t) as i64)
+    print("max  Var_MC / Var_T   (x1000)    = "); println((1000.0 * maxratio_mc_t) as i64)
+    print("mean Var_N  / Var_MC  (x1000)    = "); println((1000.0 * ratio_n_mc_acc / nf) as i64)
+    print("RQ4_MC n="); print(n); print(" k="); print(k)
+    print(" warn_t="); print(w_t); print(" warn_n="); print(w_n); print(" warn_mcsd="); print(w_mcsd); print(" warn_mcq="); print(w_mcq)
+    print(" t_mcq_both="); print(t_and_mcq); print(" t_only="); print(t_only_vs_mcq); print(" mcq_only="); print(mcq_only_vs_t)
+    print(" n_mcq_both="); print(n_and_mcq); print(" n_only="); print(n_only_vs_mcq); print(" mcq_only_n="); print(mcq_only_vs_n)
+    print(" var_mc_over_t_permille="); print((1000.0 * ratio_mc_t_acc / nf) as i64)
+    print(" var_n_over_mc_permille="); println((1000.0 * ratio_n_mc_acc / nf) as i64)
+    0
+}
