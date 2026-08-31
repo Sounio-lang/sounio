@@ -5,7 +5,7 @@ module ir::lower
 use parser::ast::*
 use ir::ir::*
 use ir::numeric_payload::{ir_wide_compile_pool_reset, ir_wide_compile_pool_intern_low}
-use check::specializer::{spec_dce_filter_with_global_marks}
+use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready}
 use io::trace::*
 use io::env::{read_env}
 
@@ -2615,42 +2615,46 @@ fn lowerer_preseed_fn_signature_mut(
     (*lo).module = module_box
 }
 
+var LOWER_ENUM_VARIANT_PTRS: [i64; 4096] = [0; 4096]
+
+fn lower_collect_enum_variant_ptrs(variants: Option<Box<VariantDefList>>, count: i64) -> i64 with Mut, Alloc {
+    if count >= 4096 { return count }
+    match variants {
+        Some(list) => {
+            let ptr = list as *mut VariantDefList
+            LOWER_ENUM_VARIANT_PTRS[count as usize] = ptr as i64
+            lower_collect_enum_variant_ptrs((*list).tail, count + 1)
+        }
+        None => count,
+    }
+}
+
 fn lowerer_register_enum_variants_mut(
     lo: &! Lowerer,
     enum_name: Name,
     variants: &Option<Box<VariantDefList>>,
     next_disc: i64
 ) with Mut, Panic, Div, Alloc, IO {
-    var current = variants
-    var disc = next_disc
-    while true {
-        match *current {
-            Some(list) => {
-                if (*(*lo).enum_variants).count < 4096 {
-                    // Extract the Box pointer to a local first, then store through it
-                    // once: the two-level nested store
-                    // `(*(*lo).enum_variants).entries[idx] = ...` is discarded by the
-                    // codegen (the documented two-level-nested-store miscompile), which
-                    // left enum_variants empty and broke all enum-variant uses. This
-                    // mirrors the working struct-layout registration idiom (var sl_box).
-                    var ev_box = (*lo).enum_variants
-                    let idx = (*ev_box).count
-                    (*ev_box).entries[idx as usize] = EnumVariantEntry {
-                        enum_name: enum_name,
-                        variant_name: (*list).head.name,
-                        discriminant: disc,
-                    }
-                    (*ev_box).count = idx + 1
-                } else {
-                    lo.error_count = lo.error_count + 1
-                    lo.had_error = true
-                    lower_note_error(2066, (*lo.current_func).name)
-                }
-                current = &(*list).tail
-                disc = disc + 1
-            }
-            _ => break
+    let variant_count = lower_collect_enum_variant_ptrs(*variants, 0)
+    var vi: i64 = 0
+    while vi < variant_count {
+        if (*(*lo).enum_variants).count >= 4096 {
+            lo.error_count = lo.error_count + 1
+            lo.had_error = true
+            lower_note_error(2066, (*lo.current_func).name)
+            return
         }
+        let list = LOWER_ENUM_VARIANT_PTRS[vi as usize] as *mut VariantDefList
+        var ev_box = (*lo).enum_variants
+        let idx = (*ev_box).count
+        (*ev_box).entries[idx as usize] = EnumVariantEntry {
+            enum_name: enum_name,
+            variant_name: (*list).head.name,
+            discriminant: next_disc + vi,
+        }
+        (*ev_box).count = idx + 1
+        (*lo).enum_variants = ev_box
+        vi = vi + 1
     }
 }
 
@@ -3418,20 +3422,59 @@ fn lower_type_expr_array_elem_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
     }
 }
 
+var LOWER_PRESEED_ITEM_PTRS: [i64; 16384] = [0; 16384]
+var LOWER_PRESEED_ENUM_DEF_PTRS: [i64; 16384] = [0; 16384]
+
+fn lower_collect_preseed_item_ptrs(items: Option<Box<ItemList>>, count: i64) -> i64 with Mut, Alloc {
+    if count >= IR_MAX_FUNCS { return count }
+    match items {
+        Some(list) => {
+            let ptr = list as *mut ItemList
+            LOWER_PRESEED_ITEM_PTRS[count as usize] = ptr as i64
+            let ed_ptr = item_enum_def_ptr(&(*list).head)
+            LOWER_PRESEED_ENUM_DEF_PTRS[count as usize] = ed_ptr as i64
+            lower_collect_preseed_item_ptrs((*list).tail, count + 1)
+        }
+        None => count,
+    }
+}
+
+fn lowerer_preseed_program_metadata_owned_mut(
+    lo: &! Lowerer,
+    items: Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc, IO {
+    match items {
+        Some(list) => {
+            let item = &(*list).head
+            if item.kind == ItemKind::ItemStruct {
+                let sd = item_struct_def_ptr(item)
+                if sd != (0 as *mut StructDef) {
+                    lowerer_register_struct_fields_direct_mut(lo, item.name, &(*sd).fields)
+                }
+            } else if item.kind == ItemKind::ItemEnum {
+                let ed = item_enum_def_ptr(item)
+                if ed != (0 as *mut EnumDef) {
+                    lowerer_register_enum_variants_mut(lo, item.name, &(*ed).variants, 0)
+                }
+            }
+            lowerer_preseed_program_metadata_owned_mut(lo, (*list).tail)
+        }
+        None => {}
+    }
+}
+
 fn lowerer_preseed_program_items_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>,
     skip_name: Name
 ) with Mut, Panic, Div, Alloc, IO {
-    // Walk by moving the Option chain (not &tail reborrows). The &tail form
-    // was observed to re-visit the same ItemFn forever under this B3 binary
-    // (64× kind=0 name=main) even when the program has one item.
-    var current: Option<Box<ItemList>> = *items
+    // Traverse the linked list in the same small recursive shape used by
+    // module_frontend_count_fn_items, then keep this large dispatch scalar.
+    let item_count = lower_collect_preseed_item_ptrs(*items, 0)
     var item_n: i64 = 0
-    while true {
-        match current {
-            Some(list) => {
-                let head = (*list).head
+    while item_n < item_count {
+                let current = LOWER_PRESEED_ITEM_PTRS[item_n as usize] as *mut ItemList
+                let head = &(*current).head
                 let kind = head.kind
                 let name = head.name
                 item_n = item_n + 1
@@ -3529,11 +3572,9 @@ fn lowerer_preseed_program_items_mut(
                         None => {}
                     }
                 } else if kind == ItemKind::ItemEnum {
-                    match head.enum_def {
-                        Some(ed) => {
-                            lowerer_register_enum_variants_mut(lo, name, &(*ed).variants, 0)
-                        }
-                        None => {}
+                    let ed = LOWER_PRESEED_ENUM_DEF_PTRS[(item_n - 1) as usize] as *mut EnumDef
+                    if ed != (0 as *mut EnumDef) {
+                        lowerer_register_enum_variants_mut(lo, name, &(*ed).variants, 0)
                     }
                 } else if kind == ItemKind::ItemImpl {
                     match head.impl_def {
@@ -3543,11 +3584,6 @@ fn lowerer_preseed_program_items_mut(
                         None => {}
                     }
                 }
-                // Advance by moving the Option chain (not &tail reborrow).
-                current = (*list).tail
-            }
-            None => break
-        }
     }
 }
 
@@ -20757,6 +20793,13 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
     epistemic: &IrEpistemicSection
 ) -> IrProgramSummaryBoxResult with Mut, Panic, Div, Alloc, IO {
     var lo = lowerer_new_with_epistemic(epistemic)
+    // DCE reconstructs Item values to remove unreachable functions. Preserve
+    // non-function metadata from the original AST before that aggregate copy.
+    // A refused/inactive DCE returns the input unchanged, so avoid a redundant
+    // full-list walk on capacity-scale programs in that case.
+    if spec_dce_global_marks_ready() {
+        lowerer_preseed_program_metadata_owned_mut(&! lo, (*prog).items)
+    }
     var i: i64 = 0
     while i < program_count {
         if i != self_index {
