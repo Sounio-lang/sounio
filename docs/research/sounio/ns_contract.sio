@@ -1,0 +1,109 @@
+// ns_contract.sio — codex's agreed NS design contract (§22, msg-1787450093) as a
+// souc-checkable Sounio analysis, with the five required acceptance controls.
+//
+// NS handle: 3 states — (0 - 1) = unknown/top, 0 = empty/deterministic, >0 = interned
+// source set (bitmask). UNKNOWN is NEVER treated as disjoint.
+// Transfer: MEASURE seeds a singleton bit; COPY/ident inherits its input's set;
+// ADD/MUL union the sets; union(unknown,_) = unknown (top absorbs).
+// disjoint(a,b) := a>=0 && b>=0 && (a & b)==0 ; either unknown -> not disjoint.
+// Gate at ADD: independence allowed ONLY with a proved-disjoint certificate.
+// Sabotage knob: drops set-propagation (measure yields empty) -> refusal must vanish.
+
+// ---- NS lattice ----
+
+fn ns_unknown() -> i64 { 0 - 1 }
+fn ns_empty() -> i64 { 0 }
+
+fn ns_bit(id: i64) -> i64 {
+    let sh = (1 as i64) << (id as u8)
+    sh as i64
+}
+
+// MEASURE transfer. Under sabotage, set-propagation is dropped: seed is empty.
+fn ns_measure(id: i64, sabotage: bool) -> i64 {
+    if sabotage { return ns_empty() }
+    return ns_bit(id)
+}
+
+// COPY / ident transfer: identity preserved (returns the input's set unchanged).
+fn ns_ident(a: i64) -> i64 { a }
+
+// ADD/MUL transfer: union, with unknown (top) absorbing.
+fn ns_union(a: i64, b: i64) -> i64 {
+    if a < 0 { return ns_unknown() }
+    if b < 0 { return ns_unknown() }
+    return a | b
+}
+
+// The disjoint certificate: both KNOWN and non-overlapping. Unknown -> not disjoint.
+fn ns_disjoint(a: i64, b: i64) -> bool {
+    if a < 0 { return false }
+    if b < 0 { return false }
+    return (a & b) == 0
+}
+
+// Gate at an ADD of two inputs: flagged (needs covariance-aware path / correction)
+// UNLESS a proved-disjoint certificate holds.
+fn add_flagged(a: i64, b: i64) -> bool {
+    if ns_disjoint(a, b) { return false }
+    return true
+}
+
+// ---- report helper (avoid println(bool): known scalar-kind SIGSEGV) ----
+
+fn report(got: bool, want: bool) -> i32 with IO {
+    if got == want {
+        println("PASS")
+        return 0
+    } else {
+        println("FAIL")
+        return 1
+    }
+}
+
+fn main() -> i32 with IO {
+    var fails = 0
+
+    println("NS contract — five acceptance controls")
+
+    // Control 1: x+x flagged (shared source), no sabotage.
+    let x1 = ns_measure(0, false)
+    let c1 = add_flagged(x1, x1)
+    print("1 x+x flagged (shared source): ")
+    fails = fails + report(c1, true)
+
+    // Control 2: x+y accepted (proved-disjoint certificate holds).
+    let x2 = ns_measure(0, false)
+    let y2 = ns_measure(1, false)
+    let c2 = add_flagged(x2, y2)
+    print("2 x+y accepted (disjoint cert): ")
+    fails = fails + report(c2, false)
+
+    // Control 3: unknown conservative — ADD with an unknown input is flagged.
+    let x3 = ns_measure(0, false)
+    let u3 = ns_unknown()
+    let c3 = add_flagged(x3, u3)
+    print("3 unknown conservative (flagged): ")
+    fails = fails + report(c3, true)
+
+    // Control 4: ident(x)+x still flagged — identity survives the call.
+    let x4 = ns_measure(0, false)
+    let ix4 = ns_ident(x4)
+    let c4 = add_flagged(ix4, x4)
+    print("4 ident(x)+x flagged (identity survives): ")
+    fails = fails + report(c4, true)
+
+    // Control 5: sabotage ON — set-propagation dropped, x+x no longer flagged.
+    let x5 = ns_measure(0, true)
+    let c5 = add_flagged(x5, x5)
+    print("5 sabotage: x+x NOT flagged (refusal vanishes): ")
+    fails = fails + report(c5, false)
+
+    if fails == 0 {
+        println("ALL FIVE CONTROLS PASS")
+        return 0
+    } else {
+        println("SOME CONTROL FAILED")
+        return 1
+    }
+}
