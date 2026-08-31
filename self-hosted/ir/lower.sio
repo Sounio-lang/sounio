@@ -13125,6 +13125,31 @@ impl Lowerer {
                 _ => {}
             }
         }
+        // `(*p).field` -- the field's owner is a DEREF, and this resolver had no
+        // ExprUnary arm (its sibling lower_method_recv_type got one in #2313).
+        // Measured: 140 of 142 unresolved field receivers report owner=<none>,
+        // and fldty=<none> follows from it -- field_named_type_for_struct returns
+        // empty on an empty type name, so the two were never independent.
+        if (*expr).kind == ExprKind::ExprUnary && (*expr).un_op == UnaryOp::OpDeref {
+            match (*expr).left {
+                Some(operand) => {
+                    if (*operand).kind == ExprKind::ExprIdent {
+                        let ost = self.lookup_local_struct_type((*operand).name)
+                        if ir_name_is_box(ost) {
+                            let bl = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*operand).name)
+                            if bl >= 0 && bl < (*self.struct_layouts).count {
+                                return (*self.struct_layouts).entries[bl as usize].type_name
+                            }
+                            return ir_empty_name()
+                        }
+                        return ost
+                    }
+                    return self.expr_receiver_struct_type_ref(&(*operand))
+                }
+                _ => {}
+            }
+            return ir_empty_name()
+        }
         if (*expr).kind == ExprKind::ExprFieldAccess {
             match (*expr).left {
                 Some(owner) => {
@@ -19802,13 +19827,25 @@ impl Lowerer {
                                 if (*bb).kind == ExprKind::ExprIdent {
                                     print(":")
                                     print(str_from_bytes((*bb).name.buf, (*bb).name.len))
-                                    print(":owner=")
-                                    let ot = self.lookup_local_struct_type((*bb).name)
-                                    if ot.len > 0 {
-                                        print(str_from_bytes(ot.buf, ot.len))
-                                    } else {
-                                        print("<none>")
-                                    }
+                                }
+                                // What the resolver ACTUALLY returns for this base,
+                                // and then what the field's declared type comes back
+                                // as. Three fixes were tried by reasoning about which
+                                // of these two steps fails and all three measured
+                                // zero; this asks the code instead.
+                                let owner_ty = self.expr_receiver_struct_type_ref(&(*bb))
+                                print(" owner=")
+                                if owner_ty.len > 0 {
+                                    print(str_from_bytes(owner_ty.buf, owner_ty.len))
+                                } else {
+                                    print("<none>")
+                                }
+                                let fld_ty = self.field_named_type_for_struct(owner_ty, (*rv).name)
+                                print(" fldty=")
+                                if fld_ty.len > 0 {
+                                    print(str_from_bytes(fld_ty.buf, fld_ty.len))
+                                } else {
+                                    print("<none>")
                                 }
                             }
                             _ => {

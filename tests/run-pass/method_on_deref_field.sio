@@ -1,0 +1,42 @@
+//@ run-pass
+//@ expect-stdout-contains: via_value=42
+//@ expect-stdout-contains: via_ref=42
+//@ expect-stdout-contains: PASS
+//
+// `(*o).field.method()` -- a method whose receiver is a field whose OWNER is a
+// deref. expr_receiver_struct_type_ref resolved an ident, an index and a field
+// base, but had no ExprUnary arm, so the owner came back empty, the field's type
+// with it, and the call was emitted against the BARE method name. That invents a
+// function with no body, and native_v2 emits `ud2` for it rather than
+// prologue+ret, which would let the call read rax and fabricate a value.
+//
+// Before the fix this program compiled, printed `via_value=42`, then DIED at
+// `via_ref` with exit 132 -- 128+4, SIGILL, the ud2 executing. Two refusals were
+// reported for it. After, both lines print 42.
+//
+// `via_value` is the control: the same call through a by-value parameter, which
+// took the ident path and always worked. If a fix breaks THAT, it broke ordinary
+// field typing rather than the deref owner.
+
+struct Inner { n: i64 }
+struct Outer { inner: Inner, tag: i64 }
+
+impl Inner {
+    fn get(self) -> i64 with Mut, Panic, Div { self.n }
+}
+
+fn via_ref(o: &! Outer) -> i64 with Mut, Panic, Div, Alloc {
+    (*o).inner.get()
+}
+
+fn via_value(o: Outer) -> i64 with Mut, Panic, Div, Alloc {
+    o.inner.get()
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var ou = Outer { inner: Inner { n: 42 }, tag: 7 }
+    print("via_value=") println(via_value(ou))
+    print("via_ref=") println(via_ref(&! ou))
+    println("PASS")
+    0
+}
