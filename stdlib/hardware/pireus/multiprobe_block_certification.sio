@@ -1,0 +1,1597 @@
+//! Pireus V14 multi-probe block certification protocol.
+//!
+//! This matcher-free source derives pending, content-addressed obligations
+//! from the frozen V13 transcript. It does not execute a V13 action block and
+//! contains no V14 expected result.
+
+use crypto::sha256::{
+    SHA256State,
+    sha256_init,
+    sha256_update,
+    sha256_finalize,
+    sha256_digest_byte,
+    sha256_compress,
+}
+
+pub const PIREUS_MBC_SCHEMA: i64 = 734000
+pub const PIREUS_MBC_PROBES: i64 = 32
+pub const PIREUS_MBC_ACTIONS: i64 = 40320
+pub const PIREUS_MBC_BLOCKS: i64 = 64
+pub const PIREUS_MBC_BLOCK_WIDTH: i64 = 630
+pub const PIREUS_MBC_LOGICAL_JOBS: i64 = 2048
+pub const PIREUS_MBC_CANONICAL_WORDS: i64 = 8
+
+pub const PIREUS_MBC_LANGUAGE_SOUNIO: i64 = 1
+pub const PIREUS_MBC_LANGUAGE_LEAN: i64 = 2
+pub const PIREUS_MBC_LANGUAGE_KOKA: i64 = 3
+pub const PIREUS_MBC_LANGUAGE_CPP: i64 = 4
+pub const PIREUS_MBC_LANGUAGE_HASKELL: i64 = 5
+pub const PIREUS_MBC_LANGUAGE_LLM: i64 = 6
+pub const PIREUS_MBC_LANGUAGE_PYTHON: i64 = 7
+pub const PIREUS_MBC_LANGUAGE_RUST: i64 = 8
+
+pub const PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY: i64 = 1
+pub const PIREUS_MBC_ROLE_FORMAL_PARITY: i64 = 2
+pub const PIREUS_MBC_ROLE_EFFECT_PARITY: i64 = 3
+pub const PIREUS_MBC_ROLE_MATERIAL_PARITY: i64 = 4
+pub const PIREUS_MBC_ROLE_DENOTATIONAL_BASELINE: i64 = 5
+pub const PIREUS_MBC_ROLE_REVIEW_ONLY: i64 = 6
+
+pub const PIREUS_MBC_STAGE_SOUNIO_EXECUTABLE: i64 = 2
+pub const PIREUS_MBC_POLICY_READY: i64 = 1
+pub const PIREUS_MBC_DETERMINISM_HOST_INDEPENDENT_EXACT: i64 = 1
+pub const PIREUS_MBC_DETERMINISM_MATERIAL_BOUND: i64 = 2
+
+pub const PIREUS_MBC_TRUST_SOUNIO_RECEIPT: i64 = 1
+pub const PIREUS_MBC_TRUST_LEAN_KERNEL: i64 = 2
+pub const PIREUS_MBC_TRUST_LEAN_NATIVE_DECIDE: i64 = 3
+pub const PIREUS_MBC_TRUST_KOKA_EFFECT: i64 = 4
+pub const PIREUS_MBC_TRUST_CPP_MATERIAL: i64 = 5
+pub const PIREUS_MBC_TRUST_HASKELL_OBSERVATION: i64 = 6
+
+pub const PIREUS_MBC_OK: i64 = 0
+pub const PIREUS_MBC_ERR_AUTHORITY: i64 = 1
+pub const PIREUS_MBC_ERR_STAGE: i64 = 2
+pub const PIREUS_MBC_ERR_POLICY: i64 = 3
+pub const PIREUS_MBC_ERR_LINEAGE: i64 = 4
+pub const PIREUS_MBC_ERR_PARENT_PARSE: i64 = 5
+pub const PIREUS_MBC_ERR_PARTITION: i64 = 6
+pub const PIREUS_MBC_ERR_IDENTITY: i64 = 7
+pub const PIREUS_MBC_ERR_RESULT_INJECTION: i64 = 8
+pub const PIREUS_MBC_ERR_PARITY: i64 = 9
+pub const PIREUS_MBC_ERR_TRUST: i64 = 10
+pub const PIREUS_MBC_ERR_DETERMINISM: i64 = 11
+pub const PIREUS_MBC_ERR_MATERIAL_ROUTE: i64 = 12
+pub const PIREUS_MBC_ERR_INVENTORY: i64 = 13
+pub const PIREUS_MBC_ERR_CLAIM: i64 = 14
+pub const PIREUS_MBC_ERR_RAW_ELF: i64 = 15
+pub const PIREUS_MBC_ERR_NEGATIVE: i64 = 16
+
+const MBC_TAG_STRATEGY: i64 = 734100
+const MBC_TAG_PROBE_SET: i64 = 734101
+const MBC_TAG_PARTITION: i64 = 734102
+const MBC_TAG_WORK_DOMAIN: i64 = 734103
+const MBC_TAG_PLAN: i64 = 734104
+const MBC_WORK_FUNCTION_V13_STREAMING_ACTION: i64 = 734200
+const MBC_PARTITION_FIXED_64_X_630: i64 = 734300
+const MBC_NUMERIC_EXACT_BOOLEAN_INTEGER: i64 = 734400
+const MBC_ORDER_V13_MATRIX_THEN_SWAP: i64 = 734500
+const MBC_MATERIAL_NOT_SEMANTIC: i64 = 0
+
+pub struct PireusMbcDigest {
+    pub words: [i64; 8],
+}
+
+pub struct PireusMbcWorkAddress {
+    pub digest: PireusMbcDigest,
+}
+
+pub struct PireusMbcExpectedDigest {
+    pub digest: PireusMbcDigest,
+    pub producer_language: i64,
+    pub producer_role: i64,
+    pub valid: bool,
+}
+
+pub struct PireusMbcObservedDigest {
+    pub digest: PireusMbcDigest,
+    pub producer_language: i64,
+    pub producer_role: i64,
+}
+
+pub struct PireusMbcWorkFunctionIdentity {
+    pub function_id: i64,
+    pub source_sha256: [i64; 8],
+    pub semantics_sha256: [i64; 8],
+    pub action_count: i64,
+    pub ordering: i64,
+    pub determinism_mode: i64,
+}
+
+pub struct PireusMbcProbeIdentity {
+    pub probe_id: i64,
+    pub canonical_words: [i64; 8],
+}
+
+pub struct PireusMbcPartitionSchema {
+    pub schema_id: i64,
+    pub work_start: i64,
+    pub work_end: i64,
+    pub block_count: i64,
+    pub block_width: i64,
+}
+
+pub struct PireusMbcWorkDomain {
+    pub protocol_schema: i64,
+    pub work_function: PireusMbcWorkFunctionIdentity,
+    pub operator_genome_sha256: [i64; 8],
+    pub strategy_sha256: [i64; 8],
+    pub probe: PireusMbcProbeIdentity,
+    pub partition: PireusMbcPartitionSchema,
+    pub block_index: i64,
+    pub block_start: i64,
+    pub block_width: i64,
+    pub block_end: i64,
+    pub numeric_mode: i64,
+    pub toolchain_sha256: [i64; 8],
+    pub material_sha256: [i64; 8],
+    pub execution_policy_sha256: [i64; 8],
+}
+
+pub struct PireusMbcBlockObligation {
+    pub domain: PireusMbcWorkDomain,
+    pub address: PireusMbcWorkAddress,
+    pub completed: bool,
+    pub reused: bool,
+    pub expected_result_present: bool,
+}
+
+pub struct PireusMbcBlockReceiptBinding {
+    pub address: PireusMbcWorkAddress,
+    pub trust_kind: i64,
+    pub actual_start: i64,
+    pub actual_end: i64,
+    pub actual_visits: i64,
+    pub completed: bool,
+    pub result: PireusMbcExpectedDigest,
+}
+
+pub struct PireusMbcProbeReceiptBinding {
+    pub probe_id: i64,
+    pub trust_kind: i64,
+    pub block_count: i64,
+    pub complete: bool,
+    pub digest: PireusMbcDigest,
+}
+
+pub struct PireusMbcAdmissionReceiptBinding {
+    pub probe_count: i64,
+    pub trust_kind: i64,
+    pub complete: bool,
+    pub digest: PireusMbcDigest,
+}
+
+pub struct PireusMbcProofBinding {
+    pub trust_kind: i64,
+    pub observed: PireusMbcObservedDigest,
+    pub expected: PireusMbcExpectedDigest,
+    pub matches: bool,
+    pub promoted: bool,
+}
+
+pub struct PireusMbcCertificationStrategy {
+    pub schema: i64,
+    pub work_function: PireusMbcWorkFunctionIdentity,
+    pub partition: PireusMbcPartitionSchema,
+    pub probe_count: i64,
+    pub aggregate_order: i64,
+    pub digest: PireusMbcDigest,
+}
+
+pub struct PireusMbcRequest {
+    pub producer_language: i64,
+    pub producer_role: i64,
+    pub stage: i64,
+    pub policy_state: i64,
+    pub garden_bound: bool,
+    pub contract_bound: bool,
+    pub parent_transcript_bound: bool,
+    pub parent_semantics_bound: bool,
+    pub operator_genome_bound: bool,
+    pub exact_domain_equality_required: bool,
+    pub canonical_bytes_required: bool,
+    pub schema_induced_partition_required: bool,
+    pub complete_actual_extent_required: bool,
+    pub host_independent_exact_required: bool,
+    pub expected_result_present: bool,
+    pub observed_as_expected_requested: bool,
+    pub semantic_write_from_parity: bool,
+    pub parity_process_requested: bool,
+    pub cross_trust_aggregation_requested: bool,
+    pub native_decide_as_kernel_requested: bool,
+    pub same_domain_conflict_accepted: bool,
+    pub review_promoted_to_authority: bool,
+    pub python_oracle_requested: bool,
+    pub rust_oracle_requested: bool,
+    pub dgx_slurm_requested: bool,
+    pub u250_declared: i64,
+    pub u250_installed: i64,
+    pub u250_pending: i64,
+    pub u250_enumeration_failures: i64,
+    pub actual_block_execution_claimed: bool,
+    pub reuse_claimed: bool,
+    pub speedup_claimed: bool,
+    pub novelty_claimed: bool,
+    pub claim_ready_requested: bool,
+    pub raw_elf_requested: bool,
+}
+
+pub struct PireusMbcPaths {
+    pub garden: string,
+    pub contract: string,
+    pub parent_transcript: string,
+}
+
+struct PireusMbcLineage {
+    garden_match: bool,
+    contract_match: bool,
+    parent_transcript_match: bool,
+    complete: bool,
+}
+
+struct PireusMbcProbeSet {
+    ids: [i64; 32],
+    canonical_words: [i64; 256],
+    records: i64,
+    cells: i64,
+    duplicate_contents: i64,
+    failures: i64,
+    complete: bool,
+}
+
+struct PireusMbcPartitionResult {
+    blocks: i64,
+    views: i64,
+    failures: i64,
+    complete: bool,
+    digest: PireusMbcDigest,
+}
+
+struct PireusMbcPlanResult {
+    digest: PireusMbcDigest,
+    first_address: PireusMbcDigest,
+    last_address: PireusMbcDigest,
+    domains: i64,
+    addresses: i64,
+    domain_failures: i64,
+    replay_checks: i64,
+    replay_failures: i64,
+}
+
+pub struct PireusMbcSummary {
+    pub valid: bool,
+    pub error: i64,
+    pub garden_match: bool,
+    pub contract_match: bool,
+    pub parent_transcript_match: bool,
+    pub parent_records: i64,
+    pub parent_canonical_cells: i64,
+    pub parent_duplicate_contents: i64,
+    pub parent_parse_failures: i64,
+    pub partition_blocks: i64,
+    pub partition_views: i64,
+    pub partition_failures: i64,
+    pub work_domains: i64,
+    pub work_addresses: i64,
+    pub domain_validation_failures: i64,
+    pub address_replay_checks: i64,
+    pub address_replay_failures: i64,
+    pub negative_cases_passed: i64,
+    pub negative_cases_total: i64,
+    pub strategy_digest: PireusMbcDigest,
+    pub probe_set_digest: PireusMbcDigest,
+    pub partition_digest: PireusMbcDigest,
+    pub plan_digest: PireusMbcDigest,
+    pub first_work_address: PireusMbcDigest,
+    pub last_work_address: PireusMbcDigest,
+    pub completed_blocks: i64,
+    pub reuse_hits: i64,
+    pub expected_result_digests: i64,
+    pub actual_block_execution_complete: bool,
+    pub any_block_reused: bool,
+    pub all_v13_probes_certified: bool,
+    pub deterministic_purity_formally_proved: bool,
+    pub material_bound_profile_instantiated: bool,
+    pub collision_free_semantic_identity: bool,
+    pub formal_parity_open: bool,
+    pub effect_parity_open: bool,
+    pub material_parity_open: bool,
+    pub denotational_parity_open: bool,
+    pub performance_measured: bool,
+    pub speedup_admitted: bool,
+    pub cache_hit_rate_admitted: bool,
+    pub algorithmic_novelty: bool,
+    pub material_novelty: bool,
+    pub scientific_novelty: bool,
+    pub global_novelty: bool,
+    pub historical_novelty: bool,
+    pub priority_claim: bool,
+    pub claim_ready: bool,
+}
+
+fn mbc_zero_digest() -> PireusMbcDigest {
+    PireusMbcDigest { words: [0; 8] }
+}
+
+fn mbc_failure_summary(error: i64) -> PireusMbcSummary {
+    PireusMbcSummary {
+        valid: false,
+        error: error,
+        garden_match: false,
+        contract_match: false,
+        parent_transcript_match: false,
+        parent_records: 0,
+        parent_canonical_cells: 0,
+        parent_duplicate_contents: 0,
+        parent_parse_failures: 0,
+        partition_blocks: 0,
+        partition_views: 0,
+        partition_failures: 0,
+        work_domains: 0,
+        work_addresses: 0,
+        domain_validation_failures: 0,
+        address_replay_checks: 0,
+        address_replay_failures: 0,
+        negative_cases_passed: 0,
+        negative_cases_total: 0,
+        strategy_digest: mbc_zero_digest(),
+        probe_set_digest: mbc_zero_digest(),
+        partition_digest: mbc_zero_digest(),
+        plan_digest: mbc_zero_digest(),
+        first_work_address: mbc_zero_digest(),
+        last_work_address: mbc_zero_digest(),
+        completed_blocks: 0,
+        reuse_hits: 0,
+        expected_result_digests: 0,
+        actual_block_execution_complete: false,
+        any_block_reused: false,
+        all_v13_probes_certified: false,
+        deterministic_purity_formally_proved: false,
+        material_bound_profile_instantiated: false,
+        collision_free_semantic_identity: false,
+        formal_parity_open: false,
+        effect_parity_open: false,
+        material_parity_open: false,
+        denotational_parity_open: false,
+        performance_measured: false,
+        speedup_admitted: false,
+        cache_hit_rate_admitted: false,
+        algorithmic_novelty: false,
+        material_novelty: false,
+        scientific_novelty: false,
+        global_novelty: false,
+        historical_novelty: false,
+        priority_claim: false,
+        claim_ready: false,
+    }
+}
+
+fn mbc_garden_hash() -> [i64; 8] {
+    [0x2bc8b791, 0x549a30c0, 0x41d07801, 0xc712b8a8,
+     0x59bbb9fd, 0x59331778, 0x02fa9eda, 0x3bcd2a9c]
+}
+
+fn mbc_contract_hash() -> [i64; 8] {
+    [0x1f7fb55f, 0x32b41368, 0x3ce45b4b, 0xdfebc686,
+     0x600f14b4, 0x346ca780, 0xe29ec8bb, 0xf91c8a48]
+}
+
+fn mbc_parent_transcript_hash() -> [i64; 8] {
+    [0x16af63f5, 0xe0f8aa7e, 0x5c899f4c, 0x395404b8,
+     0x3fb402f6, 0xbbdb5f20, 0xdea2a3d1, 0x0ad2e19f]
+}
+
+fn mbc_parent_source_hash() -> [i64; 8] {
+    [0x3136968a, 0x83bbba18, 0xd56c5438, 0x95d6bbd9,
+     0x530ccf6c, 0x59db78ac, 0x6b6f2fa3, 0xbd26c9e4]
+}
+
+fn mbc_parent_semantics_hash() -> [i64; 8] {
+    [0x0a4b2c35, 0xfde7724e, 0xa687055f, 0x1d8a5628,
+     0x353ed351, 0x47b90ad9, 0x09a7e9fd, 0x528f9f7c]
+}
+
+fn mbc_operator_genome_hash() -> [i64; 8] {
+    [0x99d5e341, 0x7550ad3f, 0x7b8223b2, 0x9f25b3d8,
+     0xd8616ac4, 0x25d4615c, 0x37c7f2f4, 0x02668926]
+}
+
+fn mbc_words_equal(left: &[i64; 8], right: &[i64; 8]) -> bool
+with Mut, Panic {
+    var word: i64 = 0
+    while word < 8 {
+        if left[word] != right[word] { return false }
+        word = word + 1
+    }
+    true
+}
+
+fn mbc_words_nonzero(words: &[i64; 8]) -> bool with Mut, Panic {
+    var word: i64 = 0
+    while word < 8 {
+        if words[word] != 0 { return true }
+        word = word + 1
+    }
+    false
+}
+
+pub fn pireus_mbc_digest_nonzero(digest: &PireusMbcDigest) -> bool
+with Mut, Panic {
+    var word: i64 = 0
+    while word < 8 {
+        if digest.words[word] != 0 { return true }
+        word = word + 1
+    }
+    false
+}
+
+fn mbc_digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+with Mut, Panic, Div, Epistemic {
+    var bytes: [u8; 256] = [0; 256]
+    var index: i64 = 0
+    while index < 8 {
+        bytes[index] = ((value >> ((7 - index) * 8)) & 255) as u8
+        index = index + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn mbc_digest_add_words(state: SHA256State, words: &[i64; 8]) -> SHA256State
+with Mut, Panic, Div, Epistemic {
+    var next = state
+    var word: i64 = 0
+    while word < 8 {
+        next = mbc_digest_add_i64(next, words[word])
+        word = word + 1
+    }
+    next
+}
+
+fn mbc_digest_finish(state: SHA256State) -> PireusMbcDigest
+with Mut, Panic, Div, Epistemic {
+    let digest = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                sha256_digest_byte(&digest, (word * 4 + byte) as i32)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    PireusMbcDigest { words: words }
+}
+
+fn mbc_text_sha256(raw: string) -> PireusMbcDigest
+with Mut, Panic, Div, Epistemic {
+    let size = str_len(raw)
+    var state: [i64; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    ]
+    var pos: i64 = 0
+    while size - pos >= 64 {
+        var block: [u8; 64] = [0; 64]
+        var index: i64 = 0
+        while index < 64 {
+            var byte = str_char_at(raw, pos + index) as i64
+            if byte < 0 { byte = byte + 256 }
+            block[index] = byte as u8
+            index = index + 1
+        }
+        state = sha256_compress(state, block)
+        pos = pos + 64
+    }
+    var tail: [u8; 64] = [0; 64]
+    let remaining = size - pos
+    var index: i64 = 0
+    while index < remaining {
+        var byte = str_char_at(raw, pos + index) as i64
+        if byte < 0 { byte = byte + 256 }
+        tail[index] = byte as u8
+        index = index + 1
+    }
+    tail[remaining] = 0x80 as u8
+    if remaining > 55 {
+        state = sha256_compress(state, tail)
+        var clear: i64 = 0
+        while clear < 64 {
+            tail[clear] = 0
+            clear = clear + 1
+        }
+    }
+    let bit_length = size * 8
+    tail[56] = ((bit_length >> 56) & 255) as u8
+    tail[57] = ((bit_length >> 48) & 255) as u8
+    tail[58] = ((bit_length >> 40) & 255) as u8
+    tail[59] = ((bit_length >> 32) & 255) as u8
+    tail[60] = ((bit_length >> 24) & 255) as u8
+    tail[61] = ((bit_length >> 16) & 255) as u8
+    tail[62] = ((bit_length >> 8) & 255) as u8
+    tail[63] = (bit_length & 255) as u8
+    state = sha256_compress(state, tail)
+    PireusMbcDigest { words: state }
+}
+
+fn mbc_span_has_prefix(
+    raw: string, start: i64, end: i64, prefix: string,
+) -> bool with Mut, Panic {
+    if end - start < str_len(prefix) { return false }
+    var index: i64 = 0
+    while index < str_len(prefix) {
+        if str_char_at(raw, start + index) != str_char_at(prefix, index) {
+            return false
+        }
+        index = index + 1
+    }
+    true
+}
+
+fn mbc_parse_uint(raw: string, start: i64, end: i64) -> i64
+with Mut, Panic {
+    if start >= end { return -1 }
+    var value: i64 = 0
+    var pos = start
+    while pos < end {
+        let code = str_char_at(raw, pos)
+        if code < 48 || code > 57 { return -1 }
+        value = value * 10 + code - 48
+        pos = pos + 1
+    }
+    value
+}
+
+fn mbc_parse_field_uint(
+    raw: string, start: i64, end: i64, field: string,
+) -> i64 with Mut, Panic {
+    let field_len = str_len(field)
+    var pos = start
+    while pos + field_len <= end {
+        var matches = true
+        var index: i64 = 0
+        while index < field_len {
+            if str_char_at(raw, pos + index) != str_char_at(field, index) {
+                matches = false
+            }
+            index = index + 1
+        }
+        if matches {
+            var value_end = pos + field_len
+            while value_end < end {
+                let code = str_char_at(raw, value_end)
+                if code < 48 || code > 57 { break }
+                value_end = value_end + 1
+            }
+            return mbc_parse_uint(raw, pos + field_len, value_end)
+        }
+        pos = pos + 1
+    }
+    -1
+}
+
+fn mbc_parse_probe_set(raw: string) -> PireusMbcProbeSet
+with Mut, Panic {
+    var ids: [i64; 32] = [0; 32]
+    var words: [i64; 256] = [0; 256]
+    var seen: [i64; 32] = [0; 32]
+    var active: i64 = -1
+    var active_cells: i64 = 0
+    var records: i64 = 0
+    var cells: i64 = 0
+    var failures: i64 = 0
+    var start: i64 = 0
+    while start < str_len(raw) {
+        var end = start
+        while end < str_len(raw) && str_char_at(raw, end) != 10 {
+            end = end + 1
+        }
+        var line_end = end
+        if line_end > start && str_char_at(raw, line_end - 1) == 13 {
+            line_end = line_end - 1
+        }
+        if mbc_span_has_prefix(
+            raw, start, line_end, "PIREUS_POC_CANON_BITS admitted=") {
+            if active >= 0 { failures = failures + 1 }
+            let admitted = mbc_parse_field_uint(
+                raw, start, line_end, "admitted=")
+            if admitted < 0 || admitted >= PIREUS_MBC_PROBES ||
+                admitted != records || seen[admitted] != 0 {
+                failures = failures + 1
+                active = -1
+            } else {
+                active = admitted
+                active_cells = 0
+                seen[admitted] = 1
+                ids[admitted] = admitted
+            }
+        } else if active >= 0 && active_cells < 256 {
+            var bit: i64 = -1
+            if active_cells == 0 && mbc_span_has_prefix(
+                raw, start, line_end, " bits=") {
+                bit = mbc_parse_field_uint(raw, start, line_end, "bits=")
+            } else if active_cells > 0 &&
+                mbc_span_has_prefix(raw, start, line_end, ":") {
+                bit = mbc_parse_uint(raw, start + 1, line_end)
+            }
+            if bit >= 0 {
+                if bit > 1 { failures = failures + 1 }
+                else {
+                    let word = active_cells / 32
+                    let shift = 31 - active_cells % 32
+                    words[active * 8 + word] =
+                        words[active * 8 + word] | (bit << shift)
+                    active_cells = active_cells + 1
+                    cells = cells + 1
+                    if active_cells == 256 {
+                        records = records + 1
+                        active = -1
+                    }
+                }
+            }
+        }
+        start = end + 1
+    }
+    if active >= 0 { failures = failures + 1 }
+    var duplicate_contents: i64 = 0
+    var left: i64 = 0
+    while left < records {
+        var right = left + 1
+        while right < records {
+            var equal = true
+            var word: i64 = 0
+            while word < 8 {
+                if words[left * 8 + word] != words[right * 8 + word] {
+                    equal = false
+                }
+                word = word + 1
+            }
+            if equal { duplicate_contents = duplicate_contents + 1 }
+            right = right + 1
+        }
+        left = left + 1
+    }
+    PireusMbcProbeSet {
+        ids: ids,
+        canonical_words: words,
+        records: records,
+        cells: cells,
+        duplicate_contents: duplicate_contents,
+        failures: failures,
+        complete: records == PIREUS_MBC_PROBES && cells == 8192 &&
+            duplicate_contents == 0 && failures == 0,
+    }
+}
+
+fn mbc_expected_digest_allowed(language: i64, role: i64, stage: i64) -> bool {
+    language == PIREUS_MBC_LANGUAGE_SOUNIO &&
+        role == PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY &&
+        stage == PIREUS_MBC_STAGE_SOUNIO_EXECUTABLE
+}
+
+fn mbc_trust_language_compatible(trust: i64, language: i64, role: i64) -> bool {
+    if trust == PIREUS_MBC_TRUST_SOUNIO_RECEIPT {
+        language == PIREUS_MBC_LANGUAGE_SOUNIO &&
+            role == PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY
+    } else if trust == PIREUS_MBC_TRUST_LEAN_KERNEL ||
+        trust == PIREUS_MBC_TRUST_LEAN_NATIVE_DECIDE {
+        language == PIREUS_MBC_LANGUAGE_LEAN &&
+            role == PIREUS_MBC_ROLE_FORMAL_PARITY
+    } else if trust == PIREUS_MBC_TRUST_KOKA_EFFECT {
+        language == PIREUS_MBC_LANGUAGE_KOKA &&
+            role == PIREUS_MBC_ROLE_EFFECT_PARITY
+    } else if trust == PIREUS_MBC_TRUST_CPP_MATERIAL {
+        language == PIREUS_MBC_LANGUAGE_CPP &&
+            role == PIREUS_MBC_ROLE_MATERIAL_PARITY
+    } else if trust == PIREUS_MBC_TRUST_HASKELL_OBSERVATION {
+        language == PIREUS_MBC_LANGUAGE_HASKELL &&
+            role == PIREUS_MBC_ROLE_DENOTATIONAL_BASELINE
+    } else { false }
+}
+
+fn mbc_partition_parameters_valid(
+    actions: i64, blocks: i64, width: i64,
+) -> bool {
+    actions > 0 && blocks > 0 && width > 0 &&
+        actions == blocks * width
+}
+
+pub fn pireus_mbc_block_shape_valid(
+    index: i64, start: i64, width: i64, end: i64,
+) -> bool {
+    index >= 0 && index < PIREUS_MBC_BLOCKS &&
+        width == PIREUS_MBC_BLOCK_WIDTH &&
+        start == index * PIREUS_MBC_BLOCK_WIDTH &&
+        end == start + width && end <= PIREUS_MBC_ACTIONS
+}
+
+fn mbc_same_domain_result_compatible(
+    exact_domain_equal: bool, left_result_equal: bool,
+    determinism_mode: i64,
+) -> bool {
+    if determinism_mode != PIREUS_MBC_DETERMINISM_HOST_INDEPENDENT_EXACT &&
+        determinism_mode != PIREUS_MBC_DETERMINISM_MATERIAL_BOUND {
+        return false
+    }
+    !exact_domain_equal || left_result_equal
+}
+
+fn mbc_determinism_domain_valid(
+    determinism_mode: i64,
+    toolchain_bound: bool,
+    material_bound: bool,
+    policy_bound: bool,
+) -> bool {
+    if determinism_mode ==
+        PIREUS_MBC_DETERMINISM_HOST_INDEPENDENT_EXACT {
+        !toolchain_bound && !material_bound && !policy_bound
+    } else if determinism_mode == PIREUS_MBC_DETERMINISM_MATERIAL_BOUND {
+        toolchain_bound && material_bound && policy_bound
+    } else { false }
+}
+
+fn mbc_work_domain_determinism_valid(
+    domain: &PireusMbcWorkDomain,
+) -> bool with Mut, Panic {
+    mbc_determinism_domain_valid(
+        domain.work_function.determinism_mode,
+        mbc_words_nonzero(&domain.toolchain_sha256),
+        mbc_words_nonzero(&domain.material_sha256),
+        mbc_words_nonzero(&domain.execution_policy_sha256))
+}
+
+fn mbc_partition_result() -> PireusMbcPartitionResult
+with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = mbc_digest_add_i64(state, MBC_TAG_PARTITION)
+    state = mbc_digest_add_i64(state, PIREUS_MBC_ACTIONS)
+    state = mbc_digest_add_i64(state, PIREUS_MBC_BLOCKS)
+    state = mbc_digest_add_i64(state, PIREUS_MBC_BLOCK_WIDTH)
+    var blocks: i64 = 0
+    var views: i64 = 0
+    var failures: i64 = 0
+    var previous_end: i64 = 0
+    var index: i64 = 0
+    while index < PIREUS_MBC_BLOCKS {
+        let start = index * PIREUS_MBC_BLOCK_WIDTH
+        let width = PIREUS_MBC_BLOCK_WIDTH
+        let end = start + width
+        if !pireus_mbc_block_shape_valid(index, start, width, end) ||
+            start != previous_end {
+            failures = failures + 1
+        }
+        state = mbc_digest_add_i64(state, index)
+        state = mbc_digest_add_i64(state, start)
+        state = mbc_digest_add_i64(state, width)
+        state = mbc_digest_add_i64(state, end)
+        blocks = blocks + 1
+        views = views + width
+        previous_end = end
+        index = index + 1
+    }
+    if previous_end != PIREUS_MBC_ACTIONS ||
+        !mbc_partition_parameters_valid(
+            PIREUS_MBC_ACTIONS, PIREUS_MBC_BLOCKS,
+            PIREUS_MBC_BLOCK_WIDTH) {
+        failures = failures + 1
+    }
+    PireusMbcPartitionResult {
+        blocks: blocks,
+        views: views,
+        failures: failures,
+        complete: blocks == PIREUS_MBC_BLOCKS &&
+            views == PIREUS_MBC_ACTIONS && failures == 0,
+        digest: mbc_digest_finish(state),
+    }
+}
+
+fn mbc_work_function() -> PireusMbcWorkFunctionIdentity {
+    PireusMbcWorkFunctionIdentity {
+        function_id: MBC_WORK_FUNCTION_V13_STREAMING_ACTION,
+        source_sha256: mbc_parent_source_hash(),
+        semantics_sha256: mbc_parent_semantics_hash(),
+        action_count: PIREUS_MBC_ACTIONS,
+        ordering: MBC_ORDER_V13_MATRIX_THEN_SWAP,
+        determinism_mode:
+            PIREUS_MBC_DETERMINISM_HOST_INDEPENDENT_EXACT,
+    }
+}
+
+fn mbc_partition_schema() -> PireusMbcPartitionSchema {
+    PireusMbcPartitionSchema {
+        schema_id: MBC_PARTITION_FIXED_64_X_630,
+        work_start: 0,
+        work_end: PIREUS_MBC_ACTIONS,
+        block_count: PIREUS_MBC_BLOCKS,
+        block_width: PIREUS_MBC_BLOCK_WIDTH,
+    }
+}
+
+fn mbc_strategy_digest() -> PireusMbcDigest
+with Mut, Panic, Div, Epistemic {
+    let garden = mbc_garden_hash()
+    let contract = mbc_contract_hash()
+    let source = mbc_parent_source_hash()
+    let semantics = mbc_parent_semantics_hash()
+    let transcript = mbc_parent_transcript_hash()
+    let genome = mbc_operator_genome_hash()
+    var state = sha256_init()
+    state = mbc_digest_add_i64(state, MBC_TAG_STRATEGY)
+    state = mbc_digest_add_i64(state, PIREUS_MBC_SCHEMA)
+    state = mbc_digest_add_words(state, &garden)
+    state = mbc_digest_add_words(state, &contract)
+    state = mbc_digest_add_words(state, &source)
+    state = mbc_digest_add_words(state, &semantics)
+    state = mbc_digest_add_words(state, &transcript)
+    state = mbc_digest_add_words(state, &genome)
+    state = mbc_digest_add_i64(state, MBC_WORK_FUNCTION_V13_STREAMING_ACTION)
+    state = mbc_digest_add_i64(state, MBC_ORDER_V13_MATRIX_THEN_SWAP)
+    state = mbc_digest_add_i64(
+        state, PIREUS_MBC_DETERMINISM_HOST_INDEPENDENT_EXACT)
+    state = mbc_digest_add_i64(state, MBC_PARTITION_FIXED_64_X_630)
+    state = mbc_digest_add_i64(state, PIREUS_MBC_PROBES)
+    state = mbc_digest_add_i64(state, PIREUS_MBC_BLOCKS)
+    state = mbc_digest_add_i64(state, PIREUS_MBC_BLOCK_WIDTH)
+    mbc_digest_finish(state)
+}
+
+fn mbc_probe_set_digest(probes: &PireusMbcProbeSet) -> PireusMbcDigest
+with Mut, Panic, Div, Epistemic {
+    let transcript = mbc_parent_transcript_hash()
+    var state = sha256_init()
+    state = mbc_digest_add_i64(state, MBC_TAG_PROBE_SET)
+    state = mbc_digest_add_i64(state, probes.records)
+    state = mbc_digest_add_words(state, &transcript)
+    var probe: i64 = 0
+    while probe < probes.records {
+        state = mbc_digest_add_i64(state, probes.ids[probe])
+        var word: i64 = 0
+        while word < 8 {
+            state = mbc_digest_add_i64(
+                state, probes.canonical_words[probe * 8 + word])
+            word = word + 1
+        }
+        probe = probe + 1
+    }
+    mbc_digest_finish(state)
+}
+
+fn mbc_work_domain(
+    probes: &PireusMbcProbeSet,
+    strategy: &PireusMbcDigest,
+    probe_index: i64,
+    block_index: i64,
+) -> PireusMbcWorkDomain with Mut, Panic {
+    var canonical: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        canonical[word] =
+            probes.canonical_words[probe_index * 8 + word]
+        word = word + 1
+    }
+    let start = block_index * PIREUS_MBC_BLOCK_WIDTH
+    PireusMbcWorkDomain {
+        protocol_schema: PIREUS_MBC_SCHEMA,
+        work_function: mbc_work_function(),
+        operator_genome_sha256: mbc_operator_genome_hash(),
+        strategy_sha256: strategy.words,
+        probe: PireusMbcProbeIdentity {
+            probe_id: probes.ids[probe_index],
+            canonical_words: canonical,
+        },
+        partition: mbc_partition_schema(),
+        block_index: block_index,
+        block_start: start,
+        block_width: PIREUS_MBC_BLOCK_WIDTH,
+        block_end: start + PIREUS_MBC_BLOCK_WIDTH,
+        numeric_mode: MBC_NUMERIC_EXACT_BOOLEAN_INTEGER,
+        toolchain_sha256: [MBC_MATERIAL_NOT_SEMANTIC; 8],
+        material_sha256: [MBC_MATERIAL_NOT_SEMANTIC; 8],
+        execution_policy_sha256: [MBC_MATERIAL_NOT_SEMANTIC; 8],
+    }
+}
+
+fn mbc_work_address(domain: &PireusMbcWorkDomain) -> PireusMbcWorkAddress
+with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = mbc_digest_add_i64(state, MBC_TAG_WORK_DOMAIN)
+    state = mbc_digest_add_i64(state, domain.protocol_schema)
+    state = mbc_digest_add_i64(state, domain.work_function.function_id)
+    state = mbc_digest_add_words(
+        state, &domain.work_function.source_sha256)
+    state = mbc_digest_add_words(
+        state, &domain.work_function.semantics_sha256)
+    state = mbc_digest_add_i64(state, domain.work_function.action_count)
+    state = mbc_digest_add_i64(state, domain.work_function.ordering)
+    state = mbc_digest_add_i64(
+        state, domain.work_function.determinism_mode)
+    state = mbc_digest_add_words(state, &domain.operator_genome_sha256)
+    state = mbc_digest_add_words(state, &domain.strategy_sha256)
+    state = mbc_digest_add_i64(state, domain.probe.probe_id)
+    state = mbc_digest_add_words(state, &domain.probe.canonical_words)
+    state = mbc_digest_add_i64(state, domain.partition.schema_id)
+    state = mbc_digest_add_i64(state, domain.partition.work_start)
+    state = mbc_digest_add_i64(state, domain.partition.work_end)
+    state = mbc_digest_add_i64(state, domain.partition.block_count)
+    state = mbc_digest_add_i64(state, domain.partition.block_width)
+    state = mbc_digest_add_i64(state, domain.block_index)
+    state = mbc_digest_add_i64(state, domain.block_start)
+    state = mbc_digest_add_i64(state, domain.block_width)
+    state = mbc_digest_add_i64(state, domain.block_end)
+    state = mbc_digest_add_i64(state, domain.numeric_mode)
+    state = mbc_digest_add_words(state, &domain.toolchain_sha256)
+    state = mbc_digest_add_words(state, &domain.material_sha256)
+    state = mbc_digest_add_words(state, &domain.execution_policy_sha256)
+    PireusMbcWorkAddress { digest: mbc_digest_finish(state) }
+}
+
+fn mbc_plan(
+    probes: &PireusMbcProbeSet,
+    strategy: &PireusMbcDigest,
+) -> PireusMbcPlanResult with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = mbc_digest_add_i64(state, MBC_TAG_PLAN)
+    state = mbc_digest_add_i64(state, PIREUS_MBC_LOGICAL_JOBS)
+    state = mbc_digest_add_words(state, &strategy.words)
+    var first = mbc_zero_digest()
+    var last = mbc_zero_digest()
+    var domains: i64 = 0
+    var addresses: i64 = 0
+    var domain_failures: i64 = 0
+    var replay_checks: i64 = 0
+    var replay_failures: i64 = 0
+    var probe: i64 = 0
+    while probe < PIREUS_MBC_PROBES {
+        var block: i64 = 0
+        while block < PIREUS_MBC_BLOCKS {
+            let domain = mbc_work_domain(probes, strategy, probe, block)
+            let address = mbc_work_address(&domain)
+            let replay = mbc_work_address(&domain)
+            domains = domains + 1
+            addresses = addresses + 1
+            if !mbc_work_domain_determinism_valid(&domain) {
+                domain_failures = domain_failures + 1
+            }
+            replay_checks = replay_checks + 1
+            if !mbc_words_equal(&address.digest.words, &replay.digest.words) {
+                replay_failures = replay_failures + 1
+            }
+            if domains == 1 { first = address.digest }
+            last = address.digest
+            state = mbc_digest_add_i64(state, probe)
+            state = mbc_digest_add_i64(state, block)
+            state = mbc_digest_add_words(state, &address.digest.words)
+            block = block + 1
+        }
+        probe = probe + 1
+    }
+    let plan_digest = mbc_digest_finish(state)
+    PireusMbcPlanResult {
+        digest: plan_digest,
+        first_address: first,
+        last_address: last,
+        domains: domains,
+        addresses: addresses,
+        domain_failures: domain_failures,
+        replay_checks: replay_checks,
+        replay_failures: replay_failures,
+    }
+}
+
+fn mbc_negative_surface() -> [i64; 2] {
+    var passed: i64 = 0
+    var total: i64 = 0
+    total = total + 1
+    if !pireus_mbc_block_shape_valid(-1, 0, 630, 630) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !pireus_mbc_block_shape_valid(64, 40320, 630, 40950) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !pireus_mbc_block_shape_valid(63, 39689, 630, 40319) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !pireus_mbc_block_shape_valid(63, 39690, 629, 40319) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !pireus_mbc_block_shape_valid(63, 39690, 0, 39690) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !pireus_mbc_block_shape_valid(63, 39690, 630, 40319) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_partition_parameters_valid(40319, 64, 630) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_partition_parameters_valid(40320, 63, 630) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_expected_digest_allowed(
+        PIREUS_MBC_LANGUAGE_LEAN, PIREUS_MBC_ROLE_FORMAL_PARITY,
+        PIREUS_MBC_STAGE_SOUNIO_EXECUTABLE) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_expected_digest_allowed(
+        PIREUS_MBC_LANGUAGE_CPP, PIREUS_MBC_ROLE_MATERIAL_PARITY,
+        PIREUS_MBC_STAGE_SOUNIO_EXECUTABLE) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_expected_digest_allowed(
+        PIREUS_MBC_LANGUAGE_LLM, PIREUS_MBC_ROLE_REVIEW_ONLY,
+        PIREUS_MBC_STAGE_SOUNIO_EXECUTABLE) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_expected_digest_allowed(
+        PIREUS_MBC_LANGUAGE_PYTHON, PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY,
+        PIREUS_MBC_STAGE_SOUNIO_EXECUTABLE) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_expected_digest_allowed(
+        PIREUS_MBC_LANGUAGE_RUST, PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY,
+        PIREUS_MBC_STAGE_SOUNIO_EXECUTABLE) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_trust_language_compatible(
+        PIREUS_MBC_TRUST_LEAN_KERNEL,
+        PIREUS_MBC_LANGUAGE_CPP, PIREUS_MBC_ROLE_MATERIAL_PARITY) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_trust_language_compatible(
+        PIREUS_MBC_TRUST_LEAN_NATIVE_DECIDE,
+        PIREUS_MBC_LANGUAGE_LEAN, PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_same_domain_result_compatible(
+        true, false, PIREUS_MBC_DETERMINISM_HOST_INDEPENDENT_EXACT) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_same_domain_result_compatible(true, false, 99) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_determinism_domain_valid(
+        PIREUS_MBC_DETERMINISM_MATERIAL_BOUND,
+        false, false, false) {
+        passed = passed + 1
+    }
+    total = total + 1
+    if !mbc_determinism_domain_valid(99, true, true, true) {
+        passed = passed + 1
+    }
+    [passed, total]
+}
+
+pub fn pireus_multiprobe_block_certification_request() -> PireusMbcRequest {
+    PireusMbcRequest {
+        producer_language: PIREUS_MBC_LANGUAGE_SOUNIO,
+        producer_role: PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY,
+        stage: PIREUS_MBC_STAGE_SOUNIO_EXECUTABLE,
+        policy_state: PIREUS_MBC_POLICY_READY,
+        garden_bound: true,
+        contract_bound: true,
+        parent_transcript_bound: true,
+        parent_semantics_bound: true,
+        operator_genome_bound: true,
+        exact_domain_equality_required: true,
+        canonical_bytes_required: true,
+        schema_induced_partition_required: true,
+        complete_actual_extent_required: true,
+        host_independent_exact_required: true,
+        expected_result_present: false,
+        observed_as_expected_requested: false,
+        semantic_write_from_parity: false,
+        parity_process_requested: false,
+        cross_trust_aggregation_requested: false,
+        native_decide_as_kernel_requested: false,
+        same_domain_conflict_accepted: false,
+        review_promoted_to_authority: false,
+        python_oracle_requested: false,
+        rust_oracle_requested: false,
+        dgx_slurm_requested: false,
+        u250_declared: 2,
+        u250_installed: 1,
+        u250_pending: 1,
+        u250_enumeration_failures: 0,
+        actual_block_execution_claimed: false,
+        reuse_claimed: false,
+        speedup_claimed: false,
+        novelty_claimed: false,
+        claim_ready_requested: false,
+        raw_elf_requested: false,
+    }
+}
+
+fn mbc_request_negative_surface() -> [i64; 2] {
+    let canonical = pireus_multiprobe_block_certification_request()
+    var bad = canonical
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    bad = canonical; bad.policy_state = 0
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.policy_state = 2
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.policy_state = 3
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.producer_language = PIREUS_MBC_LANGUAGE_PYTHON
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.producer_language = PIREUS_MBC_LANGUAGE_RUST
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.producer_language = PIREUS_MBC_LANGUAGE_CPP
+    bad.producer_role = PIREUS_MBC_ROLE_MATERIAL_PARITY
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.stage = 4
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.garden_bound = false
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.contract_bound = false
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.parent_transcript_bound = false
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.parent_semantics_bound = false
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.operator_genome_bound = false
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.exact_domain_equality_required = false
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.canonical_bytes_required = false
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.schema_induced_partition_required = false
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.complete_actual_extent_required = false
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.host_independent_exact_required = false
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.same_domain_conflict_accepted = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.expected_result_present = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.observed_as_expected_requested = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.semantic_write_from_parity = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.parity_process_requested = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.review_promoted_to_authority = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.cross_trust_aggregation_requested = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.native_decide_as_kernel_requested = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.python_oracle_requested = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.rust_oracle_requested = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.dgx_slurm_requested = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.u250_declared = 1
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.u250_installed = 2; bad.u250_pending = 0
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.u250_enumeration_failures = 1
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.actual_block_execution_claimed = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.reuse_claimed = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.speedup_claimed = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.novelty_claimed = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.claim_ready_requested = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    bad = canonical; bad.raw_elf_requested = true
+    total = total + 1
+    if pireus_mbc_request_error(&bad) != PIREUS_MBC_OK {
+        passed = passed + 1
+    }
+    [passed, total]
+}
+
+pub fn pireus_multiprobe_block_certification_paths() -> PireusMbcPaths {
+    PireusMbcPaths {
+        garden:
+            "tools/pireus/GARDEN_PIREUS_MULTIPROBE_BLOCK_CERTIFICATION_V14.md",
+        contract:
+            "tools/pireus/PIREUS_MULTIPROBE_BLOCK_CERTIFICATION_CONTRACT_V14.md",
+        parent_transcript:
+            "tools/pireus/operator_orbit_canonicalization.first.v13",
+    }
+}
+
+pub fn pireus_mbc_request_error(request: &PireusMbcRequest) -> i64 {
+    if request.policy_state != PIREUS_MBC_POLICY_READY {
+        return PIREUS_MBC_ERR_POLICY
+    }
+    if request.producer_language != PIREUS_MBC_LANGUAGE_SOUNIO ||
+        request.producer_role != PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY {
+        return PIREUS_MBC_ERR_AUTHORITY
+    }
+    if request.stage != PIREUS_MBC_STAGE_SOUNIO_EXECUTABLE {
+        return PIREUS_MBC_ERR_STAGE
+    }
+    if !request.garden_bound || !request.contract_bound ||
+        !request.parent_transcript_bound ||
+        !request.parent_semantics_bound || !request.operator_genome_bound {
+        return PIREUS_MBC_ERR_LINEAGE
+    }
+    if !request.exact_domain_equality_required ||
+        !request.canonical_bytes_required ||
+        !request.schema_induced_partition_required ||
+        !request.complete_actual_extent_required {
+        return PIREUS_MBC_ERR_IDENTITY
+    }
+    if !request.host_independent_exact_required ||
+        request.same_domain_conflict_accepted {
+        return PIREUS_MBC_ERR_DETERMINISM
+    }
+    if request.expected_result_present ||
+        request.observed_as_expected_requested {
+        return PIREUS_MBC_ERR_RESULT_INJECTION
+    }
+    if request.semantic_write_from_parity ||
+        request.parity_process_requested ||
+        request.review_promoted_to_authority {
+        return PIREUS_MBC_ERR_PARITY
+    }
+    if request.cross_trust_aggregation_requested ||
+        request.native_decide_as_kernel_requested {
+        return PIREUS_MBC_ERR_TRUST
+    }
+    if request.python_oracle_requested || request.rust_oracle_requested {
+        return PIREUS_MBC_ERR_AUTHORITY
+    }
+    if request.dgx_slurm_requested {
+        return PIREUS_MBC_ERR_MATERIAL_ROUTE
+    }
+    if request.u250_declared != 2 || request.u250_installed != 1 ||
+        request.u250_pending != 1 ||
+        request.u250_enumeration_failures != 0 ||
+        request.u250_installed + request.u250_pending !=
+            request.u250_declared {
+        return PIREUS_MBC_ERR_INVENTORY
+    }
+    if request.actual_block_execution_claimed || request.reuse_claimed ||
+        request.speedup_claimed || request.novelty_claimed ||
+        request.claim_ready_requested {
+        return PIREUS_MBC_ERR_CLAIM
+    }
+    if request.raw_elf_requested { return PIREUS_MBC_ERR_RAW_ELF }
+    PIREUS_MBC_OK
+}
+
+fn mbc_lineage(paths: &PireusMbcPaths) -> PireusMbcLineage
+with IO, Mut, Panic, Div, Alloc, Epistemic {
+    if file_size(paths.garden) <= 0 || file_size(paths.contract) <= 0 ||
+        file_size(paths.parent_transcript) <= 0 {
+        return PireusMbcLineage {
+            garden_match: false,
+            contract_match: false,
+            parent_transcript_match: false,
+            complete: false,
+        }
+    }
+    let garden_raw = read_file(paths.garden)
+    let contract_raw = read_file(paths.contract)
+    let transcript_raw = read_file(paths.parent_transcript)
+    let garden = mbc_text_sha256(garden_raw)
+    let contract = mbc_text_sha256(contract_raw)
+    let transcript = mbc_text_sha256(transcript_raw)
+    let expected_garden = mbc_garden_hash()
+    let expected_contract = mbc_contract_hash()
+    let expected_transcript = mbc_parent_transcript_hash()
+    let garden_match = mbc_words_equal(&garden.words, &expected_garden)
+    let contract_match = mbc_words_equal(&contract.words, &expected_contract)
+    let transcript_match = mbc_words_equal(
+        &transcript.words, &expected_transcript)
+    PireusMbcLineage {
+        garden_match: garden_match,
+        contract_match: contract_match,
+        parent_transcript_match: transcript_match,
+        complete: garden_match && contract_match && transcript_match,
+    }
+}
+
+fn mbc_emit_digest(digest: &PireusMbcDigest) with IO, Mut, Panic {
+    var word: i64 = 0
+    while word < 8 {
+        if word > 0 { print(":") }
+        print_int(digest.words[word])
+        word = word + 1
+    }
+}
+
+pub fn pireus_multiprobe_block_certification_evaluate(
+    request: &PireusMbcRequest,
+    paths: &PireusMbcPaths,
+    emit: bool,
+) -> PireusMbcSummary with IO, Mut, Panic, Div, Alloc, Epistemic {
+    let request_error = pireus_mbc_request_error(request)
+    if request_error != PIREUS_MBC_OK {
+        if emit {
+            print("PIREUS_MBC_PREEXEC_REFUSAL error=")
+            print_int(request_error)
+            print(" semantic_work_started=0\n")
+        }
+        return mbc_failure_summary(request_error)
+    }
+    let lineage = mbc_lineage(paths)
+    if !lineage.complete {
+        if emit {
+            print("PIREUS_MBC_LINEAGE garden_match=")
+            print_int(if lineage.garden_match { 1 } else { 0 })
+            print(" contract_match=")
+            print_int(if lineage.contract_match { 1 } else { 0 })
+            print(" parent_transcript_match=")
+            print_int(if lineage.parent_transcript_match { 1 } else { 0 })
+            print(" semantic_work_started=0\n")
+        }
+        return mbc_failure_summary(PIREUS_MBC_ERR_LINEAGE)
+    }
+    let transcript_raw = read_file(paths.parent_transcript)
+    let probes = mbc_parse_probe_set(transcript_raw)
+    if !probes.complete {
+        if emit {
+            print("PIREUS_MBC_PARENT probes="); print_int(probes.records)
+            print(" canonical_cells="); print_int(probes.cells)
+            print(" duplicate_contents="); print_int(probes.duplicate_contents)
+            print(" parse_failures="); print_int(probes.failures)
+            print(" work_plan_started=0\n")
+        }
+        return mbc_failure_summary(PIREUS_MBC_ERR_PARENT_PARSE)
+    }
+    let partition = mbc_partition_result()
+    let strategy = mbc_strategy_digest()
+    let probe_set = mbc_probe_set_digest(&probes)
+    let plan = mbc_plan(&probes, &strategy)
+    let structural_negative = mbc_negative_surface()
+    let request_negative = mbc_request_negative_surface()
+    let negative_passed = structural_negative[0] + request_negative[0]
+    let negative_total = structural_negative[1] + request_negative[1]
+    var error = PIREUS_MBC_OK
+    if error == PIREUS_MBC_OK && !partition.complete {
+        error = PIREUS_MBC_ERR_PARTITION
+    }
+    if error == PIREUS_MBC_OK &&
+        (plan.domains != PIREUS_MBC_LOGICAL_JOBS ||
+         plan.addresses != PIREUS_MBC_LOGICAL_JOBS ||
+         plan.domain_failures != 0 ||
+         plan.replay_checks != PIREUS_MBC_LOGICAL_JOBS ||
+         plan.replay_failures != 0) {
+        error = PIREUS_MBC_ERR_IDENTITY
+    }
+    if error == PIREUS_MBC_OK && negative_passed != negative_total {
+        error = PIREUS_MBC_ERR_NEGATIVE
+    }
+    let valid = error == PIREUS_MBC_OK
+    if emit {
+        print("PIREUS_MBC_LINEAGE garden_match=")
+        print_int(if lineage.garden_match { 1 } else { 0 })
+        print(" contract_match=")
+        print_int(if lineage.contract_match { 1 } else { 0 })
+        print(" parent_transcript_match=")
+        print_int(if lineage.parent_transcript_match { 1 } else { 0 })
+        print("\n")
+        print("PIREUS_MBC_PARENT probes="); print_int(probes.records)
+        print(" canonical_cells="); print_int(probes.cells)
+        print(" duplicate_contents="); print_int(probes.duplicate_contents)
+        print(" parse_failures="); print_int(probes.failures)
+        print("\n")
+        print("PIREUS_MBC_PARTITION blocks="); print_int(partition.blocks)
+        print(" views="); print_int(partition.views)
+        print(" failures="); print_int(partition.failures)
+        print(" first_start=0 first_end=630")
+        print(" last_start=39690 last_end=40320\n")
+        print("PIREUS_MBC_PLAN work_domains="); print_int(plan.domains)
+        print(" work_addresses="); print_int(plan.addresses)
+        print(" domain_failures="); print_int(plan.domain_failures)
+        print(" replay_checks="); print_int(plan.replay_checks)
+        print(" replay_failures="); print_int(plan.replay_failures)
+        print(" completed_blocks=0 reuse_hits=0 expected_results=0\n")
+        print("PIREUS_MBC_NEGATIVES passed="); print_int(negative_passed)
+        print(" total="); print_int(negative_total); print("\n")
+        print("PIREUS_MBC_DIGEST strategy="); mbc_emit_digest(&strategy)
+        print(" probe_set="); mbc_emit_digest(&probe_set)
+        print(" partition="); mbc_emit_digest(&partition.digest)
+        print(" plan="); mbc_emit_digest(&plan.digest)
+        print(" first_address="); mbc_emit_digest(&plan.first_address)
+        print(" last_address="); mbc_emit_digest(&plan.last_address); print("\n")
+        print("PIREUS_MBC_BOUNDARY actual_blocks=0 reused=0 certified=0")
+        print(" purity_proved=0 material_bound_profile=0")
+        print(" collision_free=0 formal_parity=0")
+        print(" effect_parity=0 material_parity=0 denotational_parity=0")
+        print(" performance=0 speedup=0 cache_hit_rate=0")
+        print(" algorithmic=0 material_novelty=0 scientific=0 global=0")
+        print(" historical=0 priority=0 claim_ready=0\n")
+        print("PIREUS_MBC_RESULT valid=")
+        print_int(if valid { 1 } else { 0 })
+        print(" error="); print_int(error); print("\n")
+    }
+    PireusMbcSummary {
+        valid: valid,
+        error: error,
+        garden_match: lineage.garden_match,
+        contract_match: lineage.contract_match,
+        parent_transcript_match: lineage.parent_transcript_match,
+        parent_records: probes.records,
+        parent_canonical_cells: probes.cells,
+        parent_duplicate_contents: probes.duplicate_contents,
+        parent_parse_failures: probes.failures,
+        partition_blocks: partition.blocks,
+        partition_views: partition.views,
+        partition_failures: partition.failures,
+        work_domains: plan.domains,
+        work_addresses: plan.addresses,
+        domain_validation_failures: plan.domain_failures,
+        address_replay_checks: plan.replay_checks,
+        address_replay_failures: plan.replay_failures,
+        negative_cases_passed: negative_passed,
+        negative_cases_total: negative_total,
+        strategy_digest: strategy,
+        probe_set_digest: probe_set,
+        partition_digest: partition.digest,
+        plan_digest: plan.digest,
+        first_work_address: plan.first_address,
+        last_work_address: plan.last_address,
+        completed_blocks: 0,
+        reuse_hits: 0,
+        expected_result_digests: 0,
+        actual_block_execution_complete: false,
+        any_block_reused: false,
+        all_v13_probes_certified: false,
+        deterministic_purity_formally_proved: false,
+        material_bound_profile_instantiated: false,
+        collision_free_semantic_identity: false,
+        formal_parity_open: false,
+        effect_parity_open: false,
+        material_parity_open: false,
+        denotational_parity_open: false,
+        performance_measured: false,
+        speedup_admitted: false,
+        cache_hit_rate_admitted: false,
+        algorithmic_novelty: false,
+        material_novelty: false,
+        scientific_novelty: false,
+        global_novelty: false,
+        historical_novelty: false,
+        priority_claim: false,
+        claim_ready: false,
+    }
+}
