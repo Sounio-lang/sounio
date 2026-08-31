@@ -8,11 +8,11 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 RAW_BIN="${MADAROS_RAW_BIN:-$WORK_DIR/madaros-current-source}"
 REPS="${MADAROS_STACK_REPS:-10}"
 
-if ! rg -q 'pub functions: \*mut IrFunctionTable' "$ROOT_DIR/self-hosted/ir/ir.sio"; then
+if ! grep -Eq 'pub functions: \*mut IrFunctionTable' "$ROOT_DIR/self-hosted/ir/ir.sio"; then
   echo "FAIL: IrModule.functions is not backed by IrFunctionTable" >&2
   exit 1
 fi
-if rg -q '^[[:space:]]*(let|var)[[:space:]].*\[IrFunction;[[:space:]]*(8192|16384)\]' \
+if grep -Eq '^[[:space:]]*(let|var)[[:space:]].*\[IrFunction;[[:space:]]*(8192|16384)\]' \
   "$ROOT_DIR/self-hosted/ir/normalize.sio" \
   "$ROOT_DIR/self-hosted/ir/serialize.sio"; then
   echo "FAIL: stack-sized IrFunction table remains in normalize/serialize" >&2
@@ -23,7 +23,7 @@ for witness in \
   'ir_module_fn_set(&! module, 512' \
   'ir_module_fn_set(&! module, IR_MAX_FUNCS - 1' \
   'ir_module_fn_set(&! module, IR_MAX_FUNCS,'; do
-  if ! rg -Fq "$witness" "$ROOT_DIR/self-hosted/test_ir.sio"; then
+  if ! grep -Fq "$witness" "$ROOT_DIR/self-hosted/test_ir.sio"; then
     echo "FAIL: missing function-table witness: $witness" >&2
     exit 1
   fi
