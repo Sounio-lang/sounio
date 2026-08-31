@@ -32,20 +32,26 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-MADAROS="${MADAROS_RAW_BIN:-$ROOT_DIR/artifacts/self-hosted/madaros}"
-SRC="$ROOT_DIR/tests/multimodule/opt_chained_call_accumulator_main.sio"
+MADAROS="${MADAROS_RAW_BIN:-${MADAROS_BIN:-$ROOT_DIR/artifacts/self-hosted/madaros}}"
+CASES="$ROOT_DIR/tests/multimodule"
+ENTRY="opt_chained_call_accumulator_main.sio"
 WANT="OPT_CHAINED_CALL_ACCUMULATOR_OK"
 
 fail() { echo "MADAROS_OPT_CHAINED_CALL_FAIL: $*" >&2; exit 1; }
 
 [[ -x "$MADAROS" ]] || { echo "madaros-opt-chained-call: no raw Madaros at $MADAROS -- skipping"; exit 0; }
-[[ -f "$SRC" ]] || fail "fixture missing: $SRC"
+[[ -f "$CASES/$ENTRY" ]] || fail "fixture missing: $CASES/$ENTRY"
 
 run_one() {  # run_one <label> <flag...>
   local label="$1"; shift
   local elf out rc
   elf="$(mktemp /tmp/opt-chained-XXXXXX.elf)"
-  if ! "$MADAROS" "$@" build "$SRC" "$elf" >/dev/null 2>&1; then
+  # Build from inside the fixture directory, as the sibling multimodule gates do:
+  # sibling-module resolution is relative to the entry file, and the compiler
+  # needs the raised stack. Building by path from the repo root works locally and
+  # failed in CI -- the first version of this gate did exactly that.
+  if ! ( cd "$CASES" && ulimit -s 524288 2>/dev/null || true
+         "$MADAROS" "$@" build "$ENTRY" "$elf" ) >/dev/null 2>&1; then
     rm -f "$elf"; fail "$label: the fixture did not build"
   fi
   chmod +x "$elf"
