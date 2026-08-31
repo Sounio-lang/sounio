@@ -85,6 +85,102 @@ let with_lock state_directory operation =
       Unix.lockf descriptor F_LOCK 0;
       operation ())
 
+let signing_paths state_directory =
+  ( Filename.concat state_directory "guardian-ed25519-private.pem",
+    Filename.concat state_directory "guardian-ed25519-public.pem",
+    Filename.concat state_directory "guardian-ed25519-key.v1" )
+
+let validate_signing_pair private_key public_key =
+  let probe = "loom-native-hook-generation-guardian-signing-probe-v1\n" in
+  let public_text =
+    Loom_hook_generation_drain.read_file "guardian-public-key" public_key
+  in
+  let signature = Loom_epistemic.outcome_ed25519_sign private_key probe in
+  if not (Loom_epistemic.outcome_ed25519_verify public_text probe signature) then
+    failf "guardian-signing-pair-invalid";
+  ( Loom_hook_generation_drain.sha256_file "guardian-private-key" private_key,
+    Loom_hook_generation_drain.sha256 public_text,
+    Loom_epistemic.outcome_public_key_id public_text )
+
+let generate_signing_pair state_directory =
+  let private_key, public_key, key_manifest = signing_paths state_directory in
+  let temporary_private =
+    Filename.concat state_directory
+      (Printf.sprintf ".guardian-private.%d.pem" (Unix.getpid ()))
+  in
+  let temporary_public =
+    Filename.concat state_directory
+      (Printf.sprintf ".guardian-public.%d.pem" (Unix.getpid ()))
+  in
+  let openssl = "/usr/bin/openssl" in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter (fun path -> if Sys.file_exists path then (try Unix.unlink path with _ -> ()))
+        [ temporary_private; temporary_public ])
+    (fun () ->
+      if not (Loom_hook_generation_drain.executable openssl) then
+        failf "guardian-openssl-unavailable";
+      let generated =
+        Loom_hook.run_process ~timeout_seconds:10.0 ~cwd:state_directory openssl
+          [ "genpkey"; "-algorithm"; "ED25519"; "-out"; temporary_private ]
+      in
+      if generated.code <> 0 then
+        failf "guardian-private-key-generation-refused:%s" generated.output;
+      Unix.chmod temporary_private 0o600;
+      let derived =
+        Loom_hook.run_process ~timeout_seconds:10.0 ~cwd:state_directory openssl
+          [ "pkey"; "-in"; temporary_private; "-pubout"; "-out";
+            temporary_public ]
+      in
+      if derived.code <> 0 then
+        failf "guardian-public-key-derivation-refused:%s" derived.output;
+      let private_text =
+        Loom_hook_generation_drain.read_file "guardian-private-key" temporary_private
+      in
+      let public_text =
+        Loom_hook_generation_drain.read_file "guardian-public-key" temporary_public
+      in
+      ignore (atomic_write state_directory (Filename.basename private_key) private_text);
+      ignore (atomic_write state_directory (Filename.basename public_key) public_text);
+      let private_sha256, public_sha256, key_id =
+        validate_signing_pair private_key public_key
+      in
+      let created_utc = Loom_hook_generation_drain.utc_now (Unix.time ()) in
+      let manifest =
+        Printf.sprintf
+          "schema=loom-native-hook-guardian-key-v1\nalgorithm=ed25519\nkey_id=%s\nprivate_key_sha256=%s\npublic_key_sha256=%s\ncreated_utc=%s\n"
+          key_id private_sha256 public_sha256 created_utc
+      in
+      ignore (atomic_write state_directory (Filename.basename key_manifest) manifest);
+      (public_sha256, key_id))
+
+let ensure_signing_pair state_directory =
+  let private_key, public_key, key_manifest = signing_paths state_directory in
+  match
+    (Sys.file_exists private_key, Sys.file_exists public_key,
+     Sys.file_exists key_manifest)
+  with
+  | false, false, false -> generate_signing_pair state_directory
+  | true, true, true ->
+      let private_sha256, public_sha256, key_id =
+        validate_signing_pair private_key public_key
+      in
+      let values =
+        Loom_hook_generation_drain.parse_fields "guardian-key-manifest"
+          (Loom_hook_generation_drain.read_file "guardian-key-manifest" key_manifest)
+      in
+      if Loom_hook_generation_drain.field values "schema"
+           <> "loom-native-hook-guardian-key-v1"
+         || Loom_hook_generation_drain.field values "algorithm" <> "ed25519"
+         || Loom_hook_generation_drain.field values "key_id" <> key_id
+         || Loom_hook_generation_drain.field values "private_key_sha256"
+            <> private_sha256
+         || Loom_hook_generation_drain.field values "public_key_sha256"
+            <> public_sha256
+      then failf "guardian-key-manifest-drift";
+      (public_sha256, key_id)
+  | _ -> failf "guardian-signing-pair-incomplete"
+
 let state_directory common = Loom_hook_generation_drain.marker_directory common
 
 let runtime_paths common =
@@ -127,12 +223,12 @@ let rollback_probe state_directory current candidate =
         ("loom-native-hook-rollback-probe-v1\000" ^ Unix.realpath current ^ "\000"
        ^ Unix.realpath candidate ^ "\000" ^ Unix.realpath current))
 
-let final_marker observation created_utc =
+let final_marker observation guardian_public_key_sha256 created_utc =
   let open Loom_hook_generation_drain in
   Printf.sprintf
-    "schema=loom-native-hook-final-config-v1\nstate=FINAL_CONFIG_BOUND\nruntime_id=%s\nruntime_manifest_sha256=%s\nconfig_bundle_sha256=%s\nsemantic_authority=Sounio\naction=9046\ncreated_utc=%s\n"
+    "schema=loom-native-hook-final-config-v1\nstate=FINAL_CONFIG_BOUND\nruntime_id=%s\nruntime_manifest_sha256=%s\nconfig_bundle_sha256=%s\nguardian_public_key_sha256=%s\nsemantic_authority=Sounio\naction=9046\ncreated_utc=%s\n"
     observation.candidate_runtime_id observation.candidate_runtime_sha256
-    observation.config_pair_sha256 created_utc
+    observation.config_pair_sha256 guardian_public_key_sha256 created_utc
 
 let rollback_marker observation config_sha256 probe_sha256 created_utc =
   let open Loom_hook_generation_drain in
@@ -161,19 +257,25 @@ let prepare ~cwd ~apply =
       config_sha256
   else
     with_lock state (fun () ->
+        let guardian_public_key_sha256, guardian_key_id =
+          ensure_signing_pair state
+        in
         let probe_sha256 = rollback_probe state current candidate in
         let created_utc =
           Loom_hook_generation_drain.utc_now (Unix.time ())
         in
         let rollback = rollback_marker observation config_sha256 probe_sha256 created_utc in
-        let final = final_marker { observation with config_pair_sha256 = config_sha256 } created_utc in
+        let final =
+          final_marker { observation with config_pair_sha256 = config_sha256 }
+            guardian_public_key_sha256 created_utc
+        in
         let rollback_path = atomic_write state "rollback-pair-tested.v1" rollback in
         let final_path = atomic_write state "final-config.v1" final in
         Printf.sprintf
-          "{\"schema\":\"loom-native-hook-generation-guardian-v1\",\"action\":9046,\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"state\":\"PREPARED\",\"applied\":true,\"live_runtime_unchanged\":true,\"current_runtime_id\":\"%s\",\"candidate_runtime_id\":\"%s\",\"config_bundle_sha256\":\"%s\",\"rollback_probe_sha256\":\"%s\",\"rollback_marker_sha256\":\"%s\",\"final_marker_sha256\":\"%s\",\"rollback_marker_path\":\"%s\",\"final_marker_path\":\"%s\"}"
+          "{\"schema\":\"loom-native-hook-generation-guardian-v1\",\"action\":9046,\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"state\":\"PREPARED\",\"applied\":true,\"live_runtime_unchanged\":true,\"current_runtime_id\":\"%s\",\"candidate_runtime_id\":\"%s\",\"config_bundle_sha256\":\"%s\",\"guardian_key_id\":\"%s\",\"guardian_public_key_sha256\":\"%s\",\"rollback_probe_sha256\":\"%s\",\"rollback_marker_sha256\":\"%s\",\"final_marker_sha256\":\"%s\",\"rollback_marker_path\":\"%s\",\"final_marker_path\":\"%s\"}"
           (Loom_hook_generation_drain.json_escape observation.current_runtime_id)
           (Loom_hook_generation_drain.json_escape observation.candidate_runtime_id)
-          config_sha256 probe_sha256
+          config_sha256 guardian_key_id guardian_public_key_sha256 probe_sha256
           (Loom_hook_generation_drain.sha256 rollback)
           (Loom_hook_generation_drain.sha256 final)
           (Loom_hook_generation_drain.json_escape rollback_path)

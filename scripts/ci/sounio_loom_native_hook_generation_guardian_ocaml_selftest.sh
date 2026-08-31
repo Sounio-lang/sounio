@@ -65,7 +65,8 @@ plan_output="$(guardian)"
   "$plan_output" == *'"semantic_authority":"Sounio"'* ]] ||
   fail "dry run was not plan-only: $plan_output"
 [[ ! -e "$STATE_DIR/final-config.v1" && \
-  ! -e "$STATE_DIR/rollback-pair-tested.v1" ]] ||
+  ! -e "$STATE_DIR/rollback-pair-tested.v1" && \
+  ! -e "$STATE_DIR/guardian-ed25519-key.v1" ]] ||
   fail 'dry run wrote guardian markers'
 
 apply_output="$(guardian --apply)"
@@ -74,11 +75,18 @@ apply_output="$(guardian --apply)"
   "$apply_output" == *'"live_runtime_unchanged":true'* ]] ||
   fail "guardian apply did not prepare receipts: $apply_output"
 [[ -f "$STATE_DIR/final-config.v1" && \
-  -f "$STATE_DIR/rollback-pair-tested.v1" ]] ||
+  -f "$STATE_DIR/rollback-pair-tested.v1" && \
+  -f "$STATE_DIR/guardian-ed25519-private.pem" && \
+  -f "$STATE_DIR/guardian-ed25519-public.pem" && \
+  -f "$STATE_DIR/guardian-ed25519-key.v1" ]] ||
   fail 'guardian markers are absent'
 [[ "$(stat -c %a "$STATE_DIR/final-config.v1")" == 600 && \
   "$(stat -c %a "$STATE_DIR/rollback-pair-tested.v1")" == 600 ]] ||
   fail 'guardian markers are not private regular files'
+[[ "$(stat -c %a "$STATE_DIR/guardian-ed25519-private.pem")" == 600 && \
+  "$(stat -c %a "$STATE_DIR/guardian-ed25519-public.pem")" == 600 && \
+  "$(stat -c %a "$STATE_DIR/guardian-ed25519-key.v1")" == 600 ]] ||
+  fail 'guardian signing material is not private'
 grep -Fxq 'schema=loom-native-hook-final-config-v1' "$STATE_DIR/final-config.v1" ||
   fail 'final config marker schema is absent'
 grep -Fxq 'state=FINAL_CONFIG_BOUND' "$STATE_DIR/final-config.v1" ||
@@ -103,6 +111,9 @@ set -e
   "$drain_output" == *'"candidate_config_bound":true'* && \
   "$drain_output" == *'"final_config_bound":true'* && \
   "$drain_output" == *'"rollback_pair_tested":true'* && \
+  "$drain_output" == *'"ui_attestation":{"schema":"loom-native-hook-ui-attestation-v1"'* && \
+  "$drain_output" == *'"verified":true'* && \
+  "$drain_output" == *'"same_uid_peer_isolation":false'* && \
   "$drain_output" != *'"decision":"DENY672"'* ]] ||
   fail "prepared markers did not advance Sounio 9046: $drain_output"
 
@@ -125,6 +136,18 @@ set -e
   fail "tampered final marker did not close Sounio 9046: $tampered_final"
 cp "$TEST_ROOT/final-config.good" "$STATE_DIR/final-config.v1"
 
+cp "$STATE_DIR/guardian-ed25519-public.pem" "$TEST_ROOT/guardian-public.good"
+printf '\n' >> "$STATE_DIR/guardian-ed25519-public.pem"
+set +e
+tampered_key="$(drain 2>&1)"
+tampered_key_rc=$?
+set -e
+[[ "$tampered_key_rc" -eq 42 && \
+  "$tampered_key" == *'"decision":"FAIL_CLOSED"'* && \
+  "$tampered_key" == *'guardian-key-manifest-drift'* ]] ||
+  fail "tampered guardian key did not fail closed: $tampered_key"
+cp "$TEST_ROOT/guardian-public.good" "$STATE_DIR/guardian-ed25519-public.pem"
+
 cp "$STATE_DIR/rollback-pair-tested.v1" "$TEST_ROOT/rollback.good"
 sed 's/^rollback_result=PASS$/rollback_result=FAIL/' \
   "$TEST_ROOT/rollback.good" > "$STATE_DIR/rollback-pair-tested.v1"
@@ -143,4 +166,4 @@ set -e
   fail "forbidden Python or Rust executable ran: $(tr '\n' ' ' < "$FORBIDDEN_LOG")"
 
 printf '%s\n' \
-  'sounio-loom-native-hook-generation-guardian-ocaml-selftest: PASS semantic_authority=Sounio operational_realization=OCaml plan=no-write isolated_sequence=old-candidate-old atomic_markers=true live_runtime=unchanged final_binding=true rollback_binding=true final_tamper=DENY672 rollback_tamper=refused forbidden_python_rust_exec=absent'
+  'sounio-loom-native-hook-generation-guardian-ocaml-selftest: PASS semantic_authority=Sounio operational_realization=OCaml plan=no-write isolated_sequence=old-candidate-old atomic_markers=true live_runtime=unchanged final_binding=true rollback_binding=true ui_attestation=ed25519-verified same_uid_peer_isolation=false final_tamper=DENY672 key_tamper=fail_closed rollback_tamper=refused forbidden_python_rust_exec=absent'

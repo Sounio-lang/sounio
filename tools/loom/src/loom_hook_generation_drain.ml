@@ -569,7 +569,8 @@ let candidate_config_binding root candidate =
     (matched, config_bundle_sha256 root)
   with _ -> (false, String.make 64 '0')
 
-let valid_final_config_marker marker candidate_id candidate_runtime_sha256 config_sha256 =
+let valid_final_config_marker marker candidate_id candidate_runtime_sha256 config_sha256
+    guardian_public_key_sha256 =
   try
     let values = parse_fields "final-config-marker" marker in
     field values "schema" = "loom-native-hook-final-config-v1"
@@ -577,6 +578,7 @@ let valid_final_config_marker marker candidate_id candidate_runtime_sha256 confi
     && field values "runtime_id" = candidate_id
     && field values "runtime_manifest_sha256" = candidate_runtime_sha256
     && field values "config_bundle_sha256" = config_sha256
+    && field values "guardian_public_key_sha256" = guardian_public_key_sha256
     && field values "semantic_authority" = "Sounio"
     && field values "action" = "9046"
   with _ -> false
@@ -753,11 +755,15 @@ let live_observation root =
   in
   let final_config = read_marker common "final-config.v1" in
   let rollback_marker = read_marker common "rollback-pair-tested.v1" in
+  let guardian_public_key_sha256 =
+    digest_regular
+      (Filename.concat (marker_directory common) "guardian-ed25519-public.pem")
+  in
   let final_config_bound =
     match final_config with
     | Some marker ->
         valid_final_config_marker marker candidate_id candidate_runtime_sha256
-          repository_config_sha256
+          repository_config_sha256 guardian_public_key_sha256
     | None -> false
   in
   let rollback_pair_tested =
@@ -959,6 +965,40 @@ let evaluate root observation =
     failf "authority-exit-mismatch:decision=%s:expected=%d:observed=%d" decision expected_code result.code;
   (snapshot_json policy observation frame output decision, expected_code)
 
+let attach_ui_attestation common snapshot =
+  if String.length snapshot = 0 || snapshot.[String.length snapshot - 1] <> '}' then
+    failf "ui-snapshot-json-invalid";
+  let directory = marker_directory common in
+  let private_key = Filename.concat directory "guardian-ed25519-private.pem" in
+  let public_key = Filename.concat directory "guardian-ed25519-public.pem" in
+  let key_manifest = Filename.concat directory "guardian-ed25519-key.v1" in
+  let public_text = read_file "guardian-public-key" public_key in
+  let public_sha256 = sha256 public_text in
+  let private_sha256 = sha256_file "guardian-private-key" private_key in
+  let key_id = Loom_epistemic.outcome_public_key_id public_text in
+  let manifest =
+    parse_fields "guardian-key-manifest" (read_file "guardian-key-manifest" key_manifest)
+  in
+  if field manifest "schema" <> "loom-native-hook-guardian-key-v1"
+     || field manifest "algorithm" <> "ed25519"
+     || field manifest "key_id" <> key_id
+     || field manifest "private_key_sha256" <> private_sha256
+     || field manifest "public_key_sha256" <> public_sha256
+  then failf "guardian-key-manifest-drift";
+  let payload_sha256 = sha256 snapshot in
+  let signature = Loom_epistemic.outcome_ed25519_sign private_key snapshot in
+  if not (Loom_epistemic.outcome_ed25519_verify public_text snapshot signature) then
+    failf "ui-snapshot-signature-self-verification-refused";
+  String.sub snapshot 0 (String.length snapshot - 1)
+  ^ Printf.sprintf
+      ",\"ui_attestation\":{\"schema\":\"loom-native-hook-ui-attestation-v1\",\"algorithm\":\"ed25519\",\"verified\":true,\"signed_payload_sha256\":\"%s\",\"key_id\":\"%s\",\"public_key_sha256\":\"%s\",\"signature_base64\":\"%s\",\"same_uid_peer_isolation\":false}}"
+      payload_sha256 key_id public_sha256 (json_escape signature)
+
+let evaluate_live root =
+  let snapshot, code = evaluate root (live_observation root) in
+  let common = git_common_dir root in
+  (attach_ui_attestation common snapshot, code)
+
 let fail_closed_json reason =
   Printf.sprintf
     "{\"schema\":\"loom-native-hook-generation-drain-snapshot-v1\",\"action\":9046,\"stage\":\"SEMANTICS_FROZEN\",\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"authority_observed\":false,\"decision\":\"FAIL_CLOSED\",\"decision_code\":424,\"admitted\":false,\"cutover_ready\":false,\"cutover_command_exposed\":false,\"block_reason\":\"%s\",\"snapshot_utc\":\"\",\"inventory\":{\"fresh\":false,\"complete\":false,\"classification_complete\":false,\"process_generation_bound\":false,\"hook_capability_bound\":false,\"sha256\":\"\",\"total\":0,\"classified\":0,\"native\":0,\"legacy\":0,\"unknown\":0,\"unresponsive\":0},\"bindings\":{\"current_runtime_id\":\"\",\"candidate_runtime_id\":\"\",\"old_runtime_bound\":false,\"candidate_runtime_bound\":false,\"candidate_config_bound\":false,\"final_config_bound\":false,\"old_runtime_sha256\":\"\",\"candidate_runtime_sha256\":\"\",\"config_pair_sha256\":\"\"},\"canaries\":{\"mask\":0,\"required_mask\":15,\"four_provider_complete\":false},\"rollback_pair_tested\":false,\"native_entry_open\":false,\"bridge_free_candidate\":false,\"current_legacy_bridge\":false,\"authority\":{\"manifest_sha256\":\"%s\",\"semantics_sha256\":\"%s\",\"executable_sha256\":\"\",\"frame_sha256\":\"\",\"output_sha256\":\"\",\"output\":\"\"},\"members\":[]}"
@@ -967,7 +1007,7 @@ let fail_closed_json reason =
 let live_json ~cwd =
   try
     let root = find_source_root (Unix.realpath cwd) in
-    fst (evaluate root (live_observation root))
+    fst (evaluate_live root)
   with error -> fail_closed_json (Printexc.to_string error)
 
 let parse_arguments arguments =
@@ -984,10 +1024,11 @@ let run arguments =
     let cwd, fixture = parse_arguments arguments in
     let cwd = Option.value ~default:(Unix.getcwd ()) cwd |> Unix.realpath in
     let root = find_source_root cwd in
-    let observation =
-      match fixture with Some path -> fixture_observation path | None -> live_observation root
+    let json, code =
+      match fixture with
+      | Some path -> evaluate root (fixture_observation path)
+      | None -> evaluate_live root
     in
-    let json, code = evaluate root observation in
     print_endline json;
     code
   with error ->
