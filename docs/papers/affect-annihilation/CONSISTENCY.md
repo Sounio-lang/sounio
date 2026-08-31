@@ -79,16 +79,66 @@ $a \circ (b \circ c)$ are both defined and $(a \circ b) \circ c \nsim a \circ (b
 This is the axiom that carries the empirical content, and it is the one the experiment must test.
 Everything else is scaffolding.
 
+## 3.1 🟢 RESOLVED — A1–A10 are consistent
+
+The gap of §3 is closed. A model satisfying **all ten axioms**, including non-associativity.
+
+**Construction.** Start from the unit form of Cohen & Narens (1979, Thm 3.3),
+$a \circ b = b\,f(a/b)$, where monotonicity in both arguments is equivalent to *$f$ strictly
+increasing and $f(t)/t$ strictly decreasing*, and positivity to *$f(t) > 1$ and $f(t) > t$*.
+Take
+
+$$f(t) \;=\; t + 1 + \varepsilon\,\frac{t}{1+t}, \qquad \varepsilon > 0 .$$
+
+All three conditions hold **globally**: $f'(t) = 1 + \varepsilon/(1+t)^2 > 0$;
+$(f(t)/t)' = -1/t^2 - \varepsilon/(1+t)^2 < 0$; and $f(t) > t+1 > \max(1,t)$. The induced
+operation is
+
+$$\boxed{\;a \circ b \;=\; a + b + \varepsilon\,\frac{ab}{a+b}\;}$$
+
+on $X = (0,1) \cup \{z\}$, with the ceiling: the value if it is $< 1$; $z$ if it equals $1$;
+undefined if $> 1$. And $z$ absorbing.
+
+**Why each axiom holds** — analytically, not by grid:
+
+| axiom | argument |
+|---|---|
+| A4″ monotonicity | $\partial_a(a\circ b) = 1 + \varepsilon b^2/(a+b)^2 > 0$, symmetrically in $b$ |
+| A6′(i) positivity | $\varepsilon > 0 \Rightarrow a \circ b > a + b > a, b$ |
+| A3 local definability | the domain $\{a \circ b \le 1\}$ is downward closed, by monotonicity |
+| **A9 thinness** | $\circ$ strictly increasing in $b$ $\Rightarrow$ **at most one** $b$ per $a$ with $a \circ b = 1$ |
+| **A8 non-vacuity** | $a \circ a = a(2 + \varepsilon/2) = 1$ at $a^\ast = 1/(2+\varepsilon/2) \in (0,1)$ |
+| A7 Archimedean | $\circ$ exceeds addition, so $n a$ leaves $(0,1)$ |
+| **A10 grouping** | exhibited below |
+
+**The non-associativity witness** ($\varepsilon = 1$; $\circ$ is homogeneous of degree 1, so the
+witness may be scaled into $(0,1)$ freely):
+
+$$a = \tfrac19,\quad b = \tfrac29,\quad c = \tfrac39
+\;\Longrightarrow\;
+(a \circ b) \circ c = 0.924 \;\neq\; 0.895 = a \circ (b \circ c),$$
+
+both defined, both below the ceiling. Verified in
+`tests/run-pass/modelo_a1_a10.sio` (0 monotonicity violations, 0 positivity violations,
+0 local-definability violations, at most **1** crossing of the ceiling per $a$, and
+$a^\ast \circ a^\ast = 1.000$ exactly).
+
+**Note on $\varepsilon$.** At $\varepsilon = 0$ the operation degenerates to addition — the
+associative witness of §2. So $\varepsilon$ is exactly the *grouping* parameter, and A10 holds
+iff $\varepsilon \neq 0$. That is a convenient handle: the empirical question becomes the
+estimation of a single parameter whose null value is the associative model.
+
 ## 4. What is now open
 
-1. **Is A10 consistent with A1–A9?** A model satisfying all ten is required. The witness of §2
-   cannot be extended: addition is associative. Whether thin annihilation and non-associativity
-   can coexist under monotonicity **is not known to me, and I have not found it in the
-   literature**. This is the first real theorem to attack.
-2. If they cannot coexist, the project is over in its present form, and the honest report is that
-   thin annihilation *forces* associativity — which would itself be a publishable negative
-   result, and a sharp one.
-3. If they can, the representation theorem of AXIOMS.md §6.1 becomes the next target, with the
-   automorphism-rigidity obstruction (Cohen & Narens 1979, Thm 2.1) still unresolved.
+1. ~~Is A10 consistent with A1–A9?~~ **Resolved in §3.1: yes, model exhibited.**
+2. **The representation theorem** (AXIOMS.md §6.1) is now the target, with the
+   automorphism-coupling obstruction still unresolved — see AXIOMS.md §6.2 for the missing lemma
+   (invariance of the annihilation boundary, $\alpha(g(a)) = g(\alpha(a))$, replacing Luce's
+   solvability coupling).
+3. **Does the model of §3.1 satisfy the boundary-conjugation equation?** It is the obvious first
+   test case: its annihilation boundary is $b = g(a)$ with $a + b + \varepsilon ab/(a+b) = 1$,
+   and $\circ$ is homogeneous of degree 1, so dilations are candidate automorphisms — but the
+   ceiling breaks homogeneity. Whether any non-identity automorphism survives is checkable and
+   not yet checked.
 
 **No theorem is claimed in this document.** §2 is a verification; §3 is a gap; §4 is a programme.
