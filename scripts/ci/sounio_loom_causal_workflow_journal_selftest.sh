@@ -49,6 +49,9 @@ expect_value hostguardian_pidfd_attached false
 expect_value dynamic_user_workflow_attached false
 expect_value material_execution false
 expect_value pod_loss_measured false
+expect_value invalid_unit_invocation_id REFUSED
+expect_value leading_zero_material_pid REFUSED
+expect_value non_decimal_material_start_tick REFUSED
 expect_value production_activation false
 expect_value release_stage RELEASE_ADMISSION
 expect_value claim_stage CLAIM_CONTINUITY
@@ -168,8 +171,9 @@ RUN_GRANT="$(digest_of run-grant)"
 RUN_GENERATION="$(digest_of run-generation)"
 START_RECEIPT="$(digest_of start-receipt)"
 UNIT_INVOCATION_ID="$(digest_of unit-invocation-id)"
-MATERIAL_PID="$(digest_of material-pid)"
-MATERIAL_START_TICK="$(digest_of material-start-tick)"
+UNIT_INVOCATION_ID="${UNIT_INVOCATION_ID:0:32}"
+MATERIAL_PID=4242
+MATERIAL_START_TICK=987654321
 MATERIAL_CGROUP="$(digest_of material-cgroup)"
 BARRIER_NONCE="$(digest_of barrier-nonce)"
 RUN_PID_IDENTITY="$(digest_of run-pid-identity)"
@@ -186,6 +190,24 @@ material material-start-compile >/dev/null
 material material-close-compile "$COMPILE_RECEIPT" "$ARTIFACT_RECORD" \
   "$ARTIFACT_HANDLE" >/dev/null
 material material-arm-run "$RUN_TICKET" "$RUN_GRANT" "$RUN_GENERATION" >/dev/null
+
+set +e
+invalid_invocation="$(material material-mark-running "$START_RECEIPT" "$(digest_of invalid-unit-invocation)" \
+  "$MATERIAL_PID" "$MATERIAL_START_TICK" "$MATERIAL_CGROUP" "$BARRIER_NONCE" "$RUN_PID_IDENTITY" 2>&1)"
+invalid_invocation_code=$?
+invalid_pid="$(material material-mark-running "$START_RECEIPT" "$UNIT_INVOCATION_ID" 04242 \
+  "$MATERIAL_START_TICK" "$MATERIAL_CGROUP" "$BARRIER_NONCE" "$RUN_PID_IDENTITY" 2>&1)"
+invalid_pid_code=$?
+invalid_start_tick="$(material material-mark-running "$START_RECEIPT" "$UNIT_INVOCATION_ID" "$MATERIAL_PID" \
+  not-a-tick "$MATERIAL_CGROUP" "$BARRIER_NONCE" "$RUN_PID_IDENTITY" 2>&1)"
+invalid_start_tick_code=$?
+set -e
+[[ $invalid_invocation_code -eq 70 ]] ||
+  fail "64-hex unit InvocationID was not refused: $invalid_invocation"
+[[ $invalid_pid_code -eq 70 ]] ||
+  fail "leading-zero material PID was not refused: $invalid_pid"
+[[ $invalid_start_tick_code -eq 70 ]] ||
+  fail "non-decimal material start tick was not refused: $invalid_start_tick"
 
 MATERIAL_RUNNING_OUTPUT="$TEST_ROOT/material-running.out"
 SOUNIO_LOOM_CAUSAL_WORKFLOW_RUNTIME="$PARENT_RUNTIME" \
@@ -228,7 +250,7 @@ release_replay_again="$(material material-release-replay "$GUARDIAN_GENERATION" 
   "$MATERIAL_PID" "$MATERIAL_START_TICK" "$MATERIAL_CGROUP" "$RUN_GENERATION" "$BARRIER_NONCE")"
 [[ "$release_replay_again" == "$release_replay" ]] ||
   fail "idempotent release wrote or changed its receipt: $release_replay_again"
-replacement_release="$(material material-release-replay "$GUARDIAN_GENERATION" "$UNIT_INVOCATION_ID" "$(digest_of replacement-pid)" \
+replacement_release="$(material material-release-replay "$GUARDIAN_GENERATION" "$UNIT_INVOCATION_ID" 4243 \
   "$MATERIAL_START_TICK" "$MATERIAL_CGROUP" "$RUN_GENERATION" "$BARRIER_NONCE")"
 [[ "$replacement_release" == EXEC_RELEASE_RECEIPT\ outcome=REFUSED\ sounio_decision=SOUNIO_CAUSAL_WORKFLOW_MID_EXEC\ DENY593*\ sequence=7 ]] ||
   fail "replacement release was not refused: $replacement_release"
@@ -289,7 +311,7 @@ DEPENDENCIES="$(ldd "$RUNTIME_ONE" 2>&1 || true)"
 printf '%s\n' "$DEPENDENCIES" | grep -Eqi 'python|rust' &&
   fail 'OCaml journal runtime has a prohibited dependency'
 
-result="$(printf 'sounio-loom-causal-workflow-journal-selftest: PASS semantic_authority=Sounio action=9037 operational_language=OCaml operational_role=EFFECT_PARITY parent_sounio_rechecked_each_transition=true controller_sigkill=true controller_sigkill_at=MATERIAL_RUNNING_IN_EXEC controller_recovery_at_mid_exec=true tmux_used=false journal_replay_after_sigkill=true state_before=MATERIAL_RUNNING_IN_EXEC state_after=ATTESTED_CLOSED sequence=12 compile_count=1 ticket_count=1 launch_count=1 result_count=1 attestation_count=1 release=IDEMPOTENT_NO_WRITE replacement_release=REFUSED replacement_release_sounio=DENY593 release_bit_sabotage=PASS recompile=REFUSED duplicate_ticket=REFUSED duplicate_launch=REFUSED incomplete_extinction=REFUSED wrong_guardian=REFUSED journal_tamper=REFUSED journal_mode=0600 store_mode=0700 hash_chain=verified fsync_before_reply=true exec_witness_durable_before_release=true claim_after_attestation_durable=true run_ticket_bearer=false run_ticket_execution_authority=false launch_authority=action-9030 python_executed=false rust_executed=false runtime_dependencies=clean module_sha256=%s fixture_sha256=%s executable_sha256=%s hostguardian_pidfd_attached=false dynamic_user_workflow_attached=false material_execution=false pod_loss_measured=false production_activation=false parity_open=true claim_ready=false' \
+result="$(printf 'sounio-loom-causal-workflow-journal-selftest: PASS semantic_authority=Sounio action=9037 operational_language=OCaml operational_role=EFFECT_PARITY parent_sounio_rechecked_each_transition=true controller_sigkill=true controller_sigkill_at=MATERIAL_RUNNING_IN_EXEC controller_recovery_at_mid_exec=true tmux_used=false journal_replay_after_sigkill=true state_before=MATERIAL_RUNNING_IN_EXEC state_after=ATTESTED_CLOSED sequence=12 compile_count=1 ticket_count=1 launch_count=1 result_count=1 attestation_count=1 release=IDEMPOTENT_NO_WRITE replacement_release=REFUSED replacement_release_sounio=DENY593 release_bit_sabotage=PASS invalid_unit_invocation_id=REFUSED leading_zero_material_pid=REFUSED non_decimal_material_start_tick=REFUSED canonical_process_identity=true recompile=REFUSED duplicate_ticket=REFUSED duplicate_launch=REFUSED incomplete_extinction=REFUSED wrong_guardian=REFUSED journal_tamper=REFUSED journal_mode=0600 store_mode=0700 hash_chain=verified fsync_before_reply=true exec_witness_durable_before_release=true claim_after_attestation_durable=true run_ticket_bearer=false run_ticket_execution_authority=false launch_authority=action-9030 python_executed=false rust_executed=false runtime_dependencies=clean module_sha256=%s fixture_sha256=%s executable_sha256=%s hostguardian_pidfd_attached=false dynamic_user_workflow_attached=false material_execution=false pod_loss_measured=false production_activation=false parity_open=true claim_ready=false' \
   "$(sha256sum "$ROOT_DIR/tools/loom/src/loom_causal_workflow.ml" | cut -d ' ' -f 1)" \
   "$(sha256sum "$ROOT_DIR/tools/loom/causal_workflow_journal_fixture.ml" | cut -d ' ' -f 1)" \
   "$(sha256sum "$RUNTIME_ONE" | cut -d ' ' -f 1)")"

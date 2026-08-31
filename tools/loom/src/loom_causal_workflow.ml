@@ -43,6 +43,33 @@ let digest label value =
     failf "causal-workflow-%s-digest-invalid" label;
   value
 
+let fixed_lower_hex label width value =
+  if String.length value <> width
+     || not (String.for_all
+          (function '0' .. '9' | 'a' .. 'f' -> true | _ -> false) value)
+     || String.for_all (( = ) '0') value then
+    failf "causal-workflow-%s-hex-invalid" label;
+  value
+
+let canonical_unit_invocation_id value =
+  fixed_lower_hex "unit-invocation-id" 32 value
+
+let positive_decimal label minimum value =
+  if value = "" || String.length value > 20 || value.[0] = '0'
+     || not (String.for_all (function '0' .. '9' -> true | _ -> false) value)
+  then failf "causal-workflow-%s-decimal-invalid" label;
+  let parsed =
+    try Int64.of_string value
+    with Failure _ -> failf "causal-workflow-%s-decimal-invalid" label
+  in
+  if Int64.compare parsed minimum < 0 then
+    failf "causal-workflow-%s-decimal-invalid" label;
+  value
+
+let canonical_material_pid value = positive_decimal "material-pid" 2L value
+let canonical_material_start_tick value =
+  positive_decimal "material-start-tick" 1L value
+
 let validate_atom label value =
   if value = "" || String.length value > 256 then
     failf "causal-workflow-%s-invalid" label;
@@ -705,10 +732,10 @@ let apply_transition (policy : policy) (snapshot : snapshot) (event : event) =
       { base with launch_count = 1;
         start_receipt = Some (field fields "start_receipt" |> digest "start-receipt");
         unit_invocation_id =
-          Some (field fields "unit_invocation_id" |> digest "unit-invocation-id");
-        material_pid = Some (field fields "material_pid" |> digest "material-pid");
+          Some (field fields "unit_invocation_id" |> canonical_unit_invocation_id);
+        material_pid = Some (field fields "material_pid" |> canonical_material_pid);
         material_start_tick =
-          Some (field fields "material_start_tick" |> digest "material-start-tick");
+          Some (field fields "material_start_tick" |> canonical_material_start_tick);
         material_cgroup =
           Some (field fields "material_cgroup" |> digest "material-cgroup");
         barrier_nonce = Some (field fields "barrier_nonce" |> digest "barrier-nonce");
@@ -956,20 +983,20 @@ let admit_exec_release ~repo_root ~state_root ~workflow_id ~guardian_generation
   let snapshot = load_snapshot ~repo_root ~state_root ~workflow_id in
   if snapshot.phase <> Material_running_in_exec then
     failf "causal-workflow-release-phase-refused";
-  let equal label supplied persisted =
-    digest label supplied = require_option label persisted
+  let equal canonical label supplied persisted =
+    canonical supplied = require_option label persisted
   in
   let word0 = 3071 in
   let word0 =
     if digest "guardian-generation" guardian_generation = snapshot.guardian_generation
     then word0 else clear_bit word0 1
   in
-  let word0 = if equal "unit-invocation-id" unit_invocation_id snapshot.unit_invocation_id then word0 else clear_bit word0 2 in
-  let word0 = if equal "material-pid" material_pid snapshot.material_pid then word0 else clear_bit word0 3 in
-  let word0 = if equal "material-start-tick" material_start_tick snapshot.material_start_tick then word0 else clear_bit word0 4 in
-  let word0 = if equal "material-cgroup" material_cgroup snapshot.material_cgroup then word0 else clear_bit word0 5 in
-  let word0 = if equal "run-grant-generation" run_grant_generation snapshot.run_grant_generation then word0 else clear_bit word0 6 in
-  let word0 = if equal "barrier-nonce" barrier_nonce snapshot.barrier_nonce then word0 else clear_bit word0 11 in
+  let word0 = if equal canonical_unit_invocation_id "unit-invocation-id" unit_invocation_id snapshot.unit_invocation_id then word0 else clear_bit word0 2 in
+  let word0 = if equal canonical_material_pid "material-pid" material_pid snapshot.material_pid then word0 else clear_bit word0 3 in
+  let word0 = if equal canonical_material_start_tick "material-start-tick" material_start_tick snapshot.material_start_tick then word0 else clear_bit word0 4 in
+  let word0 = if equal (digest "material-cgroup") "material-cgroup" material_cgroup snapshot.material_cgroup then word0 else clear_bit word0 5 in
+  let word0 = if equal (digest "run-grant-generation") "run-grant-generation" run_grant_generation snapshot.run_grant_generation then word0 else clear_bit word0 6 in
+  let word0 = if equal (digest "barrier-nonce") "barrier-nonce" barrier_nonce snapshot.barrier_nonce then word0 else clear_bit word0 11 in
   let frame = Printf.sprintf "9037 1 %d 1045\n" word0 in
   let code, output = process_exchange policy.mid_exec_runtime frame in
   let decision = String.split_on_char '\n' output |> List.hd in

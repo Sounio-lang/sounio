@@ -6,6 +6,7 @@ let empty_sha256 =
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 let identity label = Loom_causal_workflow.sha256 label
+let invocation_id label = String.sub (identity label) 0 32
 
 let option_value = function Some value -> value | None -> "absent"
 let option_int = function Some value -> string_of_int value | None -> "absent"
@@ -80,9 +81,9 @@ let phase_b ~repo_root ~state_root =
   let running =
     mark_run_launched ~repo_root ~state_root ~workflow_id
       ~start_receipt:(identity "run-start-receipt-v1")
-      ~unit_invocation_id:(identity "unit-invocation-id-v1")
-      ~material_pid:(identity "material-pid-v1")
-      ~material_start_tick:(identity "material-start-tick-v1")
+      ~unit_invocation_id:(invocation_id "unit-invocation-id-v1")
+      ~material_pid:"4242"
+      ~material_start_tick:"987654321"
       ~material_cgroup:(identity "material-cgroup-v1")
       ~barrier_nonce:(identity "barrier-nonce-v1")
       ~run_pid_identity:(identity "run-pid-identity-v1")
@@ -90,9 +91,9 @@ let phase_b ~repo_root ~state_root =
   expect_refused "duplicate-launch" (fun () ->
       mark_run_launched ~repo_root ~state_root ~workflow_id
         ~start_receipt:(identity "run-start-receipt-v2")
-        ~unit_invocation_id:(identity "unit-invocation-id-v2")
-        ~material_pid:(identity "material-pid-v2")
-        ~material_start_tick:(identity "material-start-tick-v2")
+        ~unit_invocation_id:(invocation_id "unit-invocation-id-v2")
+        ~material_pid:"4243"
+        ~material_start_tick:"987654322"
         ~material_cgroup:(identity "material-cgroup-v2")
         ~barrier_nonce:(identity "barrier-nonce-v2")
         ~run_pid_identity:(identity "run-pid-identity-v2"));
