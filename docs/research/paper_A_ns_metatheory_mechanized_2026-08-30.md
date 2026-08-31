@@ -85,7 +85,7 @@ One could instead have baked `m.gumVar = trueVar a` into `t_kraw` and called pre
 | NS type safety | `progress`, `preservation` (+ `weakening`, `substClosed`, `value_emptyE`, canonical forms) | port of V2's proofs with the `N` index and the `Covers` obligation at every `kraw` construction |
 | Soundness | `Exact`, `exact_shift`, `exact_subst`, `exact_preservation` | |
 | Theorem 6.4 | `AGFree`, `typed_agfree` (no reduction needed), `soundness_star` (along `⇒*`) | "no **reached** operator is an anti-garbling" |
-| §8.2 controls | `x_plus_x_steps` (the defective semantics *does* step), `x_plus_x_understates` (2 ≠ 4), `x_plus_x_gap` (= 2⟨x,x⟩), `x_plus_x_untypable` (∀ Γ T E, ∀ annotation), `measure_plus_measure_untypable` (source level, via `invMeasure`), `x_plus_top_untypable` (`x + opaque(y)`: ⊤ clause in isolation, via `invOpaque`; `opaque_y_typable`), `x_plus_y_typable`, `x_plus_y_exact`, `x_times_y_exact`, `x_times_x_understates` | the sabotage witness in the kernel; `opaque e` = the paper's `opaque_knowledge()` fixture, typed at ⊤ |
+| §8.2 controls | `x_plus_x_steps` (the defective semantics *does* step), `x_plus_x_understates` (2 ≠ 4), `x_plus_x_gap` (= 2⟨x,x⟩), `x_plus_x_untypable` (∀ Γ T E, ∀ annotation), `measure_plus_measure_untypable` (source level, via `invMeasure`), `let_x_plus_x_untypable` (the §8.2 shared-variable `let x = measure s in x + x`, via `invLet` + `invVar`), `x_plus_top_untypable` (`x + opaque(y)`: ⊤ clause in isolation, via `invOpaque`; `opaque_y_typable`), `x_plus_y_typable`, `x_plus_y_exact`, `x_times_y_exact`, `x_times_x_understates` | the sabotage witness in the kernel; `opaque e` = the paper's `opaque_knowledge()` fixture, typed at ⊤ |
 
 Axiom footprint (`#print axioms`, captured by the gate):
 
@@ -115,10 +115,15 @@ leak — the footprint proves it.
    exactness would be a *hypothesis* (the claimed `ρ` equals the true `⟨a,b⟩`), not a
    theorem — which is the paper's point about it being a typed claim.
 5. **Honest labelling (the noise-symbol axiom).** Distinct `measure` labels are distinct
-   physical sources. The type system *tracks* sources; it does not *discover* them — two
+   physical sources. **Assumed, not proved** — with dishonest labels the calculus
+   under-approximates covariance (Grok 4.6 round 3 forced this to be said plainly). The type system *tracks* sources; it does not *discover* them — two
    physically correlated measurements given different labels type as disjoint. This is the
    modelling axiom of every noise-symbol system (Comba–Stolfi, Fluctuat) and is stated, not
    discharged. (xai review 2026-08-30, item 3 — `paper_A_ns_metatheory_xai_review_2026-08-30.md`.)
+
+6. **Algebraic, not distributional.** `trueVar a = ⟨a,a⟩` is the variance of `Σ c_s ε_s` under
+   independent unit-variance symbols *by definition*; no sampling/distributional adequacy is
+   modelled or claimed (Grok 4.6 rounds 2–3).
 
 ## 5. Reproduce
 
