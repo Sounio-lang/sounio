@@ -380,9 +380,11 @@ for _ in $(seq 1 240); do
   [[ "$sabotage_refusal" == loom-causal-material-mid-exec-sabotage-refusal-v1$'\n'* ]] && break
   sleep 0.25
 done
-[[ "${sabotage_refusal:-}" == *$'\ndecision=DENY592\n'* && \
-   "${sabotage_refusal:-}" == *$'\noriginal_cell_held=true\n'* && \
-   "${sabotage_refusal:-}" == *$'\nrelease_sent=false\n'* ]] && \
+sabotage_decision="$(record_value <(printf '%s\n' "${sabotage_refusal:-}") decision)"
+sabotage_cell_held="$(record_value <(printf '%s\n' "${sabotage_refusal:-}") original_cell_held)"
+sabotage_release_sent="$(record_value <(printf '%s\n' "${sabotage_refusal:-}") release_sent)"
+[[ "$sabotage_decision" == DENY592 && "$sabotage_cell_held" == true && \
+   "$sabotage_release_sent" == false ]] && \
   host_exec "$POD_B" sh -c "test ! -e '$HOST_ROOT/store/result.record' && test ! -e '$HOST_ROOT/store/attestation.record'" ||
   fail "replacement-identity sabotage was not refused before release: ${sabotage_refusal:-absent}"
 
