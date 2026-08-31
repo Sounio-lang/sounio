@@ -18,15 +18,17 @@ TEST_EVIDENCE_PENDING_REL="${TEST_EVIDENCE_REL}.pending"
 
 FREEZE_COMMIT='d239261c807ad600a7d3c8f347e2588185cc4294'
 SOURCE_BASE_COMMIT='c9c4e93a77b9a94f99ecb6da659402ea552f9f11'
-SOURCE_COMMIT='0f22cb703fbc0308685ba28bf48d7de39162d4d6'
+SOURCE_BOUNDARY_COMMIT='0f22cb703fbc0308685ba28bf48d7de39162d4d6'
+SOURCE_COMMIT='1fe3c1820af46f4c598dbee5494329334a326127'
 POLICY_COMMIT='f3a4128388d47e091e9803d67c097a6976efeb02'
 PRESEAL_GATE_COMMIT='PENDING'
 
 FREEZE_SHA256='dab99f29f594de4c83ef15d932c4ddd0eaac388236c94aea8992822a3bd8b42f'
-MODULE_SHA256='a6d3fb0445405811d50429ba87436efaf3e08a1103e4375dfbce7527efa4cfee'
+SOURCE_BASE_MODULE_SHA256='a6d3fb0445405811d50429ba87436efaf3e08a1103e4375dfbce7527efa4cfee'
+MODULE_SHA256='4e34d2fa92662c682d2ee664ef5ab1a832b430e19b370763db27fe1b30a00a64'
 EXAMPLE_SHA256='af6ed3880c3eb1e60ebb48373f6a5448f58fc2b733e071d2f9c086b0230fec2b'
 TEST_SHA256='feff53c9b8617fb08f7836ec279cbeb74cc70251b5ae6b0bb22e2c5e1d467091'
-SOURCE_MANIFEST_SHA256='5a1949034bef3ffaeee3bf32b933a21a69e135b3d95d2867db6b3b666387db16'
+SOURCE_MANIFEST_SHA256='d457672724ba7aa7c252607e7cc190f6e8d8e7243bd7ddc8d1e20ffa10fe238a'
 PARENT_SOURCE_MANIFEST_SHA256='162beb0a344715c5674e33fb110dad48910a729c58f5756e79c6e892d3dcf768'
 SEMANTICS_SHA256='f7b7e81c546bf54a2a92ec374f50465dfb2e0874d52b77fc6ac70484587dc20c'
 PARENT_SEMANTICS_SHA256='f7b7e81c546bf54a2a92ec374f50465dfb2e0874d52b77fc6ac70484587dc20c'
@@ -146,7 +148,10 @@ require_hash "${ROOT}/stdlib/coordination/loom_language_authority.sio" \
 git -C "${ROOT}" merge-base --is-ancestor "${FREEZE_COMMIT}" \
   "${SOURCE_BASE_COMMIT}" || fail 'frozen semantics do not precede reuse source'
 git -C "${ROOT}" merge-base --is-ancestor "${SOURCE_BASE_COMMIT}" \
-  "${SOURCE_COMMIT}" || fail 'reuse source does not precede boundary correction'
+  "${SOURCE_BOUNDARY_COMMIT}" ||
+  fail 'reuse source does not precede boundary correction'
+git -C "${ROOT}" merge-base --is-ancestor "${SOURCE_BOUNDARY_COMMIT}" \
+  "${SOURCE_COMMIT}" || fail 'boundary correction does not precede source repair'
 git -C "${ROOT}" merge-base --is-ancestor "${SOURCE_COMMIT}" \
   "${PRESEAL_GATE_COMMIT}" || fail 'reuse source does not precede gate'
 git -C "${ROOT}" merge-base --is-ancestor "${PRESEAL_GATE_COMMIT}" HEAD ||
@@ -155,8 +160,13 @@ git -C "${ROOT}" merge-base --is-ancestor "${POLICY_COMMIT}" \
   "${SOURCE_COMMIT}" || fail 'Guardian policy does not precede reuse source'
 
 require_committed_hash "${FREEZE_COMMIT}" "${FREEZE_REL}" "${FREEZE_SHA256}"
-require_committed_hash "${SOURCE_BASE_COMMIT}" "${MODULE_REL}" "${MODULE_SHA256}"
+require_committed_hash "${SOURCE_BASE_COMMIT}" "${MODULE_REL}" \
+  "${SOURCE_BASE_MODULE_SHA256}"
 require_committed_hash "${SOURCE_BASE_COMMIT}" "${TEST_REL}" "${TEST_SHA256}"
+require_committed_hash "${SOURCE_BOUNDARY_COMMIT}" "${MODULE_REL}" \
+  "${SOURCE_BASE_MODULE_SHA256}"
+require_committed_hash "${SOURCE_BOUNDARY_COMMIT}" "${EXAMPLE_REL}" \
+  "${EXAMPLE_SHA256}"
 require_committed_hash "${SOURCE_COMMIT}" "${MODULE_REL}" "${MODULE_SHA256}"
 require_committed_hash "${SOURCE_COMMIT}" "${EXAMPLE_REL}" "${EXAMPLE_SHA256}"
 require_committed_hash "${SOURCE_COMMIT}" "${TEST_REL}" "${TEST_SHA256}"
@@ -178,9 +188,12 @@ NORMALIZED_GATE_SHA256="$(sed \
 SOURCE_BASE_DELTA="$(git -C "${ROOT}" diff-tree --no-commit-id --name-only -r "${SOURCE_BASE_COMMIT}" | LC_ALL=C sort)"
 [[ "${SOURCE_BASE_DELTA}" == $'.claude/llm_offload_log.md\nexamples/pireus_multiprobe_block_reuse_admission.sio\nstdlib/hardware/pireus/multiprobe_block_reuse_admission.sio\ntests/stdlib/hardware/test_pireus_multiprobe_block_reuse_admission.sio' ]] ||
   fail 'reuse source base commit escaped its exact path allowlist'
-SOURCE_DELTA="$(git -C "${ROOT}" diff-tree --no-commit-id --name-only -r "${SOURCE_COMMIT}" | LC_ALL=C sort)"
-[[ "${SOURCE_DELTA}" == $'.claude/llm_offload_log.md\nexamples/pireus_multiprobe_block_reuse_admission.sio' ]] ||
+SOURCE_BOUNDARY_DELTA="$(git -C "${ROOT}" diff-tree --no-commit-id --name-only -r "${SOURCE_BOUNDARY_COMMIT}" | LC_ALL=C sort)"
+[[ "${SOURCE_BOUNDARY_DELTA}" == $'.claude/llm_offload_log.md\nexamples/pireus_multiprobe_block_reuse_admission.sio' ]] ||
   fail 'reuse boundary correction escaped its exact path allowlist'
+SOURCE_DELTA="$(git -C "${ROOT}" diff-tree --no-commit-id --name-only -r "${SOURCE_COMMIT}" | LC_ALL=C sort)"
+[[ "${SOURCE_DELTA}" == $'.claude/llm_offload_log.md\nstdlib/hardware/pireus/multiprobe_block_reuse_admission.sio' ]] ||
+  fail 'reuse source repair escaped its exact path allowlist'
 [[ "$(git -C "${ROOT}" diff-tree --no-commit-id --name-only -r "${PRESEAL_GATE_COMMIT}")" == "${GATE_REL}" ]] ||
   fail 'gate preseal commit escaped its exact path allowlist'
 
