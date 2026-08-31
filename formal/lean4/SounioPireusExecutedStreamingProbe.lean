@@ -2,10 +2,12 @@
   FORMAL_PARITY base for one already-frozen Sounio V13 execution record.
 
   The input, winner, and output below were emitted by the matcher-free Sounio
-  executable at commit 73704f7afed6780c3a317b739cbd35fe94dbe395 and are
-  bound to the first transcript by its SHA-256.  Lean does not choose or revise
-  them.  This module only packages the admitted=0 record and divides the exact
-  65536-code scan into independently checkable blocks.
+  executable at commit 73704f7afed6780c3a317b739cbd35fe94dbe395.  The freeze
+  separately records that producer source and the later matcher-only frozen
+  source; both hashes are packaged below.  The external gate binds them to the
+  first transcript.  Lean does not choose or revise the record.  This module
+  only packages admitted=0 and divides the exact 65536-code scan into
+  independently checkable blocks.
 
   No minimum or executed-parity claim is made here.  The downstream block
   certificates must prove that no view in any block is below the emitted
@@ -27,7 +29,10 @@ open SounioPireusSignTableBitVecLex
 open SounioPireusConcreteQuotientAction
 open SounioPireusStreamingMinimumCorrespondence
 
-def frozenSounioSourceSha256 : String :=
+def matcherFreeSounioSourceSha256 : String :=
+  "3136968a83bbba18d56c543895d6bbd9530ccf6c59db78ac6b6f2fa3bd26c9e4"
+
+def frozenMatcherSounioSourceSha256 : String :=
   "7ada1b17bf91fdb3f4c48877d2485f71a65bb4159d88cb7e4b288c77bfe3cdae"
 
 def frozenSounioFirstTranscriptSha256 : String :=
