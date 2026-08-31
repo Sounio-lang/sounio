@@ -27,8 +27,8 @@ GATE_REL='scripts/ci/pireus_concrete_quotient_action_formal_parity.sh'
 
 PARENT_GATE_COMMIT='e04304321bf55e2538c31fffc07ea23c2d69be77'
 SOURCE_COMMIT='e2508f6781065b94b7343b5ba407712d36d46b1c'
-ARTIFACT_COMMIT='PENDING_ARTIFACT_COMMIT'
-PRESEAL_GATE_SHA256='PENDING_PRESEAL_GATE_SHA256'
+ARTIFACT_COMMIT='649a5a6439f3260c06df716737dfd6f232d8d839'
+PRESEAL_GATE_SHA256='e5052290e3ffc7481b21a6e1f9f9c39250c7e20c74cc091f66ec9d5631119a06'
 SOURCE_BUNDLE_SHA256='48591d2519b821e6985927cb56b705b2a39c51c48b630769ba470f6cf2de71dc'
 AUDIT_BUNDLE_SHA256='8a2c2485b5111b4b18ad8093743c117ad66564ccc79d025a2641229c6196731b'
 SIGN_SHA256='160b68484acedc4f501f181b28eed3e3a17bf483b1207cca1c5ca433661696c9'
@@ -39,12 +39,12 @@ CLOSURE_AUDIT_SHA256='02ca9ba1c0110c58c25fbb4edb0579bf37e51148ab970b24f335855f0b
 QUOTIENT_AUDIT_SHA256='99a6ae72d01c5b200086771058f1835eb78e5bd3c5b154c61cd53670951a8840'
 LAKEFILE_SHA256='7992ce727698567504989f963c46e89b0ba9d0cdf79b3ecb5859f2da831506b1'
 SOURCE_OFFLOAD_LOG_SHA256='da00ebb48583d6f63a1c7c5c5e77c704367db92c682f0effbe94ca08e44e36d4'
-GATE_OFFLOAD_LOG_SHA256='15a60b3a8f6c8a240c754ac17230c7531911f279907c8c0c070de1764b5ec92d'
+GATE_OFFLOAD_LOG_SHA256='69e7c99f75693a8fd0981050155b0513c2d12e24f4b6d2ac8e9b2bcd95a1b767'
 PARENT_RECEIPT_SHA256='36c23734c1a05ddea1716de5d0013cb795aeaf20ebb811848a7d6699211e6b3e'
 PARENT_GATE_SHA256='aa413f08d12c447a992bcacf54e68a376cac1babd71f6b3b2fd662c2ccb32dd2'
 PARENT_EVIDENCE_SHA256='5363ce3100b5429c7a8d7c9dd9dba14a836f2af10d1f1e4f5823e521ea250218'
-RECEIPT_SHA256='368980723c685ec3b0b4e43e831795d7af910af6e2f0809cac1613f69a5c8f93'
-EVIDENCE_SHA256='be0cbd784cb1dc0e6b172d3f71380031f2512baa69821ced61e3469892a1a702'
+RECEIPT_SHA256='ef219a1bf2c3d3788f9a11e08f6cb4bd67985f92539fe89cef0be29b63033165'
+EVIDENCE_SHA256='004e0a62e47733b1454fdd3e0284cae5688f24c298efe5f2f1169643afc7ba7c'
 BASE_GATE_SHA256='6a18d7061bd408a3050d468d65c53231d0010865543346352e7ae91a0ff11f0e'
 BASE_FREEZE_SHA256='11893a34450729ff06ac40ade86c90decb7a6947daea3cc108cae17f73572f84'
 PARITY_OPEN_SHA256='4d24259d1807cffa999a90aea4e4797fcbce50659c2e59c34deccb3ca33bdfbf'
@@ -100,11 +100,13 @@ EXPECTED_THEOREMS=(
 
 EXPECTED_DEFINITIONS=(
   cellIndex cellOfIndex tableCellList packTable unpackTable basisOfLinear
-  analyticBasisEntryOfLinear AnalyticActionView viewOfAction identityView composeView
-  inverseView IsNormalizedBits NormalizedBits normalizedBitsOfTable tableOfNormalizedBits
+  analyticBasisEntryOfLinear viewOfAction identityView composeView inverseView
+  IsNormalizedBits normalizedBitsOfTable tableOfNormalizedBits
   quotientAct concreteQuotientActionSystem SameDeclaredLinearSwapGaugeOrbit
   declaredCanonicalOption ConcreteQuotientBoundary concreteQuotientBoundary
 )
+
+EXPECTED_TYPE_ABBREVIATIONS=(AnalyticActionView NormalizedBits)
 
 fail() {
   printf 'pireus concrete quotient action formal parity: FAIL: %s\n' "$*" >&2
@@ -227,10 +229,10 @@ require_committed_hash "${ARTIFACT_COMMIT}" "${RECEIPT_REL}" "${RECEIPT_SHA256}"
 require_committed_hash "${ARTIFACT_COMMIT}" "${EVIDENCE_REL}" "${EVIDENCE_SHA256}"
 require_committed_hash "${ARTIFACT_COMMIT}" "${GATE_REL}" "${PRESEAL_GATE_SHA256}"
 
-[[ "$(lean --version | head -1)" == 'Lean (version 4.33.1, x86_64-unknown-linux-gnu, commit 6b3642c68f70b2c741a5b3a70db7114cb88b1e48, Release)' ]] || fail 'Lean version drift'
+[[ "$(lean --version | head -1)" == 'Lean (version 4.33.1, x86_64-unknown-linux-gnu, commit 819816b2e0a3bf405af45ae5c7af2491d8f5bee6, Release)' ]] || fail 'Lean version drift'
 [[ "$(lake --version)" == 'Lake version 5.0.0-src+819816b (Lean version 4.33.1)' ]] || fail 'Lake version drift'
 [[ "$(uname -m)" == 'x86_64' ]] || fail 'architecture drift'
-grep -Fq 'Intel(R) Xeon(R) Gold 6526Y' /proc/cpuinfo || fail 'Xeon model drift'
+grep -Fq 'INTEL(R) XEON(R) GOLD 6526Y' /proc/cpuinfo || fail 'Xeon model drift'
 [[ "$(nproc)" -eq 64 ]] || fail 'logical CPU count drift'
 
 [[ "$(sha_text "${BUILD_COMMAND}")" == "${BUILD_COMMAND_SHA256}" ]] || fail 'build command drift'
@@ -255,8 +257,11 @@ for theorem_name in "${EXPECTED_THEOREMS[@]}"; do
   grep -Fqx "#print axioms ${theorem_name}" "${AUDIT_FILES[@]}" || fail "missing theorem audit: ${theorem_name}"
 done
 for definition_name in "${EXPECTED_DEFINITIONS[@]}"; do
-  grep -Eq "^(def|abbrev|structure) ${definition_name}([[:space:]]|:|$)" "${SOURCE_FILES[@]}" || fail "missing definition: ${definition_name}"
+  grep -Eq "^(def|structure) ${definition_name}([[:space:]]|:|$)" "${SOURCE_FILES[@]}" || fail "missing definition: ${definition_name}"
   grep -Fqx "#print axioms ${definition_name}" "${AUDIT_FILES[@]}" || fail "missing definition audit: ${definition_name}"
+done
+for abbreviation_name in "${EXPECTED_TYPE_ABBREVIATIONS[@]}"; do
+  grep -Eq "^abbrev ${abbreviation_name}([[:space:]]|:|$)" "${SOURCE_FILES[@]}" || fail "missing type abbreviation: ${abbreviation_name}"
 done
 for source_file in "${SOURCE_FILES[@]}"; do
   [[ "$(grep -c 'native_decide' "${source_file}" || true)" -eq 0 ]] || fail "native_decide drift: ${source_file}"
@@ -292,6 +297,11 @@ require_line "${ROOT}/${RECEIPT_REL}" 'u250_pending_installation_card_count=1'
 require_line "${ROOT}/${RECEIPT_REL}" 'u250_enumeration_failure_count=0'
 require_line "${ROOT}/${RECEIPT_REL}" 'llm_role=REVIEW_ONLY'
 require_line "${ROOT}/${RECEIPT_REL}" 'llm_confirmed_result=false'
+require_line "${ROOT}/${RECEIPT_REL}" 'axiom_audit_public_theorem_coverage=49_OF_49'
+require_line "${ROOT}/${RECEIPT_REL}" 'axiom_audit_public_definition_reports=20'
+require_line "${ROOT}/${RECEIPT_REL}" 'axiom_audit_public_instance_reports=2'
+require_line "${ROOT}/${RECEIPT_REL}" 'axiom_audit_unreported_type_abbreviations=2'
+require_line "${ROOT}/${RECEIPT_REL}" 'source_hashed_type_abbreviations=true'
 require_line "${ROOT}/${RECEIPT_REL}" 'computable_extraction_claim=false'
 require_line "${ROOT}/${RECEIPT_REL}" 'choice_free_core_claim=false'
 require_line "${ROOT}/${RECEIPT_REL}" 'guardian_role=PREEXECUTION_POLICY_NOT_FORMAL_PROOF'
