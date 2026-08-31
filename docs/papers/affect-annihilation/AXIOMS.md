@@ -57,8 +57,25 @@ For all $w, x, y, z' \in X$:
 
 **A2 — Nontriviality.** There exist $u, v \in X$ with $u \succ v$.
 
-**A3 — Local definability.** If $x \circ y$ is defined, $x \succsim w$ and $y \succsim z'$, then
-$w \circ z'$ is defined.
+**A2′ — $z$ is the strict maximum.** $z \succ x$ for every $x \in X^\ast$.
+
+> **Corrected 2026-08-31.** The position of $z$ in the order was never postulated, and the first
+> draft of CONSISTENCY.md §2 placed it at the *bottom* while the witness model annihilates at the
+> *ceiling* — an inconsistency between two of my own documents. Fixed here by decision: $z$ is
+> the **top**. Reading: the composition that yields no resultant is the extreme of the order,
+> not its floor. Without this axiom the ordinal position of $z$ can be relabelled freely, and
+> both the density argument and the rigidity proof collapse.
+
+**A3′ — Local definability, stated for $\circ^\ast$.** If $x \circ y$ is defined **and lies in
+$X^\ast$**, $x \succsim w$ and $y \succsim z'$, then $w \circ z'$ is defined **and lies in
+$X^\ast$**.
+
+> 🚨 **The unrestricted form is inconsistent with the witness model.** With $z$ absorbing,
+> $z \circ x$ is *defined* $(= z)$ for every $x$; with $z$ the maximum, every $w \preceq z$, so
+> unrestricted A3 forces $w \circ z'$ defined for **all** pairs — i.e. $\circ$ total. But the
+> model has $0.9 \circ 0.9$ above the ceiling and undefined. My own axiom list contradicted my
+> own witness. The repair is to state definability — and A7 below — for $\circ^\ast$
+> throughout.
 
 **A4″ — Monotonicity off the singular point.** For all $x, y, c \in X^\ast$:
 (i) if $x \circ c$ and $y \circ c$ are defined **and both lie in $X^\ast$**, then
@@ -115,6 +132,24 @@ $x \succsim y \iff c \circ x \succsim c \circ y$.
 $nx \succsim y$, where $1x = x$ and $nx = [(n-1)x] \circ x$.
 
 **A8 — Annihilation is non-vacuous.** There exist $a, b \in X^\ast$ with $a \circ b = z$.
+
+**A9′ — Coherence (upward closure of annihilation).** If $a \circ b = z$, $a \precsim a'$,
+$b \precsim b'$ and $a' \circ b'$ is defined, then $a' \circ b' = z$.
+
+> 🔴 **This axiom is the mathematical content of the existence theorem, and it was missing.**
+> Without it, *"the interior is a PCS"* is **false in general**, and both the existence proof and
+> the rigidity proposition rest on that claim. Countermodel: take $(0,1)$ with $a \circ b = a+b$,
+> pick an interior pair $(a_0,b_0)$ with $a_0 + b_0 < 1$, and simply **decree**
+> $a_0 \circ b_0 := z$, leaving thinness intact. Every axiom A1–A9 as previously listed still
+> holds — yet now $(a_0+\delta) \circ b_0$ lies in $X^\ast$ while the smaller pair annihilates,
+> so the domain of $\circ^\ast$ is not downward closed, A3′ fails for $\circ^\ast$, and
+> Narens & Luce does not apply.
+>
+> The witness model satisfies coherence **because its annihilation set is a level curve of a
+> strictly increasing function** — but the axiom list did not force it. Naming the obstruction:
+> *interior annihilation*, the possibility of $a \circ b = z$ with $a' \circ b' \in X^\ast$ for
+> $a' \succsim a$, $b' \succsim b$. A9′ is exactly its negation, and it is **necessary**, by the
+> countermodel.
 
 **A9 — Annihilation is thin.** For every $a, b \in X^\ast$ with $a \circ b = z$ and every
 $c \in X^\ast$ with $c \neq b$, if $a \circ c$ is defined then $a \circ c \neq z$.

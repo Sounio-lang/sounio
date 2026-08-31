@@ -26,8 +26,12 @@ inspection — which is the argument for building models early.
 
 Let
 
-$$X = (0,1) \cup \{z\}, \qquad z \prec r \ \text{ for all } r \in (0,1), \qquad
+$$X = (0,1) \cup \{z\}, \qquad z \succ r \ \text{ for all } r \in (0,1), \qquad
 \succsim \ = \ \ge \ \text{ on } (0,1),$$
+
+> ⚠️ **Corrected 2026-08-31.** This first said $z \prec r$ — $z$ at the *bottom* — while the
+> model annihilates at the *ceiling*. Two of my own documents disagreed on where $z$ sits, and
+> nothing in the axiom list settled it. A2′ now fixes $z$ as the strict **maximum**.
 
 and define $\circ$ by, for $a, b \in (0,1)$:
 
@@ -43,7 +47,7 @@ Verification, axiom by axiom:
 
 | axiom | holds because |
 |---|---|
-| A1 weak order | $z$ is the minimum; $\ge$ orders $(0,1)$ |
+| A1, A2′ order | $z$ is the strict **maximum**; $\ge$ orders $(0,1)$ |
 | A2 nontriviality | $0.6 \succ 0.3$ |
 | A3 local definability | $w \preceq x,\ z' \preceq y \Rightarrow w + z' \le x + y \le 1$; and any composition with $z$ is defined |
 | **A4″** monotonicity | on $x+c<1,\ y+c<1$: $x \ge y \iff x+c \ge y+c$ |
@@ -127,6 +131,61 @@ $a^\ast \circ a^\ast = 1.000$ exactly).
 associative witness of §2. So $\varepsilon$ is exactly the *grouping* parameter, and A10 holds
 iff $\varepsilon \neq 0$. That is a convenient handle: the empirical question becomes the
 estimation of a single parameter whose null value is the associative model.
+
+## 3.2 🔴 Three axiom defects found by adversarial reading — and repaired
+
+An adversarial pass over the axiom list (2026-08-31) found three defects **before** any question
+of representation. All three are now repaired in AXIOMS.md; recorded here because they change
+what the earlier sections of this document claimed.
+
+**A — Unrestricted local definability contradicted the witness.** With $z$ absorbing, $z \circ x$
+is defined for every $x$; with $z$ the maximum, every $w \preceq z$, so the unrestricted axiom
+forces $\circ$ **total**. The model has $0.9 \circ 0.9$ above the ceiling and undefined. The
+axiom list contradicted the model it was supposed to admit. **Repair: A3′, stated for
+$\circ^\ast$.**
+
+**B — "The interior is a PCS" does not follow.** Countermodel: on $(0,1)$ with $a \circ b = a+b$,
+pick an interior pair with $a_0 + b_0 < 1$ and **decree** $a_0 \circ b_0 := z$, keeping thinness.
+All of A1–A9 as first listed still hold, yet $(a_0+\delta) \circ b_0 \in X^\ast$ while the
+smaller pair annihilates — the domain of $\circ^\ast$ is not downward closed and Narens & Luce
+does not apply. **This also holed the rigidity proposition**, which rests on the same claim.
+**Repair: A9′, coherence.** It is *necessary*, by the countermodel — the obstruction it negates
+is **interior annihilation**.
+
+**C — The position of $z$ was never postulated**, and §2 above placed it at the bottom while the
+model annihilates at the ceiling. **Repair: A2′, $z$ is the strict maximum.**
+
+**The witness satisfies coherence**, and for a structural reason worth isolating: its annihilation
+set is a **level curve of a strictly increasing function**. Verified in
+`tests/run-pass/coerencia_da_testemunha.sio` — 3240 pairs tested by raising both arguments from an
+annihilating pair, **0 violations**, and 0 violations of the strict growth that causes it.
+
+## 3.3 The existence theorem, now statable
+
+With the repaired system — call it **PCS$_z$**: $z$ strict maximum and absorbing, annihilation
+reached and thin, NL1976 Axioms 2–7 stated for $\circ^\ast$, plus coherence — the existence
+proof is **Narens & Luce (1976) Theorem 2.1 applied to $X^\ast$ verbatim**, plus a one-point
+extension.
+
+> **Conjecture (existence).** Every coherent PCS$_z$ has a representation in a numerical
+> PCS$_z$ $\langle R \cup \{\zeta\}, \ge, \hat\otimes\rangle$, unique given the target
+> (by triviality of the automorphism group, §6.2 of AXIOMS.md).
+
+Two things this reframes:
+
+1. **The target cannot satisfy NL1976 Def. 2.2.** A reached absorbing $\zeta$ violates positivity
+   and strict monotonicity, exactly as $X$ does. The requirement *"the target is a PCS"* descends
+   one level: it is required of the target's **interior**.
+2. **The extension to $z$ is by FIAT, not by completion or continuity.** The Dedekind completion
+   of NL1976 §7 **cannot** produce $z$: its cuts are proper by definition (no top is ever added),
+   and Theorem 7.4(i) proves the completion **is a PCS** — and PCSs exclude absorbing elements by
+   positivity. Continuity fails too: in the witness, $\lim_{a \to 1^-} a \circ b > 1$, so the
+   continuous prolongation is *undefined*, not $z$. Calling it "continuity" would sell a
+   canonicity that does not exist.
+
+The remaining work is half a page of routine lemmas: well-definedness of $\hat\otimes$ on the
+fibre of $z$ (needs coherence + $z$ strict maximum), descent of thinness to the target, and
+absorption in the target.
 
 ## 4. What is now open
 
