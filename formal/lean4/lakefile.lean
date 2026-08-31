@@ -297,6 +297,37 @@ lean_lib «SounioPireusGL4ActionEnumeration» where
 lean_lib «SounioPireusGL4AnalyticCensus» where
   moreLeanArgs := #["-j", "1"]
 
+-- First split of the analytic ordered-basis equivalence: embeds each frozen
+-- matrix-code witness into the constructive GL(4,2) basis enumeration.
+lean_lib «SounioPireusGL4AnalyticScanEmbedding» where
+  moreLeanArgs := #["-j", "1"]
+
+-- Reverse direction: an analytic ordered basis determines an admitted matrix.
+lean_lib «SounioPireusGL4AnalyticBasisEncoder» where
+  moreLeanArgs := #["-j", "1"]
+
+-- Kernel-checked two-sided equivalence between the frozen scan subtype and
+-- the constructive ordered-basis subtype.
+lean_lib «SounioPireusGL4AnalyticScanBijection» where
+  moreLeanArgs := #["-j", "1"]
+
+-- Duplicate-free 20160 scan witnesses and 40320 concrete GL(4,F2) x swap
+-- actions, including the outer-family minimum.
+lean_lib «SounioPireusGL4AnalyticActionCensus» where
+  moreLeanArgs := #["-j", "1"]
+
+lean_lib «SounioPireusGL4AnalyticScanEmbeddingAxiomAudit» where
+  moreLeanArgs := #["-j", "1"]
+
+lean_lib «SounioPireusGL4AnalyticBasisEncoderAxiomAudit» where
+  moreLeanArgs := #["-j", "1"]
+
+lean_lib «SounioPireusGL4AnalyticScanBijectionAxiomAudit» where
+  moreLeanArgs := #["-j", "1"]
+
+lean_lib «SounioPireusGL4AnalyticActionCensusAxiomAudit» where
+  moreLeanArgs := #["-j", "1"]
+
 -- Frente B vector 4/3 B: the sedenion extension of the Furey ladder — octonion SM generation persists
 -- (B1) and the doubling adds exactly one fermionic mode (greedy rank 3 -> 4). All three native_decide
 -- sweeps (16x16 complex greedy over 1..15) build in ~10s, so kept as a default_target.

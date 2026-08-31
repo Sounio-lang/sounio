@@ -1,0 +1,16 @@
+import SounioPireusGL4AnalyticActionCensus
+
+open SounioPireusGL4AnalyticActionCensus
+
+#print axioms analyticActionViews
+#print axioms actionOfView
+#print axioms analyticConcreteActionList
+#print axioms analytic_concrete_action_list_length_is_40320
+#print axioms action_view_fiber_nodup
+#print axioms analytic_action_views_nodup
+#print axioms action_of_view_injective
+#print axioms analytic_concrete_action_list_nodup
+#print axioms any_enumeration_containing_declared_actions_has_at_least_40320
+#print axioms GL4AnalyticScanBijectionBoundary
+#print axioms gl4AnalyticScanBijectionBoundary
+#print axioms scan_basis_extraction_is_partial_not_target03
