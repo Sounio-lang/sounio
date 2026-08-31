@@ -8856,6 +8856,7 @@ type provider_auth_probe =
   | Claude_auth
   | Kimi_auth
   | Grok_auth
+  | Cursor_auth
   | Opencode_auth
 
 type provider_spec = {
@@ -8930,6 +8931,16 @@ let provider_specs =
         [ "interactive"; "headless"; "event-stream"; "resume"; "model-select";
           "external-session-id"; "auth-login"; "doctor"; "context-isolation" ];
       provider_auth_probe = Grok_auth; provider_login_args = [ "login" ] };
+    { provider_id = "cursor"; provider_name = "Cursor Agent CLI";
+      provider_executable = "cursor-agent";
+      provider_version_args = [ "--version" ];
+      provider_stream = "stream-json"; provider_session_binding = "caller";
+      provider_capabilities =
+        [ "interactive"; "headless"; "event-stream"; "resume"; "model-select";
+          "external-session-id"; "auth-login"; "doctor";
+          "context-isolation" ];
+      provider_auth_probe = Cursor_auth;
+      provider_login_args = [ "login" ] };
     { provider_id = "opencode"; provider_name = "OpenCode";
       provider_executable = "opencode"; provider_version_args = [ "--version" ];
       provider_stream = "json-events"; provider_session_binding = "stream-observed";
@@ -9018,6 +9029,7 @@ let provider_auth_status spec executable =
          else ("unknown", "native-auth-status-failed"))
   | Kimi_auth -> ("unknown", "native-cli-has-no-offline-auth-status")
   | Grok_auth -> ("unknown", "native-cli-has-no-offline-auth-status")
+  | Cursor_auth -> ("unknown", "native-cli-has-no-offline-auth-status")
   | Opencode_auth ->
       let result = run_captured executable [ "providers"; "list" ] in
       if result.captured_code = 0 then ("delegated", "native-multiprovider-store")
@@ -9097,7 +9109,7 @@ let provider_model_args spec model =
     match spec.provider_id with
     | "codex" -> [ "-m"; model ]
     | "kimi" -> [ "-m"; model ]
-    | "claude" | "grok" | "opencode" -> [ "--model"; model ]
+    | "claude" | "grok" | "cursor" | "opencode" -> [ "--model"; model ]
     | _ -> failf "unsupported-provider:%s" spec.provider_id
 
 let provider_unsafe_args spec enabled =
@@ -9108,6 +9120,7 @@ let provider_unsafe_args spec enabled =
     | "claude" -> [ "--dangerously-skip-permissions" ]
     | "kimi" -> [ "--auto" ]
     | "grok" -> [ "--always-approve" ]
+    | "cursor" -> [ "--force" ]
     | "opencode" -> [ "--auto" ]
     | _ -> failf "unsupported-provider:%s" spec.provider_id
 
@@ -9121,6 +9134,7 @@ let provider_context_isolation_args spec enabled =
     | "grok" ->
         [ "--no-memory"; "--no-subagents"; "--disable-web-search";
           "--max-turns"; "2" ]
+    | "cursor" -> [ "--disable-indexing"; "--disable-codebase-ref" ]
     | "opencode" -> [ "--pure" ]
     | _ -> failf "unsupported-provider:%s" spec.provider_id
 
@@ -9166,6 +9180,14 @@ let provider_argv spec lifecycle executable mode cwd session_id provider_session
       [ executable; "--no-leader"; "--cwd"; cwd; "--output-format";
         "streaming-json"; "--resume"; provider_session ]
       @ context_args @ model_args @ unsafe_args @ [ "-p"; prompt ]
+  | "cursor", "turn", "new" ->
+      [ executable; "--print"; "--output-format"; "stream-json";
+        "--single-turn"; "--new-session-id"; session_id; "--workspace"; cwd ]
+      @ context_args @ model_args @ unsafe_args @ [ prompt ]
+  | "cursor", "turn", "resume" ->
+      [ executable; "--print"; "--output-format"; "stream-json";
+        "--single-turn"; "--resume"; provider_session; "--workspace"; cwd ]
+      @ context_args @ model_args @ unsafe_args @ [ prompt ]
   | "opencode", "turn", "new" ->
       [ executable; "run"; "--format"; "json"; "--dir"; cwd ]
       @ context_args @ model_args @ unsafe_args @ [ prompt ]
@@ -13471,7 +13493,7 @@ let change_claim_ready_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  host-enroll --agent A --lane L [--replace] [--state-dir DIR]\n  host-reconcile [--agent A --lane L] [--apply] [--service-enabled] [--state-dir DIR]\n  host-supervise [--once] [--interval-seconds N] [--apply] [--service-enabled] [--state-dir DIR]\n  host-verify --agent A --lane L [--state-dir DIR]\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
+    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude|cursor|grok\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  host-enroll --agent A --lane L [--replace] [--state-dir DIR]\n  host-reconcile [--agent A --lane L] [--apply] [--service-enabled] [--state-dir DIR]\n  host-supervise [--once] [--interval-seconds N] [--apply] [--service-enabled] [--state-dir DIR]\n  host-verify --agent A --lane L [--state-dir DIR]\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
   Printf.eprintf
     "  provider-start accepts --wait to observe the turn until terminal state\n";

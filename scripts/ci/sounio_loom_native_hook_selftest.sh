@@ -8,6 +8,9 @@ TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-native-hook.XXXXXX")"
 AUTHORITY_RUNTIME="$TEST_ROOT/sounio-loom-language-authority-runtime"
 AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
 TOOLCHAIN_ROOT="$TEST_ROOT/toolchain"
+CUTOVER_RUNTIME="$TEST_ROOT/sounio-loom-native-hook-cutover"
+CUTOVER_MANIFEST="$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1"
+CUTOVER_TOOLCHAIN_ROOT="$TEST_ROOT/cutover-toolchain"
 COORD_DIR="$TEST_ROOT/coord"
 DECISION_LOG="$TEST_ROOT/agent-hook.tsv"
 SENTINEL_DIR="$TEST_ROOT/sentinel-bin"
@@ -50,8 +53,9 @@ fail() {
 
 run_hook() {
   local event="$1"
+  local provider="${2:-codex}"
   set +e
-  HOOK_OUTPUT="$(printf '%s\n' "$event" | "$LOOM" agent-hook --agent codex 2>&1)"
+  HOOK_OUTPUT="$(printf '%s\n' "$event" | "$LOOM" agent-hook --agent "$provider" 2>&1)"
   HOOK_RC=$?
   set -e
 }
@@ -94,6 +98,14 @@ git -C "$ROOT_DIR" archive "$frozen_executable_commit" \
 SOUNIO_LOOM_LANGUAGE_AUTHORITY_SOUC="$TOOLCHAIN_ROOT/bin/souc" \
   SOUNIO_LOOM_LANGUAGE_AUTHORITY_OUTPUT="$AUTHORITY_RUNTIME" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" >/dev/null
+cutover_executable_commit="$(sed -n 's/^sounio_executable_commit=//p' "$CUTOVER_MANIFEST")"
+[[ -n "$cutover_executable_commit" ]] || fail 'native-hook cutover manifest omitted its executable commit'
+mkdir -p "$CUTOVER_TOOLCHAIN_ROOT"
+git -C "$ROOT_DIR" archive "$cutover_executable_commit" \
+  bin/souc bin/souc-lean-single-x86_64 | tar -x -C "$CUTOVER_TOOLCHAIN_ROOT"
+SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_SOUC="$CUTOVER_TOOLCHAIN_ROOT/bin/souc" \
+  SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_OUTPUT="$CUTOVER_RUNTIME" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_cutover.sh" >/dev/null
 git -C "$ROOT_DIR" worktree add --detach --no-checkout "$SIBLING_ROOT" HEAD >/dev/null
 SIBLING_ADDED=1
 
@@ -101,6 +113,7 @@ export PATH="$SENTINEL_DIR:$PATH"
 export SOUNIO_COORD_DIR="$COORD_DIR"
 export SOUNIO_COORD_RUNTIME_MODE=local
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME="$AUTHORITY_RUNTIME"
+export SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_RUNTIME="$CUTOVER_RUNTIME"
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$DECISION_LOG"
 export SOUNIO_LOOM_HOOK_TEST_MODE=1
 export SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1
@@ -274,7 +287,7 @@ if SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
 fi
 
 [[ -f "$DECISION_LOG" ]] || fail "native hook omitted its decision log"
-grep -Fq $'decision=ALLOW\treason=SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=SEMANTICS_FROZEN' \
+grep -Fq $'decision=ALLOW\treason=SOUNIO_NATIVE_HOOK_CUTOVER HOOK_EVENT_ADMIT semantic_authority=Sounio action=9045' \
   "$DECISION_LOG" || fail "decision log omitted the Sounio ALLOW"
 grep -Fq $'decision=DENY\treason=write-path-outside-current-repository' "$DECISION_LOG" ||
   fail "decision log omitted the outside-write DENY"
@@ -288,7 +301,7 @@ grep -Fq $'decision=DENY\treason=Sounio-authority-runtime-hash-mismatch' "$DECIS
   fail "decision log omitted the runtime-tamper DENY"
 grep -Fq $'decision=DENY\treason=write-path-missing' "$DECISION_LOG" ||
   fail "decision log omitted the pathless-write DENY"
-grep -Fq $'sounio_source_sha256=64bb0118793fe46dcb392abc1a9212eb15bd55047461576a3ef1a6cefa3f17da\tsemantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff\tproducing_language=OCaml\tlanguage_role=OPERATIONAL_REALIZATION\tsemantic_authority_language=Sounio\tsemantic_authority_role=SEMANTIC_AUTHORITY\tsemantic_authority_origin=worktree' \
+grep -Fq $'sounio_source_sha256=545b0ae24fa78344aa96186eacaff4f9dc24ed7155adbed758cb4c85d1b3cd82\tsemantics_sha256=27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882\tproducing_language=OCaml\tlanguage_role=OPERATIONAL_REALIZATION\tsemantic_authority_language=Sounio\tsemantic_authority_role=SEMANTIC_AUTHORITY\tsemantic_authority_origin=worktree' \
   "$DECISION_LOG" || fail "decision receipt omitted the authority chain"
 grep -Fq $'\ttoolchain=OCaml ' "$DECISION_LOG" ||
   fail "decision receipt omitted the toolchain"
@@ -296,8 +309,61 @@ grep -Fq $'\thardware=os_type=' "$DECISION_LOG" ||
   fail "decision receipt omitted the hardware"
 grep -Fq $'\tcommand=sounio-loom agent-hook --agent codex event=SessionStart tool=none\tcommand_sha256=' \
   "$DECISION_LOG" || fail "decision receipt omitted the command"
-grep -Fq $'\tresult=SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=SEMANTICS_FROZEN' \
+grep -Fq $'\tparent_authority_result=SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=SEMANTICS_FROZEN' \
+  "$DECISION_LOG" || fail "decision receipt omitted the parent authority result"
+grep -Fq $'\tresult=SOUNIO_NATIVE_HOOK_CUTOVER HOOK_EVENT_ADMIT semantic_authority=Sounio action=9045' \
   "$DECISION_LOG" || fail "decision receipt omitted the result"
+
+cursor_event="{\"hook_event_name\":\"sessionStart\",\"session_id\":\"cursor-native-hook-$$\",\"cwd\":\"$ROOT_DIR\"}"
+SOUNIO_LOOM_COORD_AUTO=0 run_hook "$cursor_event" cursor
+[[ "$HOOK_RC" -eq 0 ]] || fail "Cursor native dialect was refused: rc=$HOOK_RC output=$HOOK_OUTPUT"
+grok_event="{\"hookEventName\":\"session_start\",\"sessionId\":\"grok-native-hook-$$\",\"cwd\":\"$ROOT_DIR\",\"workspaceRoot\":\"$ROOT_DIR\"}"
+SOUNIO_LOOM_COORD_AUTO=0 run_hook "$grok_event" grok
+[[ "$HOOK_RC" -eq 0 ]] || fail "Grok native dialect was refused: rc=$HOOK_RC output=$HOOK_OUTPUT"
+grep -Fq $'provider=cursor\tdialect=cursor-camel' "$DECISION_LOG" ||
+  fail 'decision receipt omitted the Cursor provider binding'
+grep -Fq $'provider=grok\tdialect=grok-camel' "$DECISION_LOG" ||
+  fail 'decision receipt omitted the Grok provider binding'
+
+cursor_wrong_dialect="{\"hookEventName\":\"sessionStart\",\"sessionId\":\"cursor-wrong-$$\",\"cwd\":\"$ROOT_DIR\"}"
+SOUNIO_LOOM_COORD_AUTO=0 run_hook "$cursor_wrong_dialect" cursor
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'provider-hook-dialect-mismatch:field=hookEventName'* ]] ||
+  fail "Cursor accepted the Grok field dialect: rc=$HOOK_RC output=$HOOK_OUTPUT"
+grok_wrong_dialect="{\"hook_event_name\":\"SessionStart\",\"session_id\":\"grok-wrong-$$\",\"cwd\":\"$ROOT_DIR\"}"
+SOUNIO_LOOM_COORD_AUTO=0 run_hook "$grok_wrong_dialect" grok
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'provider-hook-dialect-mismatch:field=hook_event_name'* ]] ||
+  fail "Grok accepted the snake field dialect: rc=$HOOK_RC output=$HOOK_OUTPUT"
+
+SOUNIO_LOOM_COORD_AUTO=0 SOUNIO_LOOM_NATIVE_HOOK_CONFIG="$TEST_ROOT/missing-provider.json" \
+  run_hook "$cursor_event" cursor
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'native-hook-provider-config-missing'* ]] ||
+  fail "missing provider config did not fail closed: rc=$HOOK_RC output=$HOOK_OUTPUT"
+printf '{"hooks":{"sessionStart":[]}}\n' >"$TEST_ROOT/tampered-provider.json"
+SOUNIO_LOOM_COORD_AUTO=0 SOUNIO_LOOM_NATIVE_HOOK_CONFIG="$TEST_ROOT/tampered-provider.json" \
+  run_hook "$cursor_event" cursor
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'native-hook-provider-config-not-direct:cursor'* ]] ||
+  fail "non-native provider config did not fail closed: rc=$HOOK_RC output=$HOOK_OUTPUT"
+
+SOUNIO_LOOM_COORD_AUTO=0 \
+  SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_MANIFEST="$TEST_ROOT/missing-cutover.freeze" \
+  run_hook "$cursor_event" cursor
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'Sounio-native-hook-cutover-policy-missing'* ]] ||
+  fail "missing cutover policy did not fail closed: rc=$HOOK_RC output=$HOOK_OUTPUT"
+cp "$CUTOVER_MANIFEST" "$TEST_ROOT/tampered-cutover.freeze"
+printf '\n' >>"$TEST_ROOT/tampered-cutover.freeze"
+SOUNIO_LOOM_COORD_AUTO=0 \
+  SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_MANIFEST="$TEST_ROOT/tampered-cutover.freeze" \
+  run_hook "$cursor_event" cursor
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'Sounio-native-hook-cutover-policy-hash-mismatch'* ]] ||
+  fail "tampered cutover policy did not fail closed: rc=$HOOK_RC output=$HOOK_OUTPUT"
+cp "$CUTOVER_RUNTIME" "$TEST_ROOT/tampered-cutover-runtime"
+printf x >>"$TEST_ROOT/tampered-cutover-runtime"
+chmod 0755 "$TEST_ROOT/tampered-cutover-runtime"
+SOUNIO_LOOM_COORD_AUTO=0 \
+  SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_RUNTIME="$TEST_ROOT/tampered-cutover-runtime" \
+  run_hook "$cursor_event" cursor
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'Sounio-native-hook-cutover-runtime-hash-mismatch'* ]] ||
+  fail "tampered cutover runtime did not fail closed: rc=$HOOK_RC output=$HOOK_OUTPUT"
 
 [[ ! -e "$SENTINEL_MARKER" ]] || fail "Python or Rust was executed by the native hook"
 
@@ -405,4 +471,4 @@ SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
   --reason 'native tmux fixture complete' >/dev/null
 
 printf '%s\n' \
-  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio session=roundtrip hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused log_redirect=refused decision_receipt=complete python=not-executed rust=not-executed'
+  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio action=9045 session=roundtrip hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused cutover_policy_missing=refused cutover_policy_tamper=refused cutover_runtime_tamper=refused log_redirect=refused providers=codex,claude,cursor,grok dialect_mismatch=refused config_missing=refused config_non_native=refused decision_receipt=complete python=not-executed rust=not-executed'

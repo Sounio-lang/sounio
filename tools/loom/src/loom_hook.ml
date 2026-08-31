@@ -5,6 +5,9 @@ exception Error of string
 let pinned_manifest_sha256 =
   "5fe5e5c9cdcb83935770f58df52f2d614d11f8abde519c4a2505ca20998fae2e"
 
+let pinned_native_hook_cutover_manifest_sha256 =
+  "16a4f7e24e1fcdb71690b3031914b2fe6cd389ad866154b7bf73907f007cfc4a"
+
 let max_event_bytes = 8 * 1024 * 1024
 let process_timeout_seconds = 5.0
 let coordination_process_timeout_seconds = 15.0
@@ -389,6 +392,124 @@ let replace_object_field value name replacement =
            fields)
   | _ -> failf "invalid-json:tool_input-must-be-object"
 
+type hook_profile = {
+  provider_id : string;
+  provider_code : int;
+  dialect_name : string;
+  dialect_code : int;
+  camel_case : bool;
+}
+
+let hook_profile agent =
+  if starts_with agent "codex" then
+    { provider_id = "codex"; provider_code = 1; dialect_name = "snake";
+      dialect_code = 1; camel_case = false }
+  else if starts_with agent "claude" then
+    { provider_id = "claude"; provider_code = 2; dialect_name = "snake";
+      dialect_code = 1; camel_case = false }
+  else if starts_with agent "cursor" then
+    { provider_id = "cursor"; provider_code = 3;
+      dialect_name = "cursor-camel"; dialect_code = 2; camel_case = false }
+  else if starts_with agent "grok" then
+    { provider_id = "grok"; provider_code = 4;
+      dialect_name = "grok-camel"; dialect_code = 3; camel_case = true }
+  else failf "unsupported-hook-agent:%s" agent
+
+let reject_alias event forbidden =
+  match object_field event forbidden with
+  | None -> ()
+  | Some _ -> failf "provider-hook-dialect-mismatch:field=%s" forbidden
+
+let aliased_field event profile snake camel =
+  if profile.camel_case then (reject_alias event snake; object_field event camel)
+  else (reject_alias event camel; object_field event snake)
+
+let aliased_string ?(default = "") event profile snake camel =
+  match aliased_field event profile snake camel with
+  | Some (Json_string value) -> value
+  | Some Json_null | None -> default
+  | Some _ -> failf "invalid-json:%s-must-be-string" (if profile.camel_case then camel else snake)
+
+let normalize_hook_event_name profile value =
+  match profile.provider_id, value with
+  | ("codex" | "claude"),
+    ("SessionStart" | "SessionEnd" | "UserPromptSubmit" | "PreToolUse"
+    | "PostToolUse" | "Stop") -> value
+  | "cursor", ("SessionStart" | "sessionStart") -> "SessionStart"
+  | "cursor", ("SessionEnd" | "sessionEnd") -> "SessionEnd"
+  | "cursor", ("UserPromptSubmit" | "beforeSubmitPrompt") -> "UserPromptSubmit"
+  | "cursor", ("PreToolUse" | "preToolUse" | "beforeShellExecution"
+    | "beforeFileEdit") -> "PreToolUse"
+  | "cursor", ("PostToolUse" | "postToolUse" | "afterShellExecution"
+    | "afterFileEdit") -> "PostToolUse"
+  | "cursor", ("Stop" | "stop") -> "Stop"
+  | "grok", ("SessionStart" | "sessionStart" | "session_start") -> "SessionStart"
+  | "grok", ("SessionEnd" | "sessionEnd" | "session_end") -> "SessionEnd"
+  | "grok", ("UserPromptSubmit" | "beforeSubmitPrompt" | "user_prompt_submit") -> "UserPromptSubmit"
+  | "grok", ("PreToolUse" | "preToolUse" | "pre_tool_use") -> "PreToolUse"
+  | "grok", ("PostToolUse" | "postToolUse" | "post_tool_use") -> "PostToolUse"
+  | "grok", ("Stop" | "stop") -> "Stop"
+  | _ -> failf "provider-hook-event-unsupported:%s:%s" profile.provider_id value
+
+let normalize_hook_tool profile value =
+  match profile.provider_id, value with
+  | "cursor", "run_terminal_command" -> "Bash"
+  | "cursor", "search_replace" -> "Edit"
+  | "cursor", "write_file" -> "Write"
+  | _, value -> value
+
+let normalize_hook_event profile event =
+  let raw_name = aliased_string event profile "hook_event_name" "hookEventName" in
+  if raw_name = "" then failf "hook-event-name-missing";
+  let raw_session = aliased_string event profile "session_id" "sessionId" in
+  if raw_session = "" then failf "hook-session-id-missing";
+  let cwd =
+    if profile.camel_case then
+      let direct = string_field event "cwd" in
+      if direct <> "" then direct else string_field event "workspaceRoot"
+    else string_field event "cwd"
+  in
+  if cwd = "" then failf "hook-cwd-missing";
+  let tool_name =
+    aliased_string event profile "tool_name" "toolName"
+    |> normalize_hook_tool profile
+  in
+  let tool_input = aliased_field event profile "tool_input" "toolInput" in
+  let optional name value fields =
+    match value with None -> fields | Some found -> (name, found) :: fields
+  in
+  let call_id =
+    if profile.camel_case then
+      match object_field event "toolUseId" with
+      | Some value -> Some value
+      | None -> object_field event "toolCallId"
+    else
+      match object_field event "tool_use_id" with
+      | Some value -> Some value
+      | None -> object_field event "tool_call_id"
+  in
+  let fields =
+    [ ("hook_event_name", Json_string (normalize_hook_event_name profile raw_name));
+      ("session_id", Json_string raw_session); ("cwd", Json_string cwd) ]
+  in
+  let fields =
+    if tool_name = "" then fields else ("tool_name", Json_string tool_name) :: fields
+  in
+  Json_object
+    (fields
+     |> optional "tool_input" tool_input
+     |> optional "tool_use_id" call_id)
+
+let hook_event_code event_name =
+  match event_name with
+  | "SessionStart" -> 1
+  | "UserPromptSubmit" -> 2
+  | "PreToolUse" -> 3
+  | "PostToolUse" -> 4
+  | "Stop" -> 5
+  | "SessionEnd" -> 6
+  | _ -> failf "hook-event-unsupported:%s" event_name
+
 let execution_tool name =
   List.mem name [ "Bash"; "Exec"; "exec_command"; "shell"; "Shell" ]
 
@@ -592,6 +713,37 @@ let change_hook_output root input mutation stage_root =
             Json_string "Sounio 9043 admitted a kernel-resident staged change");
            ("updatedInput", updated_input) ]) ]
 
+let provider_hook_output profile output =
+  match profile.provider_id with
+  | "codex" | "claude" -> output
+  | "cursor" | "grok" ->
+      let specific =
+        match object_field output "hookSpecificOutput" with
+        | Some (Json_object _ as value) -> value
+        | Some _ -> failf "native-hook-output-specific-must-be-object"
+        | None -> failf "native-hook-output-specific-missing"
+      in
+      let decision = string_field specific "permissionDecision" in
+      let reason = string_field specific "permissionDecisionReason" in
+      let updated =
+        match object_field specific "updatedInput" with
+        | Some value -> value
+        | None -> failf "native-hook-output-updated-input-missing"
+      in
+      if decision <> "allow" then
+        failf "native-hook-output-decision-unsupported:%s" decision;
+      if profile.provider_id = "cursor" then
+        Json_object
+          [ ("permission", Json_string "allow");
+            ("agent_message", Json_string reason);
+            ("updated_input", updated) ]
+      else
+        Json_object
+          [ ("decision", Json_string "allow");
+            ("reason", Json_string reason);
+            ("hookSpecificOutput", specific) ]
+  | provider -> failf "native-hook-output-provider-unsupported:%s" provider
+
 let git_commit_message command =
   try
     match Loom_exec.lex_command command with
@@ -776,6 +928,10 @@ type authority_receipt = {
   hardware_sha256 : string;
   command : string;
   command_sha256 : string;
+  parent_authority_result : string;
+  provider : string;
+  dialect : string;
+  provider_config_sha256 : string;
   result : string;
 }
 
@@ -805,6 +961,10 @@ let operational_receipt raw_event command =
     hardware_sha256 = sha256 hardware;
     command;
     command_sha256 = sha256 raw_event;
+    parent_authority_result = "unavailable";
+    provider = "unverified";
+    dialect = "unverified";
+    provider_config_sha256 = "unavailable";
     result = "unavailable" }
 
 let runtime_authority_root () =
@@ -884,6 +1044,150 @@ let authorize_guard root _raw_event base_receipt =
     semantic_authority_origin = policy_origin;
     result = decision }
 
+let runtime_native_hook_cutover_root () =
+  let binary_dir = Filename.dirname (Unix.realpath Sys.executable_name) in
+  Filename.concat (Filename.dirname binary_dir) "policy/native-hook-cutover"
+
+let native_hook_cutover_policy_root worktree_root =
+  let local_manifest =
+    Filename.concat worktree_root "tools/loom/native_hook_cutover.freeze.v1"
+  in
+  let selected =
+    match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_ROOT" with
+    | Some path when path <> "" -> path
+    | _ when Sys.file_exists local_manifest -> worktree_root
+    | _ -> runtime_native_hook_cutover_root ()
+  in
+  let selected = Unix.realpath selected in
+  let runtime_root = runtime_native_hook_cutover_root () in
+  let origin =
+    if selected = Unix.realpath worktree_root then "worktree"
+    else if Sys.file_exists runtime_root && selected = Unix.realpath runtime_root then
+      "runtime-capsule"
+    else "explicit-root"
+  in
+  (selected, origin)
+
+let native_hook_cutover_runtime root manifest =
+  let explicit = Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_RUNTIME" in
+  let sibling =
+    Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
+      "sounio-loom-native-hook-cutover"
+  in
+  let local =
+    Filename.concat root "tools/loom/.runtime/sounio-loom-native-hook-cutover"
+  in
+  let selected =
+    match explicit with
+    | Some path when path <> "" -> path
+    | _ when Sys.file_exists sibling -> sibling
+    | _ -> local
+  in
+  if not (Sys.file_exists selected) then
+    failf "Sounio-native-hook-cutover-runtime-missing:%s" selected;
+  if sha256_file selected <> required manifest "executable_sha256" then
+    failf "Sounio-native-hook-cutover-runtime-hash-mismatch";
+  selected
+
+let provider_config_relative profile =
+  match profile.provider_id with
+  | "codex" -> ".codex/hooks.json"
+  | "claude" -> ".claude/settings.json"
+  | "cursor" -> ".cursor/hooks.json"
+  | "grok" -> ".grok/hooks/loom-native.json"
+  | value -> failf "unsupported-hook-provider-config:%s" value
+
+let native_hook_config_path root policy_root profile =
+  match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CONFIG" with
+  | Some path when path <> "" && test_mode () -> path
+  | Some _ when not (test_mode ()) -> failf "hook-config-override-requires-test-mode"
+  | _ ->
+      let worktree = Filename.concat root (provider_config_relative profile) in
+      if Sys.file_exists worktree then worktree
+      else Filename.concat (Filename.concat policy_root "configs")
+          (profile.provider_id ^ ".json")
+
+let validate_native_hook_config profile path =
+  if not (Sys.file_exists path) then failf "native-hook-provider-config-missing:%s" path;
+  let content = read_file path in
+  let lowered = String.lowercase_ascii content in
+  List.iter
+    (fun prohibited ->
+      if contains lowered prohibited then
+        failf "native-hook-provider-config-prohibited-bridge:%s" prohibited)
+    [ "python"; "pypy"; "rustc"; "cargo"; "node "; "ruby "; "awk "; "bc " ];
+  if not (contains content "exec env SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT=")
+     || not (contains content "bin/sounio-loom-runtime")
+     || not (contains content ("agent-hook --agent " ^ profile.provider_id))
+  then failf "native-hook-provider-config-not-direct:%s" profile.provider_id;
+  sha256 content
+
+let digest_u60 digest offset =
+  if String.length digest <> 64 || offset < 0 || offset + 15 > 64 then
+    failf "invalid-sha256:%s" digest;
+  try Int64.of_string ("0x" ^ String.sub digest offset 15) |> Int64.to_string
+  with _ -> failf "invalid-sha256:%s" digest
+
+let authorize_native_hook_cutover root profile event _raw_event base_receipt =
+  let policy_root, policy_origin = native_hook_cutover_policy_root root in
+  let manifest_path =
+    match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_MANIFEST" with
+    | Some path when path <> "" -> path
+    | _ -> Filename.concat policy_root "tools/loom/native_hook_cutover.freeze.v1"
+  in
+  if not (Sys.file_exists manifest_path) then
+    failf "Sounio-native-hook-cutover-policy-missing";
+  if sha256_file manifest_path <> pinned_native_hook_cutover_manifest_sha256 then
+    failf "Sounio-native-hook-cutover-policy-hash-mismatch";
+  let manifest = parse_manifest manifest_path in
+  if required manifest "stage" <> "SEMANTICS_FROZEN"
+     || required manifest "producing_language" <> "Sounio"
+     || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
+     || required manifest "action" <> "9045"
+     || required manifest "parity_open" <> "false"
+     || required manifest "claim_ready" <> "false"
+  then failf "Sounio-native-hook-cutover-policy-state-invalid";
+  let source_path = Filename.concat policy_root (required manifest "source_path") in
+  let entrypoint_path = Filename.concat policy_root (required manifest "entrypoint_path") in
+  if sha256_file source_path <> required manifest "source_sha256" then
+    failf "Sounio-native-hook-cutover-source-hash-mismatch";
+  if sha256_file entrypoint_path <> required manifest "entrypoint_sha256" then
+    failf "Sounio-native-hook-cutover-entrypoint-hash-mismatch";
+  if sha256 (read_file source_path ^ read_file entrypoint_path)
+     <> required manifest "semantics_sha256"
+  then failf "Sounio-native-hook-cutover-semantics-hash-mismatch";
+  let runtime = native_hook_cutover_runtime policy_root manifest in
+  let config_path = native_hook_config_path root policy_root profile in
+  let config_sha256 = validate_native_hook_config profile config_path in
+  let event_name = string_field event "hook_event_name" in
+  let event_code = hook_event_code event_name in
+  let word = if event_code = 3 then 8388607 else 8359935 in
+  let semantics = required manifest "semantics_sha256" in
+  let frame =
+    Printf.sprintf "9045 1 3 %d %d %d %d 0 %s %s %s %s 4 4\n"
+      profile.provider_code profile.dialect_code event_code word
+      (digest_u60 semantics 0) (digest_u60 semantics 15)
+      (digest_u60 base_receipt.toolchain_sha256 0)
+      (digest_u60 config_sha256 0)
+  in
+  let result = run_process ~input:frame ~cwd:policy_root runtime [] in
+  let decision = trim result.output in
+  if result.code <> 0
+     || decision <>
+        "SOUNIO_NATIVE_HOOK_CUTOVER HOOK_EVENT_ADMIT semantic_authority=Sounio action=9045"
+  then failf "Sounio-native-hook-cutover-denied:rc=%d:%s" result.code decision;
+  { base_receipt with
+    sounio_source_sha256 = required manifest "source_sha256";
+    semantics_sha256 = semantics;
+    semantic_authority_language = required manifest "producing_language";
+    semantic_authority_role = required manifest "language_role";
+    semantic_authority_origin = policy_origin;
+    parent_authority_result = base_receipt.result;
+    provider = profile.provider_id;
+    dialect = profile.dialect_name;
+    provider_config_sha256 = config_sha256;
+    result = decision }
+
 let utc_now () =
   let tm = Unix.gmtime (Unix.gettimeofday ()) in
   Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02dZ"
@@ -930,6 +1234,10 @@ let append_decision_log root decision reason agent lane event receipt =
             "hardware_sha256=" ^ receipt.hardware_sha256;
             "command=" ^ log_escape receipt.command;
             "command_sha256=" ^ receipt.command_sha256;
+            "parent_authority_result=" ^ log_escape receipt.parent_authority_result;
+            "provider=" ^ receipt.provider;
+            "dialect=" ^ receipt.dialect;
+            "provider_config_sha256=" ^ receipt.provider_config_sha256;
             "result=" ^ log_escape receipt.result ] ^ "\n"
       in
       write_all descriptor line;
@@ -959,6 +1267,8 @@ let scope_arguments agent lane intent =
 let harness_of_agent agent =
   if starts_with agent "claude" then "claude"
   else if starts_with agent "codex" then "codex"
+  else if starts_with agent "cursor" then "cursor"
+  else if starts_with agent "grok" then "grok"
   else failf "unsupported-hook-agent:%s" agent
 
 let process_identity () =
@@ -1319,7 +1629,7 @@ let parse_agent arguments =
         (safe_token value, true)
     | _ ->
         failf
-          "usage: agent-hook --agent codex|claude [--test-file-capability-fixture]"
+          "usage: agent-hook --agent codex|claude|cursor|grok [--test-file-capability-fixture]"
   in
   loop arguments
 
@@ -1336,7 +1646,8 @@ let run arguments =
     if raw_event = "" then failf "hook-event-empty";
     (try root := Some (git_root (Unix.getcwd ()) |> Unix.realpath) with _ -> ());
     receipt := Some (operational_receipt raw_event "sounio-loom agent-hook event=unparsed");
-    let event = parse_json raw_event in
+    let profile = hook_profile !agent in
+    let event = parse_json raw_event |> normalize_hook_event profile in
     let cwd = string_field ~default:(Unix.getcwd ()) event "cwd" in
     let current_root = git_root cwd |> Unix.realpath in
     let tool_root =
@@ -1359,11 +1670,16 @@ let run arguments =
     in
     let base_receipt = operational_receipt raw_event command in
     receipt := Some base_receipt;
-    let authorized_receipt = authorize_guard current_root raw_event base_receipt in
+    let parent_receipt = authorize_guard current_root raw_event base_receipt in
+    receipt := Some parent_receipt;
+    let authorized_receipt =
+      authorize_native_hook_cutover current_root profile event raw_event parent_receipt
+    in
     receipt := Some authorized_receipt;
     let hook_output =
       execute_event tool_root current_root event !agent !lane raw_session_id
         file_capability_fixture (sha256 raw_event)
+      |> Option.map (provider_hook_output profile)
     in
     append_decision_log current_root "ALLOW" authorized_receipt.result !agent !lane
       !event_name authorized_receipt;
