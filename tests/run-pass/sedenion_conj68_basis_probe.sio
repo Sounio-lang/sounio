@@ -25,6 +25,12 @@
 //
 // Exact legs are decidable integer arithmetic (entries stay far below 2^53 by
 // the Hadamard bound: 10x10 Gram entries <= 8 -> intermediates < ~1e14).
+// RESULT (2026-08-31, Madaros v0.80.0 COMMITTED): on the full basis sweep
+// every one of the 43 length-3 witnesses is an EXACT INTEGER combination with
+// support <= 2 and coefficients +-1 (D3EXACT == D3W == 43); the f64 fallback
+// below is never taken. The bilinear map is massively degenerate (kernel
+// dim 13 of 16 in the k0=m0=0 sector for the hard pairs), which is where the
+// integer rank-one witnesses live.
 // Differential oracle (search-only, defines no expected value, ADR-008):
 // scripts/research/sedenion_commutativity_diameter_probe.py.
 
@@ -141,6 +147,62 @@ fn bareiss_rank(m: &![i64; 160], nrows: i64) -> i64 with Mut, Panic, Div {
         col = col + 1
     }
     rank
+}
+
+// ------------------------------------------------ exact integer witness scan
+// Scan u in span(U), w in span(V) over supports <= 2 with coefficients +-1
+// (25 projective directions each side; 625 integer commutator checks). The
+// exact kernel of the bilinear map is massively degenerate (dim 13 of 16 in
+// the k0=m0=0 sector for the hard pairs), and carries INTEGER rank-one
+// elements -- e.g. u=(e4,-e7), w=(e6-e4, e7+e5) for (e1,e2) vs (e2,e3).
+// Decidable integer equality; no float involved.
+
+fn combo_vec(rows: &[i64; 160], pat: i64, out: &![i64; 16]) with Mut, Panic, Div {
+    // pat 0..4: single row pat; pat 5..24: pairs (i<j) with rel sign
+    var c = 0
+    while c < 16 { out[c as usize] = 0; c = c + 1 }
+    if pat < 5 {
+        var c1 = 0
+        while c1 < 16 { out[c1 as usize] = rows[(pat * 16 + c1) as usize]; c1 = c1 + 1 }
+    } else {
+        let p = pat - 5
+        let pair = p / 2
+        let sgn = if (p % 2) == 0 { 1 } else { 0 - 1 }
+        // pair 0..9 -> (i,j), i<j in 0..4
+        var i = 0
+        var j = 1
+        var cnt = 0
+        var found = 0
+        while i < 5 && found == 0 {
+            j = i + 1
+            while j < 5 && found == 0 {
+                if cnt == pair { found = 1 } else { cnt = cnt + 1; j = j + 1 }
+            }
+            if found == 0 { i = i + 1 }
+        }
+        var c2 = 0
+        while c2 < 16 {
+            out[c2 as usize] = rows[(i * 16 + c2) as usize] + sgn * rows[(j * 16 + c2) as usize]
+            c2 = c2 + 1
+        }
+    }
+}
+
+fn exact_combo_witness(urow: &[i64; 160], vrow: &[i64; 160]) -> i64 with Mut, Panic, Div {
+    var pa = 0
+    while pa < 25 {
+        var u = [0; 16]
+        combo_vec(urow, pa, &!u)
+        var pb = 0
+        while pb < 25 {
+            var w = [0; 16]
+            combo_vec(vrow, pb, &!w)
+            if comm_is_zero(&u, &w) { return 1 }
+            pb = pb + 1
+        }
+        pa = pa + 1
+    }
+    0
 }
 
 // ---------------------------------------------------------------- f64 helpers
@@ -626,6 +688,7 @@ fn main() with IO, Mut, Panic, Div {
     var d1 = 0
     var d2 = 0
     var d3w = 0
+    var d3exact = 0
     var d3u = 0
     var skipped = 0
     var swap_ok = 0
@@ -699,7 +762,13 @@ fn main() with IO, Mut, Panic, Div {
                 }
                 if rk < 10 {
                     d2 = d2 + 1
+                } else if exact_combo_witness(&urow, &vrow) == 1 {
+                    // exact integer rank-one witness: decidable, no float
+                    d3w = d3w + 1
+                    d3exact = d3exact + 1
+                    if tgt < 0 { swap_ok = swap_ok + 1 }
                 } else {
+                    // f64 fallback (ideally never taken on the basis sweep)
                     // d3 hunt: tensor C[c][i][j] = [u_i, w_j]
                     // Exact leg first: an all-zero (i,j) slice is an INTEGER
                     // rank-one witness u_i (x) w_j (covers the combinatorial
@@ -785,6 +854,8 @@ fn main() with IO, Mut, Panic, Div {
     print_int(d2)
     print(" D3W ")
     print_int(d3w)
+    print(" D3EXACT ")
+    print_int(d3exact)
     print(" D3U ")
     print_int(d3u)
     print("\n")

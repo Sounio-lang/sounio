@@ -64,6 +64,32 @@ classe 3 que orientaram o `lock0`. Convenção de multiplicação verificada
 idêntica à Table 1 do paper e ao `cd_sigma` do repo (par canônico
 (e₁+e₁₀)(e₇+e₁₂)=0 ✓).
 
+## Rodada 2 (mesmo dia): os witnesses são INTEIROS — o float era muleta
+
+Kernel exato sobre ℚ do bilinear restrito ao setor k₀=m₀=0 (O(x₀)⊗O(x′) → Im 𝕊,
+matriz inteira 16×16) para os pares duros: **dim ker = 13 de 16** — o mapa é
+massivamente degenerado (estrutura octoniônica, não acaso) — e o kernel contém
+elementos de posto 1 **inteiros**:
+
+- (e₁,e₂) vs (e₂,+e₃): u = (e₄,−e₇) ∈ O(x₀), w = (e₆−e₄, e₇+e₅) ∈ O(x′),
+  [u,w] = 0 exato. (E o espelho u = (e₄,−e₇)+(e₆,−e₅), w = (e₄,−e₅).)
+
+Consequência implementada: `exact_combo_witness` — varredura de combinações
+com suporte ≤ 2 e coeficientes ±1 (25 direções projetivas por lado, 625 checks
+de comutador inteiro por par). Resultado no sweep completo:
+
+```
+D1 4  D2 37  D3W 43  D3EXACT 43  D3U 0     ← float fallback NUNCA executado
+CONJ68_BASIS_SWEEP OK
+```
+
+**Todo witness de comprimento 3 no sweep de base é uma combinação inteira
+±1 de no máximo 2 geradores por lado.** A perna primária é agora aritmética
+i64 decidível de ponta a ponta (o hunt f64 permanece só como fallback
+documentado para o futuro sweep racional denso). Isso também aponta o caminho
+da prova: um certificado FINITO e combinatório por classe de pares — formato
+ideal para Lean.
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD
