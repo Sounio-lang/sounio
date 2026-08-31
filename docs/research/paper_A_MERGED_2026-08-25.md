@@ -972,7 +972,10 @@ larger corpus.
 ### 8.4 RQ4 — it changes a clinical decision
 
 The stakes are set by a real, running model. `examples/vancomycin_auc_epistemic.sio`
-(a `run-pass` example) propagates GUM uncertainty through a vancomycin AUC-guided
+(a `run-pass` example; it runs under the lean_single engine — the self-hosted Madaros compiler
+fails closed on builtin `Knowledge<T>` arithmetic, E245/E004, #1706 — and its engine-portable
+twin `examples/vancomycin_auc_affine.sio` reproduces the same receipt on both engines through
+`stdlib/epistemic/affine`) propagates GUM uncertainty through a vancomycin AUC-guided
 therapeutic-drug-monitoring chain for a discriminating patient (65 yr male, 70±1 kg,
 SCr 1.40±0.14 mg/dL, 500 mg q12h):
 

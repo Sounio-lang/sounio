@@ -66,7 +66,8 @@ adversarial gates.
 | NS dataflow flags shared-source add | `docs/research/sounio/ns_dataflow.sio` | souc-green |
 | five acceptance controls incl. sabotage causality | `docs/research/sounio/ns_contract.sio` | souc-green (5/5 PASS) |
 | correlated operator (escape valve) | `stdlib/epistemic/gum_supplement1.sio` (`gum_s1_add_correlated`) | in-tree, orphaned |
-| clinical WARN (AUC=450, CI[362,538], boundary 400) | `examples/vancomycin_auc_epistemic.sio` | run-pass |
+| clinical WARN (AUC=450, CI[362,538], boundary 400) | `examples/vancomycin_auc_epistemic.sio` (lean_single; Madaros fails closed on builtin Knowledge arithmetic, #1706) | run-pass |
+| same receipt, engine-portable (Madaros + lean_single): CrCl 52.08±5.26, CL 2.22±0.22, AUC 450.07±44.44, CI [361.2, 539.0], WARN | `examples/vancomycin_auc_affine.sio` (`stdlib/epistemic/affine`) | run-pass on both engines, 2026-08-31 |
 | **RQ4 two-compartment flip rate**: interval sum ρ=1 silences 311/909 true WARNs (34.2 %), Var ratio 0.500; phase decomposition Cov<0 silences 0, chain over-states 300× (1,894 spurious) | `docs/research/sounio/rq4_vanco_two_compartment_flip.sio` (5,000-patient deterministic cohort, Madaros v0.80.0) | **measured 2026-08-31**, deterministic, identity check error 0 |
 | 2-compartment (shared-source sum) is future | `stdlib/clinical/vancomycin_pbpk.sio:49,52` | stubbed |
 | compiler wire (E230, `noise_sets.sio`, N1–N4) | integration commit `4ac63da51f` (base `06e85a6ada`) | **landed + source-verified** (Madaros v0.80.0); four controls + both gates green; xai+zai reviewed |
