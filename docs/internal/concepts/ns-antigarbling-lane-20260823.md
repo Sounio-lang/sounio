@@ -7,45 +7,79 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.ns-antigarbling-lane-20260823
 -->
 
-# Semantic Lane Declaration — NS anti-garbling wire
+# Semantic Lane Declaration -- NS anti-garbling wire
 
-Per `SEMANTIC_LANE_CONTRACT.md`. Filed (codex-authorized, msg-1787455026; N1 accepted msg-1787462805).
+Status: executable
+Authority: repo-only executable compiler contract
+
+Per `SEMANTIC_LANE_CONTRACT.md`. The noise-symbol set is the representation
+mechanism for the single registered concept, `SOUNIO-ANTIGARBLING`; it is not a
+separate scientific claim.
 
 ```text
-Semantic-Lane-ID:  ns-antigarbling-wire-20260823 (session-lane canonical: claude--session-6d7a2c7b-...)
-Owner:             fable-1 (agent=claude), worktree /workspace/.wt/ns-wire-20260823, branch fable/ns-wire-20260823, base 06e85a6ada
-Concept-IDs:       SOUNIO-NOISE-SYMBOL (proposed); SOUNIO-ANTIGARBLING (proposed); sibling to SOUNIO-PROVENANCE (codex L5/L6)
-Intent-Preserved:  uncertainty must not be fabricated; the independence assumption of uncertainty arithmetic is a checked precondition, not a silent default
-Transformation:    a Knowledge value's type carries a noise-symbol-set identity; ep_add/ep_mul over operands whose source-sets are non-disjoint (or unknown) is rejected unless a proved-disjoint certificate holds
-Types-Changed:     TypeEntry gains a trailing noise_set_id: i64 (interned handle; -1 unknown/top, 0 empty/deterministic, >0 interned set), AFTER provenance_id
-Effects-Changed:   none (NS is a type refinement, not an effect)
+Semantic-Lane-ID:  ns-antigarbling-wire-20260823
+Owner:             fable-1 implementation; Codex integration review for PR #2336
+Concept-IDs:       SOUNIO-ANTIGARBLING
+Intent-Preserved:  uncertainty must not be fabricated; an independence assumption used by uncertainty arithmetic is a checked precondition, not a silent default
+Transformation:    Knowledge types carry a noise-source-set handle; Add and Mul reject two noise-bearing operands when their sets are not provably disjoint
+Types-Changed:     TypeEntry gains noise_set_id: i64 (-1 unknown/top, 0 empty/deterministic, >0 interned set)
+Effects-Changed:   none
 IR-Changed:        none
-Claims-Introduced: (CANDIDATE, pending prior-art gate) compile-time covariance-soundness of uncertainty propagation via noise-symbol-set tracking
-Claims-Forbidden:  inner=0 == disjoint support (zero covariance, not disjoint support); may-alias IS the NS soundness proof (it is only the worklist mechanism); the novelty is established (candidate until the prior-art gate)
-Assumptions:       noise_set_id trailing after provenance_id; interned-handle representation with a dedicated NS table module; source cap 64
-Write-Set:         self-hosted/check/noise_sets.sio, self-hosted/check/types.sio, scripts/bootstrap/bootstrap_concat.sh, scripts/bootstrap/run_knowledge_bootstrap_tests.sh, tests/run-pass/ns_handle_validity.sio (N1); self-hosted/check/check.sio, self-hosted/check/epistemic.sio, scripts/ci/ns_antigarbling_gate.sh (N2/N3)
-Read-Set:          check.sio Knowledge-construction and ep_add/ep_mul sites; epistemic.sio knowledge_meta_from_ty
-Positive-Witness:  tests/run-pass/ns_handle_validity.sio (9/9 PASS)
-Negative-Witness:  (N3) tests/compile-fail/ns_add_shared_source_rejected.sio (E230); ns_add_unknown_conservative.sio (E230)
-Acceptance-Gate:   (N4) scripts/ci/ns_antigarbling_gate.sh — same-source-built sabotage
-Integration-Target: base branch codex/l5-provenance-typeentry-20260822 @ 06e85a6ada (L6 tip)
-Authoritative-Only-If: xai math-review passes (grok-4.6, see docs/audit/NS_N1_GROK46_MATHREVIEW_2026-08-23.md); gate green; zero regressions vs base
+Claims-Introduced: the self-hosted checker has an executable, fail-closed Add/Mul refusal for shared or unknown non-empty noise-source sets
+Claims-Forbidden:  novelty; full covariance soundness; physical independence; causal provenance; run-level Knowledge arithmetic; Sub/Div coverage; sign-aware covariance; a claim-ready or clinically validated result
+Assumptions:       at most 64 directly representable source identities; overflow and invalid handles saturate to unknown/top; only exact single-parameter identity bodies preserve a call result handle
+Write-Set:         self-hosted/check/noise_sets.sio, self-hosted/check/types.sio, self-hosted/check/check.sio, self-hosted/check/epistemic.sio, bootstrap wiring, NS witnesses, and NS gates
+Read-Set:          Knowledge construction, Add/Mul checking, branch and loop joins, assignment, and direct-call projection
+Positive-Witness:  tests/run-pass/ns_handle_validity.sio
+Negative-Witness:  tests/compile-fail/ns_add_shared_source_rejected.sio; tests/compile-fail/ns_add_unknown_conservative.sio
+Acceptance-Gate:   scripts/ci/ns_antigarbling_gate.sh
+Integration-Target: current origin/main through PR #2336
+Authoritative-Only-If: the named gate passes with its sabotage controls, current-source compiler construction passes, and the math-review honesty boundary is retained
 ```
 
-## Mandatory distinctions honoured
-- **uncertainty != ignorance** — `noise_set_id = 0` (empty/deterministic) distinct from `-1` (unknown/top); unknown NEVER treated as disjoint; the TypeEntry default is `-1` (fail-closed on unseeded).
-- **computational provenance != physical causality** — NS is computational source-identity; sibling to R-ORIGIN, never conflated (§24 boundary table in docs/research/2026-08-22-domain-semantics-...).
-- **analogy != ontology** — the Blackwell/associator research motivates NS; the wire asserts only the operational rule.
+## Executable boundary
 
-## Diagnostic code
-**E230** — NS anti-garbling; distinct from E222 (R-ORIGIN) and E224; free on base 06e85a6ada.
+- `measure(...)` seeds a fresh singleton source; a deterministic `Knowledge(...)`
+  constructor carries the empty set.
+- Add and Mul union source sets after E230 checks that two non-empty operands
+  are provably disjoint. Unknown/top fails closed.
+- `if`, `match`, assignment, loops, indirect calls, and unproved direct calls
+  conservatively widen when an exact set cannot be preserved.
+- Only a proved exact single-parameter identity body projects the selected
+  argument's set through a direct call.
+- `SOUNIO_NS_DISABLE=1` disables only E230 for the diagnostic negative control;
+  it does not disable source propagation or the existing E245 run-level limit.
+- Sub and Div remain outside E230. Their sign-dependent covariance treatment is
+  future work, so this contract makes no safety claim for them.
 
-## Phase order (codex)
-- **N1 (DONE, accepted)** representation-only: NS table module + trailing field + all TypeEntry defaults; bootstrap/source-build behaviour-neutral. Build receipt: madaros-ns-n1b.elf 100,746,094 bytes (byte-size identical to baseline; NS inert). grok-4.6 review applied (fail-closed on invalid handle + src=63 guard).
-- **N2** seed at Knowledge/measure ctors; union at add/mul; unknown conservative; parametric call-summary.
-- **N3** distinct diagnostic **E230** at ep_add/ep_mul; same-source-built sabotage control.
-- **N4** named gate + full regression vs base.
+## Mandatory distinctions preserved
 
-## Draft concept contracts (proposed; registry.tsv row deferred to founder/codex ratification)
-- **SOUNIO-NOISE-SYMBOL** — a value's uncertainty carries the identity-set of the independent measurement sources it derives from; interned set handle in the type; propagated by union.
-- **SOUNIO-ANTIGARBLING** — combining uncertain values under independence when source-sets are non-disjoint (or unknown) fabricates precision; rejected (E230) unless proved-disjoint. Soundness anchor: docs/research/lean/SounioAntiGarblingModel.lean.
+- **uncertainty != ignorance**: `0` means an empty deterministic source set;
+  `-1` means unknown/top and is never treated as disjoint from a non-empty set.
+- **computational source identity != physical independence or causality**: the
+  checker tracks a bounded static identity abstraction, not an empirical model.
+- **compile refusal != runtime validation**: E245 still blocks general run-level
+  Knowledge arithmetic, and an E230 witness does not establish runtime parity.
+- **executable != claim-ready**: the gate proves the stated compiler behavior,
+  not novelty, full covariance semantics, or scientific validation.
+
+## Diagnostic
+
+`E230` is the dedicated anti-garbling refusal. It is implemented at both
+self-hosted binary-operation checking paths and currently covers Add and Mul.
+
+## Integration receipt
+
+```text
+Semantic-Outcome: executable Add/Mul anti-garbling contract integrated with conservative source-set dataflow
+Concept-Status-Before: proposed implementation lane
+Concept-Status-After: executable
+Distinctions-Added: empty/deterministic versus unknown/top; exact identity projection versus conservative call widening
+Distinctions-Preserved: uncertainty versus ignorance; computational source identity versus physical causality; compile success versus runtime parity
+Distinctions-Erased: none
+Evidence-Run: scripts/ci/ns_antigarbling_gate.sh plus current-source compiler validation required by the PR integration gate
+Fallback-Path: none; invalid, overflowed, or unresolved source information becomes unknown/top
+Legacy-Kept: E245 run-level Knowledge arithmetic restriction; all non-NS checker behavior
+Conflicting-Lanes: none in the declared implementation write set at integration review time
+Next-Semantic-Interface: sign-aware Sub/Div treatment and run-level Knowledge lowering remain separate future lanes
+```

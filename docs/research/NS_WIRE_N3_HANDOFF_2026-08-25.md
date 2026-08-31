@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.ns-wire-n3-handoff-2026-08-25
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -14,9 +15,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.ns-wi
 
 # NS wire — N3 (E230 gate) handoff for the build/verify cycle
 
-Step 1 (implement, no build) is done in this worktree. This note is what the
-build/verify cycle (step 2) must reconcile before committing N3. **Nothing here is
-built or verified yet** — the edits are static.
+This is a chronological, historical handoff. Its opening checkpoint predates
+the build receipts later in the same document. For the current executable
+scope and evidence contract, use
+`docs/internal/concepts/ns-antigarbling-lane-20260823.md` and
+`scripts/ci/ns_antigarbling_gate.sh`.
+
+At the first checkpoint, implementation was complete but not yet built. The
+later `STEP 2` and `STEP 2b` sections preserve what was subsequently measured.
 
 ## What N3 added (all in `fable/ns-wire-20260823`, uncommitted on top of the N1+N2 checkpoint)
 
@@ -29,11 +35,12 @@ built or verified yet** — the edits are static.
      "no refusal"; unknown (top) is never disjoint (conservative).
   3. E230 raise at BOTH `knowledge_binary_result` sites (the `*mut Checker` in-place
      path ~6214 and the value path ~21917), so the rule cannot go inert on one.
-  4. E230 message (short) + help text (mirrors E222/E224).
+  4. E230 message (short) + help text.
 - `tests/compile-fail/ns_add_shared_source_rejected.sio` — `x + x` (canonical).
 - `tests/compile-fail/ns_add_unknown_conservative.sio` — `u + m`, u = top (call return).
 - `scripts/ci/ns_antigarbling_gate.sh` — the same-source-built sabotage witness (E230
-  refuses, vanishes under `SOUNIO_NS_DISABLE`, E222 unaffected, disjoint add accepted).
+  refuses, vanishes under `SOUNIO_NS_DISABLE`, an unrelated refusal is unaffected,
+  and disjoint Add/Mul are accepted by E230).
 
 ## ⚠️ N2 tests that FLIP under N3 — reconcile before the suite goes green
 
@@ -60,24 +67,28 @@ unexpected hits mean the predicate is too aggressive (revisit the empty/disjoint
 ## Build/verify checklist (step 2)
 
 1. Build Madaros from this worktree (build-lock; heavy build via SLURM per repo policy).
-2. `souc check` the two new compile-fail fixtures → expect E230; under `SOUNIO_NS_DISABLE=1`
-   → expect clean. Confirm the `&(*table)` immutable-borrow idiom compiles (first caller of
-   `ns_disjoint` from outside the module).
+2. `souc check` the two new compile-fail fixtures → expect E230; under
+   `SOUNIO_NS_DISABLE=1` → expect E230 to vanish. Do not require `rc=0`, because
+   current main may still emit the independent E245 lowering refusal. Confirm the
+   `&(*table)` immutable-borrow idiom compiles (first caller of `ns_disjoint` from
+   outside the module).
 3. Run `scripts/ci/ns_antigarbling_gate.sh` → all controls pass.
 4. Run the full run-pass + compile-fail suite; reconcile the two flips above and any suite-wide
    hits; confirm ZERO regressions elsewhere.
 5. xai math-review (per §26) → then commit N3 and notify codex on the bus.
 
-## STEP 2 — build + verify results (2026-08-25, Madaros v0.80.0 built from these sources)
+## STEP 2 — historical build + verify results (2026-08-25, Madaros v0.80.0 built from these sources)
 
 Built `artifacts/self-hosted/madaros-nswire` (100MB ELF) via `build_modular_madaros.sh`
 (serialized through `souc-build-lock.sh`). Runtime verification with that binary:
 
-**PROVEN (the gate works):**
+**PROVEN on that historical lane (the gate worked there):**
 - `x + x` (shared source) → `error[E230] ... independence-assuming operation over correlated
   uncertainty`; under `SOUNIO_NS_DISABLE=1` → `check: OK` (sabotage witness).
 - `u + m` (u = top via unprojected call) → E230; vanishes under sabotage.
-- Disjoint `a + b` and `a * b` (distinct measures) → `check: OK` (NOT a blanket ban).
+- Disjoint `a + b` and `a * b` (distinct measures) → `check: OK` on that lane
+  (not a blanket E230 ban). Current-main integration measures this as “no E230”
+  because E245 can still determine the overall command status.
 - E222 (R-ORIGIN) under `SOUNIO_NS_DISABLE=1` → **still fires** (knob is NS-specific;
   E230/E222 causally separable).
 - `scripts/ci/ns_antigarbling_gate.sh` (SOUC=madaros) → **all controls pass.**
@@ -156,5 +167,6 @@ conservatively refused (sound-but-incomplete), reconciled like the trace flips (
   understating. **OpSub** is not gated (its canonical correlated case OVERSTATES = safe);
   **OpDiv** is deferred. A full sign-of-correlation treatment (Sub/Div, negative covariance)
   is future work.
-- E230 is kept causally separate from E222 (R-ORIGIN) and E224 — distinct code, distinct
-  message, distinct sabotage knob — so the gate's E222-survives control is meaningful.
+- E230 is causally separate from E245: distinct diagnostic, distinct condition,
+  and a dedicated sabotage knob. The current gate proves the separation by
+  requiring E230 to vanish while E245 survives on the same source-built compiler.
