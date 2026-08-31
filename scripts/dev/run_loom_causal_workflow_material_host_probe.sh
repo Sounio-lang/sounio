@@ -288,9 +288,15 @@ MATERIAL_CGROUP_SHA256="$(record_value <(printf '%s\n' "$ready_probe") material_
 material_before_record="$(host_exec "$POD_A" systemctl show "$MATERIAL_UNIT" -p Id -p ActiveState -p MainPID -p InvocationID -p ControlGroup)"
 material_before_id="$(record_value <(printf '%s\n' "$material_before_record") Id)"
 material_before_state="$(record_value <(printf '%s\n' "$material_before_record") ActiveState)"
-material_before_pid="$(record_value <(printf '%s\n' "$material_before_record") MainPID)"
+material_cell_before_pid="$(record_value <(printf '%s\n' "$material_before_record") MainPID)"
 material_before_invocation="$(record_value <(printf '%s\n' "$material_before_record") InvocationID)"
 material_before_cgroup="$(record_value <(printf '%s\n' "$material_before_record") ControlGroup)"
+material_cell_before_stat="$(host_exec "$POD_A" cat "/proc/$material_cell_before_pid/stat")"
+material_cell_before_tail="${material_cell_before_stat##*) }"
+read -r -a material_cell_before_fields <<< "$material_cell_before_tail"
+material_cell_before_start="${material_cell_before_fields[19]:-}"
+material_cell_before_cgroup="$(host_exec "$POD_A" cat "/proc/$material_cell_before_pid/cgroup")"
+material_cell_before_cgroup_sha256="$(host_exec "$POD_A" sha256sum "/proc/$material_cell_before_pid/cgroup" | cut -d ' ' -f 1)"
 material_before_stat="$(host_exec "$POD_A" cat "/proc/$MATERIAL_PID/stat")"
 material_before_tail="${material_before_stat##*) }"
 read -r -a material_before_fields <<< "$material_before_tail"
@@ -298,10 +304,13 @@ material_before_start="${material_before_fields[19]:-}"
 material_before_cgroup_sha256="$(host_exec "$POD_A" sha256sum "/proc/$MATERIAL_PID/cgroup" | cut -d ' ' -f 1)"
 [[ "$material_before_id" == "$MATERIAL_UNIT" && \
    ( "$material_before_state" == active || "$material_before_state" == activating ) && \
-   "$material_before_pid" == "$MATERIAL_PID" && "$material_before_invocation" == "$MATERIAL_INVOCATION_ID" && \
+   "$material_cell_before_pid" =~ ^[1-9][0-9]*$ && "$material_cell_before_pid" -gt 1 && \
+   "$material_cell_before_pid" != "$MATERIAL_PID" && "$material_cell_before_start" =~ ^[1-9][0-9]*$ && \
+   "$material_cell_before_cgroup" == *"$MATERIAL_UNIT"* && \
+   "$material_before_invocation" == "$MATERIAL_INVOCATION_ID" && \
    "$material_before_start" == "$MATERIAL_START_TICK" && "$material_before_cgroup" == */"$MATERIAL_UNIT" && \
    "$material_before_cgroup_sha256" == "$MATERIAL_CGROUP_SHA256" ]] ||
-  fail "inner material identity was not live at authenticated EXEC_STARTED: $material_before_record"
+  fail "material controller/tracee identity was not live at authenticated EXEC_STARTED: $material_before_record"
 host_exec "$POD_A" sh -c "test ! -e '$HOST_ROOT/store/result.record' && test ! -e '$HOST_ROOT/store/attestation.record'" ||
   fail 'material output existed before Pod-A deletion and authorized release'
 unit_before_record="$(host_exec "$POD_A" systemctl show "$UNIT" -p Id -p MainPID -p InvocationID -p ExecMainStartTimestampMonotonic)"
@@ -318,8 +327,13 @@ POD_B_UID="$(kubectl -n "$NAMESPACE" get pod "$POD_B" -o jsonpath='{.metadata.ui
 [[ "$POD_B_UID" =~ ^[0-9a-f-]{36}$ && "$POD_B_UID" != "$POD_A_UID" ]] || fail 'Pod-B identity does not prove transport replacement'
 
 material_after_record="$(host_exec "$POD_B" systemctl show "$MATERIAL_UNIT" -p Id -p ActiveState -p MainPID -p InvocationID -p ControlGroup)"
-material_after_pid="$(record_value <(printf '%s\n' "$material_after_record") MainPID)"
+material_cell_after_pid="$(record_value <(printf '%s\n' "$material_after_record") MainPID)"
 material_after_invocation="$(record_value <(printf '%s\n' "$material_after_record") InvocationID)"
+material_cell_after_stat="$(host_exec "$POD_B" cat "/proc/$material_cell_after_pid/stat")"
+material_cell_after_tail="${material_cell_after_stat##*) }"
+read -r -a material_cell_after_fields <<< "$material_cell_after_tail"
+material_cell_after_start="${material_cell_after_fields[19]:-}"
+material_cell_after_cgroup_sha256="$(host_exec "$POD_B" sha256sum "/proc/$material_cell_after_pid/cgroup" | cut -d ' ' -f 1)"
 material_after_stat="$(host_exec "$POD_B" cat "/proc/$MATERIAL_PID/stat")"
 material_after_tail="${material_after_stat##*) }"
 read -r -a material_after_fields <<< "$material_after_tail"
@@ -328,9 +342,12 @@ material_after_cgroup_sha256="$(host_exec "$POD_B" sha256sum "/proc/$MATERIAL_PI
 [[ "$(record_value <(printf '%s\n' "$material_after_record") Id)" == "$MATERIAL_UNIT" && \
    ( "$(record_value <(printf '%s\n' "$material_after_record") ActiveState)" == active || \
      "$(record_value <(printf '%s\n' "$material_after_record") ActiveState)" == activating ) && \
-   "$material_after_pid" == "$MATERIAL_PID" && "$material_after_invocation" == "$MATERIAL_INVOCATION_ID" && \
+   "$material_cell_after_pid" == "$material_cell_before_pid" && \
+   "$material_cell_after_start" == "$material_cell_before_start" && \
+   "$material_cell_after_cgroup_sha256" == "$material_cell_before_cgroup_sha256" && \
+   "$material_after_invocation" == "$MATERIAL_INVOCATION_ID" && \
    "$material_after_start" == "$MATERIAL_START_TICK" && "$material_after_cgroup_sha256" == "$MATERIAL_CGROUP_SHA256" ]] ||
-  fail "inner material identity did not survive Pod replacement: $material_after_record"
+  fail "material controller/tracee identity did not survive Pod replacement: $material_after_record"
 
 if [[ "${MATERIAL_INVOCATION_ID:0:1}" == 0 ]]; then
   SABOTAGE_INVOCATION_ID="1${MATERIAL_INVOCATION_ID:1}"
@@ -413,7 +430,7 @@ host_output="$(host_exec "$POD_B" cat "$HOST_ROOT/result.log")"
   fail 'host receipt did not prove memory-only kernel-CSPRNG nonce handling'
 host_exec "$POD_B" sh -c "test ! -e '$HOST_ROOT/store/barrier-nonce.secret' && ! grep -aEq '^barrier_nonce=[0-9a-f]{64}$' '$HOST_ROOT/result.log' && test -z \"\$(find '$HOST_ROOT/capsule' -type f -exec grep -aFl '$NONCE_SECRET_SCHEMA' {} +)\"" ||
   fail 'raw barrier nonce appeared in capsule, store, or result output'
-transport_receipt="LOOM_CAUSAL_WORKFLOW_MATERIAL_HOST_TRANSPORT PASS namespace=$NAMESPACE node=$NODE pod_a=$POD_A pod_a_uid=$POD_A_UID pod_b=$POD_B pod_b_uid=$POD_B_UID transport_pod_deleted=true replacement_transport=true hostguardian_unit=$UNIT hostguardian_invocation_id=$unit_invocation_id hostguardian_exec_start_monotonic=$unit_exec_start hostguardian_unit_survived=true material_unit=$MATERIAL_UNIT material_invocation_id=$MATERIAL_INVOCATION_ID material_pid=$MATERIAL_PID material_start_tick=$MATERIAL_START_TICK material_cgroup_sha256=$MATERIAL_CGROUP_SHA256 run_grant_generation=$READY_RUN_GENERATION barrier_nonce_sha256=$READY_NONCE_SHA256 running_witness_sha256=$READY_WITNESS_SHA256 material_cell_survived=true replacement_sabotage=DENY592 release_authority=Sounio manifest_sha256=$EXPECTED_MANIFEST_SHA256 host_selftest_sha256=$HOST_SELFTEST_SHA256 host_probe_sha256=$HOST_PROBE_SHA256 transport=kubectl+privileged-hostPID+nsenter+systemd transport_trust=trusted-privileged-root-observer same_uid_peer_isolation=false hostile_transport_isolation=false capsule_layout=unpacked-directory-v1 shared_checkout=false material_execution=true compile_count=1 ticket_count=1 launch_count=1 result_count=1 attestation_count=1 controller_recovery=false pod_loss_synchronized=true transport_pod_loss_measured=true pod_loss_measured=true material_cell_survival_measured=true pod_loss_boundary=MATERIAL_RUNNING_IN_EXEC production_activation=false parity_open=false claim_ready=false host_output_sha256=$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1)"
+transport_receipt="LOOM_CAUSAL_WORKFLOW_MATERIAL_HOST_TRANSPORT PASS namespace=$NAMESPACE node=$NODE pod_a=$POD_A pod_a_uid=$POD_A_UID pod_b=$POD_B pod_b_uid=$POD_B_UID transport_pod_deleted=true replacement_transport=true hostguardian_unit=$UNIT hostguardian_invocation_id=$unit_invocation_id hostguardian_exec_start_monotonic=$unit_exec_start hostguardian_unit_survived=true material_unit=$MATERIAL_UNIT material_invocation_id=$MATERIAL_INVOCATION_ID material_cell_pid=$material_cell_before_pid material_cell_start_tick=$material_cell_before_start material_cell_cgroup_sha256=$material_cell_before_cgroup_sha256 material_tracee_pid=$MATERIAL_PID material_tracee_start_tick=$MATERIAL_START_TICK material_tracee_cgroup_sha256=$MATERIAL_CGROUP_SHA256 material_cell_main_pid_distinct_from_tracee=true run_grant_generation=$READY_RUN_GENERATION barrier_nonce_sha256=$READY_NONCE_SHA256 running_witness_sha256=$READY_WITNESS_SHA256 material_cell_survived=true replacement_sabotage=DENY592 release_authority=Sounio manifest_sha256=$EXPECTED_MANIFEST_SHA256 host_selftest_sha256=$HOST_SELFTEST_SHA256 host_probe_sha256=$HOST_PROBE_SHA256 transport=kubectl+privileged-hostPID+nsenter+systemd transport_trust=trusted-privileged-root-observer same_uid_peer_isolation=false hostile_transport_isolation=false capsule_layout=unpacked-directory-v1 shared_checkout=false material_execution=true compile_count=1 ticket_count=1 launch_count=1 result_count=1 attestation_count=1 controller_recovery=false pod_loss_synchronized=true transport_pod_loss_measured=true pod_loss_measured=true material_cell_survival_measured=true pod_loss_boundary=MATERIAL_RUNNING_IN_EXEC production_activation=false parity_open=false claim_ready=false host_output_sha256=$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1)"
 if [[ -n "$RECEIPT_OUTPUT" ]]; then
   stage="$(mktemp "$(dirname "$RECEIPT_OUTPUT")/.loom-causal-host-receipt.XXXXXX")"
   printf '%s\n%s\n' "$transport_receipt" "$host_output" > "$stage"
