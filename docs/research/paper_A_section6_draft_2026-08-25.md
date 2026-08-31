@@ -162,9 +162,12 @@ interprocedural summaries (§5.6), absent from the calculus; (iii) second-order 
 *assumed, not proved*: the type system tracks sources, it does not discover them, and with
 dishonest labels the calculus under-approximates covariance; (v) the semantics is algebraic —
 `⟨a,a⟩` is the variance under independent unit-variance symbols by definition, no distributional
-adequacy is claimed (three xai adversarial rounds 2026-08-30/31, Grok 4.5 + 4.6 + 4.6-on-fixes:
-0 unsound findings, every finding closed by a theorem or stated as a boundary —
-`paper_A_ns_metatheory_xai_review_2026-08-30.md`).
+adequacy is claimed; (vi) `treal` is modelled by `Int` — ring algebra over integer "reals", exact
+for first-order propagation, no ℝ-valued measure theory claimed — and Theorem 6.4's `Exact`
+hypothesis is load-bearing (a source-level `kraw` literal can fabricate metadata). Four adversarial
+reads 2026-08-30/31 — xAI Grok 4.5, 4.6, 4.6-on-fixes, and Kimi K3 as the independent second
+vendor: 0 unsound findings, every finding closed by a theorem or stated as a boundary —
+`paper_A_ns_metatheory_xai_review_2026-08-30.md`.
 
 ### 6.5 Two boundaries carried as hypotheses
 

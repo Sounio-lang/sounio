@@ -3847,3 +3847,10 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
 | 2026-08-30 | none | main integration | san_fpga_deployment_2026-08-04.md; SounioCDCoreLaw.lean; SounioSeamFlip.lean; SounioSedenionBipartite.lean | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | This lane merged `origin/main@c1e7937cb9` to clear an inherited Contracts red. Each listed path resolves to the same Git object in the merge index as on `origin/main`, so this lane authored no part of it and makes no new mathematical claim in it. `SounioCDCoreLaw.lean` and `SounioSeamFlip.lean` in particular landed on `main` independently of this branch; the merge resolution therefore DROPS this branch's duplicate lakefile registrations for both and keeps only «SounioZDChi», whose `.lean` file exists on this branch alone. |
+
+## 2026-08-31 - EpistemicEffectsNS.lean: Kimi K3 independent second-vendor review DONE (via tmux lane fleet:10)
+
+- Route: `kimi-code 0.38.0 -p` crashes on tool-using prompts (lifecycle bug), MOONSHOT_API_KEY absent, Z.AI 1313 → dispatched the packet to the idle K3 lane by `tmux send-keys`, asked it to write `report_kimi_k3.md`; 6.7 KB report
+- Verdict: 10 OK / 2 TIGHTENABLE / 0 FAIL; rounds 2–3 fixes confirmed OK; leftovers CLOSED except probabilistic adequacy (scoped)
+- Acted: header boundaries — reals are Int, payloads generic (metadata inert), Exact is a hypothesis; §6.4 residual (vi). Gate PASS, 13 theorems
+- Record: `docs/research/paper_A_ns_metatheory_xai_review_2026-08-30.md` (Kimi K3 section)
