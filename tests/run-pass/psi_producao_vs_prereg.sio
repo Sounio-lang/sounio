@@ -1,0 +1,186 @@
+//@ run-pass
+// MEDE o ψ que já está em produção (`stdlib/cybernetic/psychiatry.sio::patient_as_sedenion`)
+// contra o resultado da diagonal, e resolve o conflito entre os dois embeddings.
+//
+// O ψ de produção mapeia:
+//   s[i]   = process_values[i]    / ‖valores‖     (i = 0..7)
+//   s[i+8] = process_variances[i] / ‖variâncias‖  (i = 0..7)
+//
+// Ou seja: s = (a, b) na duplicação de Cayley-Dickson, com a e b UNITÁRIOS por construção.
+// A caracterização de Moreno, citada no próprio arquivo, diz que (a,b) está perto de um divisor
+// de zero quando ‖a‖ ≈ ‖b‖ E ⟨a,b⟩ ≈ 0. A normalização já garante a primeira condição
+// PERMANENTEMENTE — todo paciente vive na superfície ‖a‖ = ‖b‖. O que decide é só ⟨a,b⟩.
+//
+// A pergunta que este programa responde, sem supor: um estado do encoding de produção consegue
+// ser divisor de zero? E, se consegue, por qual caminho — pela diagonal (a variância de um
+// processo acompanha o valor DELE) ou por termos cruzados (a variância mora em outro processo)?
+
+use algebra::sedenion::{sed_basis, sed_mul, sed_norm_sq}
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn eh_zero(v: &[f64; 16]) -> bool with Mut {
+    var i: i64 = 0
+    var ok: bool = true
+    while i < 16 {
+        if abs_f64(v[i as usize]) > 1.0e-12 { ok = false }
+        i = i + 1
+    }
+    ok
+}
+
+// O estado que o ψ de produção gera quando o perfil de VALORES é o processo i puro e o de
+// VARIÂNCIAS é o processo j puro: s = e_i + e_{j+8}, já normalizado.
+fn estado_producao(i: i64, j: i64, out: &![f64; 16]) with Mut {
+    var z: i64 = 0
+    while z < 16 { out[z as usize] = 0.0; z = z + 1 }
+    out[i as usize] = 1.0
+    out[(j + 8) as usize] = 1.0
+}
+
+// Existe parceiro (e_k ± e_l) que aniquila s? Varre a mesma família da tabela do §3.
+fn tem_parceiro_aniquilador(s: &[f64; 16]) -> bool with Mut, Div, Panic {
+    var w: [f64; 16] = [0.0; 16]
+    var p: [f64; 16] = [0.0; 16]
+    var achou: bool = false
+    var k: i64 = 1
+    while k < 16 {
+        var l: i64 = k + 1
+        while l < 16 {
+            var sg: i64 = 0
+            while sg < 2 {
+                let sb = if sg == 0 { 1.0 } else { 0.0 - 1.0 }
+                var z: i64 = 0
+                while z < 16 { w[z as usize] = 0.0; z = z + 1 }
+                w[k as usize] = 1.0
+                w[l as usize] = sb
+                sed_mul(s, &w, &!p)
+                if eh_zero(&p) { achou = true }
+                sg = sg + 1
+            }
+            l = l + 1
+        }
+        k = k + 1
+    }
+    achou
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var s: [f64; 16] = [0.0; 16]
+    var falhas: i64 = 0
+
+    // ── 1. Diagonal contra cruzado, sobre TODOS os 64 pares (valor i, variância j).
+    var diag_total: i64 = 0
+    var diag_aniquila: i64 = 0
+    var cruz_total: i64 = 0
+    var cruz_aniquila: i64 = 0
+
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            estado_producao(i, j, &!s)
+            let an = tem_parceiro_aniquilador(&s)
+            if i == j {
+                diag_total = diag_total + 1
+                if an { diag_aniquila = diag_aniquila + 1 }
+            } else {
+                cruz_total = cruz_total + 1
+                if an { cruz_aniquila = cruz_aniquila + 1 }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    print("DIAGONAL_TOTAL "); print_int(diag_total)
+    print("DIAGONAL_ANIQUILA "); print_int(diag_aniquila)
+    print("CRUZADO_TOTAL "); print_int(cruz_total)
+    print("CRUZADO_ANIQUILA "); print_int(cruz_aniquila)
+
+    // A predição do plano: a diagonal NUNCA aniquila; a aniquilação só vem de termos cruzados.
+    if diag_aniquila != 0 {
+        println("FALHA: um estado DIAGONAL aniquilou — a predicao do plano cai")
+        falhas = falhas + 1
+    }
+    if cruz_aniquila == 0 {
+        println("FALHA: nenhum estado CRUZADO aniquilou — encoding nao alcanca a variedade")
+        falhas = falhas + 1
+    }
+
+    // ── 2. O produto interno ⟨a,b⟩ é o discriminante? Mede-o nos dois grupos.
+    //     Para os estados one-hot: ⟨a,b⟩ = 1 na diagonal, 0 no cruzado.
+    //     Confirma que a normalização deixa ⟨a,b⟩ como ÚNICO grau de liberdade de Moreno.
+    var i2: i64 = 0
+    var inner_diag_um: i64 = 0
+    var inner_cruz_zero: i64 = 0
+    while i2 < 8 {
+        var j2: i64 = 0
+        while j2 < 8 {
+            estado_producao(i2, j2, &!s)
+            var inner: f64 = 0.0
+            var c: i64 = 0
+            while c < 8 {
+                inner = inner + s[c as usize] * s[(c + 8) as usize]
+                c = c + 1
+            }
+            if i2 == j2 && abs_f64(inner - 1.0) < 1.0e-12 { inner_diag_um = inner_diag_um + 1 }
+            if i2 != j2 && abs_f64(inner) < 1.0e-12 { inner_cruz_zero = inner_cruz_zero + 1 }
+            j2 = j2 + 1
+        }
+        i2 = i2 + 1
+    }
+    print("DIAGONAL_COM_INNER_IGUAL_1 "); print_int(inner_diag_um)
+    print("CRUZADO_COM_INNER_IGUAL_0 "); print_int(inner_cruz_zero)
+
+    // ── 3. QUEM são os 14 cruzados que NÃO aniquilam? Medido, não inferido.
+    //     Hipótese a testar: são exatamente os que envolvem e_0 (a unidade REAL, onde mora o
+    //     valor do processo 0) ou e_8 (a unidade da DUPLICAÇÃO, onde mora a variância dele).
+    //     Se for isso, o processo 0 — "percepção", na ordem declarada do struct — fica
+    //     estruturalmente isento da assinatura de dissociação, por acidente do encoding.
+    var cruz_nao_aniquila: i64 = 0
+    var cruz_nao_aniquila_com_zero: i64 = 0
+    var i3: i64 = 0
+    while i3 < 8 {
+        var j3: i64 = 0
+        while j3 < 8 {
+            if i3 != j3 {
+                estado_producao(i3, j3, &!s)
+                if !tem_parceiro_aniquilador(&s) {
+                    cruz_nao_aniquila = cruz_nao_aniquila + 1
+                    if i3 == 0 || j3 == 0 { cruz_nao_aniquila_com_zero = cruz_nao_aniquila_com_zero + 1 }
+                }
+            }
+            j3 = j3 + 1
+        }
+        i3 = i3 + 1
+    }
+    print("CRUZADOS_QUE_NAO_ANIQUILAM "); print_int(cruz_nao_aniquila)
+    print("DESSES_ENVOLVENDO_PROCESSO_0 "); print_int(cruz_nao_aniquila_com_zero)
+    if cruz_nao_aniquila != cruz_nao_aniquila_com_zero {
+        println("NOTA: nem todos os nao-aniquiladores envolvem o processo 0 — hipotese incompleta")
+    }
+
+    // ── 4. Transição, refeita.
+    //     ⚠️ A primeira versão deste bloco usava a = e_0, que é a unidade REAL e um dos casos
+    //     que nunca aniquilam — o teste não media transição nenhuma. Agora a = e_1.
+    //     b parte de e_2 (cruzado, aniquila) e ganha peso em e_1 (diagonal), fazendo ⟨a,b⟩ subir.
+    var ponto_de_saida: i64 = -1
+    var kk: i64 = 0
+    while kk < 5 {
+        var z: i64 = 0
+        while z < 16 { s[z as usize] = 0.0; z = z + 1 }
+        s[1] = 1.0                        // a = e_1 puro (processo 1, não a unidade real)
+        s[10] = 1.0                       // b tem e_2 → componente CRUZADA
+        s[9] = kk as f64                  // b ganha e_1 → componente DIAGONAL, peso kk
+        let an = tem_parceiro_aniquilador(&s)
+        print("MISTURA_k "); print_int(kk)
+        print("MISTURA_ANIQUILA "); print_int(if an { 1 } else { 0 })
+        if !an && ponto_de_saida < 0 { ponto_de_saida = kk }
+        kk = kk + 1
+    }
+    print("SAI_DA_VARIEDADE_EM_k "); print_int(ponto_de_saida)
+
+    if falhas == 0 { println("psi de producao: PASS") } else { println("psi de producao: FAIL") }
+    falhas
+}
