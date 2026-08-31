@@ -120,6 +120,18 @@ The chapter argues that Sounio is **necessary** for this construction: no other 
   rejects under-confident clinical pathways before binary emission —
   a guarantee that runtime gates cannot give.
 
+- 6.8 **O sinal da covariância decide o dano** — the two-compartment vancomycin
+  flip-rate measurement (RQ4 of the anti-garbling paper): on a 5,000-patient
+  deterministic cohort, the independence-assuming add silences 34.2 % of true
+  WARNs in the interval sum (ρ = 1, variance exactly halved) and manufactures
+  1,894 spurious WARNs (38 % of the cohort) in the phase decomposition, where the
+  phase covariance is negative in every patient. Paragraph (PT/EN), caption and
+  figure: `docs/dissertation/results/rq4_vanco_flip_rate_v1.md`,
+  `docs/dissertation/figures/fig_rq4_flip_rate_2026-08-31.svg`; program
+  `docs/research/sounio/rq4_vanco_two_compartment_flip.sio`; theorems
+  `naive_add_understates_iff` / `naive_add_conservative_of_cov_nonpos`
+  (`formal/lean4/EpistemicEffectsNS.lean`); runtime fix `stdlib/epistemic/affine`.
+
 ### Section 7 — Empirical Evaluation
 
 [Mirrors clinical paper §3-4. Filled when M4 cohort completes.]
