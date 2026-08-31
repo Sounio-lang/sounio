@@ -1,0 +1,30 @@
+import SounioPireusConcreteQuotientAction
+
+open SounioPireusConcreteQuotientAction
+
+#print axioms normalize_raw_action_absorbs_normalize
+#print axioms IsNormalizedBits
+#print axioms normalizedBitsMin
+#print axioms normalizedBitsLawfulOrderMin
+#print axioms normalizedBitsOfTable
+#print axioms tableOfNormalizedBits
+#print axioms table_of_normalized_bits_in_section
+#print axioms table_of_normalized_bits_of_table
+#print axioms normalized_bits_eq_of_tables_eq
+#print axioms quotientAct
+#print axioms table_of_quotient_act
+#print axioms normalized_bits_of_table_eq_iff_same_gauge_orbit
+#print axioms quotient_act_on_normalized_table
+#print axioms quotient_action_identity
+#print axioms quotient_action_compose
+#print axioms quotient_action_inverse
+#print axioms concreteQuotientActionSystem
+#print axioms concrete_quotient_action_count_is_40320
+#print axioms concrete_quotient_canonical_eq_iff_same_orbit
+#print axioms SameDeclaredLinearSwapGaugeOrbit
+#print axioms normalized_same_orbit_iff_same_declared_linear_swap_gauge_orbit
+#print axioms declaredCanonicalOption
+#print axioms declared_canonical_eq_iff_same_declared_linear_swap_gauge_orbit
+#print axioms ConcreteQuotientBoundary
+#print axioms concreteQuotientBoundary
+#print axioms concrete_quotient_closes_target03_without_claim_promotion

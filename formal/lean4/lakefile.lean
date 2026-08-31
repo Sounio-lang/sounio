@@ -316,6 +316,30 @@ lean_lib «SounioPireusGL4AnalyticScanBijection» where
 lean_lib «SounioPireusGL4AnalyticActionCensus» where
   moreLeanArgs := #["-j", "1"]
 
+-- Row-major big-endian BitVec 256 representation of Pireus sign tables.
+-- Non-default: fixes the exact lexicographic state order for Target-03.
+lean_lib «SounioPireusSignTableBitVecLex» where
+  moreLeanArgs := #["-j", "1"]
+
+-- Closure of the analytic 40320-view family under identity, composition,
+-- and inverse by constructive ordered-basis re-encoding.
+lean_lib «SounioPireusAnalyticActionClosure» where
+  moreLeanArgs := #["-j", "1"]
+
+-- Lawful normalized 40320-view action and canonical-minimum iff orbit theorem.
+-- Non-default: the executed Sounio streaming-minimum equality remains open.
+lean_lib «SounioPireusConcreteQuotientAction» where
+  moreLeanArgs := #["-j", "1"]
+
+lean_lib «SounioPireusSignTableBitVecLexAxiomAudit» where
+  moreLeanArgs := #["-j", "1"]
+
+lean_lib «SounioPireusAnalyticActionClosureAxiomAudit» where
+  moreLeanArgs := #["-j", "1"]
+
+lean_lib «SounioPireusConcreteQuotientActionAxiomAudit» where
+  moreLeanArgs := #["-j", "1"]
+
 lean_lib «SounioPireusGL4AnalyticScanEmbeddingAxiomAudit» where
   moreLeanArgs := #["-j", "1"]
 
