@@ -321,7 +321,8 @@ type validated = {
 let validate_payload ~root ~event_sha256 ~command_sha256 payload =
   if String.length payload > max_payload_bytes then
     failf "sovereign-payload-too-large";
-  let table, payload_sha256 = parse_record "sovereign-request" payload in
+  let table, _ = parse_record "sovereign-request" payload in
+  let payload_sha256 = sha256 payload in
   exact table "schema" "loom-sovereign-exec-request-v1";
   let event_sha256 = require_digest "event" event_sha256 in
   let command_sha256 = require_digest "command" command_sha256 in
