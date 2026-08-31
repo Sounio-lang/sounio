@@ -736,3 +736,38 @@ genéricas do R17 (como o R16 fez com a reta), ler a relação grau-2 em coords 
 extrair a forma quadrática do witness, expressar o discriminante em n(a),n(a′),⟨z,z′⟩ e as
 grandezas da ghost-law, e provar positividade contra as identidades que já temos. Cônica é
 o que os dados genéricos REALMENTE mostram (≠ pêncil).
+
+## Rodada 19: rota construtiva (b) — confirmação EXATA da estrutura + fronteira de ferramenta
+
+Correção do usuário incorporada: float/numpy não é a prova nem a ferramenta de
+descoberta certa aqui ("se numpy resolvesse já teriam resolvido"). Pivô para o
+idioma EXATO do projeto (mod-p → reconstrução racional → i64/Lean).
+
+**Setup exato:** frames inteiros exatos emitidos pela máquina Sounio validada
+(FRAME_U/FRAME_W, novo no census); tensor comutador C[a][i][j]=[f^U_i,f^W_j]_a
+construído em ℤ exato (cd_sigma Cayley-Dickson). Witness: Σ C[a][i][j]k_i m_j = 0.
+Dados: docs/research/data/conj68_frames_13370001.txt (config a=2e₂, distinto b).
+
+**Confirmado EXATAMENTE (mod-p, p=32003, SEM float):**
+- M(k) (16×5, linear em k) tem rank genérico 5 (colunas [u,g_j] independentes);
+  200/200 random k. Simétrico p/ N(w).
+- 0/20000 random k com rank<5 ⟹ u-locus é codim ~3 em ℙ⁴ = CURVA.
+- Codim 3 = exatamente (7-4)(5-4) do determinantal de uma matriz de rank-EFETIVO
+  7 ⟹ **confirma exatamente a lei rank-7 dos §§2-5** (não via SVD float, via mod-p).
+- degrevlex GB do ideal bilinear (chart afim k0=m0=1) fecha RÁPIDO (curva tratável
+  mod p); lex/eliminação-de-m ESTOURA (>2min) — é o núcleo computacional pesado.
+
+**Critério de existência, exato:** witness real ⟺ alguma componente cônica tem
+ponto real ⟺ sua forma quadrática 3×3 (racional) é INDEFINIDA. Cônicas genéricas
+têm pontos irracionais quadráticos ⟹ SEM parametrização racional estilo R16 (por
+isso o R16 deu inteiros só na config super-simétrica). O objeto exato é a EQUAÇÃO
+da cônica; extração precisa de FGLM (após slice 0-dim) ou CAS (Singular/msolve/
+Macaulay2) — NENHUM instalado aqui. sympy lex estoura; degrevlex fecha mas
+change-of-order limpo não cabe em script de 2min.
+
+**Fronteira honesta:** este é o núcleo duro/aberto (por isso a conjectura está em
+disputa). Ferramenta certa p/ o próximo golpe: (a) pipeline mod-p+CRT do próprio
+Sounio (o que fez a ghost law) sobre o ideal determinantal, OU (b) instalar
+Singular/msolve e usar degrevlex+FGLM. O ALVO exato: a forma quadrática Q da
+cônica em coords de frame, e a prova de que disc/assinatura é indefinida uniforme
+para d≥3 — expressa em n(a),n(a′),⟨z,z′⟩ e ghost-law. Ainda o núcleo aberto.
