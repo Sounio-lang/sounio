@@ -164,4 +164,59 @@ def ghostOrthogonal : Bool :=
 
 theorem ghost_orthogonal_canonical : ghostOrthogonal = true := by native_decide
 
+/-! ## PAPER PROOF of the two ghost identities (Rodada 7)
+
+Normalize n(a)=n(b)=n(a')=n(b')=1; frames u = (c, cz) with c ⊥ {1,a,b,z},
+w = (g, gz') with g ⊥ {1,a',b',z'}; φ(u,w,v) = ⟨[u,w],v⟩ cyclic.
+
+GHOST 1, Z = (z+z', 0):  φ(u,w,Z) = ⟨[Z,u],w⟩.
+  [(z,0),u]  = ([z,c], -2c) = (-2cz, -2c)      (z ⊥ c so zc = -cz; (cz)z = -c)
+  [(z',0),u] = ([z',c], 2(cz)z').
+  ⟨(cz)z', gz'⟩ = ⟨cz,g⟩ n(z') = ⟨cz,g⟩       (right mult by unit = isometry)
+  ⟨c, gz'⟩ = ⟨c z̄', g⟩ = -⟨cz', g⟩.
+  Sum = -2⟨cz,g⟩ - 2⟨c,gz'⟩ + ⟨z'c - cz', g⟩ + 2⟨cz,g⟩
+      = 2⟨cz',g⟩ + ⟨z'c,g⟩ - ⟨cz',g⟩ = ⟨cz' + z'c, g⟩ = -2⟨c,z'⟩ Re(g) = 0
+  since g is PURE.  ∎
+
+GHOST 2, Z₂ = (0, z+z'):  φ(u,w,Z₂) = ⟨[Z₂,u],w⟩.
+  [(0,z),u]  = (-2c, 2cz)
+  [(0,z'),u] = ([cz,z'], -2z'c)               (flexibility for z'(cz))
+  ⟨(cz)z', g⟩ = -⟨cz, gz'⟩;  ⟨z'(cz), g⟩ = -⟨cz, z'g⟩
+  ⟨cz, gz' + z'g⟩ = -2⟨g,z'⟩ Re(cz) = 0       (cz pure)
+  ⟨z'c, gz'⟩ = -⟨z'cz', g⟩ = -⟨c,g⟩ + 2⟨c,z'⟩⟨z',g⟩   (z'cz' = c - 2⟨c,z'⟩z')
+  Sum = -2⟨c,g⟩ + 2⟨cz,gz'⟩ - ⟨cz,gz'⟩ + ⟨cz,z'g⟩ - 2⟨z'c,gz'⟩
+      = -4⟨c,z'⟩⟨z',g⟩ = 0   since g ⊥ z'.  ∎
+
+Unnormalized scaling gives the measured law (n(A')·z + n(A)·z').
+Below: kernel verification on a SECOND canonical pair with n(A)=1, n(A')=2,
+pinning the normalized coefficients.  x'' = (e₂+e₄, -e₃-e₅): z'' = -2e₁,
+ghost = 2z + z'' = 2e₃ - 2e₁ ∝ e₃ - e₁. -/
+
+def xpp : Vec := vsub (vsub (vadd (e 2) (e 4)) (e 11)) (e 13)
+
+def vFrame2 : List Vec :=
+  [xpp,
+   vsub (e 6) (e 15),
+   vadd (e 7) (e 14),
+   vsub (vadd (vsub (e 2) (e 4)) (e 11)) (e 13),
+   vsub (vadd (vsub (e 3) (e 5)) (e 12)) (e 10)]
+
+def frames2Annihilate : Bool :=
+  (vFrame2.drop 1).all (fun w => isZero (mul xpp w) && isZero (mul w xpp))
+
+theorem frames2_annihilate : frames2Annihilate = true := by native_decide
+
+def ghost1n : Vec := vsub (e 3) (e 1)
+def ghost2n : Vec := vsub (e 11) (e 9)
+
+/-- The NORMALIZED ghost law at n(A)=1, n(A')=2: the direction
+    n(A')·z + n(A)·z' = 2e₃ - 2e₁ (embedded in both slots) is orthogonal to
+    every sector commutator of the pair (e₁,e₂) vs (e₂+e₄, -e₃-e₅). -/
+def ghostNormalized : Bool :=
+  (uFrame.drop 1).all (fun u => (vFrame2.drop 1).all (fun w =>
+    let c := comm u w
+    dot c ghost1n == 0 && dot c ghost2n == 0))
+
+theorem ghost_normalized_n2 : ghostNormalized = true := by native_decide
+
 end SounioConj68RankBound

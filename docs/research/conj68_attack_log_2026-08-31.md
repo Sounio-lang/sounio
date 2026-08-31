@@ -251,6 +251,43 @@ de que 9 = dim genérico e Stiefel–Hopf não obstrui em (4,4,9), o zero força
 virá das identidades, não da topologia genérica: provavelmente da estrutura
 de composição n(ab)=n(a)n(b) que as normalizações z/n sugerem.
 
+## Rodada 7 (mesmo dia): AS IDENTIDADES-FANTASMA PROVADAS — rank(T|₄ₓ₄) ≤ 9 é teorema
+
+Prova em papel (registrada também em `SounioConj68RankBound.lean`, com a
+instância normalizada n=1 vs n′=2 kernel-verified: `ghost_normalized_n2`).
+
+Normalização: n(a)=n(b)=n(a′)=n(b′)=1; frames u=(c,cz), c⊥{1,a,b,z};
+w=(g,gz′), g⊥{1,a′,b′,z′}; φ(u,w,v)=⟨[u,w],v⟩ cíclica (como no teorema
+principal).
+
+**Ghost 1** (Z=(z+z′,0)): φ(u,w,Z)=⟨[Z,u],w⟩.
+[(z,0),u] = (−2cz,−2c) (z⊥c ⟹ zc=−cz; alternatividade (cz)z=−c);
+[(z′,0),u] = ([z′,c], 2(cz)z′). Isometria-direita: ⟨(cz)z′,gz′⟩=⟨cz,g⟩ mata o
+cruzado; ⟨c,gz′⟩=−⟨cz′,g⟩; soma = ⟨cz′+z′c, g⟩ = −2⟨c,z′⟩·Re(g) = **0 pela
+pureza de g**. ∎
+
+**Ghost 2** (Z₂=(0,z+z′)): [(0,z),u]=(−2c,2cz); [(0,z′),u]=([cz,z′],−2z′c)
+(flexibilidade). ⟨cz, gz′+z′g⟩ = −2⟨g,z′⟩Re(cz)=0 (cz puro); reflexão
+z′cz′ = c − 2⟨c,z′⟩z′ dá ⟨z′c,gz′⟩ = −⟨c,g⟩+2⟨c,z′⟩⟨z′,g⟩; soma =
+−4⟨c,z′⟩⟨z′,g⟩ = **0 porque g ⊥ z′** (estrutura do frame). ∎
+
+Escala não-normalizada ⟹ exatamente a lei medida (n(A′)z + n(A)z′).
+
+**Consequência: o TEOREMA SETORIAL COMPLETO está provado.** As seis direções
+puras do complemento — x, x′ (comutação), x̃, x̃′ (Lemma B + dupla-pureza),
+v₅, v₆ (ciclicidade + pureza + g⊥z′) — todas com prova de poucas linhas, cada
+peça verificada pelo kernel do Lean em instância canônica. rank(T|O×O) ≤ 9 e
+rank(T) ≤ 11, ambos justos nos dados (145 pares).
+
+Ingredientes usados (todos clássicos): multiplicação CD, flexibilidade,
+isometria da multiplicação por unidade (composição), reflexão quaterniônica,
+dupla-pureza de ZDs (Moreno), ciclicidade da forma trilinear.
+
+**O que resta para a Conjecture 6.8, agora com precisão cirúrgica:** provar
+que o mapa bilinear EXPLÍCITO T̄: ℝ⁴×ℝ⁴ → ℝ⁹ (o quociente pelas 6+1 relações
+agora todas conhecidas) tem zero não-trivial para toda configuração (x,x′).
+Um único lema de existência real, sobre um objeto totalmente explícito.
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD
