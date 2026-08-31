@@ -129,6 +129,59 @@ Três fatos novos:
 Sub-pergunta aberta interna: caracterizar os 7 pares com rank(T|₄ₓ₄) = 7
 (mais degenerados; provável relação com subálgebras quaterniônicas comuns).
 
+## Rodada 4 (mesmo dia): O TEOREMA DE ESTRUTURA — rank(T) ≤ 11 explicado e mecanizado
+
+Runner: `examples/research/conj68_rank_structure.sio`. Leg Lean (kernel-verified,
+Mathlib-free, sem sorry): `formal/lean4/SounioConj68RankBound.lean` (LEAN_OK,
+`lean --threads=1`, v4.33.0).
+
+**Correção honesta:** a rodada anterior desta sessão reportou brevemente
+"rank-7 ⟺ quatérnion compartilhado (QOVERLAP 4)" — era ARTEFATO de um buffer
+overflow no extrator 4×4 (`[0;192]` para índices até 255, sem bounds-check no
+Madaros). Corrigido; dados refeitos.
+
+### O teorema de estrutura (medido 145/145; prova em esboço; canônico em Lean)
+
+Para ZDs x = (a,b), x′ = (a′,b′):
+
+> **im(T) ⊥ span{ x, x′, x̃, x̃′ }, onde x̃ = (b,−a) é o companheiro de
+> hexágono (Lemma 3.6 do paper). Logo rank(T) ≤ 15 − 4 = 11 — e os dados
+> dizem que o limite é JUSTO (= 11 em todos os pares genéricos).**
+
+Prova (3 linhas, cada peça verificada no par canônico pelo kernel do Lean):
+
+1. φ(u,w,v) = ⟨[u,w],v⟩ é **cíclica** (⟨a,bc⟩ = ⟨ac̄,b⟩ em elementos puros).
+2. x ⊥ im T: φ(u,w,x) = ⟨[x,u],w⟩ = 0 pois u ∈ C(x). Idem x′.
+3. **Lemma B:** [x̃, u] ∈ ℝ·(0,1) = ℝ·e₈ para todo u ∈ Im C(x)
+   ([x̃,x] = 4f̃₀ pela Table 2; x̃ comuta com os 4 geradores de O(x)).
+   Como todo elemento de Im C(x′) é **duplamente puro** (⊥ e₀ e e₈ — ZDs são
+   doubly pure, Moreno), ⟨[x̃,u],w⟩ = 0. Idem x̃′.
+
+As direções-mistério foram identificadas lendo os pontos de rede inteiros do
+complemento (scan exato, suporte ≤ 3) em três pares representativos: em todos,
+o complemento é exatamente {e₀, x, x′, x̃, x̃′}.
+
+Legs Lean (native_decide sobre ℤ): frames aniquilam bilateralmente; Lemma B
+canônico (suporte de [x̃₀,u] só em e₈); dupla-pureza dos frames; as 4 direções
+⊥ aos 25 comutadores no par duro (e₁,e₂)vs(e₂,e₃); independência linear das 4.
+Falta (futuro): redução por transitividade Aut(𝕆) para o caso geral.
+
+### Estratos do setor O×O (degrau 2, dados corrigidos)
+
+HIST44 = {2:6, 3:9, 7:45, 9:83} sobre 143 pares. Condição **necessária**
+para rank44 = 7: **A ⊥ span{a₀,b₀}** (⟨A,e₁⟩=⟨A,e₂⟩=0): tabela 45/0
+(P&r7=45, notP&r7=0); não suficiente (P&no7=55). Caracterização completa dos
+estratos: aberto interno.
+
+### O que resta para a Conjecture 6.8 inteira
+
+Com rank(T) ≤ 11 estrutural, falta UMA peça: provar que o mapa bilinear
+quociente ℝ⁵×ℝ⁵ → im(T) (dim ≤ 11) sempre tem zero real não-trivial.
+Stiefel–Hopf não decide (sem obstrução genérica em q=11) — a prova precisa
+usar a estrutura específica: candidatos (i) contagem de grau/Euler sobre a
+família explícita, (ii) a simetria f ↔ f̃ do double hexagon agindo no kernel
+de dim 14, (iii) redução Aut(𝕆) a uma família de 8 parâmetros + análise real.
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD

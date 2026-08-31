@@ -1,0 +1,982 @@
+// Conjecture 6.8 — structure of the rank law (research runner, 100% Sounio).
+// See docs/research/conj68_attack_log_2026-08-31.md, Rodada 3.
+//
+// Known: rank(T) = 11 uniformly, T(u,w) = [u,w] on U x V (U = Im C(x0),
+// V = Im C(x')). The trilinear form phi(u,w,v) = <[u,w],v> is CYCLIC
+// (phi(u,w,v) = phi(w,v,u), via <a,bc> = <a c~, b>), which proves for free:
+//   x0 _|_ im(T)  (phi(u,w,x0) = <[x0,u],w> = 0 since [x0,u]=0), and
+//   x' _|_ im(T)  symmetrically.
+// So 2 of the 4 image-complement dimensions are structural. This runner hunts
+// the OTHER TWO by exact integer orthogonality tests of explicit candidates
+// against all 25 commutators, across basis pairs and random rational ZD pairs.
+//
+// Candidate legend (all pure integer sedenions built from the pair):
+//   C1  x0                      C2  x'
+//   C3  [x0, x']                C4  pure(x0 x' + x' x0)
+//   C5  pure(x0 x')             C6  (0, ab)   a,b = halves of x0
+//   C7  (0, a'b')               C8  (ab, 0)
+//   C9  (a'b', 0)               C10 [x0, x', x0]  (associator)
+//   C11 e8 = (0,1)
+//
+// Also: diagnosis of the rank(T|4x4) = 7 pairs — overlap of the quaternion
+// subalgebra span{1,A,B,AB} of x' with span{1,e1,e2,e3} of x0 (mod-p rank,
+// two primes; dim-overlap = 8 - rank of stacked 4+4 rows, error one-sided).
+//
+// Output: per-candidate pass counts over rank-11 pairs; COMPDIM histogram
+// (rank of passing-candidate span, want 4 = full closed-form complement);
+// RANK7 pair listings with overlap diagnostic.
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+
+fn sed_sigma(a: i64, b: i64) -> i64 with Mut, Panic, Div { cd_sigma_c(a, b, 4) }
+
+fn smul_i(x: &[i64; 16], y: &[i64; 16], out: &![i64; 16]) with Mut, Panic, Div {
+    var k = 0
+    while k < 16 { out[k as usize] = 0; k = k + 1 }
+    var i = 0
+    while i < 16 {
+        if x[i as usize] != 0 {
+            var j = 0
+            while j < 16 {
+                if y[j as usize] != 0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + sed_sigma(i, j) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn omul_i(x: &[i64; 8], y: &[i64; 8], out: &![i64; 8]) with Mut, Panic, Div {
+    var k = 0
+    while k < 8 { out[k as usize] = 0; k = k + 1 }
+    var i = 0
+    while i < 8 {
+        if x[i as usize] != 0 {
+            var j = 0
+            while j < 8 {
+                if y[j as usize] != 0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + sed_sigma(i, j) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn is_zero16(v: &[i64; 16]) -> bool with Mut {
+    var k = 0
+    while k < 16 {
+        if v[k as usize] != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+
+fn comm_into(x: &[i64; 16], y: &[i64; 16], out: &![i64; 16]) with Mut, Panic, Div {
+    var xy = [0; 16]
+    var yx = [0; 16]
+    smul_i(x, y, &!xy)
+    smul_i(y, x, &!yx)
+    var k = 0
+    while k < 16 { out[k as usize] = xy[k as usize] - yx[k as usize]; k = k + 1 }
+}
+
+fn dot16(x: &[i64; 16], y: &[i64; 16]) -> i64 with Mut {
+    var s = 0
+    var k = 0
+    while k < 16 { s = s + x[k as usize] * y[k as usize]; k = k + 1 }
+    s
+}
+
+fn annihilates_both(x: &[i64; 16], y: &[i64; 16]) -> bool with Mut, Panic, Div {
+    var p = [0; 16]
+    smul_i(x, y, &!p)
+    if !is_zero16(&p) { return false }
+    smul_i(y, x, &!p)
+    is_zero16(&p)
+}
+
+fn gcd_i(a0: i64, b0: i64) -> i64 with Mut, Div, Panic {
+    var a = if a0 < 0 { 0 - a0 } else { a0 }
+    var b = if b0 < 0 { 0 - b0 } else { b0 }
+    while b != 0 {
+        let t = a % b
+        a = b
+        b = t
+    }
+    a
+}
+
+fn isqrt_exact(n: i64) -> i64 with Mut, Div, Panic {
+    if n < 0 { return 0 - 1 }
+    var k = 0
+    while k * k < n { k = k + 1 }
+    if k * k == n { k } else { 0 - 1 }
+}
+
+fn lehmer_next(state: i64) -> i64 with Mut, Div, Panic {
+    (state * 48271) % 2147483647
+}
+
+// rank of an r x 16 i64 matrix mod p, r <= 12 (flat 192)
+fn rank_rows_mod_p(rows_in: &[i64; 192], nrows: i64, p: i64) -> i64 with Mut, Panic, Div {
+    var m = [0; 192]
+    var i = 0
+    while i < nrows * 16 {
+        var v = rows_in[i as usize] % p
+        if v < 0 { v = v + p }
+        m[i as usize] = v
+        i = i + 1
+    }
+    var rank = 0
+    var col = 0
+    while col < 16 && rank < nrows {
+        var pr = 0 - 1
+        var r = rank
+        while r < nrows {
+            if m[(r * 16 + col) as usize] != 0 { pr = r; r = nrows } else { r = r + 1 }
+        }
+        if pr >= 0 {
+            if pr != rank {
+                var c = 0
+                while c < 16 {
+                    let t = m[(rank * 16 + c) as usize]
+                    m[(rank * 16 + c) as usize] = m[(pr * 16 + c) as usize]
+                    m[(pr * 16 + c) as usize] = t
+                    c = c + 1
+                }
+            }
+            let piv = m[(rank * 16 + col) as usize]
+            var inv = 1
+            var base = piv
+            var e = p - 2
+            while e > 0 {
+                if (e % 2) == 1 { inv = (inv * base) % p }
+                base = (base * base) % p
+                e = e / 2
+            }
+            var r2 = rank + 1
+            while r2 < nrows {
+                let f = (m[(r2 * 16 + col) as usize] * inv) % p
+                if f != 0 {
+                    var c2 = 0
+                    while c2 < 16 {
+                        var nv = (m[(r2 * 16 + c2) as usize] - (f * m[(rank * 16 + c2) as usize]) % p) % p
+                        if nv < 0 { nv = nv + p }
+                        m[(r2 * 16 + c2) as usize] = nv
+                        c2 = c2 + 1
+                    }
+                }
+                r2 = r2 + 1
+            }
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    rank
+}
+
+// rank of the 16x25 commutator matrix mod p
+fn rank_t_mod_p(t: &[i64; 400], p: i64) -> i64 with Mut, Panic, Div {
+    var m = [0; 400]
+    var i = 0
+    while i < 400 {
+        var v = t[i as usize] % p
+        if v < 0 { v = v + p }
+        m[i as usize] = v
+        i = i + 1
+    }
+    var rank = 0
+    var col = 0
+    while col < 25 && rank < 16 {
+        var pr = 0 - 1
+        var r = rank
+        while r < 16 {
+            if m[(r * 25 + col) as usize] != 0 { pr = r; r = 16 } else { r = r + 1 }
+        }
+        if pr >= 0 {
+            if pr != rank {
+                var c = 0
+                while c < 25 {
+                    let tmp = m[(rank * 25 + c) as usize]
+                    m[(rank * 25 + c) as usize] = m[(pr * 25 + c) as usize]
+                    m[(pr * 25 + c) as usize] = tmp
+                    c = c + 1
+                }
+            }
+            let piv = m[(rank * 25 + col) as usize]
+            var inv = 1
+            var base = piv
+            var e = p - 2
+            while e > 0 {
+                if (e % 2) == 1 { inv = (inv * base) % p }
+                base = (base * base) % p
+                e = e / 2
+            }
+            var r2 = rank + 1
+            while r2 < 16 {
+                let f = (m[(r2 * 25 + col) as usize] * inv) % p
+                if f != 0 {
+                    var c2 = 0
+                    while c2 < 25 {
+                        var nv = (m[(r2 * 25 + c2) as usize] - (f * m[(rank * 25 + c2) as usize]) % p) % p
+                        if nv < 0 { nv = nv + p }
+                        m[(r2 * 25 + c2) as usize] = nv
+                        c2 = c2 + 1
+                    }
+                }
+                r2 = r2 + 1
+            }
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    rank
+}
+
+fn rank_t44_mod_p(t: &[i64; 400], p: i64) -> i64 with Mut, Panic, Div {
+    var m = [0; 256]
+    var r0 = 0
+    while r0 < 16 {
+        var i = 1
+        while i < 5 {
+            var j = 1
+            while j < 5 {
+                m[(r0 * 16 + (i - 1) * 4 + (j - 1)) as usize] = t[(r0 * 25 + i * 5 + j) as usize]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        r0 = r0 + 1
+    }
+    // reuse row-rank on 16 rows? rank_rows_mod_p caps at 12 rows; transpose:
+    // rank(M) = rank(M^T): build 16 cols x 16 rows -> use 12-row cap is not
+    // enough; do a dedicated pass (16 rows x 16 cols) inline.
+    var mm = [0; 256]
+    var i2 = 0
+    while i2 < 256 {
+        var v = m[i2 as usize] % p
+        if v < 0 { v = v + p }
+        mm[i2 as usize] = v
+        i2 = i2 + 1
+    }
+    var rank = 0
+    var col = 0
+    while col < 16 && rank < 16 {
+        var pr = 0 - 1
+        var r = rank
+        while r < 16 {
+            if mm[(r * 16 + col) as usize] != 0 { pr = r; r = 16 } else { r = r + 1 }
+        }
+        if pr >= 0 {
+            if pr != rank {
+                var c = 0
+                while c < 16 {
+                    let tmp = mm[(rank * 16 + c) as usize]
+                    mm[(rank * 16 + c) as usize] = mm[(pr * 16 + c) as usize]
+                    mm[(pr * 16 + c) as usize] = tmp
+                    c = c + 1
+                }
+            }
+            let piv = mm[(rank * 16 + col) as usize]
+            var inv = 1
+            var base = piv
+            var e = p - 2
+            while e > 0 {
+                if (e % 2) == 1 { inv = (inv * base) % p }
+                base = (base * base) % p
+                e = e / 2
+            }
+            var r2 = rank + 1
+            while r2 < 16 {
+                let f = (mm[(r2 * 16 + col) as usize] * inv) % p
+                if f != 0 {
+                    var c2 = 0
+                    while c2 < 16 {
+                        var nv = (mm[(r2 * 16 + c2) as usize] - (f * mm[(rank * 16 + c2) as usize]) % p) % p
+                        if nv < 0 { nv = nv + p }
+                        mm[(r2 * 16 + c2) as usize] = nv
+                        c2 = c2 + 1
+                    }
+                }
+                r2 = r2 + 1
+            }
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    rank
+}
+
+fn perp_basis(arow: &[i64; 8], brow: &[i64; 8], zrow: &[i64; 8], out: &![i64; 32]) -> i64 with Mut, Panic, Div {
+    var m = [0; 21]
+    var c = 0
+    while c < 7 {
+        m[c as usize] = arow[(c + 1) as usize]
+        m[(7 + c) as usize] = brow[(c + 1) as usize]
+        m[(14 + c) as usize] = zrow[(c + 1) as usize]
+        c = c + 1
+    }
+    var piv_col = [0; 3]
+    var rank = 0
+    var col = 0
+    while col < 7 && rank < 3 {
+        var pr = 0 - 1
+        var r = rank
+        while r < 3 {
+            if m[(r * 7 + col) as usize] != 0 { pr = r; r = 3 } else { r = r + 1 }
+        }
+        if pr >= 0 {
+            if pr != rank {
+                var c1 = 0
+                while c1 < 7 {
+                    let t = m[(rank * 7 + c1) as usize]
+                    m[(rank * 7 + c1) as usize] = m[(pr * 7 + c1) as usize]
+                    m[(pr * 7 + c1) as usize] = t
+                    c1 = c1 + 1
+                }
+            }
+            let piv = m[(rank * 7 + col) as usize]
+            var r2 = 0
+            while r2 < 3 {
+                if r2 != rank {
+                    let f = m[(r2 * 7 + col) as usize]
+                    if f != 0 {
+                        var c2 = 0
+                        while c2 < 7 {
+                            m[(r2 * 7 + c2) as usize] = piv * m[(r2 * 7 + c2) as usize] - f * m[(rank * 7 + c2) as usize]
+                            c2 = c2 + 1
+                        }
+                        var g = 0
+                        var c3 = 0
+                        while c3 < 7 {
+                            g = gcd_i(g, m[(r2 * 7 + c3) as usize])
+                            c3 = c3 + 1
+                        }
+                        var gd = 1
+                        if g > 1 { gd = g }
+                        if gd > 1 {
+                            c3 = 0
+                            while c3 < 7 { m[(r2 * 7 + c3) as usize] = m[(r2 * 7 + c3) as usize] / gd; c3 = c3 + 1 }
+                        }
+                    }
+                }
+                r2 = r2 + 1
+            }
+            piv_col[rank as usize] = col
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    var nout = 0
+    var fc = 0
+    while fc < 7 {
+        var isp = 0
+        var q = 0
+        while q < rank {
+            if piv_col[q as usize] == fc { isp = 1 }
+            q = q + 1
+        }
+        if isp == 0 && nout < 4 {
+            var v = [0; 8]
+            var prodp = 1
+            q = 0
+            while q < rank { prodp = prodp * m[(q * 7 + piv_col[q as usize]) as usize]; q = q + 1 }
+            v[(fc + 1) as usize] = prodp
+            q = 0
+            while q < rank {
+                let pc = piv_col[q as usize]
+                var piv = 1
+                if m[(q * 7 + pc) as usize] != 0 { piv = m[(q * 7 + pc) as usize] }
+                v[(pc + 1) as usize] = (0 - m[(q * 7 + fc) as usize]) * (prodp / piv)
+                q = q + 1
+            }
+            var g2 = 0
+            var c4 = 0
+            while c4 < 8 { g2 = gcd_i(g2, v[c4 as usize]); c4 = c4 + 1 }
+            var g2d = 1
+            if g2 > 1 { g2d = g2 }
+            if g2d > 1 {
+                c4 = 0
+                while c4 < 8 { v[c4 as usize] = v[c4 as usize] / g2d; c4 = c4 + 1 }
+            }
+            c4 = 0
+            while c4 < 8 { out[(nout * 8 + c4) as usize] = v[c4 as usize]; c4 = c4 + 1 }
+            nout = nout + 1
+        }
+        fc = fc + 1
+    }
+    nout
+}
+
+// build V frame for integer ZD xp; returns 1 on success (frame in vrow)
+fn build_v_frame(xp: &[i64; 16], vrow: &![i64; 160]) -> i64 with Mut, Panic, Div {
+    var arow8 = [0; 8]
+    var brow8 = [0; 8]
+    var q = 0
+    while q < 8 {
+        arow8[q as usize] = xp[q as usize]
+        brow8[q as usize] = xp[(8 + q) as usize]
+        q = q + 1
+    }
+    var z8 = [0; 8]
+    omul_i(&arow8, &brow8, &!z8)
+    var cb = [0; 32]
+    let nc = perp_basis(&arow8, &brow8, &z8, &!cb)
+    if nc != 4 { return 0 }
+    var nA = 0
+    q = 0
+    while q < 8 { nA = nA + arow8[q as usize] * arow8[q as usize]; q = q + 1 }
+    q = 0
+    while q < 16 { vrow[q as usize] = xp[q as usize]; q = q + 1 }
+    var gj = 0
+    while gj < 4 {
+        var cj = [0; 8]
+        var c6 = 0
+        while c6 < 8 { cj[c6 as usize] = cb[(gj * 8 + c6) as usize]; c6 = c6 + 1 }
+        var dj = [0; 8]
+        omul_i(&cj, &z8, &!dj)
+        var cand = [0; 16]
+        c6 = 0
+        while c6 < 8 {
+            cand[c6 as usize] = nA * cj[c6 as usize]
+            cand[(8 + c6) as usize] = dj[c6 as usize]
+            c6 = c6 + 1
+        }
+        var okg = annihilates_both(xp, &cand)
+        if !okg {
+            c6 = 0
+            while c6 < 8 { cand[(8 + c6) as usize] = 0 - dj[c6 as usize]; c6 = c6 + 1 }
+            okg = annihilates_both(xp, &cand)
+        }
+        if !okg { return 0 }
+        var g3 = 0
+        c6 = 0
+        while c6 < 16 { g3 = gcd_i(g3, cand[c6 as usize]); c6 = c6 + 1 }
+        var g3d = 1
+        if g3 > 1 { g3d = g3 }
+        if g3d > 1 {
+            c6 = 0
+            while c6 < 16 { cand[c6 as usize] = cand[c6 as usize] / g3d; c6 = c6 + 1 }
+        }
+        c6 = 0
+        while c6 < 16 { vrow[((gj + 1) * 16 + c6) as usize] = cand[c6 as usize]; c6 = c6 + 1 }
+        gj = gj + 1
+    }
+    1
+}
+
+// enumerate small integer vectors v (support<=4) with v _|_ all 25 commutator
+// columns -- prints the image-complement lattice points for pattern reading.
+fn scan_small_complement(tten: &[i64; 400], tag: i64) with IO, Mut, Panic, Div {
+    print("COMPLEMENT_SCAN t=")
+    print_int(tag)
+    print("\n")
+    var printed = 0
+    // stratified: support 1; support 2 (s1<s2, cs2 in {+-1,+-2}); support 3
+    // (s1<s2<s3, cs in {+-1,+-2}); support 4 (s1<s2<s3<s4, cs in {+-1}).
+    var pat = 0
+    while pat < 200000 && printed < 14 {
+        var v = [0; 16]
+        var valid = 0
+        if pat < 16 {
+            v[pat as usize] = 1
+            valid = 1
+        } else if pat < 16 + 120 * 16 {
+            let q = pat - 16
+            let pairix = q / 16
+            let cf = q % 16
+            let c2 = cf / 4
+            // decode pair (s1<s2) from pairix 0..119
+            var s1 = 0
+            var s2 = 1
+            var cnt = 0
+            var fnd = 0
+            while s1 < 16 && fnd == 0 {
+                s2 = s1 + 1
+                while s2 < 16 && fnd == 0 {
+                    if cnt == pairix { fnd = 1 } else { cnt = cnt + 1; s2 = s2 + 1 }
+                }
+                if fnd == 0 { s1 = s1 + 1 }
+            }
+            if fnd == 1 && cf < 4 {
+                let cs2 = if cf == 0 { 1 } else { if cf == 1 { 0 - 1 } else { if cf == 2 { 2 } else { 0 - 2 } } }
+                v[s1 as usize] = 1
+                v[s2 as usize] = cs2
+                valid = 1
+            }
+        } else {
+            // support 3: triples s1<s2<s3 (560) x 16 coeff pats (cs2,cs3 in 4 vals)
+            let q3 = pat - (16 + 120 * 16)
+            if q3 < 560 * 16 {
+                let tripix = q3 / 16
+                let cf3 = q3 % 16
+                let c2x = cf3 / 4
+                let c3x = cf3 % 4
+                var s1 = 0
+                var s2 = 1
+                var s3 = 2
+                var cnt3 = 0
+                var fnd3 = 0
+                while s1 < 16 && fnd3 == 0 {
+                    s2 = s1 + 1
+                    while s2 < 16 && fnd3 == 0 {
+                        s3 = s2 + 1
+                        while s3 < 16 && fnd3 == 0 {
+                            if cnt3 == tripix { fnd3 = 1 } else { cnt3 = cnt3 + 1; s3 = s3 + 1 }
+                        }
+                        if fnd3 == 0 { s2 = s2 + 1 }
+                    }
+                    if fnd3 == 0 { s1 = s1 + 1 }
+                }
+                if fnd3 == 1 {
+                    let cs2 = if c2x == 0 { 1 } else { if c2x == 1 { 0 - 1 } else { if c2x == 2 { 2 } else { 0 - 2 } } }
+                    let cs3 = if c3x == 0 { 1 } else { if c3x == 1 { 0 - 1 } else { if c3x == 2 { 2 } else { 0 - 2 } } }
+                    v[s1 as usize] = 1
+                    v[s2 as usize] = cs2
+                    v[s3 as usize] = cs3
+                    valid = 1
+                }
+            }
+        }
+        if valid == 1 {
+            var okc = 1
+            var pi2 = 0
+            while pi2 < 5 && okc == 1 {
+                var pj2 = 0
+                while pj2 < 5 && okc == 1 {
+                    var s = 0
+                    var cc = 0
+                    while cc < 16 {
+                        s = s + tten[(cc * 25 + pi2 * 5 + pj2) as usize] * v[cc as usize]
+                        cc = cc + 1
+                    }
+                    if s != 0 { okc = 0 }
+                    pj2 = pj2 + 1
+                }
+                pi2 = pi2 + 1
+            }
+            if okc == 1 {
+                print("  CVEC [")
+                var pz = 0
+                while pz < 16 { print_int(v[pz as usize]); print(" "); pz = pz + 1 }
+                print("]\n")
+                printed = printed + 1
+            }
+        }
+        pat = pat + 1
+    }
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // x0 = (e1,e2) + verified partner frame
+    var x0 = [0; 16]
+    x0[1] = 1
+    x0[10] = 1
+    var urow = [0; 160]
+    var c0 = 0
+    while c0 < 16 { urow[c0 as usize] = x0[c0 as usize]; c0 = c0 + 1 }
+    var plo = [4, 5, 6, 7]
+    var phi = [7, 6, 5, 4]
+    var psg = [0 - 1, 1, 0 - 1, 1]
+    var g = 0
+    var u_ok = 1
+    while g < 4 {
+        var pv = [0; 16]
+        pv[plo[g as usize] as usize] = 1
+        pv[(8 + phi[g as usize]) as usize] = psg[g as usize]
+        if !annihilates_both(&x0, &pv) { u_ok = 0 }
+        var c1 = 0
+        while c1 < 16 { urow[((g + 1) * 16 + c1) as usize] = pv[c1 as usize]; c1 = c1 + 1 }
+        g = g + 1
+    }
+    print("U_FRAME ")
+    if u_ok == 1 { println("OK") } else { println("FAIL") }
+
+    var pass = [0; 11]        // per-candidate pass count over rank-11 pairs
+    var n11 = 0
+    var compdim_hist = [0; 12]
+    var n_r7 = 0
+    var hist44 = [0; 17]
+    // predicate P: A _|_ span{e1,e2}  (xp[1] == 0 && xp[2] == 0)
+    var p_r7 = 0
+    var p_no7 = 0
+    var np_r7 = 0
+    var np_no7 = 0
+
+    // pair loop: tgt 0..83 basis (skip x0 itself and non-frames), then 60 rational
+    var seed = 987654321
+    var t = 0
+    let n_basis = 84
+    let n_rand = 60
+    var made_rand = 0
+    var attempts = 0
+
+    while t < n_basis + 3000 {
+        var xp = [0; 16]
+        var have = 0
+        if t < n_basis {
+            // basis ZD list in the same enumeration as the probe
+            var idx = 0
+            var lo = 1
+            var found = 0
+            while lo <= 7 && found == 0 {
+                var hi = 1
+                while hi <= 7 && found == 0 {
+                    if hi != lo {
+                        var sg = 0
+                        while sg <= 1 && found == 0 {
+                            if idx == t {
+                                xp[lo as usize] = 1
+                                xp[(8 + hi) as usize] = if sg == 0 { 1 } else { 0 - 1 }
+                                found = 1
+                            }
+                            idx = idx + 1
+                            sg = sg + 1
+                        }
+                    }
+                    hi = hi + 1
+                }
+                lo = lo + 1
+            }
+            if found == 1 {
+                // skip x0 itself
+                if xp[1] == 1 && xp[10] == 1 && xp[2] == 0 { have = if t == 0 { 0 } else { 1 } } else { have = 1 }
+            }
+        } else {
+            if made_rand >= n_rand { t = n_basis + 3000 } else {
+                attempts = attempts + 1
+                // sample like the rational sweep
+                var a8 = [0; 8]
+                seed = lehmer_next(seed)
+                let i1 = 1 + (seed % 7)
+                seed = lehmer_next(seed)
+                let i2 = 1 + (seed % 7)
+                seed = lehmer_next(seed)
+                a8[i1 as usize] = if (seed % 2) == 0 { 1 } else { 0 - 1 }
+                seed = lehmer_next(seed)
+                if i2 != i1 && (seed % 3) != 0 {
+                    seed = lehmer_next(seed)
+                    a8[i2 as usize] = if (seed % 2) == 0 { 1 } else { 0 - 1 }
+                }
+                var t0 = [0; 8]
+                var q = 1
+                while q < 8 {
+                    seed = lehmer_next(seed)
+                    let r3 = seed % 3
+                    t0[q as usize] = if r3 == 0 { 0 } else { if r3 == 1 { 1 } else { 0 - 1 } }
+                    q = q + 1
+                }
+                var na = 0
+                var dta = 0
+                q = 0
+                while q < 8 {
+                    na = na + a8[q as usize] * a8[q as usize]
+                    dta = dta + t0[q as usize] * a8[q as usize]
+                    q = q + 1
+                }
+                if na > 0 {
+                    var tp = [0; 8]
+                    var nz = 0
+                    q = 0
+                    while q < 8 {
+                        tp[q as usize] = na * t0[q as usize] - dta * a8[q as usize]
+                        if tp[q as usize] != 0 { nz = 1 }
+                        q = q + 1
+                    }
+                    if nz == 1 {
+                        var gg = 0
+                        q = 0
+                        while q < 8 { gg = gcd_i(gg, tp[q as usize]); q = q + 1 }
+                        var ggd = 1
+                        if gg > 1 { ggd = gg }
+                        if ggd > 1 {
+                            q = 0
+                            while q < 8 { tp[q as usize] = tp[q as usize] / ggd; q = q + 1 }
+                        }
+                        var ntp = 0
+                        q = 0
+                        while q < 8 { ntp = ntp + tp[q as usize] * tp[q as usize]; q = q + 1 }
+                        let kk = isqrt_exact(ntp)
+                        if kk > 0 {
+                            var b8 = [0; 8]
+                            omul_i(&a8, &tp, &!b8)
+                            q = 0
+                            while q < 8 {
+                                xp[q as usize] = kk * a8[q as usize]
+                                xp[(8 + q) as usize] = b8[q as usize]
+                                q = q + 1
+                            }
+                            have = 1
+                            made_rand = made_rand + 1
+                        }
+                    }
+                }
+            }
+        }
+
+        if have == 1 {
+            var vrow = [0; 160]
+            if build_v_frame(&xp, &!vrow) == 1 {
+                // commutator tensor
+                var tten = [0; 400]
+                var it2 = 0
+                while it2 < 5 {
+                    var uu2 = [0; 16]
+                    var cz = 0
+                    while cz < 16 { uu2[cz as usize] = urow[(it2 * 16 + cz) as usize]; cz = cz + 1 }
+                    var jt2 = 0
+                    while jt2 < 5 {
+                        var ww2 = [0; 16]
+                        cz = 0
+                        while cz < 16 { ww2[cz as usize] = vrow[(jt2 * 16 + cz) as usize]; cz = cz + 1 }
+                        var cm = [0; 16]
+                        comm_into(&uu2, &ww2, &!cm)
+                        cz = 0
+                        while cz < 16 {
+                            tten[(cz * 25 + it2 * 5 + jt2) as usize] = cm[cz as usize]
+                            cz = cz + 1
+                        }
+                        jt2 = jt2 + 1
+                    }
+                    it2 = it2 + 1
+                }
+                let rkt = rank_t_mod_p(&tten, 2147483647)
+                if t == 4 || t == 14 || t == 36 {
+                    scan_small_complement(&tten, t)
+                }
+                if rkt == 11 {
+                    n11 = n11 + 1
+                    // ---- candidates
+                    var cands = [0; 176]   // 11 x 16
+                    // C1 x0 ; C2 xp
+                    var cc = 0
+                    while cc < 16 {
+                        cands[cc as usize] = x0[cc as usize]
+                        cands[(16 + cc) as usize] = xp[cc as usize]
+                        cc = cc + 1
+                    }
+                    // C3 [x0,xp]
+                    var c3v = [0; 16]
+                    comm_into(&x0, &xp, &!c3v)
+                    // C4 pure(x0 xp + xp x0) ; C5 pure(x0 xp)
+                    var pxy = [0; 16]
+                    var pyx = [0; 16]
+                    smul_i(&x0, &xp, &!pxy)
+                    smul_i(&xp, &x0, &!pyx)
+                    cc = 0
+                    while cc < 16 {
+                        cands[(32 + cc) as usize] = c3v[cc as usize]
+                        cands[(48 + cc) as usize] = if cc == 0 { 0 } else { pxy[cc as usize] + pyx[cc as usize] }
+                        cands[(64 + cc) as usize] = if cc == 0 { 0 } else { pxy[cc as usize] }
+                        cc = cc + 1
+                    }
+                    // C6 (0, ab) from x0: a=e1,b=e2 -> ab=e3
+                    // C7 (0, a'b') ; C8 (ab,0) ; C9 (a'b',0)
+                    var a08 = [0; 8]
+                    var b08 = [0; 8]
+                    var ap8 = [0; 8]
+                    var bp8 = [0; 8]
+                    cc = 0
+                    while cc < 8 {
+                        a08[cc as usize] = x0[cc as usize]
+                        b08[cc as usize] = x0[(8 + cc) as usize]
+                        ap8[cc as usize] = xp[cc as usize]
+                        bp8[cc as usize] = xp[(8 + cc) as usize]
+                        cc = cc + 1
+                    }
+                    var ab0 = [0; 8]
+                    var abp = [0; 8]
+                    omul_i(&a08, &b08, &!ab0)
+                    omul_i(&ap8, &bp8, &!abp)
+                    cc = 0
+                    while cc < 8 {
+                        cands[(80 + 8 + cc) as usize] = ab0[cc as usize]
+                        cands[(96 + 8 + cc) as usize] = abp[cc as usize]
+                        cands[(112 + cc) as usize] = ab0[cc as usize]
+                        cands[(128 + cc) as usize] = abp[cc as usize]
+                        cc = cc + 1
+                    }
+                    // C10 associator [x0, xp, x0]
+                    var t1 = [0; 16]
+                    var t2 = [0; 16]
+                    var t3 = [0; 16]
+                    smul_i(&x0, &xp, &!t1)
+                    smul_i(&t1, &x0, &!t2)
+                    smul_i(&xp, &x0, &!t1)
+                    var t4 = [0; 16]
+                    smul_i(&x0, &t1, &!t4)
+                    cc = 0
+                    while cc < 16 { cands[(144 + cc) as usize] = t2[cc as usize] - t4[cc as usize]; cc = cc + 1 }
+                    // C11 e8
+                    cc = 0
+                    while cc < 16 { cands[(160 + cc) as usize] = if cc == 8 { 1 } else { 0 }; cc = cc + 1 }
+
+                    // test each candidate against all 25 commutators
+                    var passing = [0; 192]  // up to 12 x 16 rows of passing candidates
+                    var npass_rows = 0
+                    var ci = 0
+                    while ci < 11 {
+                        var cv = [0; 16]
+                        cc = 0
+                        while cc < 16 { cv[cc as usize] = cands[(ci * 16 + cc) as usize]; cc = cc + 1 }
+                        var okc = 1
+                        if is_zero16(&cv) { okc = 0 }
+                        var pi2 = 0
+                        while pi2 < 5 && okc == 1 {
+                            var pj2 = 0
+                            while pj2 < 5 && okc == 1 {
+                                var s = 0
+                                cc = 0
+                                while cc < 16 {
+                                    s = s + tten[(cc * 25 + pi2 * 5 + pj2) as usize] * cv[cc as usize]
+                                    cc = cc + 1
+                                }
+                                if s != 0 { okc = 0 }
+                                pj2 = pj2 + 1
+                            }
+                            pi2 = pi2 + 1
+                        }
+                        if okc == 1 {
+                            pass[ci as usize] = pass[ci as usize] + 1
+                            if npass_rows < 12 {
+                                cc = 0
+                                while cc < 16 {
+                                    passing[(npass_rows * 16 + cc) as usize] = cv[cc as usize]
+                                    cc = cc + 1
+                                }
+                                npass_rows = npass_rows + 1
+                            }
+                        }
+                        ci = ci + 1
+                    }
+                    let cd = rank_rows_mod_p(&passing, npass_rows, 2147483647)
+                    compdim_hist[cd as usize] = compdim_hist[cd as usize] + 1
+                }
+                // rank-7 sector diagnosis
+                let rk44 = rank_t44_mod_p(&tten, 2147483647)
+                hist44[rk44 as usize] = hist44[rk44 as usize] + 1
+                let predP = if xp[1] == 0 && xp[2] == 0 { 1 } else { 0 }
+                if rk44 == 7 {
+                    if predP == 1 { p_r7 = p_r7 + 1 } else { np_r7 = np_r7 + 1 }
+                } else {
+                    if predP == 1 { p_no7 = p_no7 + 1 } else { np_no7 = np_no7 + 1 }
+                }
+                if rk44 == 7 {
+                    n_r7 = n_r7 + 1
+                    print("RANK7 A=[")
+                    var pz = 0
+                    while pz < 8 { print_int(xp[pz as usize]); print(" "); pz = pz + 1 }
+                    print("] B=[")
+                    pz = 0
+                    while pz < 8 { print_int(xp[(8 + pz) as usize]); print(" "); pz = pz + 1 }
+                    print("]")
+                    // quaternion overlap: rows {1,A,B,AB} vs {1,e1,e2,e3} (octonion, 16-padded)
+                    var qa = [0; 192]
+                    var ap = [0; 8]
+                    var bp = [0; 8]
+                    pz = 0
+                    while pz < 8 { ap[pz as usize] = xp[pz as usize]; bp[pz as usize] = xp[(8 + pz) as usize]; pz = pz + 1 }
+                    var zz = [0; 8]
+                    omul_i(&ap, &bp, &!zz)
+                    // rows: e0; A; B; AB; e0; e1; e2; e3  (8 rows, but shared e0 -> use 7)
+                    var rr = 0
+                    while rr < 112 { qa[rr as usize] = 0; rr = rr + 1 }
+                    qa[0] = 1
+                    pz = 0
+                    while pz < 8 {
+                        qa[(16 + pz) as usize] = ap[pz as usize]
+                        qa[(32 + pz) as usize] = bp[pz as usize]
+                        qa[(48 + pz) as usize] = zz[pz as usize]
+                        pz = pz + 1
+                    }
+                    qa[64] = 1
+                    qa[(80 + 1) as usize] = 1
+                    qa[(96 + 2) as usize] = 1
+                    // 7 rows total is enough: {e0,A,B,AB} u {e0,e1,e2} + e3 row:
+                    // simpler: 8 rows with e3
+                    // overlap dim = 4 + 4 - rank(stack of {e0,A,B,AB,e0,e1,e2,e3})
+                    // (duplicate e0 row does not change rank)
+                    var qa8 = [0; 192]
+                    rr = 0
+                    while rr < 128 { qa8[rr as usize] = qa[rr as usize]; rr = rr + 1 }
+                    qa8[(112 + 3) as usize] = 1
+                    let rq = rank_rows_mod_p(&qa8, 8, 2147483647)
+                    print(" QOVERLAP ")
+                    print_int(4 + 4 - rq)
+                    print("\n")
+                }
+            }
+        }
+        t = t + 1
+    }
+
+    print("N11 ")
+    print_int(n11)
+    print("\n")
+    var ci2 = 0
+    while ci2 < 11 {
+        print("CAND ")
+        print_int(ci2 + 1)
+        print(" PASS ")
+        print_int(pass[ci2 as usize])
+        print("\n")
+        ci2 = ci2 + 1
+    }
+    var hd = 0
+    while hd < 12 {
+        if compdim_hist[hd as usize] > 0 {
+            print("COMPDIM ")
+            print_int(hd)
+            print(" N ")
+            print_int(compdim_hist[hd as usize])
+            print("\n")
+        }
+        hd = hd + 1
+    }
+    print("RANK7_PAIRS ")
+    print_int(n_r7)
+    print("\n")
+    var hh = 0
+    while hh < 17 {
+        if hist44[hh as usize] > 0 {
+            print("HIST44 ")
+            print_int(hh)
+            print(" N ")
+            print_int(hist44[hh as usize])
+            print("\n")
+        }
+        hh = hh + 1
+    }
+    print("PRED_A_PERP_E12: P&r7 ")
+    print_int(p_r7)
+    print("  P&no7 ")
+    print_int(p_no7)
+    print("  notP&r7 ")
+    print_int(np_r7)
+    print("  notP&no7 ")
+    print_int(np_no7)
+    print("\n")
+    println("CONJ68_RANK_STRUCTURE DONE")
+}
