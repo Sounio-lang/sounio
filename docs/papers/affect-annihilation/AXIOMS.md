@@ -79,6 +79,28 @@ $x \succsim y \iff c \circ x \succsim c \circ y$.
 > every automorphism, and Luce & Narens (1994, n. 13) already allow monotonicity to need "some
 > care … in dealing with extreme points, if such exist".
 
+> ### A4″ is NECESSARY, not a convenience — and this is the paper's first real result
+>
+> Suppose $\circ$ were monotone (even weakly) in each argument **including comparisons through
+> $z$**, with $z$ absorbing and reached at some $(a,b)$, $a,b \neq z$. Then annihilation
+> **propagates**:
+>
+> - If $z$ is the order minimum, $\{(x,y) : x \circ y = z\}$ is a down-set — a region of
+>   positive measure.
+> - If $z$ is interior with $a \prec z \prec b$, then every $a' \in [a,z]$ and $b' \in [z,b]$
+>   is squeezed between $a \circ b = z$ and $z \circ b' = z$, so $a' \circ b' = z$ — again a
+>   region.
+>
+> **Therefore thin annihilation is impossible inside any monotone class.** Suspending
+> monotonicity at $z$ is not the minimal cosmetic weakening; it is the **condition of existence
+> of the object**. The model of CONSISTENCY.md §2 — annihilation confined to the line
+> $x + y = 1$ — is precisely a witness that lives outside the monotone class, and it fails to
+> propagate for exactly this reason.
+>
+> This also explains why the published alternatives are all **regional**: Łukasiewicz t-norms and
+> their duals (Luce & Marley 1969, essential maximum), and nullnorms with an interior annihilator
+> (Calvo, De Baets & Fodor 2001). They keep monotonicity, so they must pay with a region.
+
 **A5 — Restricted solvability.** If $x \succ y$ then there is $u$ with $x \succ y \circ u$.
 
 **A6′ — Positivity off the singular point, and absorption at it.**
@@ -148,8 +170,31 @@ commitment, not an observable — and the paper must not blur that.
    watch: A4′ removes monotonicity exactly where Cohen & Narens (1979, Thm 2.1) get automorphism
    rigidity, and that rigidity is the engine of *all* non-associative uniqueness. If the singular
    point breaks the fixed-point trichotomy, uniqueness fails.
-2. **Uniqueness, and the anchor it will need.** Likely requires homogeneity under translations
-   **off** the null set, in the manner of Luce (1992). Unproved.
+2. **Uniqueness — and the missing lemma is now identified.** The system is **not** covered by
+   Luce (1992): $z$ absorbing *and* reached from non-singular elements is excluded by his
+   Theorem 1(iv) (an extreme point is not reachable by concatenation of interior points),
+   Lemma 2 (an absorbing point must be extreme) and Theorem 2(i). His architecture — Theorems 1,
+   3, 4 and the reduction to unit structures on the homogeneous components — survives if the
+   hypotheses are reproduced component by component. What does **not** survive is the coupling:
+   >
+   > In Luce's Theorem 5, the two homogeneous components are glued by the solvability equation
+   > with $F$ **strictly monotone through $z$** — the behaviour near zero carries information
+   > and forces the power law $t = u^{\rho}$ between the dilation constants (his Lemmas 6, 7).
+   > Here every composition touching $z$ collapses to $z$ and **carries no information**. That
+   > argument dies, and a priori the components decouple: independent dilations on each side,
+   > ratio-type uniqueness lost.
+   >
+   **The proposed substitute — and the theorem to prove.** Every automorphism $\alpha$ satisfies
+   $a \circ b = z \iff \alpha(a) \circ \alpha(b) = z$, so $\alpha$ preserves the annihilation
+   curve. If the boundary is $b = g(a)$, this is the conjugation equation
+   $$\alpha(g(a)) = g(\alpha(a)).$$
+   **To prove:** boundary invariance, together with homogeneity and finite uniqueness on each
+   component, restricts the automorphism group enough to recover uniqueness — **or** exhibit the
+   counterexample showing it does not. The annihilation boundary takes the role that the
+   solvability function $s_i$ plays in Luce's Theorem 5. This is the step, and it is open.
+   >
+   Related open problem: Luce & Narens (1994), **Problem 11** — *"What structures are there …
+   for which homogeneity fails at selected points?"*
 3. **That the target algebra must be 16-dimensional.** Nothing above forces $\mathbb{S}$. The
    dimension is a separate argument and is not made here. Orbit counts (168, 336, 1848) are
    **symmetry-forced** and carry no empirical content; their only legitimate place is kernel
