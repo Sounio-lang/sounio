@@ -416,6 +416,7 @@ activate_runtime() {
       dune_path:dune_sha256 \
       loom_build_path:loom_build_sha256 \
       installer_path:installer_sha256 \
+      coord_runtime_path:coord_runtime_sha256 \
       operational_gate_path:operational_gate_sha256 \
       ci_entrypoint_path:ci_entrypoint_sha256; do
       change_path_key="${change_pair%%:*}"
