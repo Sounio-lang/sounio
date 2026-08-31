@@ -3498,3 +3498,13 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - Verdict: 6 [OK], 3 [TIGHTENABLE] (Covers membership-vs-coefficient; honest-labelling axiom; "true variance" after kmul is first-order), 0 [FAIL]
 - Acted: `covers_coeff` lemma added (gate C4/C3 updated, re-PASS); labelling axiom promoted to explicit boundary (iv); wording "true first-order variance"
 - Record: `docs/research/paper_A_ns_metatheory_xai_review_2026-08-30.md`
+
+## 2026-08-31 - second-provider review of EpistemicEffectsNS.lean BLOCKED (account state, not packet)
+
+- Requested: `zai` (Z.AI GLM-5.2) on the same packet as the xai review (file post-`covers_coeff`, 9 attack surfaces)
+- `zai` direct (api.z.ai coding plan): HTTP error code **1313** "usage pattern does not comply with the Fair Usage Policy… request frequency has been limited… submit a request" — twice, ~10 min apart → account lockout, needs a restore request in the Z.AI console
+- `zai` via OpenRouter fallback (`z-ai/glm-4.6`, forced with `env -u ZAI_API_KEY` + filtered `SOUNIO_KEYS_ENV`): **402** "Insufficient credits. This account never purchased credits" → also blocks qwen/mistral/gemini/llama/cohere routes
+- `deepseek` (deepseek-v4-pro): **401** "Authentication Fails, Your api key: ****8cec is invalid"
+- `groq` (llama-3.3-70b): **401** "Invalid API Key"
+- Operational: `xai` only (Grok 4.5 review done 2026-08-30). `xai-fast` is same vendor — not an independent second opinion.
+- Action for the operator: restore Z.AI access (console request) or fund OpenRouter, and rotate DEEPSEEK/GROQ keys in `~/.sounio-keys.env`; then re-run `bin/llm-offload -t math-review -p zai -i <packet>` (packet regenerable from the file + the attack list in `paper_A_ns_metatheory_xai_review_2026-08-30.md`).

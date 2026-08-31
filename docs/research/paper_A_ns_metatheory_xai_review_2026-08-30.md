@@ -51,3 +51,27 @@ Not proved: conf semantics, higher-order (non-linearised) product variance, phys
 Nothing in the report identifies an unsound direction; the two substantive tightenables (2, 3)
 both concern *completeness* / *modelling scope*, which is where the paper already places its
 stated boundaries (§6.5).
+
+---
+
+## Second-provider status (2026-08-31) — BLOCKED, not skipped
+
+The repo's math-review policy is a two-provider fan-out (xai + zai). The zai leg was
+dispatched on the post-`covers_coeff` file with the identical packet and **could not run**
+for account reasons, none of which are about the proof:
+
+| Route | Result |
+|---|---|
+| Z.AI GLM-5.2 direct (`api.z.ai`, coding plan) | `1313` Fair-Usage lockout — "request frequency has been limited… submit a request" (2 attempts, ~10 min apart) |
+| GLM-4.6 via OpenRouter (driver fallback, forced) | `402` no credits on the OpenRouter account |
+| DeepSeek V4 Pro (independent substitute) | `401` API key invalid |
+| Groq Llama 3.3 70B (last independent key) | `401` API key invalid |
+
+Only xAI is operational. `xai-fast` (Grok 4.1) is the same vendor and does not count as
+an independent second opinion, so it was not used as a stand-in. The zai review remains
+**open**: restore Z.AI access (or fund OpenRouter / rotate the DeepSeek–Groq keys) and re-run
+`OFFLOAD_MAX_TOKENS=16384 bin/llm-offload -t math-review -p zai -i <packet>`; the packet is
+the `.lean` file preceded by the nine attack surfaces listed at the top of this record.
+
+Until then the mechanization's external-review status is: **one adversarial review (Grok
+4.5), 0 FAIL, all tightenables acted on; second opinion pending on operator action.**
