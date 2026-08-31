@@ -60,9 +60,17 @@ For all $w, x, y, z' \in X$:
 **A3 — Local definability.** If $x \circ y$ is defined, $x \succsim w$ and $y \succsim z'$, then
 $w \circ z'$ is defined.
 
-**A4′ — Monotonicity off the singular point.** For all $x, y, c \in X^\ast$:
-(i) if $x \circ c$ and $y \circ c$ are defined, then $x \succsim y \iff x \circ c \succsim y \circ c$;
-(ii) if $c \circ x$ and $c \circ y$ are defined, then $x \succsim y \iff c \circ x \succsim c \circ y$.
+**A4″ — Monotonicity off the singular point.** For all $x, y, c \in X^\ast$:
+(i) if $x \circ c$ and $y \circ c$ are defined **and both lie in $X^\ast$**, then
+$x \succsim y \iff x \circ c \succsim y \circ c$;
+(ii) if $c \circ x$ and $c \circ y$ are defined **and both lie in $X^\ast$**, then
+$x \succsim y \iff c \circ x \succsim c \circ y$.
+
+> ⚠️ **Corrected 2026-08-31.** The first draft of this axiom quantified only over the
+> *arguments* being in $X^\ast$, and is **false**. Counterexample in the model of §3.1:
+> $c = 0.5$, $x = 0.5$, $y = 0.4$ give $x \succ y$ but $x \circ c = z \prec 0.9 = y \circ c$.
+> Monotonicity fails precisely when one composition lands on the annihilator, so the *results*
+> must be restricted too. Found by attempting to build a model — which is what models are for.
 
 > *This is the whole modification.* Narens & Luce require monotonicity on all of $X$. Strict
 > monotonicity and an annihilator are **logically incompatible**: if $a \circ z = z = b \circ z$
