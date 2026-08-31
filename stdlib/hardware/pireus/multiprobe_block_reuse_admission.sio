@@ -1,0 +1,477 @@
+//! Downstream implementation of the frozen V14 reuse-admission rule.
+//!
+//! This module validates a fixture without replaying block work. It compares
+//! full domains and recomputes their canonical address. It cannot promote the
+//! fixture to an actual cache hit or admit a material receipt.
+
+use crypto::sha256::{
+    SHA256State,
+    sha256_init,
+    sha256_update,
+    sha256_finalize,
+    sha256_digest_byte,
+}
+use hardware::pireus::multiprobe_block_certification::{
+    PIREUS_MBC_SCHEMA,
+    PIREUS_MBC_ACTIONS,
+    PIREUS_MBC_BLOCKS,
+    PIREUS_MBC_BLOCK_WIDTH,
+    PIREUS_MBC_LANGUAGE_SOUNIO,
+    PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY,
+    PIREUS_MBC_TRUST_SOUNIO_RECEIPT,
+    PIREUS_MBC_DETERMINISM_HOST_INDEPENDENT_EXACT,
+    PireusMbcDigest,
+    PireusMbcWorkAddress,
+    PireusMbcExpectedDigest,
+    PireusMbcWorkFunctionIdentity,
+    PireusMbcProbeIdentity,
+    PireusMbcPartitionSchema,
+    PireusMbcWorkDomain,
+    PireusMbcBlockReceiptBinding,
+}
+
+pub const PIREUS_MBC_REUSE_EVIDENCE_FIXTURE: i64 = 1
+pub const PIREUS_MBC_REUSE_EVIDENCE_MATERIAL_RECEIPT: i64 = 2
+
+pub const PIREUS_MBC_REUSE_OK: i64 = 0
+pub const PIREUS_MBC_REUSE_ERR_SEMANTICS: i64 = 1
+pub const PIREUS_MBC_REUSE_ERR_EVIDENCE_KIND: i64 = 2
+pub const PIREUS_MBC_REUSE_ERR_DOMAIN: i64 = 3
+pub const PIREUS_MBC_REUSE_ERR_ADDRESS: i64 = 4
+pub const PIREUS_MBC_REUSE_ERR_EXTENT: i64 = 5
+pub const PIREUS_MBC_REUSE_ERR_COMPLETION: i64 = 6
+pub const PIREUS_MBC_REUSE_ERR_TRUST: i64 = 7
+pub const PIREUS_MBC_REUSE_ERR_AUTHORITY: i64 = 8
+pub const PIREUS_MBC_REUSE_ERR_RESULT: i64 = 9
+pub const PIREUS_MBC_REUSE_ERR_WORK_REPLAY: i64 = 10
+pub const PIREUS_MBC_REUSE_ERR_CACHE_HIT_CLAIM: i64 = 11
+
+const MBC_REUSE_TAG_WORK_DOMAIN: i64 = 734103
+const MBC_REUSE_WORK_FUNCTION: i64 = 734200
+const MBC_REUSE_PARTITION: i64 = 734300
+const MBC_REUSE_NUMERIC_MODE: i64 = 734400
+const MBC_REUSE_ORDERING: i64 = 734500
+
+pub struct PireusMbcReuseAdmissionRequest {
+    pub frozen_semantics_sha256: [i64; 8],
+    pub evidence_kind: i64,
+    pub canonical_domain: PireusMbcWorkDomain,
+    pub receipt_domain: PireusMbcWorkDomain,
+    pub receipt: PireusMbcBlockReceiptBinding,
+    pub expected_result: PireusMbcExpectedDigest,
+    pub work_replay_requested: bool,
+    pub actual_cache_hit_claimed: bool,
+}
+
+pub struct PireusMbcReuseAdmissionDecision {
+    pub fixture_eligible: bool,
+    pub work_replayed: bool,
+    pub actual_cache_hit: bool,
+    pub material_receipt_admitted: bool,
+    pub error: i64,
+}
+
+fn mbc_reuse_frozen_semantics_words() -> [i64; 8] {
+    [4156024860, 1416361290, 714271799, 1330660957,
+     4214098036, 3576395772, 1791427716, 1484636684]
+}
+
+fn mbc_reuse_words_equal(left: &[i64; 8], right: &[i64; 8]) -> bool
+with Mut, Panic {
+    var word: i64 = 0
+    while word < 8 {
+        if left[word] != right[word] { return false }
+        word = word + 1
+    }
+    true
+}
+
+fn mbc_reuse_domain_equal(
+    left: &PireusMbcWorkDomain,
+    right: &PireusMbcWorkDomain,
+) -> bool with Mut, Panic {
+    left.protocol_schema == right.protocol_schema &&
+    left.work_function.function_id == right.work_function.function_id &&
+    mbc_reuse_words_equal(
+        &left.work_function.source_sha256,
+        &right.work_function.source_sha256) &&
+    mbc_reuse_words_equal(
+        &left.work_function.semantics_sha256,
+        &right.work_function.semantics_sha256) &&
+    left.work_function.action_count == right.work_function.action_count &&
+    left.work_function.ordering == right.work_function.ordering &&
+    left.work_function.determinism_mode ==
+        right.work_function.determinism_mode &&
+    mbc_reuse_words_equal(
+        &left.operator_genome_sha256, &right.operator_genome_sha256) &&
+    mbc_reuse_words_equal(&left.strategy_sha256, &right.strategy_sha256) &&
+    left.probe.probe_id == right.probe.probe_id &&
+    mbc_reuse_words_equal(
+        &left.probe.canonical_words, &right.probe.canonical_words) &&
+    left.partition.schema_id == right.partition.schema_id &&
+    left.partition.work_start == right.partition.work_start &&
+    left.partition.work_end == right.partition.work_end &&
+    left.partition.block_count == right.partition.block_count &&
+    left.partition.block_width == right.partition.block_width &&
+    left.block_index == right.block_index &&
+    left.block_start == right.block_start &&
+    left.block_width == right.block_width &&
+    left.block_end == right.block_end &&
+    left.numeric_mode == right.numeric_mode &&
+    mbc_reuse_words_equal(&left.toolchain_sha256, &right.toolchain_sha256) &&
+    mbc_reuse_words_equal(&left.material_sha256, &right.material_sha256) &&
+    mbc_reuse_words_equal(
+        &left.execution_policy_sha256,
+        &right.execution_policy_sha256)
+}
+
+fn mbc_reuse_digest_add_i64(
+    state: SHA256State,
+    value: i64,
+) -> SHA256State with Mut, Panic, Div, Epistemic {
+    var bytes: [u8; 256] = [0; 256]
+    var index: i64 = 0
+    while index < 8 {
+        bytes[index] = ((value >> ((7 - index) * 8)) & 255) as u8
+        index = index + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn mbc_reuse_digest_add_words(
+    state: SHA256State,
+    words: &[i64; 8],
+) -> SHA256State with Mut, Panic, Div, Epistemic {
+    var next = state
+    var word: i64 = 0
+    while word < 8 {
+        next = mbc_reuse_digest_add_i64(next, words[word])
+        word = word + 1
+    }
+    next
+}
+
+fn mbc_reuse_digest_finish(state: SHA256State) -> PireusMbcDigest
+with Mut, Panic, Div, Epistemic {
+    let digest = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                sha256_digest_byte(&digest, (word * 4 + byte) as i32)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    PireusMbcDigest { words: words }
+}
+
+fn mbc_reuse_work_address(
+    domain: &PireusMbcWorkDomain,
+) -> PireusMbcWorkAddress with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = mbc_reuse_digest_add_i64(state, MBC_REUSE_TAG_WORK_DOMAIN)
+    state = mbc_reuse_digest_add_i64(state, domain.protocol_schema)
+    state = mbc_reuse_digest_add_i64(state, domain.work_function.function_id)
+    state = mbc_reuse_digest_add_words(
+        state, &domain.work_function.source_sha256)
+    state = mbc_reuse_digest_add_words(
+        state, &domain.work_function.semantics_sha256)
+    state = mbc_reuse_digest_add_i64(
+        state, domain.work_function.action_count)
+    state = mbc_reuse_digest_add_i64(state, domain.work_function.ordering)
+    state = mbc_reuse_digest_add_i64(
+        state, domain.work_function.determinism_mode)
+    state = mbc_reuse_digest_add_words(state, &domain.operator_genome_sha256)
+    state = mbc_reuse_digest_add_words(state, &domain.strategy_sha256)
+    state = mbc_reuse_digest_add_i64(state, domain.probe.probe_id)
+    state = mbc_reuse_digest_add_words(state, &domain.probe.canonical_words)
+    state = mbc_reuse_digest_add_i64(state, domain.partition.schema_id)
+    state = mbc_reuse_digest_add_i64(state, domain.partition.work_start)
+    state = mbc_reuse_digest_add_i64(state, domain.partition.work_end)
+    state = mbc_reuse_digest_add_i64(state, domain.partition.block_count)
+    state = mbc_reuse_digest_add_i64(state, domain.partition.block_width)
+    state = mbc_reuse_digest_add_i64(state, domain.block_index)
+    state = mbc_reuse_digest_add_i64(state, domain.block_start)
+    state = mbc_reuse_digest_add_i64(state, domain.block_width)
+    state = mbc_reuse_digest_add_i64(state, domain.block_end)
+    state = mbc_reuse_digest_add_i64(state, domain.numeric_mode)
+    state = mbc_reuse_digest_add_words(state, &domain.toolchain_sha256)
+    state = mbc_reuse_digest_add_words(state, &domain.material_sha256)
+    state = mbc_reuse_digest_add_words(
+        state, &domain.execution_policy_sha256)
+    PireusMbcWorkAddress { digest: mbc_reuse_digest_finish(state) }
+}
+
+fn mbc_reuse_expected_authoritative(
+    expected: &PireusMbcExpectedDigest,
+) -> bool {
+    expected.valid &&
+    expected.producer_language == PIREUS_MBC_LANGUAGE_SOUNIO &&
+    expected.producer_role == PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY
+}
+
+pub fn pireus_mbc_reuse_admission_error(
+    request: &PireusMbcReuseAdmissionRequest,
+) -> i64 with Mut, Panic, Div, Epistemic {
+    let frozen_semantics = mbc_reuse_frozen_semantics_words()
+    if !mbc_reuse_words_equal(
+        &request.frozen_semantics_sha256, &frozen_semantics) {
+        return PIREUS_MBC_REUSE_ERR_SEMANTICS
+    }
+    if request.evidence_kind != PIREUS_MBC_REUSE_EVIDENCE_FIXTURE {
+        return PIREUS_MBC_REUSE_ERR_EVIDENCE_KIND
+    }
+    if !mbc_reuse_domain_equal(
+        &request.canonical_domain, &request.receipt_domain) {
+        return PIREUS_MBC_REUSE_ERR_DOMAIN
+    }
+    // This executable is a fixture validator, not the later generic cache.
+    // Equality to the frozen first domain pins this fixture's complete payload,
+    // including the zero material-identity convention. The address check below
+    // separately binds that payload to the V14 work-domain transcript.
+    let frozen_fixture_domain = mbc_reuse_fixture_domain()
+    if !mbc_reuse_domain_equal(
+        &request.canonical_domain, &frozen_fixture_domain) {
+        return PIREUS_MBC_REUSE_ERR_DOMAIN
+    }
+    let canonical_address = mbc_reuse_work_address(&request.canonical_domain)
+    if !mbc_reuse_words_equal(
+        &canonical_address.digest.words,
+        &request.receipt.address.digest.words) {
+        return PIREUS_MBC_REUSE_ERR_ADDRESS
+    }
+    if request.canonical_domain.block_start < 0 ||
+        request.canonical_domain.block_end <=
+            request.canonical_domain.block_start ||
+        request.canonical_domain.block_width !=
+            request.canonical_domain.block_end -
+                request.canonical_domain.block_start ||
+        request.receipt.actual_start !=
+            request.canonical_domain.block_start ||
+        request.receipt.actual_end != request.canonical_domain.block_end ||
+        request.receipt.actual_visits != request.canonical_domain.block_width {
+        return PIREUS_MBC_REUSE_ERR_EXTENT
+    }
+    if !request.receipt.completed {
+        return PIREUS_MBC_REUSE_ERR_COMPLETION
+    }
+    if request.receipt.trust_kind != PIREUS_MBC_TRUST_SOUNIO_RECEIPT {
+        return PIREUS_MBC_REUSE_ERR_TRUST
+    }
+    if !mbc_reuse_expected_authoritative(&request.expected_result) ||
+        !mbc_reuse_expected_authoritative(&request.receipt.result) {
+        return PIREUS_MBC_REUSE_ERR_AUTHORITY
+    }
+    if !mbc_reuse_words_equal(
+        &request.expected_result.digest.words,
+        &request.receipt.result.digest.words) {
+        return PIREUS_MBC_REUSE_ERR_RESULT
+    }
+    if request.work_replay_requested {
+        return PIREUS_MBC_REUSE_ERR_WORK_REPLAY
+    }
+    if request.actual_cache_hit_claimed {
+        return PIREUS_MBC_REUSE_ERR_CACHE_HIT_CLAIM
+    }
+    PIREUS_MBC_REUSE_OK
+}
+
+pub fn pireus_mbc_reuse_admission_decide(
+    request: &PireusMbcReuseAdmissionRequest,
+) -> PireusMbcReuseAdmissionDecision with Mut, Panic, Div, Epistemic {
+    let error = pireus_mbc_reuse_admission_error(request)
+    PireusMbcReuseAdmissionDecision {
+        fixture_eligible: error == PIREUS_MBC_REUSE_OK,
+        work_replayed: false,
+        actual_cache_hit: false,
+        material_receipt_admitted: false,
+        error: error,
+    }
+}
+
+fn mbc_reuse_fixture_domain() -> PireusMbcWorkDomain {
+    PireusMbcWorkDomain {
+        protocol_schema: PIREUS_MBC_SCHEMA,
+        work_function: PireusMbcWorkFunctionIdentity {
+            function_id: MBC_REUSE_WORK_FUNCTION,
+            source_sha256: [825661066, 2210118168, 3580646456, 2513877977,
+                            1393348460, 1507555500, 1802448803, 3173435876],
+            semantics_sha256: [172698677, 4259803726, 2793866591, 495605288,
+                               893309777, 1203309273, 161999357, 1385144188],
+            action_count: PIREUS_MBC_ACTIONS,
+            ordering: MBC_REUSE_ORDERING,
+            determinism_mode: PIREUS_MBC_DETERMINISM_HOST_INDEPENDENT_EXACT,
+        },
+        operator_genome_sha256:
+            [2580931393, 1968221503, 2072126386, 2670048216,
+             3630262980, 634675548, 935850740, 40274214],
+        strategy_sha256:
+            [823527488, 2102981964, 689417732, 3282026123,
+             3002666996, 863528254, 1687391336, 293118144],
+        probe: PireusMbcProbeIdentity {
+            probe_id: 0,
+            canonical_words:
+                [3554998473, 1443113271, 3898302206, 506712922,
+                 1635778206, 1944220659, 153556771, 2320183185],
+        },
+        partition: PireusMbcPartitionSchema {
+            schema_id: MBC_REUSE_PARTITION,
+            work_start: 0,
+            work_end: PIREUS_MBC_ACTIONS,
+            block_count: PIREUS_MBC_BLOCKS,
+            block_width: PIREUS_MBC_BLOCK_WIDTH,
+        },
+        block_index: 0,
+        block_start: 0,
+        block_width: PIREUS_MBC_BLOCK_WIDTH,
+        block_end: PIREUS_MBC_BLOCK_WIDTH,
+        numeric_mode: MBC_REUSE_NUMERIC_MODE,
+        toolchain_sha256: [0; 8],
+        material_sha256: [0; 8],
+        execution_policy_sha256: [0; 8],
+    }
+}
+
+pub fn pireus_mbc_reuse_fixture_request() -> PireusMbcReuseAdmissionRequest {
+    let canonical_domain = mbc_reuse_fixture_domain()
+    let receipt_domain = mbc_reuse_fixture_domain()
+    let expected = PireusMbcExpectedDigest {
+        digest: PireusMbcDigest {
+            words: [101, 102, 103, 104, 105, 106, 107, 108],
+        },
+        producer_language: PIREUS_MBC_LANGUAGE_SOUNIO,
+        producer_role: PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY,
+        valid: true,
+    }
+    PireusMbcReuseAdmissionRequest {
+        frozen_semantics_sha256: mbc_reuse_frozen_semantics_words(),
+        evidence_kind: PIREUS_MBC_REUSE_EVIDENCE_FIXTURE,
+        canonical_domain: canonical_domain,
+        receipt_domain: receipt_domain,
+        receipt: PireusMbcBlockReceiptBinding {
+            address: PireusMbcWorkAddress {
+                digest: PireusMbcDigest {
+                    words: [2213758423, 1767173016, 1790269097, 2268840738,
+                            2523897194, 1929821822, 3019705322, 2557260308],
+                },
+            },
+            trust_kind: PIREUS_MBC_TRUST_SOUNIO_RECEIPT,
+            actual_start: 0,
+            actual_end: PIREUS_MBC_BLOCK_WIDTH,
+            actual_visits: PIREUS_MBC_BLOCK_WIDTH,
+            completed: true,
+            result: PireusMbcExpectedDigest {
+                digest: PireusMbcDigest {
+                    words: [101, 102, 103, 104, 105, 106, 107, 108],
+                },
+                producer_language: PIREUS_MBC_LANGUAGE_SOUNIO,
+                producer_role: PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY,
+                valid: true,
+            },
+        },
+        expected_result: expected,
+        work_replay_requested: false,
+        actual_cache_hit_claimed: false,
+    }
+}
+
+pub fn pireus_mbc_reuse_admission_negative_surface() -> [i64; 2]
+with Mut, Panic, Div, Epistemic {
+    let canonical = pireus_mbc_reuse_fixture_request()
+    var passed: i64 = 0
+    var total: i64 = 0
+    var bad = canonical
+
+    bad.frozen_semantics_sha256[0] = 0
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_SEMANTICS { passed = passed + 1 }
+    bad = canonical; bad.evidence_kind = PIREUS_MBC_REUSE_EVIDENCE_MATERIAL_RECEIPT
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_EVIDENCE_KIND { passed = passed + 1 }
+    bad = canonical; bad.receipt_domain.block_start = 1
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_DOMAIN { passed = passed + 1 }
+    bad = canonical
+    bad.canonical_domain.probe.probe_id =
+        bad.canonical_domain.probe.probe_id + 1
+    bad.receipt_domain.probe.probe_id =
+        bad.receipt_domain.probe.probe_id + 1
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_DOMAIN { passed = passed + 1 }
+    bad = canonical; bad.receipt.address.digest.words[0] = 0
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_ADDRESS { passed = passed + 1 }
+    bad = canonical; bad.receipt.actual_start = 1
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_EXTENT { passed = passed + 1 }
+    bad = canonical
+    bad.receipt.actual_end = PIREUS_MBC_BLOCK_WIDTH - 1
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_EXTENT { passed = passed + 1 }
+    bad = canonical
+    bad.receipt.actual_visits = PIREUS_MBC_BLOCK_WIDTH - 1
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_EXTENT { passed = passed + 1 }
+    bad = canonical; bad.receipt.completed = false
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_COMPLETION { passed = passed + 1 }
+    bad = canonical; bad.receipt.trust_kind = 99
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_TRUST { passed = passed + 1 }
+    bad = canonical; bad.expected_result.valid = false
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_AUTHORITY { passed = passed + 1 }
+    bad = canonical
+    bad.expected_result.producer_language = PIREUS_MBC_LANGUAGE_SOUNIO + 1
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_AUTHORITY { passed = passed + 1 }
+    bad = canonical
+    bad.expected_result.producer_role = PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY + 1
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_AUTHORITY { passed = passed + 1 }
+    bad = canonical; bad.receipt.result.valid = false
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_AUTHORITY { passed = passed + 1 }
+    bad = canonical
+    bad.receipt.result.producer_language = PIREUS_MBC_LANGUAGE_SOUNIO + 1
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_AUTHORITY { passed = passed + 1 }
+    bad = canonical
+    bad.receipt.result.producer_role = PIREUS_MBC_ROLE_SEMANTIC_AUTHORITY + 1
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_AUTHORITY { passed = passed + 1 }
+    bad = canonical; bad.receipt.result.digest.words[0] = 999
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_RESULT { passed = passed + 1 }
+    bad = canonical; bad.work_replay_requested = true
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_WORK_REPLAY { passed = passed + 1 }
+    bad = canonical; bad.actual_cache_hit_claimed = true
+    total = total + 1
+    if pireus_mbc_reuse_admission_error(&bad) ==
+        PIREUS_MBC_REUSE_ERR_CACHE_HIT_CLAIM { passed = passed + 1 }
+    [passed, total]
+}
