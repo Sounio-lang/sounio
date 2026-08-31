@@ -3508,3 +3508,10 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - `groq` (llama-3.3-70b): **401** "Invalid API Key"
 - Operational: `xai` only (Grok 4.5 review done 2026-08-30). `xai-fast` is same vendor — not an independent second opinion.
 - Action for the operator: restore Z.AI access (console request) or fund OpenRouter, and rotate DEEPSEEK/GROQ keys in `~/.sounio-keys.env`; then re-run `bin/llm-offload -t math-review -p zai -i <packet>` (packet regenerable from the file + the attack list in `paper_A_ns_metatheory_xai_review_2026-08-30.md`).
+
+## 2026-08-31 - EpistemicEffectsNS.lean round 2: xai Grok 4.6 (XAI_MODEL=grok-4.6), operator-requested
+
+- Same packet (post-covers_coeff file + 9 attack surfaces), OFFLOAD_MAX_TOKENS=16384; DONE 3109 bytes
+- Verdict: 6 OK, 2 TIGHTENABLE, 1 FAIL (missing witnesses). Correct catches: `uk` shared source 0 → old x+⊤ witness did not isolate ⊤; no source-level `measure s + measure s` witness
+- Acted: `opaque` constructor + `t_opaque`/`opaque_red`; `x_plus_top_untypable` rebuilt on `kadd xk (opaque yk)`; `invMeasure` + `measure_plus_measure_untypable`; gate → 12 theorems, PASS
+- Record: `docs/research/paper_A_ns_metatheory_xai_review_2026-08-30.md` (Round 2 section)

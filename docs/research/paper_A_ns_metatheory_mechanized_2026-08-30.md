@@ -3,7 +3,7 @@
 **Closes** the two `◻` rows of §6.4's mechanization table (Lemma 2 "argued, not
 mechanized"; NS-extended preservation "[pending wire]") **and** the theorem itself, which
 the closed draft claimed "at paper level". Artifact: `formal/lean4/EpistemicEffectsNS.lean`
-(1332 lines, Lean 4.33.1, Mathlib-free, sorry-free). Gate:
+(~1400 lines, Lean 4.33.1, Mathlib-free, sorry-free). Gate:
 `bash scripts/ci/ns_metatheory_lean_gate.sh` → `NS_METATHEORY_LEAN_GATE_PASS` (C1–C5).
 
 Nothing here touches the compiler; the wire (`4ac63da51f`) and this proof are independent
@@ -83,7 +83,7 @@ One could instead have baked `m.gumVar = trueVar a` into `t_kraw` and called pre
 | NS type safety | `progress`, `preservation` (+ `weakening`, `substClosed`, `value_emptyE`, canonical forms) | port of V2's proofs with the `N` index and the `Covers` obligation at every `kraw` construction |
 | Soundness | `Exact`, `exact_shift`, `exact_subst`, `exact_preservation` | |
 | Theorem 6.4 | `AGFree`, `typed_agfree` (no reduction needed), `soundness_star` (along `⇒*`) | "no **reached** operator is an anti-garbling" |
-| §8.2 controls | `x_plus_x_steps` (the defective semantics *does* step), `x_plus_x_understates` (2 ≠ 4), `x_plus_x_gap` (= 2⟨x,x⟩), `x_plus_x_untypable` (∀ Γ T E, ∀ annotation), `x_plus_top_untypable`, `x_plus_y_typable`, `x_plus_y_exact`, `x_times_y_exact`, `x_times_x_understates` | the sabotage witness in the kernel |
+| §8.2 controls | `x_plus_x_steps` (the defective semantics *does* step), `x_plus_x_understates` (2 ≠ 4), `x_plus_x_gap` (= 2⟨x,x⟩), `x_plus_x_untypable` (∀ Γ T E, ∀ annotation), `measure_plus_measure_untypable` (source level, via `invMeasure`), `x_plus_top_untypable` (`x + opaque(y)`: ⊤ clause in isolation, via `invOpaque`; `opaque_y_typable`), `x_plus_y_typable`, `x_plus_y_exact`, `x_times_y_exact`, `x_times_x_understates` | the sabotage witness in the kernel; `opaque e` = the paper's `opaque_knowledge()` fixture, typed at ⊤ |
 
 Axiom footprint (`#print axioms`, captured by the gate):
 
