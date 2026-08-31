@@ -361,7 +361,7 @@ require_line "${ROOT}/${RECEIPT_REL}" 'u250_installed_card_count=1'
 require_line "${ROOT}/${RECEIPT_REL}" 'u250_pending_installation_card_count=1'
 require_line "${ROOT}/${RECEIPT_REL}" 'u250_enumeration_failure_count=0'
 require_line "${ROOT}/${RECEIPT_REL}" 'result_enum=V13_FROZEN_SOUNIO_PROBE0_MATCHES_LEAN_MODEL_NATIVE_TRUST_GENERAL_LINK_OPEN_NO_CLAIM'
-[[ "$(grep -Ec '=PENDING_' "${ROOT}/${RECEIPT_REL}" "${ROOT}/${EVIDENCE_REL}" || true)" -eq 0 ]] || fail 'artifact placeholder remains'
+[[ "$(awk '/=PENDING_/ { count++ } END { print count + 0 }' "${ROOT}/${RECEIPT_REL}" "${ROOT}/${EVIDENCE_REL}")" -eq 0 ]] || fail 'artifact placeholder remains'
 
 python_frame="$(python_oracle_frame "${SOURCE_BUNDLE_SHA256}" "${PYTHON_COMMAND_SHA256}")"
 require_line "${ROOT}/${RECEIPT_REL}" "python_preexec_frame_sha256=$(sha_text "${python_frame}")"
