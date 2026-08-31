@@ -380,6 +380,18 @@ let string_field ?(default = "") value name =
   | Some Json_null | None -> default
   | Some _ -> failf "invalid-json:%s-must-be-string" name
 
+let string_array_field value name =
+  match object_field value name with
+  | Some (Json_array values) ->
+      Some
+        (List.map
+           (function
+             | Json_string found -> found
+             | _ -> failf "invalid-json:%s-items-must-be-strings" name)
+           values)
+  | Some Json_null | None -> None
+  | Some _ -> failf "invalid-json:%s-must-be-array" name
+
 let replace_object_field value name replacement =
   match value with
   | Json_object fields ->
@@ -458,13 +470,24 @@ let normalize_hook_tool profile value =
   | "cursor", "write_file" -> "Write"
   | _, value -> value
 
+let cursor_workspace_root event =
+  let direct = string_field event "cwd" in
+  match string_array_field event "workspace_roots" with
+  | None -> direct
+  | Some [] -> failf "hook-workspace-roots-empty"
+  | Some [ root ] when root = "" -> failf "hook-workspace-roots-empty"
+  | Some [ root ] when direct = "" || direct = root -> root
+  | Some [ _ ] -> failf "hook-workspace-root-conflict"
+  | Some _ -> failf "hook-workspace-roots-ambiguous"
+
 let normalize_hook_event profile event =
   let raw_name = aliased_string event profile "hook_event_name" "hookEventName" in
   if raw_name = "" then failf "hook-event-name-missing";
   let raw_session = aliased_string event profile "session_id" "sessionId" in
   if raw_session = "" then failf "hook-session-id-missing";
   let cwd =
-    if profile.camel_case then
+    if profile.provider_id = "cursor" then cursor_workspace_root event
+    else if profile.camel_case then
       let direct = string_field event "cwd" in
       if direct <> "" then direct else string_field event "workspaceRoot"
     else string_field event "cwd"
@@ -1289,6 +1312,53 @@ let process_identity () =
   (pid, pid_start, trim (read_file "/proc/sys/kernel/random/boot_id"),
    Unix.readlink "/proc/self/ns/pid", Unix.gethostname ())
 
+let parent_process () =
+  try
+    let pid = Unix.getppid () in
+    let executable = Unix.realpath (Unix.readlink (Printf.sprintf "/proc/%d/exe" pid)) in
+    let arguments =
+      read_file (Printf.sprintf "/proc/%d/cmdline" pid)
+      |> String.split_on_char '\000'
+      |> List.filter (( <> ) "")
+    in
+    Some (executable, arguments)
+  with _ -> None
+
+let exact_cursor_parent executable arguments =
+  match arguments with
+  | launcher :: rest ->
+      Filename.basename executable = "node"
+      && Filename.basename launcher = "cursor-agent"
+      && List.exists
+           (fun argument ->
+             Filename.basename argument = "index.js"
+             && contains argument "/cursor-agent/versions/")
+           rest
+  | [] -> false
+
+let exact_grok_parent executable arguments =
+  let command = Filename.basename executable in
+  match arguments with
+  | launcher :: _ ->
+      Filename.basename launcher = "grok"
+      && (command = "grok"
+          || (starts_with command "grok-" && ends_with command "-linux-x86_64"))
+  | [] -> false
+
+let observed_compatibility_provider () =
+  match parent_process () with
+  | Some (executable, arguments) when exact_cursor_parent executable arguments ->
+      Some "cursor"
+  | Some (executable, arguments) when exact_grok_parent executable arguments ->
+      Some "grok"
+  | _ -> None
+
+let route_compatibility_agent requested =
+  match observed_compatibility_provider () with
+  | Some observed when not (starts_with requested observed) ->
+      (observed, "verified-" ^ observed ^ "-provider-compat")
+  | _ -> (requested, "direct")
+
 let exact_environment name expected =
   Sys.getenv_opt name = Some expected
 
@@ -1660,8 +1730,13 @@ let run arguments =
     if raw_event = "" then failf "hook-event-empty";
     (try root := Some (git_root (Unix.getcwd ()) |> Unix.realpath) with _ -> ());
     receipt := Some (operational_receipt raw_event "sounio-loom agent-hook event=unparsed");
+    let parsed_event = parse_json raw_event in
+    let effective_agent, provider_route =
+      route_compatibility_agent parsed_agent
+    in
+    agent := effective_agent;
     let profile = hook_profile !agent in
-    let event = parse_json raw_event |> normalize_hook_event profile in
+    let event = normalize_hook_event profile parsed_event in
     let cwd = string_field ~default:(Unix.getcwd ()) event "cwd" in
     let current_root = git_root cwd |> Unix.realpath in
     let tool_root =
@@ -1679,8 +1754,14 @@ let run arguments =
     event_name := string_field ~default:"unknown" event "hook_event_name";
     let tool_name = string_field ~default:"none" event "tool_name" in
     let command =
-      Printf.sprintf "sounio-loom agent-hook --agent %s event=%s tool=%s"
-        !agent !event_name tool_name
+      let base =
+        Printf.sprintf "sounio-loom agent-hook --agent %s event=%s tool=%s"
+          !agent !event_name tool_name
+      in
+      if provider_route = "direct" then base
+      else
+        Printf.sprintf "%s requested_provider=%s provider_route=%s" base
+          parsed_agent provider_route
     in
     let base_receipt = operational_receipt raw_event command in
     receipt := Some base_receipt;

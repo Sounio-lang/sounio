@@ -1595,10 +1595,17 @@ native_hook_caller_is_exact_harness() {
           "$NATIVE_HOOK_CALLER_CMDLINE" == *'cli.js'* ]]
       ;;
     cursor)
-      [[ "$NATIVE_HOOK_CALLER_COMMAND" == cursor-agent* ||
-        "$NATIVE_HOOK_CALLER_COMMAND" == cursor* ]]
+      [[ "$NATIVE_HOOK_CALLER_COMMAND" == cursor-agent ||
+        "$NATIVE_HOOK_CALLER_COMMAND" == cursor ]] ||
+        [[ "$NATIVE_HOOK_CALLER_COMMAND" == node &&
+          "$NATIVE_HOOK_CALLER_CMDLINE" == *'/bin/cursor-agent '* &&
+          "$NATIVE_HOOK_CALLER_CMDLINE" == *'/cursor-agent/versions/'*'/index.js'* ]]
       ;;
-    grok) [[ "$NATIVE_HOOK_CALLER_COMMAND" == grok* ]] ;;
+    grok)
+      [[ "$NATIVE_HOOK_CALLER_COMMAND" == grok ]] ||
+        [[ "$NATIVE_HOOK_CALLER_COMMAND" == grok-*-linux-x86_64 &&
+          "$NATIVE_HOOK_CALLER_CMDLINE" == */bin/grok* ]]
+      ;;
     *) return 1 ;;
   esac
 }

@@ -206,6 +206,8 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_exec_ingress.ml" \
   "$ROOT_DIR/tools/loom/src/loom_exec_grant_cell.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_drain.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_guardian.ml" \
   "$ROOT_DIR/tools/loom/src/loom_invocation_cell.ml" \
   "$ROOT_DIR/tools/loom/src/loom_lane_health.ml" \
   "$ROOT_DIR/tools/loom/src/loom_membrane.ml" \

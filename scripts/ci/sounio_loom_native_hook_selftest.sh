@@ -314,9 +314,12 @@ grep -Fq $'\tparent_authority_result=SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reas
 grep -Fq $'\tresult=SOUNIO_NATIVE_HOOK_CUTOVER HOOK_EVENT_ADMIT semantic_authority=Sounio action=9045' \
   "$DECISION_LOG" || fail "decision receipt omitted the result"
 
-cursor_event="{\"hook_event_name\":\"sessionStart\",\"session_id\":\"cursor-native-hook-$$\",\"cwd\":\"$ROOT_DIR\"}"
+cursor_event="{\"hook_event_name\":\"sessionStart\",\"session_id\":\"cursor-native-hook-$$\",\"workspace_roots\":[\"$ROOT_DIR\"]}"
 SOUNIO_LOOM_COORD_AUTO=0 run_hook "$cursor_event" cursor
 [[ "$HOOK_RC" -eq 0 ]] || fail "Cursor native dialect was refused: rc=$HOOK_RC output=$HOOK_OUTPUT"
+cursor_legacy_cwd_event="{\"hook_event_name\":\"sessionStart\",\"session_id\":\"cursor-native-cwd-hook-$$\",\"cwd\":\"$ROOT_DIR\"}"
+SOUNIO_LOOM_COORD_AUTO=0 run_hook "$cursor_legacy_cwd_event" cursor
+[[ "$HOOK_RC" -eq 0 ]] || fail "Cursor cwd dialect was refused: rc=$HOOK_RC output=$HOOK_OUTPUT"
 grok_event="{\"hookEventName\":\"session_start\",\"sessionId\":\"grok-native-hook-$$\",\"cwd\":\"$ROOT_DIR\",\"workspaceRoot\":\"$ROOT_DIR\"}"
 SOUNIO_LOOM_COORD_AUTO=0 run_hook "$grok_event" grok
 [[ "$HOOK_RC" -eq 0 ]] || fail "Grok native dialect was refused: rc=$HOOK_RC output=$HOOK_OUTPUT"
@@ -329,6 +332,22 @@ cursor_wrong_dialect="{\"hookEventName\":\"sessionStart\",\"sessionId\":\"cursor
 SOUNIO_LOOM_COORD_AUTO=0 run_hook "$cursor_wrong_dialect" cursor
 [[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'provider-hook-dialect-mismatch:field=hookEventName'* ]] ||
   fail "Cursor accepted the Grok field dialect: rc=$HOOK_RC output=$HOOK_OUTPUT"
+cursor_empty_roots="{\"hook_event_name\":\"sessionStart\",\"session_id\":\"cursor-empty-roots-$$\",\"workspace_roots\":[]}"
+SOUNIO_LOOM_COORD_AUTO=0 run_hook "$cursor_empty_roots" cursor
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'hook-workspace-roots-empty'* ]] ||
+  fail "Cursor accepted an empty workspace root inventory: rc=$HOOK_RC output=$HOOK_OUTPUT"
+cursor_ambiguous_roots="{\"hook_event_name\":\"sessionStart\",\"session_id\":\"cursor-ambiguous-roots-$$\",\"workspace_roots\":[\"$ROOT_DIR\",\"$SIBLING_ROOT\"]}"
+SOUNIO_LOOM_COORD_AUTO=0 run_hook "$cursor_ambiguous_roots" cursor
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'hook-workspace-roots-ambiguous'* ]] ||
+  fail "Cursor accepted ambiguous workspace roots: rc=$HOOK_RC output=$HOOK_OUTPUT"
+cursor_invalid_roots="{\"hook_event_name\":\"sessionStart\",\"session_id\":\"cursor-invalid-roots-$$\",\"workspace_roots\":[7]}"
+SOUNIO_LOOM_COORD_AUTO=0 run_hook "$cursor_invalid_roots" cursor
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'invalid-json:workspace_roots-items-must-be-strings'* ]] ||
+  fail "Cursor accepted a non-string workspace root: rc=$HOOK_RC output=$HOOK_OUTPUT"
+cursor_conflicting_root="{\"hook_event_name\":\"sessionStart\",\"session_id\":\"cursor-conflicting-root-$$\",\"cwd\":\"$ROOT_DIR\",\"workspace_roots\":[\"$SIBLING_ROOT\"]}"
+SOUNIO_LOOM_COORD_AUTO=0 run_hook "$cursor_conflicting_root" cursor
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'hook-workspace-root-conflict'* ]] ||
+  fail "Cursor accepted conflicting workspace roots: rc=$HOOK_RC output=$HOOK_OUTPUT"
 grok_wrong_dialect="{\"hook_event_name\":\"SessionStart\",\"session_id\":\"grok-wrong-$$\",\"cwd\":\"$ROOT_DIR\"}"
 SOUNIO_LOOM_COORD_AUTO=0 run_hook "$grok_wrong_dialect" grok
 [[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'provider-hook-dialect-mismatch:field=hook_event_name'* ]] ||
