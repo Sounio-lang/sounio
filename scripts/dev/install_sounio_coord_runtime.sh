@@ -218,13 +218,9 @@ activate_runtime() {
       loom_product_activation_resident_runtime_sha256 \
       "$version_dir/bin/sounio-loom-resident-membrane-runtime-v5"
   fi
-  if grep -q '^capability=loom-product-exec-ingress-dark-attachment-v1$' "$manifest"; then
-    local exec_ingress_capsule="$version_dir/policy/product-exec-ingress"
-    local exec_ingress_freeze="$exec_ingress_capsule/tools/loom/product_exec_ingress_dark.runtime.v1"
-    grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" &&
-      grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$manifest" &&
-      grep -q '^capability=loom-product-launch-dark-attachment-v1$' "$manifest" ||
-      die "installed runtime declares product ExecIngress without binary attestation, the native hook, and Sounio action 9031: $runtime_id"
+  local exec_ingress_capsule="$version_dir/policy/product-exec-ingress"
+  local exec_ingress_freeze="$exec_ingress_capsule/tools/loom/product_exec_ingress_dark.runtime.v1"
+  if [[ -f "$exec_ingress_freeze" ]]; then
     verify_manifest_binary_sha256 "$manifest" \
       loom_product_exec_ingress_manifest_sha256 "$exec_ingress_freeze"
     verify_manifest_binary_sha256 "$manifest" \
@@ -262,8 +258,6 @@ activate_runtime() {
         "$(manifest_value "$manifest" loom_product_exec_ingress_contract_sha256)" &&
       "$(manifest_value "$exec_ingress_freeze" evidence_sha256)" == \
         "$(manifest_value "$manifest" loom_product_exec_ingress_evidence_sha256)" &&
-      "$(manifest_value "$exec_ingress_freeze" runtime_version)" == \
-        "$(manifest_value "$manifest" runtime_version)" &&
       "$(manifest_value "$exec_ingress_freeze" runtime_sha256)" == \
         "$(manifest_value "$manifest" loom_product_exec_ingress_reference_runtime_sha256)" &&
       "$(manifest_value "$exec_ingress_freeze" action_9031_manifest_sha256)" == \
@@ -271,6 +265,14 @@ activate_runtime() {
       "$(manifest_value "$exec_ingress_freeze" action_9031_runtime_sha256)" == \
         "$(manifest_value "$manifest" loom_product_activation_operational_manifest_sha256)" ]] ||
       die "installed product ExecIngress is not bound to its frozen Sounio authority and OCaml runtime: $runtime_id"
+    if grep -q '^capability=loom-product-exec-ingress-dark-attachment-v1$' "$manifest"; then
+      grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" &&
+        grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$manifest" &&
+        grep -q '^capability=loom-product-launch-dark-attachment-v1$' "$manifest" &&
+        [[ "$(manifest_value "$exec_ingress_freeze" runtime_version)" == \
+          "$(manifest_value "$manifest" runtime_version)" ]] ||
+        die "installed runtime declares product ExecIngress without its exact attested runtime and Sounio action 9031: $runtime_id"
+    fi
   fi
   if grep -q '^capability=loom-sovereign-execution-kernel-product-v1$' "$manifest"; then
     local sovereign_capsule="$version_dir/policy/sovereign-execution"
@@ -1595,9 +1597,50 @@ else
     "$stage/policy/product-exec-ingress/tools/loom/$(basename "$loom_product_exec_ingress_contract")"
   install -m 0444 "$loom_product_exec_ingress_evidence" \
     "$stage/policy/product-exec-ingress/tools/loom/evidence/$(basename "$loom_product_exec_ingress_evidence")"
+  product_exec_ingress_frozen_head="$(
+    manifest_value "$loom_product_exec_ingress_freeze" implementation_commit
+  )"
+  [[ "$product_exec_ingress_frozen_head" =~ ^[0-9a-f]{40}$ ]] &&
+    git -C "$SOURCE_ROOT" cat-file -e \
+      "$product_exec_ingress_frozen_head^{commit}" ||
+    die "Loom product ExecIngress historical source commit is unavailable"
   for product_exec_ingress_source in "${loom_product_exec_ingress_sources[@]}"; do
+    product_exec_ingress_relative="${product_exec_ingress_source#"$SOURCE_ROOT/"}"
+    product_exec_ingress_target="$stage/policy/product-exec-ingress/$product_exec_ingress_relative"
+    case "$(basename "$product_exec_ingress_source")" in
+      loom_exec_ingress.ml) product_exec_ingress_hash_key=exec_ingress_source_sha256 ;;
+      loom_hook.ml) product_exec_ingress_hash_key=hook_source_sha256 ;;
+      loom_membrane.ml) product_exec_ingress_hash_key=membrane_source_sha256 ;;
+      loom.ml) product_exec_ingress_hash_key=cli_source_sha256 ;;
+      loom_pty_stubs.c) product_exec_ingress_hash_key=c_stub_sha256 ;;
+      dune) product_exec_ingress_hash_key=dune_sha256 ;;
+      *) die "Loom product ExecIngress source has no frozen hash key" ;;
+    esac
+    product_exec_ingress_expected="$(
+      manifest_value "$loom_product_exec_ingress_freeze" \
+        "$product_exec_ingress_hash_key"
+    )"
+    [[ "$product_exec_ingress_expected" =~ ^[0-9a-f]{64}$ ]] ||
+      die "Loom product ExecIngress source has an invalid frozen hash"
     install -m 0444 "$product_exec_ingress_source" \
-      "$stage/policy/product-exec-ingress/tools/loom/src/$(basename "$product_exec_ingress_source")"
+      "$product_exec_ingress_target"
+    product_exec_ingress_actual="$(
+      sha256sum "$product_exec_ingress_target" | awk '{print $1}'
+    )"
+    if [[ "$product_exec_ingress_actual" != "$product_exec_ingress_expected" ]]; then
+      product_exec_ingress_temporary="$product_exec_ingress_target.frozen.$$.$RANDOM"
+      git -C "$SOURCE_ROOT" cat-file blob \
+        "$product_exec_ingress_frozen_head:$product_exec_ingress_relative" \
+        > "$product_exec_ingress_temporary" ||
+        die "Loom product ExecIngress historical source is unavailable: $product_exec_ingress_relative"
+      product_exec_ingress_actual="$(
+        sha256sum "$product_exec_ingress_temporary" | awk '{print $1}'
+      )"
+      [[ "$product_exec_ingress_actual" == "$product_exec_ingress_expected" ]] ||
+        die "Loom product ExecIngress historical source hash diverged: $product_exec_ingress_relative"
+      chmod 0444 "$product_exec_ingress_temporary"
+      mv "$product_exec_ingress_temporary" "$product_exec_ingress_target"
+    fi
   done
   sovereign_capsule_sources=(
     "$loom_sovereign_source" "$loom_sovereign_entrypoint"

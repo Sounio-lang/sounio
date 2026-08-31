@@ -77,7 +77,8 @@ mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$REPO/scripts/ci" \
   "$REPO/formal/tla" "$REPO/tools" "$REPO/.codex" "$REPO/.claude" \
   "$REPO/.cursor" "$REPO/.grok/hooks"
 cp "$ROOT_DIR/bin/sounio-coord" "$ROOT_DIR/bin/sounio-agentd" \
-  "$ROOT_DIR/bin/sounio-fleet" "$ROOT_DIR/bin/sounio-loom" "$REPO/bin/"
+  "$ROOT_DIR/bin/sounio-fleet" "$ROOT_DIR/bin/sounio-loom" \
+  "$ROOT_DIR/bin/souc" "$ROOT_DIR/bin/souc-lean-single-x86_64" "$REPO/bin/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$REPO/scripts/dev/"
@@ -106,6 +107,9 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_v1_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_handoff_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_transparency_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_sovereign_execution_kernel.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_sovereign_change_kernel.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_sovereign_material_change.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_peer_activation_capsule_authority.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_peer_activation_capsule_current_frame.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v5.sh" \
@@ -115,6 +119,10 @@ cp "$ROOT_DIR/.claude/settings.json" "$REPO/.claude/"
 cp "$ROOT_DIR/.cursor/hooks.json" "$REPO/.cursor/"
 cp "$ROOT_DIR/.grok/hooks/loom-native.json" "$REPO/.grok/hooks/"
 cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_execution_kernel_product_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_execution_kernel_product_freeze_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_receipt_admit.sh" \
   "$REPO/scripts/ci/"
 mkdir -p "$REPO/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
@@ -169,15 +177,32 @@ cp "$ROOT_DIR/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md" \
   "$ROOT_DIR/tools/loom/resident_membrane.runtime.v3" \
   "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4" \
   "$ROOT_DIR/tools/loom/resident_membrane_v5_main.sio" \
+  "$ROOT_DIR/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md" \
+  "$ROOT_DIR/tools/loom/sovereign_execution_kernel_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/sovereign_execution_kernel.freeze.v1" \
+  "$ROOT_DIR/tools/loom/sovereign_execution_kernel_material.runtime.v1" \
+  "$ROOT_DIR/tools/loom/sovereign_execution_kernel_product.runtime.v1" \
+  "$ROOT_DIR/tools/loom/sovereign_change_kernel_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/sovereign_change_kernel.freeze.v1" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change.freeze.v2" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v2" \
   "$REPO/tools/loom/"
 mkdir -p "$REPO/tools/loom/evidence"
 cp "$ROOT_DIR/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v2-20260831.txt" \
   "$REPO/tools/loom/evidence/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
   "$ROOT_DIR/tools/loom/src/loom_effect_closure.ml" \
   "$ROOT_DIR/tools/loom/src/loom_exec.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_intent.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_catalog.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_operation_cell.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_result_record.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_result.ml" \
   "$ROOT_DIR/tools/loom/src/loom_exec_ingress.ml" \
   "$ROOT_DIR/tools/loom/src/loom_exec_grant_cell.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
@@ -186,6 +211,12 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_membrane.ml" \
   "$ROOT_DIR/tools/loom/src/loom_peer_activation_capsule.ml" \
   "$ROOT_DIR/tools/loom/src/loom_resident.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_sovereign_exec.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_sovereign_provider_fixture.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_change.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_change_provider_fixture.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_change_stubs.c" \
+  "$ROOT_DIR/tools/loom/src/loom_provider_hook_fixture.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
@@ -199,6 +230,9 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
 cp -R "$ROOT_DIR/tools/loom/src/vendor" "$REPO/tools/loom/src/"
 mkdir -p "$REPO/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_sovereign_execution_kernel_authority.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_sovereign_change_kernel_authority.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_sovereign_material_change_authority.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
   "$REPO/stdlib/coordination/"
@@ -255,8 +289,12 @@ native_hook_cutover_toolchain_commit="$(sed -n 's/^sounio_executable_commit=//p'
   fail 'subprocess membrane fixture has no frozen toolchain commit'
 [[ "$native_hook_cutover_toolchain_commit" =~ ^[0-9a-f]{40}$ ]] || \
   fail 'native hook cutover fixture has no frozen toolchain commit'
-git -C "$REPO" fetch -q "$ROOT_DIR" "$subprocess_toolchain_commit"
-git -C "$REPO" fetch -q "$ROOT_DIR" "$native_hook_cutover_toolchain_commit"
+source_objects="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-path objects)"
+printf '%s\n' "$source_objects" > "$REPO/.git/objects/info/alternates"
+git -C "$REPO" cat-file -e "$subprocess_toolchain_commit^{commit}" ||
+  fail 'subprocess membrane frozen toolchain commit is unavailable through the source alternate'
+git -C "$REPO" cat-file -e "$native_hook_cutover_toolchain_commit^{commit}" ||
+  fail 'native hook cutover frozen toolchain commit is unavailable through the source alternate'
 git -C "$REPO" worktree add -q -b second-lane "$SECOND"
 RUNTIME_ROOT="$REPO/.git/sounio-coord-runtime"
 
@@ -330,8 +368,12 @@ grep -qx "loom_execution_outcome_runtime_sha256=$loom_execution_outcome_sha" \
   fail 'runtime manifest did not pin the frozen Sounio execution-outcome executable'
 grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$first_manifest" || \
   fail 'runtime manifest omitted native hook binary attestation'
-grep -q '^capability=loom-product-exec-ingress-dark-attachment-v1$' \
-  "$first_manifest" || fail 'runtime manifest omitted product ExecIngress'
+if grep -q '^capability=loom-product-exec-ingress-dark-attachment-v1$' \
+    "$first_manifest"; then
+  fail 'runtime manifest revived the superseded product ExecIngress capability'
+fi
+grep -q '^capability=loom-sovereign-execution-kernel-product-v1$' \
+  "$first_manifest" || fail 'runtime manifest omitted sovereign execution'
 exec_ingress_capsule="$RUNTIME_ROOT/versions/$first_id/policy/product-exec-ingress"
 exec_ingress_freeze="$exec_ingress_capsule/tools/loom/product_exec_ingress_dark.runtime.v1"
 exec_ingress_contract="$exec_ingress_capsule/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md"
@@ -373,26 +415,48 @@ done
 
 active_before_tamper="$(readlink -f "$RUNTIME_ROOT/current")"
 cp -a "$RUNTIME_ROOT/versions/$first_id" \
-  "$RUNTIME_ROOT/versions/product-exec-ingress-source-drift"
+  "$RUNTIME_ROOT/versions/product-exec-ingress-historical-source-drift"
 sed -i \
-  's/^runtime_id=.*/runtime_id=product-exec-ingress-source-drift/' \
-  "$RUNTIME_ROOT/versions/product-exec-ingress-source-drift/manifest"
+  's/^runtime_id=.*/runtime_id=product-exec-ingress-historical-source-drift/' \
+  "$RUNTIME_ROOT/versions/product-exec-ingress-historical-source-drift/manifest"
 chmod u+w \
-  "$RUNTIME_ROOT/versions/product-exec-ingress-source-drift/policy/product-exec-ingress/tools/loom/src/loom_exec_ingress.ml"
-printf '\n(* product ExecIngress source sabotage *)\n' >> \
-  "$RUNTIME_ROOT/versions/product-exec-ingress-source-drift/policy/product-exec-ingress/tools/loom/src/loom_exec_ingress.ml"
+  "$RUNTIME_ROOT/versions/product-exec-ingress-historical-source-drift/policy/product-exec-ingress/tools/loom/src/loom_exec_ingress.ml"
+printf '\n(* historical product ExecIngress source sabotage *)\n' >> \
+  "$RUNTIME_ROOT/versions/product-exec-ingress-historical-source-drift/policy/product-exec-ingress/tools/loom/src/loom_exec_ingress.ml"
 set +e
-exec_ingress_tamper_output="$(cd "$REPO" && \
+historical_exec_ingress_tamper_output="$(cd "$REPO" && \
   scripts/dev/install_sounio_coord_runtime.sh --runtime-dir "$RUNTIME_ROOT" \
-    --activate product-exec-ingress-source-drift 2>&1)"
-exec_ingress_tamper_rc=$?
+    --activate product-exec-ingress-historical-source-drift 2>&1)"
+historical_exec_ingress_tamper_rc=$?
 set -e
-[[ "$exec_ingress_tamper_rc" -ne 0 && \
-  "$exec_ingress_tamper_output" == \
+[[ "$historical_exec_ingress_tamper_rc" -ne 0 && \
+  "$historical_exec_ingress_tamper_output" == \
     *'installed product ExecIngress source drifted: tools/loom/src/loom_exec_ingress.ml'* ]] ||
-  fail "activation did not causally refuse product ExecIngress source drift: rc=$exec_ingress_tamper_rc output=$exec_ingress_tamper_output"
+  fail "activation did not causally refuse historical product ExecIngress source drift: rc=$historical_exec_ingress_tamper_rc output=$historical_exec_ingress_tamper_output"
 [[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$active_before_tamper" ]] ||
-  fail 'failed product ExecIngress source activation changed the current runtime link'
+  fail 'failed historical product ExecIngress source activation changed the current runtime link'
+
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/sovereign-execution-source-drift"
+sed -i \
+  's/^runtime_id=.*/runtime_id=sovereign-execution-source-drift/' \
+  "$RUNTIME_ROOT/versions/sovereign-execution-source-drift/manifest"
+chmod u+w \
+  "$RUNTIME_ROOT/versions/sovereign-execution-source-drift/policy/sovereign-execution/tools/loom/src/loom_sovereign_exec.ml"
+printf '\n(* sovereign execution source sabotage *)\n' >> \
+  "$RUNTIME_ROOT/versions/sovereign-execution-source-drift/policy/sovereign-execution/tools/loom/src/loom_sovereign_exec.ml"
+set +e
+sovereign_tamper_output="$(cd "$REPO" && \
+  scripts/dev/install_sounio_coord_runtime.sh --runtime-dir "$RUNTIME_ROOT" \
+    --activate sovereign-execution-source-drift 2>&1)"
+sovereign_tamper_rc=$?
+set -e
+[[ "$sovereign_tamper_rc" -ne 0 && \
+  "$sovereign_tamper_output" == \
+    *'installed sovereign execution product source drifted: tools/loom/src/loom_sovereign_exec.ml'* ]] ||
+  fail "activation did not causally refuse sovereign source drift: rc=$sovereign_tamper_rc output=$sovereign_tamper_output"
+[[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$active_before_tamper" ]] ||
+  fail 'failed sovereign source activation changed the current runtime link'
 for tamper_binary in sounio-coord-runtime sounio-loom-runtime \
   sounio-loom-custody-transfer-runtime sounio-loom-execution-outcome-runtime; do
   binary="$RUNTIME_ROOT/versions/$first_id/bin/$tamper_binary"
