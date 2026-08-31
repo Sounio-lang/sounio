@@ -23,8 +23,9 @@ contract, but they cannot weaken it or manufacture an expected result.
 The sovereign kernel admits an execution only when all of the following are
 affirmatively observed:
 
-- the ExecGrant exists only in HostGuardian memory, is non-bearer, single-use,
-  and is consumed by one atomic state transition;
+- the ExecGrant exists only in Loom-kernel memory, is non-bearer, single-use,
+  and is consumed by one atomic state transition after the HostGuardian has
+  registered the material worker;
 - no token, handle, or transport descriptor is execution authority;
 - the requesting process is bound by `SO_PEERCRED`, pidfd, start tick, harness
   ancestry, executable identity, and operation identity;

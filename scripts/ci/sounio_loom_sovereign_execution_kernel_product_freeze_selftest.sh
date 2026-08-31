@@ -39,6 +39,7 @@ expect schema loom-sovereign-execution-kernel-product-runtime-v1
 expect stage PRODUCT_EXECUTION_FROZEN
 expect semantic_authority Sounio
 expect semantic_action 9042
+expect grant_residency Loom_kernel_memory
 expect grant_is_bearer false
 expect exported_token false
 expect exported_handle false
@@ -86,5 +87,5 @@ expected_result_sha256="$(sed -n 's/^product_selftest_result_sha256=//p' "$EVIDE
 [[ "$result_sha256" == "$expected_result_sha256" ]] || \
   fail 'product selftest result diverged from evidence'
 
-printf 'sounio-loom-sovereign-execution-kernel-product-freeze-selftest: PASS semantic_authority=Sounio action=9042 stage=PRODUCT_EXECUTION_FROZEN product_manifest_sha256=%s product_result_sha256=%s same_uid_peer_isolation=true production_activation=true exec_attached=true write_attached=false commit_attached=false ci_attached=false python_executed=false rust_executed=false claim_ready=false\n' \
+printf 'sounio-loom-sovereign-execution-kernel-product-freeze-selftest: PASS semantic_authority=Sounio action=9042 stage=PRODUCT_EXECUTION_FROZEN product_manifest_sha256=%s product_result_sha256=%s grant_residency=Loom_kernel_memory same_uid_peer_isolation=true production_activation=true exec_attached=true write_attached=false commit_attached=false ci_attached=false python_executed=false rust_executed=false claim_ready=false\n' \
   "$manifest_sha256" "$result_sha256"

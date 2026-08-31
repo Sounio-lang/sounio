@@ -21,6 +21,18 @@ external int_of_file_descr : file_descr -> int = "sounio_loom_int_of_file_descr"
 
 let failf format = Printf.ksprintf (fun value -> raise (Loom_error value)) format
 
+let start_ready_timeout () =
+  match Sys.getenv_opt "SOUNIO_LOOM_START_READY_TIMEOUT_SECONDS" with
+  | None | Some "" -> 30.0
+  | Some raw ->
+      let seconds =
+        try int_of_string raw
+        with _ -> failf "invalid Loom start readiness timeout"
+      in
+      if seconds < 1 || seconds > 300 then
+        failf "Loom start readiness timeout must be between 1 and 300 seconds";
+      float_of_int seconds
+
 let starts_with value prefix =
   String.length value >= String.length prefix
   && String.sub value 0 (String.length prefix) = prefix
@@ -3500,7 +3512,7 @@ let launch_guardian paths agent lane session_id cwd command instance_id
       in
       exit code
   | guardian_pid ->
-      let deadline = Unix.gettimeofday () +. 30.0 in
+      let deadline = Unix.gettimeofday () +. start_ready_timeout () in
       let rec wait () =
         if Unix.gettimeofday () >= deadline then (
           (try Unix.kill guardian_pid Sys.sigkill with _ -> ());
@@ -4034,7 +4046,8 @@ let input_request paths data =
           instance
       | _ -> failf "invalid interactive ATTACHED response fields")
 
-let start_command ?(launch_source = "start") ?(ready_timeout = 30.0) cli =
+let start_command ?(launch_source = "start")
+    ?(ready_timeout = start_ready_timeout ()) cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
   let agent = required cli "--agent" in
@@ -8948,7 +8961,8 @@ let provider_start_command cli =
     ~finally:(fun () ->
       Unix.putenv ready_key (Option.value ~default:"" previous_ready_path))
     (fun () ->
-      start_command ~launch_source:"provider-start" ~ready_timeout:30.0
+      start_command ~launch_source:"provider-start"
+        ~ready_timeout:(start_ready_timeout ())
         start_cli);
   atomic_write ready_path "ready\n";
   Printf.printf

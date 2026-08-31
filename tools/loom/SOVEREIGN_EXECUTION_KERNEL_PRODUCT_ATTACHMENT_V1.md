@@ -93,9 +93,11 @@ it in the activated capsule. This installed test mode creates only a temporary,
 explicitly selftest capability with `wake_eligible=0`; it cannot become a live
 delivery endpoint or authorize production wake transport.
 
-Cold start and causal-event observation each have a bounded 30-second budget.
-Timeout still refuses the operation; the wider budget prevents a loaded host
-from being misclassified as a semantic or custody failure.
+Cold start defaults to a bounded 30-second budget. The product stress gate sets
+an explicit 120-second budget for this heavily loaded shared host. The accepted
+range is 1 through 300 seconds, and expiration still refuses the operation; no
+retry converts a timeout into an admission. Causal-event observation remains
+bounded independently.
 
 ## Claim Boundary
 

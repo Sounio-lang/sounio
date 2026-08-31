@@ -261,6 +261,7 @@ activate_runtime() {
       "$version_dir/bin/sounio-loom-sovereign-execution-kernel"
     [[ "$(manifest_value "$sovereign_product" semantic_authority)" == Sounio &&
       "$(manifest_value "$sovereign_product" semantic_action)" == 9042 &&
+      "$(manifest_value "$sovereign_product" grant_residency)" == Loom_kernel_memory &&
       "$(manifest_value "$sovereign_product" grant_is_bearer)" == false &&
       "$(manifest_value "$sovereign_product" exported_token)" == false &&
       "$(manifest_value "$sovereign_product" exported_handle)" == false &&

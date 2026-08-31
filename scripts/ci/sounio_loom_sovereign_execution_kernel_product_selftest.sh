@@ -62,6 +62,7 @@ launch() {
     SOUNIO_COORD_RUNTIME_MODE="$COORD_RUNTIME_MODE" \
     SOUNIO_COORD_RUNTIME_DIR="$COORD_RUNTIME_DIR" \
     SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
+    SOUNIO_LOOM_START_READY_TIMEOUT_SECONDS=120 \
     SOUNIO_COORD_DIR="$COORD_DIR" \
     SOUNIO_LOOM_COORD_AUTO=0 \
     SOUNIO_LOOM_PROVIDER_HOOK_RUNTIME="$LOOM" \
@@ -195,4 +196,4 @@ if ! runtime_processes_absent; then
 fi
 
 printf '%s\n' \
-  'sounio-loom-sovereign-execution-kernel-product-selftest: PASS semantic_authority=Sounio action=9042 stage=PRODUCT_EXECUTION_ATTACHED happy_path=PASS hostile_same_uid_spoof=REFUSED_BEFORE_EXECUTION transport_death=MATERIAL_COMPLETED guardian_death=GUARDIAN_REVOKED grant_is_bearer=false grant_single_use=true consume_atomic=true interface_release_authority=zero same_uid_peer_isolation=true production_activation=true exec_attached=true write_attached=false commit_attached=false ci_attached=false worker_reaped=true residual_processes=false python_executed=false rust_executed=false claim_ready=false'
+  'sounio-loom-sovereign-execution-kernel-product-selftest: PASS semantic_authority=Sounio action=9042 stage=PRODUCT_EXECUTION_ATTACHED happy_path=PASS hostile_same_uid_spoof=REFUSED_BEFORE_EXECUTION transport_death=MATERIAL_COMPLETED guardian_death=GUARDIAN_REVOKED grant_residency=Loom_kernel_memory grant_is_bearer=false grant_single_use=true consume_atomic=true interface_release_authority=zero same_uid_peer_isolation=true production_activation=true exec_attached=true write_attached=false commit_attached=false ci_attached=false worker_reaped=true residual_processes=false python_executed=false rust_executed=false claim_ready=false'
