@@ -1,0 +1,78 @@
+//@ run-pass
+//@ exit-code: 0
+//@ description: Epistemic vancomycin AUC TDM — the same GUM chain as vancomycin_auc_epistemic.sio, on stdlib/epistemic/affine (executable under Madaros AND lean_single)
+//! Twin of examples/vancomycin_auc_epistemic.sio. That example uses the builtin
+//! `Knowledge<f64>` type, which the self-hosted Madaros compiler refuses to lower (E245 /
+//! E004 — builtin Knowledge arithmetic has no native lowering, tracked as #1706); it runs
+//! under lean_single only. This file reproduces the same receipt through
+//! stdlib/epistemic/affine, which both engines execute — and, because affine forms carry the
+//! measurement sources, the chain is exact to first order even where the same measurement
+//! (weight, SCr) enters more than once.
+//!
+//! DISCRIMINATING PATIENT: 65 yr male, 70 ± 1 kg, SCr 1.40 ± 0.14 mg/dL, 500 mg q12h
+//!   CrCl (Cockcroft–Gault) = 75·70/(72·1.40) = 52.1 mL/min,  u ≈ 5.2
+//!   CL   (Matzke 1984)     = 0.695·(52.1·0.06) + 0.05 = 2.22 L/h,  u ≈ 0.22
+//!   AUC₀₋₂₄ (q12h)         = 2·500/2.22 = 450 mg·h/L,  u ≈ 44  →  95 % CI ≈ [361, 539]
+//!   Point-estimate TDM: THERAPEUTIC.  Epistemic TDM: WARN — lower bound crosses 400.
+//! Not a clinical tool.
+
+use epistemic::affine::{af_measured, af_const, af_add, af_scale, af_div, af_value, af_std, af_variance}
+
+fn to_i(x: f64) -> i64 { (x * 100.0 + 0.5) as i64 }
+
+fn print_pm(label: f64, u: f64) -> i64 with IO, Mut, Div, Panic {
+    // prints value and uncertainty as integers ×100 (portable across engines)
+    print("  x100: "); print(to_i(label)); print("  +-  "); println(to_i(u))
+    0
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let weight = af_measured(70.0, 1.0, 0)
+    let scr    = af_measured(1.40, 0.14, 1)
+
+    // Cockcroft–Gault, 65 y male: CrCl = 75·w / (72·SCr)
+    let w75 = af_scale(&weight, 75.0)
+    let s72 = af_scale(&scr, 72.0)
+    let crcl = af_div(&w75, &s72)
+
+    // Matzke 1984: CL = 0.695·(CrCl·0.06) + 0.05
+    let renal = af_scale(&crcl, 0.06 * 0.695)
+    let nr = af_const(0.05)
+    let cl = af_add(&renal, &nr)
+
+    // AUC₀₋₂₄ for q12h = 2·D / CL
+    let d2 = af_const(1000.0)
+    let auc = af_div(&d2, &cl)
+
+    let v = af_value(&auc)
+    let u = af_std(&auc)
+    let lower95 = v - 2.0 * u
+    let upper95 = v + 2.0 * u
+
+    println("Epistemic vancomycin AUC TDM (affine, engine-portable)")
+    print("[1] CrCl mL/min"); let _a = print_pm(af_value(&crcl), af_std(&crcl))
+    print("[2] CL L/h     "); let _b = print_pm(af_value(&cl), af_std(&cl))
+    print("[3] AUC mg*h/L "); let _c = print_pm(v, u)
+    print("    95% CI x100: ["); print(to_i(lower95)); print(", "); print(to_i(upper95)); println("]")
+
+    // the receipt: same numbers as the Knowledge<f64> example, ±1 in the last printed digit
+    var ok: i64 = 1
+    if to_i(af_value(&crcl)) < 5200 || to_i(af_value(&crcl)) > 5216 { ok = 0 }   // 52.08
+    if to_i(af_std(&crcl)) < 515 || to_i(af_std(&crcl)) > 535 { ok = 0 }          // 5.26
+    if to_i(af_value(&cl)) < 220 || to_i(af_value(&cl)) > 224 { ok = 0 }          // 2.22
+    if to_i(af_std(&cl)) < 20 || to_i(af_std(&cl)) > 24 { ok = 0 }                // 0.22
+    if to_i(v) < 44950 || to_i(v) > 45050 { ok = 0 }                               // 450.0
+    if to_i(u) < 4300 || to_i(u) > 4500 { ok = 0 }                                 // 44
+    if af_variance(&auc) <= 0.0 { ok = 0 }
+
+    if v >= 400.0 && v <= 600.0 && lower95 < 400.0 {
+        println("GUM decision:     WARN -- lower 95% CI crosses 400 subtherapeutic threshold")
+        println("GUM_GATE=WARN_SUBTHERAPEUTIC_POSSIBLE")
+    } else {
+        println("GUM_GATE=UNEXPECTED")
+        ok = 0
+    }
+    if ok == 1 { println("VANCOMYCIN_AUC_AFFINE PASS"); return 0 }
+    println("VANCOMYCIN_AUC_AFFINE FAIL")
+    1
+}
