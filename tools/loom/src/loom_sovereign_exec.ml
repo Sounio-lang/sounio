@@ -6,7 +6,7 @@ let semantic_manifest_sha256 =
   "966f022c98bc7df89ce40a90ede9ec8a9a726499baec0fd21e72f327f286a176"
 
 let material_manifest_sha256 =
-  "2045439f1a07d737a0cb8370ad080a80cd0715db2966863539f3c0794d14d7e3"
+  "1005da28d4375da8d67fecc4a301c0c6e768902d720952f93e3f82a74fd41f92"
 
 let max_payload_bytes = 1024 * 1024
 let max_output_bytes = 8 * 1024 * 1024

@@ -270,9 +270,9 @@ activate_runtime() {
       "$(manifest_value "$sovereign_product" production_activation)" == true &&
       "$(manifest_value "$sovereign_product" exec_attached)" == true &&
       "$(manifest_value "$sovereign_product" semantic_manifest_sha256)" == \
-        11a9099d8870646afc3b38302cbc98a257eb284784375cb4011be30214b42f71 &&
+        966f022c98bc7df89ce40a90ede9ec8a9a726499baec0fd21e72f327f286a176 &&
       "$(manifest_value "$sovereign_product" material_manifest_sha256)" == \
-        2045439f1a07d737a0cb8370ad080a80cd0715db2966863539f3c0794d14d7e3 &&
+        1005da28d4375da8d67fecc4a301c0c6e768902d720952f93e3f82a74fd41f92 &&
       "$(manifest_value "$sovereign_product" sounio_runtime_sha256)" == \
         "$(manifest_value "$manifest" loom_sovereign_runtime_sha256)" ]] ||
       die "installed sovereign execution product is not bound to frozen Sounio action 9042: $runtime_id"
@@ -1489,8 +1489,8 @@ else
     printf 'loom_sovereign_role=SEMANTIC_AUTHORITY\n'
     printf 'loom_sovereign_operational_kernel=OCaml\n'
     printf 'loom_sovereign_action=9042\n'
-    printf 'loom_sovereign_semantic_manifest_sha256=11a9099d8870646afc3b38302cbc98a257eb284784375cb4011be30214b42f71\n'
-    printf 'loom_sovereign_material_manifest_sha256=2045439f1a07d737a0cb8370ad080a80cd0715db2966863539f3c0794d14d7e3\n'
+    printf 'loom_sovereign_semantic_manifest_sha256=966f022c98bc7df89ce40a90ede9ec8a9a726499baec0fd21e72f327f286a176\n'
+    printf 'loom_sovereign_material_manifest_sha256=1005da28d4375da8d67fecc4a301c0c6e768902d720952f93e3f82a74fd41f92\n'
     printf 'loom_sovereign_runtime_sha256=%s\n' \
       "$loom_sovereign_runtime_sha256"
     printf 'loom_sovereign_product_manifest_sha256=%s\n' \
