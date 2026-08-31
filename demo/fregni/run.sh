@@ -11,7 +11,7 @@ echo "--- 1. Reference arithmetic (Python) ---"
 python3 reference.py
 echo ""
 
-echo "--- 2. Confidence-gated dosing pipeline (Sounio/Madares) ---"
+echo "--- 2. Confidence-gated dosing pipeline (Sounio/Madaros) ---"
 "$SOUC" run fregni_demo.sio
 echo ""
 

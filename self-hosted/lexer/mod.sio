@@ -15,10 +15,96 @@ use lexer::numparse::*
 use lexer::tables::*
 use lexer::token::{TokenKind}
 use parser::ast::*
-use parser::parser::{parser_set_token_at, parser_set_token_flat, parser_set_token_int_value, parser_set_token_scalar}
+use parser::parser::{parser_set_token_at, parser_set_token_flat, parser_set_token_int_value, parser_set_token_scalar, parser_set_last_errors}
 use parser::mod::{parse_items_preloaded}
 
-// Maximum tokens per file (2097152) — use literal not constant: boot4 leaves let globals at 0
+// Maximum tokens per file (2097152) — use literal not constant: boot4 leaves let globals at 0.
+//
+// HISTORICAL DEFECT (fixed 2026-08-17): when tc reached the table size, emits
+// were silently skipped (parser_set_token_* no-ops past the wall) while the
+// lexer kept walking source. The returned token_count could still grow, and
+// out-of-range reads synthesized Eof — so the parser blamed an innocent line
+// that never changed. That is success-by-silence: the compiler discarded its
+// own input and lied about where the failure was. Same sin class as fabricating
+// a zero for unimplemented extern "C" (E219). Refusal is mandatory; raising the
+// ceiling without refusal only moves the lie.
+
+// LEXER_TOKEN_OVERFLOW: 0 = ok, 1 = token table full, 2 = source byte buffer full
+var LEXER_TOKEN_OVERFLOW: i64 = 0
+var LEXER_TOKEN_OVERFLOW_LINE: i64 = 0
+var LEXER_TOKEN_OVERFLOW_COL: i64 = 0
+var LEXER_TOKEN_OVERFLOW_BYTE: i64 = 0
+
+pub fn lexer_reset_token_overflow() with Mut {
+    LEXER_TOKEN_OVERFLOW = 0
+    LEXER_TOKEN_OVERFLOW_LINE = 0
+    LEXER_TOKEN_OVERFLOW_COL = 0
+    LEXER_TOKEN_OVERFLOW_BYTE = 0
+}
+
+pub fn lexer_token_overflow_kind() -> i64 {
+    LEXER_TOKEN_OVERFLOW
+}
+
+pub fn lexer_token_overflow_line() -> i64 {
+    LEXER_TOKEN_OVERFLOW_LINE
+}
+
+pub fn lexer_token_overflow_col() -> i64 {
+    LEXER_TOKEN_OVERFLOW_COL
+}
+
+pub fn lexer_token_overflow_byte() -> i64 {
+    LEXER_TOKEN_OVERFLOW_BYTE
+}
+
+// Record overflow once (first site wins — that is the real cause).
+fn lexer_mark_token_overflow(line: i64, col: i64, byte_pos: i64, kind: i64) with Mut {
+    if LEXER_TOKEN_OVERFLOW == 0 {
+        LEXER_TOKEN_OVERFLOW = kind
+        LEXER_TOKEN_OVERFLOW_LINE = line
+        LEXER_TOKEN_OVERFLOW_COL = col
+        LEXER_TOKEN_OVERFLOW_BYTE = byte_pos
+    }
+}
+
+// Push one flat token. Returns new tc, or -1 if the table is full (overflow marked).
+// Capacity 2097152 is the array length; the last slot must remain available for Eof
+// only when we finish cleanly — any content emit at tc >= 2097152 is refusal.
+fn lexer_push_flat(tc: i64, kind: i64, start: i64, end: i64, line: i64, col: i64, ival: i64) -> i64 with Mut, Panic {
+    if tc >= 2097152 {
+        lexer_mark_token_overflow(line, col, start, 1)
+        return 0 - 1
+    }
+    parser_set_token_flat(tc, kind, start, end, line, col, ival)
+    tc + 1
+}
+
+// Print E229 and return true if overflow is set. Call after lex when IO is available.
+pub fn lexer_report_token_overflow_if_any() -> bool with IO, Mut {
+    if LEXER_TOKEN_OVERFLOW == 0 {
+        return false
+    }
+    print("error[E229]: ")
+    if LEXER_TOKEN_OVERFLOW == 2 {
+        print("source exceeds lexer byte buffer (capacity 2097152 bytes)")
+    } else {
+        print("lexer token table full (capacity 2097152 tokens)")
+    }
+    print("\n  --> reached at line ")
+    print_int(LEXER_TOKEN_OVERFLOW_LINE)
+    print(" column ")
+    print_int(LEXER_TOKEN_OVERFLOW_COL)
+    print(" (byte offset ")
+    print_int(LEXER_TOKEN_OVERFLOW_BYTE)
+    print(")\n")
+    print("  = note: tokens past this table were previously SILENTLY DROPPED, so later\n")
+    print("          parse errors blamed innocent lines. This is a fail-closed refusal\n")
+    print("          (same discipline as E219 for unimplemented extern \"C\").\n")
+    print("  = help: split the module. Raising the ceiling without keeping this refusal\n")
+    print("          only moves the lie to the next input past the new wall.\n")
+    true
+}
 
 // ============================================================================
 // WHITESPACE AND COMMENT HANDLING
@@ -542,9 +628,15 @@ pub fn sourcefile_trace_enable() with Mut {
 // CURSOR_SOURCE must be populated before calling (e.g. by lex_file_to_globals).
 // Returns the total number of tokens emitted (including the EOF token).
 pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
+    lexer_reset_token_overflow()
     var n: i64 = source_len
     if n < 0 { n = 0 }
-    if n > 2097152 { n = 2097152 }
+    // Source buffer is also [i8; 2097152]. Truncating here was a second silent
+    // drop (bytes past the wall never lexed). Refuse instead.
+    if n > 2097152 {
+        lexer_mark_token_overflow(1, 1, n, 2)
+        return 0 - 1
+    }
     CURSOR_SOURCE_LEN = n
     var pos: i64 = 0
     var line: i64 = 1
@@ -552,6 +644,11 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
     var tc: i64 = 0
 
     while pos < n {
+        // Fail closed before any further emit once the table is full.
+        if tc >= 2097152 {
+            lexer_mark_token_overflow(line, col, pos, 1)
+            break
+        }
         let ch = CURSOR_SOURCE[pos as usize]
 
         if ch == 32 as i8 || ch == 9 as i8 || ch == 13 as i8 {
@@ -615,7 +712,15 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 pos = pos + 1
                 col = col + 1
             }
-            parser_set_token_flat(tc, keyword_lookup_code(text, text_idx), start, pos, line, start_col, 0)
+            // main moved the identifier slot to the scalar setter (TokenKind
+            // directly) so a new keyword needs no arm in parser_set_token_flat's
+            // dispatch. Keep that, and keep this PR's fail-closed guard: the
+            // guard is about the slot, not about which setter writes it.
+            if tc >= 2097152 {
+                lexer_mark_token_overflow(line, start_col, start, 1)
+                break
+            }
+            parser_set_token_scalar(tc, keyword_lookup(text, text_idx), start, pos, line, start_col)
             tc = tc + 1
             continue
         }
@@ -641,8 +746,8 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                     pos = pos + 1
                     col = col + 1
                 }
-                parser_set_token_flat(tc, 129, start, pos, line, start_col, value)
-                tc = tc + 1
+                tc = lexer_push_flat(tc, 129, start, pos, line, start_col, value)
+                if tc < 0 { break }
                 continue
             }
             while pos < n && is_digit(CURSOR_SOURCE[pos as usize]) {
@@ -679,11 +784,11 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 }
             }
             if is_float_token {
-                parser_set_token_flat(tc, 125, start, pos, line, start_col, 0)
+                tc = lexer_push_flat(tc, 125, start, pos, line, start_col, 0)
             } else {
-                parser_set_token_flat(tc, 124, start, pos, line, start_col, value)
+                tc = lexer_push_flat(tc, 124, start, pos, line, start_col, value)
             }
-            tc = tc + 1
+            if tc < 0 { break }
             continue
         }
 
@@ -705,8 +810,8 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 pos = pos + 1
                 col = col + 1
             }
-            parser_set_token_flat(tc, 126, start, pos, line, start_col, 0)
-            tc = tc + 1
+            tc = lexer_push_flat(tc, 126, start, pos, line, start_col, 0)
+            if tc < 0 { break }
             continue
         }
 
@@ -772,13 +877,22 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
         else if ch == 64 as i8 { kind_code = 184 }
         else if ch == 35 as i8 { kind_code = 185 }
 
-        parser_set_token_flat(tc, kind_code, start, start + width, line, start_col, 0)
-        tc = tc + 1
+        tc = lexer_push_flat(tc, kind_code, start, start + width, line, start_col, 0)
+        if tc < 0 { break }
         pos = pos + width
         col = col + width
     }
 
-    parser_set_token_flat(tc, 0, pos, pos, line, col, 0)
+    // Overflow: do not hand the parser a truncated stream (that re-creates the lie).
+    if LEXER_TOKEN_OVERFLOW != 0 {
+        return 0 - 1
+    }
+
+    // Eof must fit; if not, refuse rather than omit the terminator.
+    tc = lexer_push_flat(tc, 0, pos, pos, line, col, 0)
+    if tc < 0 {
+        return 0 - 1
+    }
     return tc
 
     var first_byte: i8 = 0 as i8
@@ -1028,11 +1142,16 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
 // Returns the token count. Frame is tiny: file pointer + a few scalars.
 pub fn lex_file_to_globals(path: string) -> i64 with IO, Mut, Div, Panic {
     if SOURCEFILE_TRACE == 1 { print("trace=lex_file_to_globals_enter\n") }
+    lexer_reset_token_overflow()
     let size = file_size(path)
     let data = read_file(path)
     var n: i64 = size
     if n < 0 { n = 0 }
-    if n > 2097152 { n = 2097152 }
+    // Do not silently clip the file to the CURSOR_SOURCE wall.
+    if n > 2097152 {
+        lexer_mark_token_overflow(1, 1, n, 2)
+        return 0 - 1
+    }
     var ci: i64 = 0
     while ci < n {
         CURSOR_SOURCE[ci as usize] = data[ci as usize]
@@ -1048,6 +1167,14 @@ pub fn lex_file_to_globals(path: string) -> i64 with IO, Mut, Div, Panic {
 pub fn lex_file_parse_items(path: string) -> Option<Box<ItemList>> with IO, Mut, Div, Panic, Alloc {
     if SOURCEFILE_TRACE == 1 { print("trace=lex_file_parse_items_enter\n") }
     let tc = lex_file_to_globals(path)
+    // Fail closed: never parse a silently truncated token stream.
+    if tc < 0 || lexer_token_overflow_kind() != 0 {
+        let _reported = lexer_report_token_overflow_if_any()
+        // Make check-mode preflight fail (same channel as parse errors).
+        parser_set_last_errors(true, 1)
+        if SOURCEFILE_TRACE == 1 { print("trace=lex_token_overflow\n") }
+        return None
+    }
     if SOURCEFILE_TRACE == 1 { print("trace=lex_ok\n") }
     let items = parse_items_preloaded(tc)
     if SOURCEFILE_TRACE == 1 { print("trace=parse_ok\n") }

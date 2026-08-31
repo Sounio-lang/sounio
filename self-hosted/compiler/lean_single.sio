@@ -105,10 +105,14 @@ var FN_IN_IMPL: [i64; 65536] = [0; 65536]
 var PTX_BUF: [i8; 262144] = [0; 262144]
 var PTX_LEN: i64 = 0
 
-// Call patch table: code offset where rel32 needs patching, target fn index
-var PATCH_OFF: [i64; 65536] = [0; 65536]
-var PATCH_FN: [i64; 65536] = [0; 65536]
-var PATCH_KIND: [i64; 65536] = [0; 65536]
+// Call patch table: code offset where rel32 needs patching, target fn index.
+// Current main already records 65,333 patches while self-building. A modest IR
+// accessor migration measured 66,056 and wrote past the old 65,536 arrays,
+// corrupting PATCH_COUNT to 519 and leaving late calls at rel32=0. Match the
+// current native relocation tier so bootstrap growth has real headroom.
+var PATCH_OFF: [i64; 131072] = [0; 131072]
+var PATCH_FN: [i64; 131072] = [0; 131072]
+var PATCH_KIND: [i64; 131072] = [0; 131072]
 var PATCH_COUNT: i64 = 0
 
 // Canonical function-signature registry for fn-typed values and indirect calls.
@@ -1053,11 +1057,11 @@ fn note_limit_error(kind: i64) with Mut {
 
 fn print_limit_error() with IO, Mut, Panic {
     if LIMIT_ERROR_KIND == 1 {
-        print("error: too many local variables in function (max ")
+        print("error[E007]: too many local variables in function (max ")
         print_int(local_cap())
         print(")\n")
     } else if LIMIT_ERROR_KIND == 2 {
-        print("error: too many globals (max ")
+        print("error[E008]: too many globals (max ")
         print_int(global_cap())
         print(")\n")
     }
@@ -3857,6 +3861,29 @@ fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     return 0
 }
 
+// Unbalanced braces in a module (#1634).
+//
+// Sets TYPECHECK_FAILED DIRECTLY rather than going through tc_mark_failed or
+// note_limit_error. Both of those early-return for functions carrying
+// FN_EFFECTS & 2048 (imported), which is how an unbalanced brace in an imported
+// module used to fail the build while printing no `error:` line at all -- the
+// only symptom was a scatter of E200s hundreds of tokens later, in a different
+// file, naming a parameter that had nothing to do with it.
+fn tc_unbalanced_braces(tok: i64, d: i64) with IO, Mut, Panic {
+    print("error: unbalanced braces in module (")
+    if d > 0 {
+        print_int(d)
+        print(" unclosed `{`")
+    } else {
+        print_int(0 - d)
+        print(" extra `}`")
+    }
+    print(") near ")
+    print_src_loc_for_tok(tok)
+    print("\n")
+    TYPECHECK_FAILED = 1
+}
+
 fn tc_error_hard(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     print("error: ")
     print(msg)
@@ -3880,7 +3907,7 @@ fn tc_error_hard(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
 }
 
 fn tc_decl_init_mismatch(tok: i64, decl_ty: i64, decl_hash: i64, expr_ty: i64, expr_hash: i64) -> i64 with IO, Mut, Panic, Div {
-    print("error: Type mismatch — expected ")
+    print("error[E001]: Type mismatch — expected ")
     print_type_label(decl_ty, decl_hash)
     print(", got ")
     print_type_label(expr_ty, expr_hash)
@@ -3947,7 +3974,7 @@ fn try_apply_field_alias_refinement(field_hash: i64, tok: i64) with IO, Mut, Pan
         }
     }
     if violated == 1 {
-        print("error: refinement type violation — value ")
+        print("error[E208]: refinement type violation — value ")
         print_int(cv)
         print(" does not satisfy field predicate at line ")
         print_int(TL[tok as usize])
@@ -4007,7 +4034,7 @@ fn try_apply_call_arg_refinement(tok: i64) with IO, Mut, Panic, Div {
             }
         }
         if f64_violated == 1 {
-            print("error: refinement type violation — f64 value violates parameter predicate at line ")
+            print("error[E209]: refinement type violation — f64 value violates parameter predicate at line ")
             print_int(TL[tok as usize])
             print("\n")
             tc_mark_failed()
@@ -4056,7 +4083,7 @@ fn try_apply_call_arg_refinement(tok: i64) with IO, Mut, Panic, Div {
         }
     }
     if violated == 1 {
-        print("error: refinement type violation — value ")
+        print("error[E208]: refinement type violation — value ")
         print_int(cv)
         print(" does not satisfy parameter predicate at line ")
         print_int(TL[tok as usize])
@@ -4118,7 +4145,7 @@ fn try_apply_return_refinement(tok: i64) with IO, Mut, Panic, Div {
             }
         }
         if r10_viol == 1 {
-            print("error: refinement type violation — f64 return value violates return type predicate at line ")
+            print("error[E209]: refinement type violation — f64 return value violates return type predicate at line ")
             print_int(TL[tok as usize])
             print("\n")
             tc_mark_failed()
@@ -4161,7 +4188,7 @@ fn try_apply_return_refinement(tok: i64) with IO, Mut, Panic, Div {
         }
     }
     if violated == 1 {
-        print("error: refinement type violation — return value ")
+        print("error[E208]: refinement type violation — return value ")
         print_int(cv)
         print(" does not satisfy return type predicate at line ")
         print_int(TL[tok as usize])
@@ -4211,7 +4238,7 @@ fn tc_duplicate_param(tok: i64) -> i64 with IO, Mut, Panic {
 }
 
 fn tc_missing_effect(tok: i64) -> i64 with IO, Mut, Panic {
-    print("error: effect not declared in function signature at line ")
+    print("error[E035]: effect not declared in function signature at line ")
     print_int(TL[tok as usize])
     print("\n")
     tc_mark_failed()
@@ -4284,7 +4311,7 @@ fn tc_epistemic_cast_blocked(tok: i64) with IO, Mut, Panic {
 
 // Algebra property violations
 fn tc_algebra_violation(tok: i64, msg: string) with IO, Mut, Panic {
-    print("error: algebra property violation — ")
+    print("error[E210]: algebra property violation — ")
     print(msg)
     print(" at line ")
     print_int(TL[tok as usize])
@@ -4294,35 +4321,35 @@ fn tc_algebra_violation(tok: i64, msg: string) with IO, Mut, Panic {
 
 // Rust syntax rejection (Strike 2)
 fn tc_rust_let_mut(tok: i64) with IO, Mut, Panic {
-    print("error: Sounio uses 'var' instead of 'let mut' for mutable bindings at line ")
+    print("error[E040]: Sounio uses 'var' instead of 'let mut' for mutable bindings at line ")
     print_int(TL[tok as usize])
     print("\n  help: change 'let mut x' to 'var x'\n")
     tc_mark_failed()
 }
 
 fn tc_rust_mut_ref(tok: i64) with IO, Mut, Panic {
-    print("error: Sounio uses '&!' instead of '&mut' for exclusive references at line ")
+    print("error[E041]: Sounio uses '&!' instead of '&mut' for exclusive references at line ")
     print_int(TL[tok as usize])
     print("\n  help: change '&mut T' to '&! T'\n")
     tc_mark_failed()
 }
 
 fn tc_rust_attribute(tok: i64) with IO, Mut, Panic {
-    print("error: Sounio does not use Rust attributes (#[...]) at line ")
+    print("error[E042]: Sounio does not use Rust attributes (#[...]) at line ")
     print_int(TL[tok as usize])
     print("\n  help: remove the #[] syntax\n")
     tc_mark_failed()
 }
 
 fn tc_rust_attribute_lex(line: i64) with IO, Mut, Panic {
-    print("error: Sounio does not use Rust attributes (#[...]) at line ")
+    print("error[E042]: Sounio does not use Rust attributes (#[...]) at line ")
     print_int(line)
     print("\n  help: remove the #[] syntax\n")
     tc_mark_failed()
 }
 
 fn tc_rust_macro(tok: i64) with IO, Mut, Panic {
-    print("error: Sounio does not use Rust macros (ident!()) at line ")
+    print("error[E043]: Sounio does not use Rust macros (ident!()) at line ")
     print_int(TL[tok as usize])
     print("\n  help: use regular function calls instead of macro syntax\n")
     tc_mark_failed()
@@ -4449,7 +4476,7 @@ fn tc_effect_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with I
     // Skip effect violations for functions from imported modules — already validated
     if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 { return 0 }
     tc_mark_failed()
-    print("error: effect not declared in function signature at line ")
+    print("error[E035]: effect not declared in function signature at line ")
     print_int(TL[tok as usize])
     print("\n")
     return 0
@@ -4459,7 +4486,7 @@ fn tc_effect_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with I
 fn tc_effect_call_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 with IO, Mut, Panic {
     if (FN_EFFECTS[CURRENT_FN as usize] & 2048) != 0 { return 0 }
     tc_mark_failed()
-    print("error: effect not declared in function signature at line ")
+    print("error[E035]: effect not declared in function signature at line ")
     print_int(TL[tok as usize])
     print("\n")
     return 0
@@ -4467,7 +4494,7 @@ fn tc_effect_call_violation(tok: i64, callee_eff: i64, caller_eff: i64) -> i64 w
 
 fn tc_observe_violation(tok: i64) -> i64 with IO, Mut, Panic {
     tc_mark_failed()
-    print("error: Unobserved<T> value crosses observation boundary without `with Observe` effect at line ")
+    print("error[E036]: Unobserved<T> value crosses observation boundary without `with Observe` effect at line ")
     print_int(TL[tok as usize])
     print("\n")
     return 0
@@ -4725,7 +4752,7 @@ fn tc_wrong_arity(tok: i64, expected: i64, got: i64) -> i64 with IO, Mut, Panic 
 }
 
 fn tc_wrong_arity_hard(tok: i64, expected: i64, got: i64) -> i64 with IO, Mut, Panic {
-    print("error: arity mismatch at line ")
+    print("error[E006]: arity mismatch at line ")
     print_int(TL[tok as usize])
     print(" expected ")
     print_int(expected)
@@ -4999,6 +5026,165 @@ fn stmt_is_deref_field_field_array_store(p0: i64) -> bool with Panic, Mut {
     return TK[p as usize] == 16
 }
 
+// (*name).f1[i].f2 = expr  and  (*name).f1[i].f2[j].f3 = expr — store into a FIELD OF
+// AN ARRAY ELEMENT reached through an explicit deref. The lvalue chain crosses at least
+// one index and ends in `.field`.
+// Tokens: ( * name ) then a chain of `. ident` / `[ … ]`, ending `. ident =`.
+// lean_single had detectors for (*p).f=, (*p).f[i]=, (*p).f1.f2= and (*p).f1.f2[i]= but
+// NOT for a field of an INDEXED element, so `(*p).arr[i].f = v` fell through to the
+// generic assignment path and silently wrote into a discarded value-copy of the element
+// (reads back as 0) — the same disease as the two-hop forms, and additionally it leaked
+// the assigned field's type into LAST_STMT_HAS_VALUE, so a unit fn whose tail-if arms end
+// in such stores to differently-typed fields was falsely rejected with "if arm type does
+// not match else arm". This is the shape the IR passes use throughout
+// (self-hosted/ir/opt_cleanup.sio ocp_mfi_instr_move_fields:
+// (*module).functions[fi].instrs[dst_i].op = op).
+// Array elements of aggregate type are stored pointer-per-slot, so the element address is
+// LOADED from [array_base + idx*8]; trailing inline fields add their offsets.
+// Discriminated from the already-handled shapes by requiring BOTH an index in the chain
+// and a trailing `. ident` immediately before the `=` (the handled forms end in `]` or
+// contain no index at all), so this predicate is disjoint from all of them.
+fn stmt_is_deref_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }        // (
+    if TK[(p0 + 1) as usize] != 19 { return false } // *
+    if TK[(p0 + 2) as usize] != 3 { return false }  // simple-name root
+    if TK[(p0 + 3) as usize] != 7 { return false }  // )
+    var p = p0 + 4
+    var saw_index: i64 = 0
+    while p < TC {
+        if TK[p as usize] == 50 {                   // . field
+            if TK[(p + 1) as usize] != 3 { return false }
+            p = p + 2
+            continue
+        }
+        if TK[p as usize] == 41 {                   // [ … ]
+            var depth: i64 = 1
+            p = p + 1
+            while p < TC && depth > 0 {
+                if TK[p as usize] == 41 { depth = depth + 1 }
+                if TK[p as usize] == 42 { depth = depth - 1 }
+                p = p + 1
+            }
+            saw_index = 1
+            continue
+        }
+        if TK[p as usize] == 16 {                   // =
+            if saw_index == 0 { return false }
+            if p < p0 + 6 { return false }
+            // Two terminal forms: `. field =` stores into a field, `] =` stores into an
+            // array ELEMENT. The element form is the one ir/opt_cleanup.sio uses for its
+            // whole-record instruction rewrites, e.g.
+            // (*module).functions[fi].instrs[i] = ir_copy(dst, found).
+            if TK[(p - 1) as usize] == 42 { return true }
+            if TK[(p - 1) as usize] != 3 { return false }
+            return TK[(p - 2) as usize] == 50
+        }
+        return false
+    }
+    return false
+}
+
+// name.f1[i].f2 = expr and deeper — the AUTO-DEREF twin of
+// stmt_is_deref_indexed_elem_field_store: identical chain, bare-ident root, no `(* )`.
+// Same disease, same magnitude: measured on a single file whose two fns differ ONLY in the
+// root spelling, `(*m).blks[1].ins[0].op = 77` stored 77 while `m.blks[1].ins[0].op = 77`
+// stored nothing — rc=0, zero errors, zero warnings, Madaros correct on both. The narrow
+// ident-root handlers cover only ONE field hop before the index (stmt_is_indexed_field_field_store
+// requires TK[p0+3]==41), so every deeper ident chain fell to the generic assignment path.
+// Live casualties found by shape census: ir/dead_code.sio:260 (dce_mark_reachable marks no
+// instruction reachable), native/codegen_plan.sio:1325 (scheduling priorities stay zero),
+// with the shape appearing ~131 times under self-hosted/ (compiler/main.sio alone ~95) plus
+// the bootstrap chain.
+// This predicate is SHAPE-ONLY; root resolvability is decided at the dispatch by
+// ident_chain_root_supported, following the established gating pattern of
+// stmt_is_field_field_store_shape at :23245.
+fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 3 { return false }        // bare-ident root
+    if TK[(p0 + 1) as usize] != 50 { return false } // must start with `. field`, not `[`
+    var p = p0 + 1
+    var saw_index: i64 = 0
+    while p < TC {
+        if TK[p as usize] == 50 {                   // . field
+            if TK[(p + 1) as usize] != 3 { return false }
+            p = p + 2
+            continue
+        }
+        if TK[p as usize] == 41 {                   // [ … ]
+            var depth: i64 = 1
+            p = p + 1
+            while p < TC && depth > 0 {
+                if TK[p as usize] == 41 { depth = depth + 1 }
+                if TK[p as usize] == 42 { depth = depth - 1 }
+                p = p + 1
+            }
+            saw_index = 1
+            continue
+        }
+        if TK[p as usize] == 16 {                   // =
+            if saw_index == 0 { return false }
+            if p < p0 + 3 { return false }
+            // Same two terminal forms as the deref twin: `. field =` (field of an element)
+            // and `] =` (the element itself).
+            if TK[(p - 1) as usize] == 42 { return true }
+            if TK[(p - 1) as usize] != 3 { return false }
+            return TK[(p - 2) as usize] == 50
+        }
+        return false
+    }
+    return false
+}
+
+// (*name.field)<chain> = expr — the lvalue ROOT is a deref of a pointer held in a STRUCT
+// FIELD, e.g. `(*lo.module).string_count = 0`, `(*lo.module).string_table[i] = n`,
+// `(*lo.module).functions[i] = new_fn`, where Lowerer.module is a Box<IrModule>.
+// 37 such sites in self-hosted/ir/lower.sio — the LIVE Madaros IR lowerer.
+// No existing store predicate accepts this root: every deref-rooted one requires `)`
+// immediately after the simple name (checks at :4845 :4867 :4882 :4896 :4916 :4972 :4986),
+// and the only complex-root predicate (:4935) requires a PARENTHESISED inner base. So every
+// shape with this root reached the generic assignment path and lost its store, which is why
+// this predicate accepts the whole chain grammar rather than a single shape.
+// Base address: load the root, add the inner field offsets (inline), then LOAD the pointer
+// stored in the final inner field — that is the deref the `(* )` spells.
+fn stmt_is_deref_inner_root_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }        // (
+    if TK[(p0 + 1) as usize] != 19 { return false } // *
+    if TK[(p0 + 2) as usize] != 3 { return false }  // simple-name root
+    if TK[(p0 + 3) as usize] != 50 { return false } // `.` — NOT the (*name) forms
+    var p = p0 + 3
+    while p < TC && TK[p as usize] == 50 && TK[(p + 1) as usize] == 3 {
+        p = p + 2
+    }
+    if TK[p as usize] != 7 { return false }         // )
+    p = p + 1
+    // A non-empty chain is required: `(*p.field) = v` is whole-pointee assignment, a
+    // different operation with its own handler, and this emitter has no target field for it.
+    if TK[p as usize] != 50 && TK[p as usize] != 41 { return false }
+    while p < TC {
+        if TK[p as usize] == 50 {
+            if TK[(p + 1) as usize] != 3 { return false }
+            p = p + 2
+            continue
+        }
+        if TK[p as usize] == 41 {
+            var depth: i64 = 1
+            p = p + 1
+            while p < TC && depth > 0 {
+                if TK[p as usize] == 41 { depth = depth + 1 }
+                if TK[p as usize] == 42 { depth = depth - 1 }
+                p = p + 1
+            }
+            continue
+        }
+        if TK[p as usize] == 16 {
+            if TK[(p - 1) as usize] == 42 { return true }
+            if TK[(p - 1) as usize] != 3 { return false }
+            return TK[(p - 2) as usize] == 50
+        }
+        return false
+    }
+    return false
+}
+
 // name.f1.f2 = expr  — AUTO-DEREF two-level store (ident root, no explicit `(* )`).
 // Shape only: (3|79) 50 3 50 3 16. For a VALUE struct root the generic assignment
 // path already handles this correctly, so the dispatch gates this on the root var
@@ -5035,6 +5221,31 @@ fn stmt_is_field_field_array_store_shape(p0: i64) -> bool with Panic, Mut {
 
 // True when the var named by the token at p0 is a pointer/ref binding (so a
 // `name.f1.f2 = …` write must deref rather than write into a local struct slot).
+// Root-resolvability gate for the indexed-element field store on a BARE-IDENT root.
+// True only when the root is a LOCAL whose base address the store emitter can reproduce
+// exactly as the read path does (emit_load_var):
+//   - pointer-like root  → the slot holds the pointee address (ref/param roots);
+//   - plain struct root  → the slot ALSO holds a pointer to the struct's inline slots,
+//     because a struct value is represented as `lea rax,[rbp-(base+nslots-1)*8]` (see the
+//     struct-literal emission) and that pointer is what gets stored into the local. This is
+//     why reads like `c.heap.objects[i].mark_color` already work through a value root.
+// Anything else — globals (var_find has no slot), non-aggregate roots — returns false so the
+// statement falls through to the generic assignment path EXACTLY as before, rather than being
+// intercepted and hard-rejected. Without that, `G.arr[i].f = v` on a global struct would turn
+// from working code into a false reject.
+fn ident_chain_root_supported(p0: i64) -> bool with Panic, Mut, Div {
+    let lvi = var_find_idx(TS[p0 as usize], TE[p0 as usize])
+    if lvi < 0 { return false }
+    if var_find(TS[p0 as usize], TE[p0 as usize]) < 0 { return false }
+    let vt = VAR_TY[lvi as usize]
+    let vh = VAR_TY_HASH[lvi as usize]
+    if type_is_pointer_like(vt, vh) {
+        let it = ptr_hash_inner_ty(vh)
+        return it == 6 || it == 8
+    }
+    return vt == 6
+}
+
 fn token_chain_root_is_pointer(p0: i64) -> bool with Panic, Mut, Div {
     let lvi = var_find_idx(TS[p0 as usize], TE[p0 as usize])
     if lvi < 0 { return false }
@@ -7163,7 +7374,7 @@ fn skip_study_decl(p0: i64) -> i64 with IO, Mut, Panic {
 
     if saw_hypothesis == 0 {
         tc_mark_failed()
-        print("error: study block requires at least one hypothesis at line ")
+        print("error[E211]: study block requires at least one hypothesis at line ")
         print_int(TL[study_tok as usize])
         print("\n")
     }
@@ -7779,7 +7990,20 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
     while p < TC {
         let tk = TK[p as usize]
         if tk == 8 { depth = depth + 1; p = p + 1; continue }
-        if tk == 9 { depth = depth - 1; p = p + 1; continue }
+        if tk == 9 {
+            // Clamped, matching Pass 0a. Unclamped, one stray `}` pins depth
+            // negative for the whole remaining token stream, and every later
+            // function-body `var` is treated as a global (#1634).
+            if depth > 0 { depth = depth - 1 }
+            p = p + 1
+            continue
+        }
+        // File boundary (TK==77). Modules are independently balanced, so depth
+        // must not carry across one. Pass 0a already resets here; these three
+        // scanners did not, which is what let one file's imbalance poison the
+        // rest of the bundle -- and made the three disagree about which `var`s
+        // are global, between registration and initializer emission.
+        if tk == 77 { depth = 0; p = p + 1; continue }
         if depth > 0 { p = p + 1; continue }
         if tk == 12 {
             p = p + 1
@@ -7799,8 +8023,51 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
             if p < TC && TK[p as usize] == 16 {
                 p = p + 1
                 if TK[p as usize] == 41 {
-                    // Array repeat initializer: [V; N]
+                    // `[ ... ]` after `=` is one of TWO initializer forms, and this
+                    // scanner used to assume it was always the first:
+                    //
+                    //   [V; N]      repeat  -- one value, splatted into N slots
+                    //   [a, b, c]   list    -- N values, one per slot
+                    //
+                    // Compiled as a repeat, a LIST parses its first element as V,
+                    // finds no `;`, and rep-stos that one value across the whole
+                    // array: `var GA: [i64; 7] = [1,2,3,4,5,6,7]` read back as seven
+                    // 1s (#1574). Silent wrong data -- the array is fully
+                    // initialised, just uniformly with element 0.
+                    //
+                    // array_init_is_repeat is the same discriminator the LOCAL decl
+                    // path already uses (compile_primary, compile_stmt); only the
+                    // two global emitters were missing it.
                     let gi_arr = gl_find(gns, gne)
+                    if gi_arr >= 0 && array_init_is_repeat(p) == false {
+                        let l_base = GL_BSS_BASE + GL[(gi_arr * 4 + 1) as usize]
+                        let l_esiz = GL[(gi_arr * 4 + 2) as usize]
+                        let l_alen = GL[(gi_arr * 4 + 3) as usize]
+                        p = p + 1                              // skip [
+                        var l_idx: i64 = 0
+                        while p < TC && TK[p as usize] != 42 && TK[p as usize] != 0 {
+                            EP = p
+                            compile_or()                       // element value in rax
+                            p = EP
+                            // Excess elements are compiled (so a bad one still
+                            // diagnoses) but not stored: the slot does not exist.
+                            if l_idx < l_alen {
+                                if l_esiz == 1 {
+                                    em(0x48); em(0x89); em(0xc1)   // mov rcx, rax
+                                    emit_load_abs_addr_to_rax_x86(l_base + l_idx)
+                                    em(0x88); em(0x08)             // mov [rax], cl
+                                } else {
+                                    emit_store_rax_to_abs_qword_x86(l_base + l_idx * l_esiz)
+                                }
+                            }
+                            l_idx = l_idx + 1
+                            if p < TC && TK[p as usize] == 28 { p = p + 1 }   // skip ,
+                        }
+                        if p < TC && TK[p as usize] == 42 { p = p + 1 }      // skip ]
+                        // Short lists leave the tail at the BSS zero it already has.
+                        continue
+                    }
+                    // Array repeat initializer: [V; N]
                     if gi_arr >= 0 {
                         p = p + 1                              // skip [
                         EP = p
@@ -7861,7 +8128,20 @@ fn emit_global_inits_a64() with IO, Mut, Panic, Div {
     while p < TC {
         let tk = TK[p as usize]
         if tk == 8 { depth = depth + 1; p = p + 1; continue }
-        if tk == 9 { depth = depth - 1; p = p + 1; continue }
+        if tk == 9 {
+            // Clamped, matching Pass 0a. Unclamped, one stray `}` pins depth
+            // negative for the whole remaining token stream, and every later
+            // function-body `var` is treated as a global (#1634).
+            if depth > 0 { depth = depth - 1 }
+            p = p + 1
+            continue
+        }
+        // File boundary (TK==77). Modules are independently balanced, so depth
+        // must not carry across one. Pass 0a already resets here; these three
+        // scanners did not, which is what let one file's imbalance poison the
+        // rest of the bundle -- and made the three disagree about which `var`s
+        // are global, between registration and initializer emission.
+        if tk == 77 { depth = 0; p = p + 1; continue }
         if depth > 0 { p = p + 1; continue }
         if tk == 12 {
             p = p + 1
@@ -7881,8 +8161,35 @@ fn emit_global_inits_a64() with IO, Mut, Panic, Div {
             if p < TC && TK[p as usize] == 16 {
                 p = p + 1
                 if TK[p as usize] == 41 {
-                    // Array repeat initializer: [V; N]
+                    // a64 twin of the x86 element-list fix (#1574). See
+                    // emit_global_inits_x86 for why array_init_is_repeat has to
+                    // gate this: without it `[a, b, c]` is compiled as `[a; N]`.
                     let gi_arr = gl_find(gns, gne)
+                    if gi_arr >= 0 && array_init_is_repeat(p) == false {
+                        let l_base = GL_BSS_BASE + GL[(gi_arr * 4 + 1) as usize]
+                        let l_esiz = GL[(gi_arr * 4 + 2) as usize]
+                        let l_alen = GL[(gi_arr * 4 + 3) as usize]
+                        p = p + 1                              // skip [
+                        var l_idx: i64 = 0
+                        while p < TC && TK[p as usize] != 42 && TK[p as usize] != 0 {
+                            EP = p
+                            compile_or_a64()                   // element value in x0
+                            p = EP
+                            if l_idx < l_alen {
+                                if l_esiz == 1 {
+                                    emit_image_addr_reg_a64(9, l_base + l_idx)
+                                    em32(0x39000120)           // strb w0, [x9]
+                                } else {
+                                    emit_store_x0_to_abs_qword_a64(l_base + l_idx * l_esiz)
+                                }
+                            }
+                            l_idx = l_idx + 1
+                            if p < TC && TK[p as usize] == 28 { p = p + 1 }   // skip ,
+                        }
+                        if p < TC && TK[p as usize] == 42 { p = p + 1 }      // skip ]
+                        continue
+                    }
+                    // Array repeat initializer: [V; N]
                     if gi_arr >= 0 {
                         p = p + 1                              // skip [
                         EP = p
@@ -8829,8 +9136,11 @@ fn emit_print_int() with Mut {
     // lea rsi, [rcx+1]; mov rdx, rsp+32-rsi; write(1, rsi, rdx); add rsp, 32
     em(0x48); em(0x83); em(0xec); em(32)  // sub rsp, 32
     em(0x48); em(0x8d); em(0x4c); em(0x24); em(31)  // lea rcx, [rsp+31]
-    em(0xc6); em(0x01); em(10)  // mov byte [rcx], '\n'
-    em(0x48); em(0xff); em(0xc9)  // dec rcx
+    // No baked-in '\n'. It used to be written here, which made print(x) and
+    // print_int(x) emit a newline nobody asked for and made println(x) correct
+    // only by accident. println now appends it explicitly. Same buffer shape as
+    // emit_print_u64_no_nl_x86 below: digits start at [rsp+31], end stays
+    // rsp+32, so the length math is unchanged. (#1573)
     // Handle negative: if rax < 0, negate, set r8=1
     em(0x4d); em(0x31); em(0xc0)  // xor r8, r8
     em(0x48); em(0x85); em(0xc0)  // test rax, rax
@@ -11014,7 +11324,40 @@ fn seq_materialize_push_value_x86(seq_hash: i64) with Mut, Panic, Div {
     }
 }
 
+// E043: Rust macro syntax -- `ident!(...)` and `path::ident!(...)`.
+//
+// Mirrors the Madaros rule in self-hosted/parser/exprs.sio, deliberately down to
+// the boundary test: `!` must touch BOTH the identifier before it and the `(`
+// after it. Whitespace on either side keeps the existing operator expression
+// valid, so `x! (y)`, `x !(y)` and `x ! (y)` all still parse and run.
+//
+// Why it exists here as well as in Madaros: a language-level grammar rule must
+// not carry a different diagnostic identity depending on which frontend saw it.
+// Before this, the same source was refused by both engines but as E043 under
+// Madaros and E200 (undefined identifier) under lean_single -- which is why
+// tests/compile-fail/parser_rust_macro.sio sat on the vacuous-expect baseline:
+// the suite runs lean_single, so the fixture could never see the message it pins.
+//
+// Token kinds: 3 = ident, 51 = `::`, 32 = `!`, 6 = `(`.
+// TE[i] == TS[i+1] means token i and i+1 are lexically adjacent (no whitespace).
+fn tc_reject_rust_macro_at(p0: i64) -> bool with IO, Mut, Panic {
+    if TK[p0 as usize] != 3 { return false }
+    var q = p0
+    while TK[(q + 1) as usize] == 51 && TK[(q + 2) as usize] == 3 { q = q + 2 }
+    if TK[(q + 1) as usize] != 32 { return false }
+    if TK[(q + 2) as usize] != 6 { return false }
+    if TE[q as usize] != TS[(q + 1) as usize] { return false }
+    if TE[(q + 1) as usize] != TS[(q + 2) as usize] { return false }
+    print("error[E043]: Sounio does not use Rust macros (`ident!(...)`) at line ")
+    print_int(TL[(q + 1) as usize])
+    print("\n")
+    print("  help: use a regular function call instead of macro syntax\n")
+    tc_mark_failed()
+    return true
+}
+
 fn compile_primary() with IO, Mut, Panic, Div {
+    if tc_reject_rust_macro_at(EP) { }
     LAST_EXPR_IS_CLOSURE = 0
     LAST_EXPR_IS_LINEAR = 0
     LAST_EXPR_IS_AFFINE = 0
@@ -12649,11 +12992,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     // (issue #633).
                     if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
                         emit_print_f64()
+                        emit_print_nl()
                     } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
                         emit_print_cstr()
                         emit_print_nl()
                     } else {
                         emit_print_int()
+                        emit_print_nl()
                     }
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -13995,7 +14340,8 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 return
             }
             // β⁷ Tier 3: two-arg pow(x,y) = exp(y*ln(x)) with full Hessian propagation
-            if src_match(ns, ne - ns, "pow") {
+            let extern_c_math_stub = extern_stub_matches_src(ns, ne)
+            if (ident_fi < 0 || extern_c_math_stub == 1) && src_match(ns, ne - ns, "pow") {
                 EP = EP + 1
                 compile_or()
                 let pw_x_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var(pw_x_slot)
@@ -14144,7 +14490,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_PARAM_USED = pw_x_param_used | pw_y_param_used
                 return
             }
-            if src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") || src_match(ns, ne - ns, "tan") || src_match(ns, ne - ns, "atan") || src_match(ns, ne - ns, "tanh") || src_match(ns, ne - ns, "asin") || src_match(ns, ne - ns, "acos") {
+            if (ident_fi < 0 || extern_c_math_stub == 1) && (src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") || src_match(ns, ne - ns, "tan") || src_match(ns, ne - ns, "atan") || src_match(ns, ne - ns, "tanh") || src_match(ns, ne - ns, "asin") || src_match(ns, ne - ns, "acos")) {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 1, 0)
@@ -15639,11 +15985,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         return
                     }
                     // True undefined variable: not local, not global, not fn, not const
-                    print("E200 `")
+                    // #1634: was `E200 \`x\` at line N` -- no `error:` prefix, so
+                    // grep '^error' missed it, and a bare bundle line number with
+                    // no file to resolve it against.
+                    print("error[E200]: undefined identifier `")
                     var e200_i: i64 = ns
                     while e200_i < ne { print_char(SRC[e200_i as usize] as i64); e200_i = e200_i + 1 }
-                    print("` at line ")
-                    print_int(TL[name_tok as usize])
+                    print("` at ")
+                    print_src_loc_for_tok(name_tok)
                     print("\n")
                     tc_mark_failed()
                     em(0x31); em(0xc0)
@@ -15801,7 +16150,21 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 let elem_hash = arr_hash_elem_hash(inner_hash)
                 LAST_ALEN = arr_hash_alen(inner_hash)
                 if esiz == 8 {
-                    em(0x48); em(0x8d); em(0x04); em(0xd1)  // lea rax, [rcx + rdx*8]
+                    // #1678: array elements of AGGREGATE type are stored
+                    // pointer-per-slot, not inline -- see the store-path comments
+                    // in this file. The value path already LOADS the element
+                    // pointer here; this borrow path handed back the address of
+                    // the pointer CELL, so the callee read the pointer bits as the
+                    // first field. One opcode: 0x8b, not 0x8d.
+                    //
+                    // This is the unfinished half of #740, which corrected the
+                    // TYPE of &!module.functions[i] -- ref rather than value --
+                    // and left the address arithmetic alone.
+                    if (elem_ty == 6 || elem_ty == 7 || elem_ty == 8) && elem_hash != 0 {
+                        em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8] (element ptr)
+                    } else {
+                        em(0x48); em(0x8d); em(0x04); em(0xd1)  // lea rax, [rcx + rdx*8]
+                    }
                 } else {
                     em(0x48); em(0x8d); em(0x04); em(0x11)  // lea rax, [rcx + rdx] (esiz=1)
                 }
@@ -16708,6 +17071,23 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 base_data_ty = ref_hash_inner_ty(base_hash)
                 base_data_hash = ref_hash_inner_hash(base_hash)
             }
+            // `Box<T>` (TY 11) is the same unwrap as `&T` above and was simply
+            // never added. Without it type_is_struct_like answered false, the
+            // typed path below was skipped, and `x.boxed.field` fell through to
+            // the scan that walks EVERY struct looking for that field NAME and
+            // takes the first hit. Measured on a witness whose decoy struct
+            // declares the same name one slot over: `.a` gave 10 (right, by
+            // luck -- only one struct spells it), `.b` gave 30 where 20 was
+            // declared, `.c` gave 30 (right again, by luck).
+            //
+            // No extra dereference is emitted, deliberately: a Box already holds
+            // the payload address, which is exactly why the scan could read the
+            // right WORD through the wrong STRUCT. Only the layout used to turn a
+            // field name into an offset changes.
+            if base_ty == 11 && box_hash_is(base_hash) {
+                base_data_ty = ref_hash_inner_ty(base_hash)
+                base_data_hash = ref_hash_inner_hash(base_hash)
+            }
             EP = EP + 1
             var found: i64 = 0
             EXPR_TY = 0
@@ -17186,7 +17566,11 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
                 if al_mul_is_associative(left_hash) == false {
                     if left_sshadow >= 0 || EXPR_SSHADOW >= 0 || EXPR_HSHADOW_00 >= 0 || left_hsh_00 >= 0 {
                         if al_reassoc_mode(left_hash) != 2 {
-                            print("error: Hessian AD over a non-associative algebra — `reassociate: fano_selective` required (formal/NonAssocHessian.lean) at line ")
+                            // Split: the combined literal is 130 bytes (128 characters —
+                            // the em dash is three bytes in UTF-8) and Madaros truncates a
+                            // print at 128, silently. Tag and text each stay under it.
+                            print("error[E212]: ")
+                            print("Hessian AD over a non-associative algebra — `reassociate: fano_selective` required (formal/NonAssocHessian.lean) at line ")
                             print_int(TL[op_tok as usize])
                             print("\n")
                             tc_mark_failed()
@@ -20087,7 +20471,7 @@ fn tuple_bind_pattern_x86(pp0: i64, rp0: i64) with IO, Mut, Panic, Div {
             if TK[qr as usize] == 28 && dpth == 0 { rc = rc + 1 }
             qr = qr + 1
         }
-        print("error: tuple destructure arity mismatch: has ")
+        print("error[E213]: tuple destructure arity mismatch: has ")
         print_int(pc)
         print(" elements but type has ")
         print_int(rc)
@@ -22312,6 +22696,331 @@ fn compile_deref_field_field_array_store_x86() with IO, Mut, Panic, Div {
     }
 }
 
+// (*name)<chain>.field = expr where <chain> crosses at least one index — see
+// stmt_is_deref_indexed_elem_field_store. Walks the lvalue chain, materialising a real
+// element ADDRESS instead of a value-copy:
+//   `. field`  → inline: accumulate the field's byte offset
+//   `[ idx ]`  → aggregate elements are pointer-per-slot, so LOAD [base + idx*8]
+// and stores the RHS at the final address + accumulated offset. Because it returns before
+// the expression-statement fall-through, the statement is also correctly typed as a unit
+// (LAST_STMT_HAS_VALUE stays 0), which is what makes it legal as a tail-if arm.
+fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
+    // Serves BOTH root spellings, which differ only in where the name sits and how many
+    // tokens precede the chain: `(*name)<chain>` and the auto-deref `name<chain>`. The
+    // pointee is loaded identically for both, so the chain walk below is shared verbatim.
+    var name_tok = EP
+    var chain_start = EP + 1
+    var root_inner: i64 = 0   // 1 = `(*name.field…)` root: deref of a pointer FIELD
+    if TK[EP as usize] == 6 {
+        name_tok = EP + 2
+        chain_start = EP + 4
+        if TK[(EP + 3) as usize] == 50 {
+            root_inner = 1
+            var rp = EP + 3
+            while rp < TC && TK[rp as usize] == 50 && TK[(rp + 1) as usize] == 3 {
+                rp = rp + 2
+            }
+            chain_start = rp + 1  // past the `)`
+        }
+    }
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    // Locate the terminating `=` up front (same scan the predicate ran) so every
+    // diagnostic path can consume the whole statement instead of leaving a token tail
+    // for the statement loop to re-parse as an expression (which produced a spurious
+    // second "unknown identifier" cascade).
+    var eq_pos = chain_start
+    while eq_pos < TC && TK[eq_pos as usize] != 16 {
+        if TK[eq_pos as usize] == 41 {
+            var sdepth: i64 = 1
+            eq_pos = eq_pos + 1
+            while eq_pos < TC && sdepth > 0 {
+                if TK[eq_pos as usize] == 41 { sdepth = sdepth + 1 }
+                if TK[eq_pos as usize] == 42 { sdepth = sdepth - 1 }
+                eq_pos = eq_pos + 1
+            }
+        } else {
+            eq_pos = eq_pos + 1
+        }
+    }
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    // Structural failures below are HARD: before this handler existed these shapes
+    // reached the generic path, which rejected them outright ("value is not indexable",
+    // "unknown field access"). Reporting them as soft warnings would have turned those
+    // rejections into silent acceptances — a strictly worse trade than the false-reject
+    // this handler removes.
+    var failed: i64 = 0
+    let lslot = var_find(ns, ne)
+    let lvi = var_find_idx(ns, ne)
+    // The root must be a resolvable LOCAL; whether it is pointer-like or a plain struct is
+    // decided just below (a value root is legal only for the auto-deref spelling). Requiring
+    // pointer-like HERE would false-reject every value-rooted chain the dispatch admits.
+    if lslot < 0 || lvi < 0 {
+        tc_error_hard(name_tok, "field access through deref requires ref or pointer binding")
+        EP = eq_pos + 1
+        compile_or()
+        return
+    }
+    // Base address: emit_load_var(lslot) below, identical to the read path for BOTH a
+    // pointer-like root (slot holds the pointee address) and a plain struct root (slot holds
+    // the pointer to the struct's inline slots). Only the TYPE derivation differs.
+    var cur_ty = VAR_TY[lvi as usize]
+    var cur_hash = VAR_TY_HASH[lvi as usize]
+    if type_is_pointer_like(cur_ty, cur_hash) {
+        cur_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+        cur_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+    } else {
+        // The `(*name)` spelling asserts a pointer. A value root reaching it is the
+        // pre-existing type error and must stay a hard reject; only the auto-deref spelling
+        // may be value-rooted (gated by ident_chain_root_supported at the dispatch).
+        // `(*name.field)` is exempt: there the `*` applies to the FIELD, not to the root, so
+        // a value-struct root is perfectly legal.
+        if TK[EP as usize] == 6 && root_inner == 0 {
+            tc_error_hard(name_tok, "field access through deref requires ref or pointer binding")
+            EP = eq_pos + 1
+            compile_or()
+            return
+        }
+    }
+    // A struct root/pointee starts the chain at `.field`; an ARRAY pointee (&![T; N]) starts
+    // it at `[idx]` — `(*arrptr)[i].f = v`. Both are accepted here and discriminated by the
+    // chain walk itself (the `.field` step demands a struct, the `[idx]` step an array), so
+    // the array-rooted form is lowered correctly instead of being rejected for not being a
+    // struct: it is another shape that previously reached the generic path and was lost.
+    if cur_ty != 6 && cur_ty != 8 {
+        tc_error_hard(name_tok, "field access through pointer/ref requires struct or array pointee")
+        EP = eq_pos + 1
+        compile_or()
+        return
+    }
+    EP = chain_start  // past `( * name … )` or past the bare `name`
+    emit_load_var(lslot)  // rax = base pointer
+    var pending_off: i64 = 0
+    // `(*name.field…)` root: walk the INNER field chain inside the parens, accumulating inline
+    // offsets, then LOAD the pointer stored in the final inner field. That load is the deref
+    // the `(* )` spells, and it is what no existing predicate was willing to emit.
+    if root_inner == 1 {
+        var ip = name_tok + 1
+        var inner_off: i64 = 0
+        var inner_bad: i64 = 0
+        while inner_bad == 0 && TK[ip as usize] == 50 {
+            let itok = ip + 1
+            if cur_ty != 6 {
+                tc_error_hard(itok, "field access requires struct value")
+                inner_bad = 1
+                continue
+            }
+            let isi = st_find(cur_hash)
+            if isi < 0 {
+                tc_error_hard(itok, "unknown field access")
+                inner_bad = 1
+                continue
+            }
+            if st_private_access_denied(isi, itok) {
+                tc_error_hard(itok, "private struct field access")
+                inner_bad = 1
+                continue
+            }
+            let ifh = gl_name_hash(TS[itok as usize], TE[itok as usize])
+            ST_QUERY_NS = TS[itok as usize]
+            ST_QUERY_NE = TE[itok as usize]
+            let ioff = st_field_offset(isi, ifh)
+            let ifty = st_field_ty(isi, ifh)
+            let ifhash = st_field_hash(isi, ifh)
+            ST_QUERY_NS = -1
+            ST_QUERY_NE = -1
+            if ioff < 0 {
+                tc_error_hard(itok, "unknown field access")
+                inner_bad = 1
+                continue
+            }
+            inner_off = inner_off + ioff
+            cur_ty = ifty
+            cur_hash = ifhash
+            ip = ip + 2
+        }
+        if inner_bad == 1 {
+            EP = eq_pos + 1
+            compile_or()
+            return
+        }
+        if type_is_pointer_like(cur_ty, cur_hash) == false {
+            tc_error_hard(name_tok, "deref of a struct field requires a pointer-typed field")
+            EP = eq_pos + 1
+            compile_or()
+            return
+        }
+        if inner_off != 0 { em(0x48); em(0x8d); em(0x80); em32(inner_off) }  // lea rax,[rax+off]
+        em(0x48); em(0x8b); em(0x00)  // mov rax,[rax] — the pointer held in the field
+        cur_ty = ptr_hash_inner_ty(cur_hash)
+        cur_hash = ptr_hash_inner_hash(cur_hash)
+        if cur_ty != 6 && cur_ty != 8 {
+            tc_error_hard(name_tok, "field access through pointer/ref requires struct or array pointee")
+            EP = eq_pos + 1
+            compile_or()
+            return
+        }
+    }
+    var target_ty: i64 = 0
+    var target_hash: i64 = 0
+    var done: i64 = 0
+    while done == 0 {
+        if TK[EP as usize] == 50 {
+            let ftok = EP + 1
+            let fh = gl_name_hash(TS[ftok as usize], TE[ftok as usize])
+            if cur_ty != 6 {
+                tc_error_hard(ftok, "field access requires struct value")
+                failed = 1
+                done = 1
+                continue
+            }
+            let si = st_find(cur_hash)
+            if si < 0 {
+                tc_error_hard(ftok, "unknown field access")
+                failed = 1
+                done = 1
+                continue
+            }
+            if st_private_access_denied(si, ftok) {
+                tc_error_hard(ftok, "private struct field access")
+                failed = 1
+                done = 1
+                continue
+            }
+            ST_QUERY_NS = TS[ftok as usize]
+            ST_QUERY_NE = TE[ftok as usize]
+            let foff = st_field_offset(si, fh)
+            let fty = st_field_ty(si, fh)
+            let fhash = st_field_hash(si, fh)
+            ST_QUERY_NS = -1
+            ST_QUERY_NE = -1
+            if foff < 0 {
+                tc_error_hard(ftok, "unknown field access")
+                failed = 1
+                done = 1
+                continue
+            }
+            pending_off = pending_off + foff
+            cur_ty = fty
+            cur_hash = fhash
+            EP = EP + 2
+            if TK[EP as usize] == 16 {
+                target_ty = fty
+                target_hash = fhash
+                done = 1
+            }
+            continue
+        }
+        if TK[EP as usize] == 41 {
+            if cur_ty != 8 {
+                tc_error_hard(EP, "indexed store requires array field")
+                failed = 1
+                done = 1
+                continue
+            }
+            // Is this the TERMINAL step, i.e. `… [ idx ] = expr`? Then the store target is
+            // the array ELEMENT itself rather than a field of it, which needs the aggregate
+            // store form (elements are pointer-per-slot, so an aggregate RHS is copied into
+            // fresh element storage and the POINTER is written into the slot;
+            // materialize_aggregate_array_element_x86 no-ops for scalar elements and leaves
+            // the value in rax, so one path serves both).
+            var term_p = EP + 1
+            var term_depth: i64 = 1
+            while term_p < TC && term_depth > 0 {
+                if TK[term_p as usize] == 41 { term_depth = term_depth + 1 }
+                if TK[term_p as usize] == 42 { term_depth = term_depth - 1 }
+                term_p = term_p + 1
+            }
+            if TK[term_p as usize] == 16 {
+                let esiz_t = arr_hash_esiz(cur_hash)
+                let elem_ty_t = arr_hash_elem_ty(cur_hash)
+                let elem_hash_t = arr_hash_elem_hash(cur_hash)
+                if pending_off != 0 { em(0x48); em(0x8d); em(0x80); em32(pending_off) }
+                let arr_slot = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(arr_slot)  // save the array base address
+                EP = EP + 1               // skip [
+                compile_or()              // index in rax
+                if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // 'as usize'
+                if TK[EP as usize] == 42 { EP = EP + 1 }  // ]
+                if TK[EP as usize] == 16 { EP = EP + 1 }  // =
+                em(0x50)                  // push index
+                compile_or()              // rhs in rax
+                let rhs_ty_t = EXPR_TY
+                let rhs_hash_t = EXPR_TY_HASH
+                if ty_eq(elem_ty_t, elem_hash_t, rhs_ty_t, rhs_hash_t) == false {
+                    tc_error(EP - 1, "assignment type mismatch")
+                }
+                materialize_aggregate_array_element_x86(cur_hash)
+                em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value or fresh element ptr)
+                em(0x59)                      // pop rcx (index)
+                emit_load_var(arr_slot)       // rax = array base
+                if esiz_t == 8 {
+                    em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+                } else {
+                    em(0x88); em(0x14); em(0x08)            // mov [rax + rcx], dl
+                }
+                return
+            }
+            if arr_hash_esiz(cur_hash) != 8 {
+                tc_error_hard(EP, "indexed element field store requires 8-byte array elements")
+                failed = 1
+                done = 1
+                continue
+            }
+            let elem_ty = arr_hash_elem_ty(cur_hash)
+            let elem_hash = arr_hash_elem_hash(cur_hash)
+            if elem_ty != 6 && elem_ty != 8 {
+                tc_error_hard(EP, "indexed element field store requires aggregate elements")
+                failed = 1
+                done = 1
+                continue
+            }
+            if pending_off != 0 { em(0x48); em(0x8d); em(0x80); em32(pending_off) }  // lea rax,[rax+off]
+            pending_off = 0
+            em(0x50)      // push array base
+            EP = EP + 1   // skip [
+            compile_or()  // index in rax
+            if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // 'as usize'
+            if TK[EP as usize] == 42 { EP = EP + 1 }  // ]
+            em(0x48); em(0x89); em(0xc2)            // mov rdx, rax (index)
+            em(0x59)                                // pop rcx (array base)
+            em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8] (element ptr)
+            cur_ty = elem_ty
+            cur_hash = elem_hash
+            continue
+        }
+        tc_error_hard(EP, "unsupported assignment target")
+        failed = 1
+        done = 1
+    }
+    if failed == 1 {
+        EP = eq_pos + 1
+        compile_or()
+        return
+    }
+    // rax = pointer to the object that owns the final field.
+    let addr_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var(addr_slot)
+    if TK[EP as usize] == 16 { EP = EP + 1 }  // skip =
+    compile_or()  // rhs in rax
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    // Severity note: soft, matching every other deref-store handler in this file
+    // (compile_deref_field_field_store_x86 etc. all use tc_error here). Assignment-type
+    // mismatch being a warning is a PRE-EXISTING file-wide hole, not one this handler
+    // introduces — `(*p).f1.f2 = <wrong type>` warns identically. Tightening it belongs
+    // to a separate, measured change: this seed compiles the whole compiler bundle, so a
+    // new hard reject here risks false-rejecting valid code across all of main.sio.
+    if ty_eq(target_ty, target_hash, rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    emit_store_to_pointer_offset_x86(addr_slot, pending_off, target_ty, target_hash)
+}
+
 fn compile_stmt() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
     LAST_STMT_HAS_VALUE = 0
@@ -22768,7 +23477,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         }
                     }
                     if violated == 1 {
-                        print("error: refinement type violation — value ")
+                        print("error[E208]: refinement type violation — value ")
                         print_int(cv)
                         print(" does not satisfy predicate at line ")
                         print_int(TL[(EP - 1) as usize])
@@ -22817,7 +23526,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         }
                     }
                     if f64_viol9 == 1 {
-                        print("error: refinement type violation — f64 value violates let-binding predicate at line ")
+                        print("error[E209]: refinement type violation — f64 value violates let-binding predicate at line ")
                         print_int(TL[(EP - 1) as usize])
                         print("\n")
                         tc_mark_failed()
@@ -23474,6 +24183,38 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     }
     if stmt_is_deref_field_field_store(EP) {
         compile_deref_field_field_store_x86()
+        return
+    }
+
+    // (*name).arr[i].field = expr (and deeper: (*name).arr[i].arr2[j].field = expr) —
+    // a field of an INDEXED element. Must be dispatched AFTER the shapes above (all of
+    // which end in `]` or carry no index, so the predicate is disjoint) and BEFORE the
+    // expression-statement fall-through, which silently wrote into a discarded value-copy
+    // of the element AND typed the assignment as a value.
+    if stmt_is_deref_indexed_elem_field_store(EP) {
+        compile_deref_indexed_elem_field_store_x86()
+        return
+    }
+
+    // name.arr[i].field = expr — the auto-deref twin of the shape above, for a ref/param root
+    // OR a plain struct root (both keep their base address in the slot; see
+    // ident_chain_root_supported, which also makes globals and non-aggregate roots fall
+    // through untouched instead of being hard-rejected). Dispatched at this point (not
+    // earlier) so every narrow ident-root handler above keeps its shapes — those cover one
+    // field hop before the index; this catches the deeper chains they miss.
+    if stmt_is_ident_indexed_elem_field_store(EP) {
+        if ident_chain_root_supported(EP) {
+            compile_deref_indexed_elem_field_store_x86()
+            return
+        }
+    }
+
+    // (*name.field)<chain> = expr — root is a deref of a pointer held in a struct field.
+    // Disjoint from every predicate above by construction (they all require `)` right after
+    // the simple name, or a parenthesised inner base), so no dispatch ordering hazard: this
+    // accepts the full chain grammar because nothing else ever accepted this root at all.
+    if stmt_is_deref_inner_root_store(EP) {
+        compile_deref_indexed_elem_field_store_x86()
         return
     }
 
@@ -24335,8 +25076,10 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // β⁹ GTT week-7: capture scrutinee channel topology before any arm body
         // compilation can overwrite EXPR_CH_SET.  Mirror of week-6 `if_cond_ch_set`.
         let match_scrut_ch_set = EXPR_CH_SET
-        MATCH_SCRUT_TY = EXPR_TY
-        MATCH_SCRUT_HASH = EXPR_TY_HASH
+        let match_scrut_ty = EXPR_TY
+        let match_scrut_hash = EXPR_TY_HASH
+        MATCH_SCRUT_TY = match_scrut_ty
+        MATCH_SCRUT_HASH = match_scrut_hash
         // Observation boundary: pattern-matching on an Unobserved<T> collapses uncertainty
         if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
             tc_observe_boundary(EP - 1, "cannot pattern-match on Unobserved<T> — requires `with Observe`")
@@ -24571,9 +25314,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         emit_store_var(obslot)
                         if VAR_COUNT > 0 {
                             let obvi = VAR_COUNT - 1
-                            if type_is_option_inline(MATCH_SCRUT_TY, MATCH_SCRUT_HASH) && option_hash_is(MATCH_SCRUT_HASH) {
-                                VAR_TY[obvi as usize] = option_hash_inner_ty(MATCH_SCRUT_HASH)
-                                VAR_TY_HASH[obvi as usize] = option_hash_inner_hash(MATCH_SCRUT_HASH)
+                            if type_is_option_inline(match_scrut_ty, match_scrut_hash) && option_hash_is(match_scrut_hash) {
+                                VAR_TY[obvi as usize] = option_hash_inner_ty(match_scrut_hash)
+                                VAR_TY_HASH[obvi as usize] = option_hash_inner_hash(match_scrut_hash)
                             }
                             // β⁹ GTT week-7 follow-up: OR-pattern inner-value bound
                             // var inherits scrutinee's channel topology (same rule
@@ -24618,14 +25361,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             // the single-pattern path at the tagged emission below loads [scrut]→tag). Emit a
             // tag test per tagged element, ALL jumping to the shared skip; bind payloads; body.
             if is_tuple_pattern == 1 {
-                var tup_first_slots: i64 = (MATCH_SCRUT_HASH % 1000000) / 1000
+                var tup_first_slots: i64 = (match_scrut_hash % 1000000) / 1000
                 if tup_first_slots < 1 { tup_first_slots = 1 }
                 let elem1_off = tup_first_slots * 8
                 // Element Option types (for typing the payload bindings — without this the
                 // bound var is untyped and `*ia` in the arm body miscompiles).
                 var tup_e0_hash: i64 = 0
                 var tup_e1_hash: i64 = 0
-                let tmci = tup_cache_lookup(MATCH_SCRUT_HASH)
+                let tmci = tup_cache_lookup(match_scrut_hash)
                 if tmci >= 0 {
                     tup_e0_hash = TUP_CACHE_FIRST_HASH[tmci as usize]
                     tup_e1_hash = TUP_CACHE_LAST_HASH[tmci as usize]
@@ -24698,8 +25441,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                     // Propagate scrutinee type to bound variable
                     if VAR_COUNT > 0 {
                         let vbi = VAR_COUNT - 1
-                        VAR_TY[vbi as usize] = MATCH_SCRUT_TY
-                        VAR_TY_HASH[vbi as usize] = MATCH_SCRUT_HASH
+                        VAR_TY[vbi as usize] = match_scrut_ty
+                        VAR_TY_HASH[vbi as usize] = match_scrut_hash
                         // β⁹ GTT week-7 follow-up: bound var inherits scrutinee's
                         // channel topology.  Without this, arm bodies that reference
                         // the bound variable load VAR_CH_SET[bslot] = 0 (stale) and
@@ -24760,9 +25503,9 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                         // Propagate inner type from Option/Result scrutinee to bound variable
                         if bslot >= 0 && VAR_COUNT > 0 {
                             let bvi = VAR_COUNT - 1
-                            if type_is_option_inline(MATCH_SCRUT_TY, MATCH_SCRUT_HASH) && option_hash_is(MATCH_SCRUT_HASH) {
-                                VAR_TY[bvi as usize] = option_hash_inner_ty(MATCH_SCRUT_HASH)
-                                VAR_TY_HASH[bvi as usize] = option_hash_inner_hash(MATCH_SCRUT_HASH)
+                            if type_is_option_inline(match_scrut_ty, match_scrut_hash) && option_hash_is(match_scrut_hash) {
+                                VAR_TY[bvi as usize] = option_hash_inner_ty(match_scrut_hash)
+                                VAR_TY_HASH[bvi as usize] = option_hash_inner_hash(match_scrut_hash)
                             }
                             // β⁹ GTT week-7 follow-up: inner-value bound var inherits
                             // scrutinee's channel topology.  Upper-bound sound because
@@ -24874,7 +25617,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // so CD[CL-1] != 0xc3 and the epilogue is emitted. Harmless for value-matches (value in
         // rax) and for all-returning matches (unreachable merge = dead nop).
         em(0x90)
-        if MATCH_SCRUT_TY == 7 && match_arms < 1000000 && match_arms < en_variant_count(MATCH_SCRUT_HASH) {
+        if match_scrut_ty == 7 && match_arms < 1000000 && match_arms < en_variant_count(match_scrut_hash) {
             tc_error_hard(EP - 1, "match must be exhaustive")
             LAST_STMT_HAS_VALUE = 0
             LAST_STMT_TY = 0
@@ -25875,7 +26618,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                     var call_conf: i64 = ety_conf_product(arg_conf, FN_EFF_CONF[call_fi as usize])
                     var call_cmin: i64 = FN_EPISTEMIC_MIN[call_fi as usize]
                     if call_cmin > 0 && call_conf > 0 && call_conf < call_cmin {
-                        print("error: confidence gate violation at line ")
+                        print("error[E214]: confidence gate violation at line ")
                         print_int(TL[p as usize])
                         print(": args confidence ")
                         print_int(call_conf)
@@ -26475,7 +27218,7 @@ fn epistemic_infer_pass() with IO, Mut, Panic, Div {
                             let ec_min: i64 = FN_EPISTEMIC_MIN[ec_fi as usize]
                             if ec_conf > 0 && ec_conf < ec_min {
                                 EPIST_EFFECT_VIOLATIONS = EPIST_EFFECT_VIOLATIONS + 1
-                                print("error: EpistemicComplete violation in fn ")
+                                print("error[E215]: EpistemicComplete violation in fn ")
                                 var ec_np: i64 = FN_NS[ec_fi as usize]
                                 while ec_np < FN_NE[ec_fi as usize] {
                                     print_char(SRC[ec_np as usize] as i64)
@@ -27950,7 +28693,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             }
             if saw_hypo == 0 {
                 tc_mark_failed()
-                print("error: study block requires at least one hypothesis at line ")
+                print("error[E211]: study block requires at least one hypothesis at line ")
                 print_int(TL[study_tok as usize])
                 print("\n")
             }
@@ -28159,7 +28902,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         var rec_fi: i64 = 0
         while rec_fi < rec_fields {
             if ST_FTY[(rec_si * 128 + rec_fi) as usize] == 6 && ST_FHASH[(rec_si * 128 + rec_fi) as usize] == rec_hash {
-                print("error: infinite recursive type\n")
+                print("error[E216]: infinite recursive type\n")
                 tc_mark_failed()
                 rec_fi = rec_fields
             } else {
@@ -28223,10 +28966,44 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     p = 0
     // Pass 0b: register global variables
     var depth: i64 = 0
+    var open_tok: i64 = 0       // the `{` that took depth 0 -> 1 in this module
+    var reported: i64 = 0       // at most one brace diagnostic per module
     while p < TC {
         let tk = TK[p as usize]
-        if tk == 8 { depth = depth + 1; p = p + 1; continue }
-        if tk == 9 { depth = depth - 1; p = p + 1; continue }
+        if tk == 8 {
+            if depth == 0 { open_tok = p }
+            depth = depth + 1
+            p = p + 1
+            continue
+        }
+        if tk == 9 {
+            // Clamped, matching Pass 0a. Unclamped, one stray `}` pins depth
+            // negative for the whole remaining token stream, and every later
+            // function-body `var` is treated as a global (#1634). Clamping
+            // alone would make the stray `}` invisible, so it is reported here
+            // -- at the offending token, which is the useful place.
+            if depth > 0 {
+                depth = depth - 1
+            } else {
+                if reported == 0 { tc_unbalanced_braces(p, 0 - 1)  reported = 1 }
+            }
+            p = p + 1
+            continue
+        }
+        // File boundary (TK==77). Modules are independently balanced, so depth
+        // must not carry across one. Pass 0a already resets here; these three
+        // scanners did not, which is what let one file's imbalance poison the
+        // rest of the bundle -- and made the three disagree about which `var`s
+        // are global, between registration and initializer emission.
+        if tk == 77 {
+            if depth > 0 {
+                if reported == 0 { tc_unbalanced_braces(open_tok, depth) }
+            }
+            depth = 0
+            reported = 0
+            p = p + 1
+            continue
+        }
         if depth > 0 { p = p + 1; continue }
         // Top-level var
         if tk == 12 {
@@ -28280,11 +29057,27 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     p = SCAN_TY_NEXT
                 }
             }
-            // Skip = initializer until next var or fn or EOF
-            while p < TC && TK[p as usize] != 12 && TK[p as usize] != 1 && TK[p as usize] != 0 { p = p + 1 }
+            // Skip = initializer until next var or fn or file boundary or EOF. This
+            // walks past arbitrary tokens INCLUDING braces, so it has to carry the
+            // depth with it -- otherwise a top-level `var` followed by an
+            // `impl Foo { ... }` swallows the opening brace and stops at the `fn`
+            // inside the impl with depth still 0 (#1634).
+            while p < TC && TK[p as usize] != 12 && TK[p as usize] != 1 && TK[p as usize] != 0 && TK[p as usize] != 77 {
+                if TK[p as usize] == 8 { depth = depth + 1 }
+                if TK[p as usize] == 9 {
+                    if depth > 0 { depth = depth - 1 }
+                }
+                p = p + 1
+            }
             continue
         }
         p = p + 1
+    }
+    // The last module has no trailing boundary marker. Report at the unmatched
+    // `{` rather than at the end of the stream: the tail of the bundle is the
+    // appended native prelude, whose line numbers mean nothing to the author.
+    if depth > 0 {
+        if reported == 0 { tc_unbalanced_braces(open_tok, depth) }
     }
     p = 0
 
@@ -29070,7 +29863,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // -1 sentinel: bodyless declaration (e.g. fn inside effect block) — skip silently
         if body_open < 0 { fn_idx = fn_idx + 1; continue }
         if p <= 0 || p >= TC || body_open == 0 || body_close <= body_open || body_close > TC {
-            print("error: invalid function body span for fn#")
+            print("error[E217]: invalid function body span for fn#")
             print_int(fn_idx)
             print(" ")
             print_fn_name(fn_idx)
@@ -29118,6 +29911,21 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         LAST_STMT_TY_HASH = 0
         CURRENT_SRET_SLOT = 0
         if ret_agg_nslots(CURRENT_RET_TY, CURRENT_RET_HASH) > 0 {
+            // Slot 1 belongs to the `push r12` the SRET prologue emits.
+            //
+            // The prologue is `push rbp; mov rbp,rsp; push r12; sub rsp,frame`,
+            // so the saved r12 lives at rbp-0x08 -- which is slot 1, exactly
+            // where emit_store_incoming_arg_x86(0, CURRENT_SRET_SLOT) then wrote
+            // the incoming SRET pointer. `pop r12` in the epilogue restored that
+            // pointer instead of the CALLER's r12, so a function returning an
+            // aggregate destroyed its caller's SRET destination.
+            //
+            // The caller then wrote its own result through a pointer into the
+            // callee's dead frame, and the next call reused those bytes: two
+            // `let z = outer(..)` bindings both read the second call's values.
+            // Confirmed under gdb -- r12 intact at the callee's entry, holding
+            // the callee's own SRET at its `ret`.
+            NEXT_SLOT = NEXT_SLOT + 1
             CURRENT_SRET_SLOT = NEXT_SLOT
             NEXT_SLOT = NEXT_SLOT + 1
         }
@@ -29412,7 +30220,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                             if type_has_knowledge(CURRENT_RET_TY, CURRENT_RET_HASH) || type_has_knowledge(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                                 tc_epistemic_boundary(EP)
                             } else {
-                                print("error: tail type mismatch at ")
+                                print("error[E218]: tail type mismatch at ")
                                 print_src_loc_for_tok(EP - 1)
                                 print(" (bundle line ")
                                 print_int(TL[(EP - 1) as usize])
@@ -29518,7 +30326,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if fi >= 0 && fi < FN_COUNT && off >= 0 && off + 3 < CL {
             let target = FN_OFF[fi as usize]
             if target == -1 {
-                print("error: unresolved function body for call target fn#")
+                print("error[E220]: unresolved function body for call target fn#")
                 print_int(fi)
                 print(" ")
                 print_fn_name(fi)
@@ -29545,7 +30353,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         if main_fn < 0 && me - ms == 4 && sb(ms) == 109 && sb(ms+1) == 97 && sb(ms+2) == 105 && sb(ms+3) == 110 { main_fn = mi }
         mi = mi + 1
     }
-    if main_fn < 0 { print("error: no main\n"); return 1 }
+    if main_fn < 0 { print("error[E221]: no main\n"); return 1 }
 
     // Trampoline: save argc/argv, call main, exit
     TRAMP_OFF = CL
@@ -29627,7 +30435,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         em(0x0f); em(0x05)
     }
 
-    if CD_OVF != 0 { print("error: code buffer overflow at fn="); print_int(CD_OVF_FN); print(" name="); print_fn_name(CD_OVF_FN); print(" CL="); print_int(CD_OVF_CL); print(" total_fns="); print_int(FN_COUNT); print("\n"); return 1 }
+    if CD_OVF != 0 { print("error[E222]: code buffer overflow at fn="); print_int(CD_OVF_FN); print(" name="); print_fn_name(CD_OVF_FN); print(" CL="); print_int(CD_OVF_CL); print(" total_fns="); print_int(FN_COUNT); print("\n"); return 1 }
     print("compile: fns="); print_int(FN_COUNT); print(" code="); print_int(CL)
     print(" main=fn"); print_int(main_fn); print(" patches="); print_int(PATCH_COUNT)
     print(" gates[direct="); print_int(EPIST_GATES_DIRECT)
@@ -30423,11 +31231,9 @@ fn emit_print_int_a64() with Mut {
     // x0 = value to print
     // sub sp, sp, #64 for scratch buffer
     em32(0xD1000000 | (64 << 10) | (31 << 5) | 31)  // sub sp, sp, #64
-    // store '\n' at sp+63
-    em32(0xD2800140 | 10)  // movz x10, #10
-    em32(0x39000000 | (63 << 10) | (31 << 5) | 10)  // strb w10, [sp, #63]
-    // x9 = sp + 62 (current write position)
-    em32(0x91000000 | (62 << 10) | (31 << 5) | 9)   // add x9, sp, #62
+    // No baked-in '\n' -- see the x86-64 twin. x9 starts at sp+63 and the
+    // length stays (sp+64) - x1, exactly as in emit_print_u64_no_nl_a64.
+    em32(0x91000000 | (63 << 10) | (31 << 5) | 9)   // add x9, sp, #63
     // x11 = 0 (negative flag)
     em32(0xD2800000 | 11)  // movz x11, #0
     // Check if negative: cmp x0, #0; b.ge skip_neg
@@ -32722,11 +33528,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     // reference for dispatch only (issue #633).
                     if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
                         emit_print_f64_a64()
+                        emit_print_nl_a64()
                     } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
                         emit_print_cstr_a64()
                         emit_print_nl_a64()
                     } else {
                         emit_print_int_a64()
+                        emit_print_nl_a64()
                     }
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -33330,7 +34138,8 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if TK[EP as usize] == 7 { EP = EP + 1 }
                 EXPR_IS_F64 = 0; EXPR_TY = 1; return
             }
-            if src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log") {
+            let extern_c_math_stub_a64 = extern_stub_matches_src(ns, ne)
+            if (ident_fi < 0 || extern_c_math_stub_a64 == 1) && (src_match(ns, ne - ns, "sqrt") || src_match(ns, ne - ns, "sin") || src_match(ns, ne - ns, "cos") || src_match(ns, ne - ns, "exp") || src_match(ns, ne - ns, "ln") || src_match(ns, ne - ns, "log")) {
                 EP = EP + 1
                 if TK[EP as usize] == 7 {
                     tc_wrong_arity(name_tok, 1, 0)
@@ -34521,6 +35330,23 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             var base_data_ty = base_ty
             var base_data_hash = base_hash
             if base_ty == 10 {
+                base_data_ty = ref_hash_inner_ty(base_hash)
+                base_data_hash = ref_hash_inner_hash(base_hash)
+            }
+            // `Box<T>` (TY 11) is the same unwrap as `&T` above and was simply
+            // never added. Without it type_is_struct_like answered false, the
+            // typed path below was skipped, and `x.boxed.field` fell through to
+            // the scan that walks EVERY struct looking for that field NAME and
+            // takes the first hit. Measured on a witness whose decoy struct
+            // declares the same name one slot over: `.a` gave 10 (right, by
+            // luck -- only one struct spells it), `.b` gave 30 where 20 was
+            // declared, `.c` gave 30 (right again, by luck).
+            //
+            // No extra dereference is emitted, deliberately: a Box already holds
+            // the payload address, which is exactly why the scan could read the
+            // right WORD through the wrong STRUCT. Only the layout used to turn a
+            // field name into an offset changes.
+            if base_ty == 11 && box_hash_is(base_hash) {
                 base_data_ty = ref_hash_inner_ty(base_hash)
                 base_data_hash = ref_hash_inner_hash(base_hash)
             }
@@ -36694,8 +37520,10 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         compile_or_a64()
         // β⁹ GTT week-7: capture scrutinee channel topology (a64 mirror of x86 :~16478).
         let match_scrut_ch_set_a = EXPR_CH_SET
-        MATCH_SCRUT_TY = EXPR_TY
-        MATCH_SCRUT_HASH = EXPR_TY_HASH
+        let match_scrut_ty_a = EXPR_TY
+        let match_scrut_hash_a = EXPR_TY_HASH
+        MATCH_SCRUT_TY = match_scrut_ty_a
+        MATCH_SCRUT_HASH = match_scrut_hash_a
         // Observation boundary: pattern-matching on an Unobserved<T> collapses uncertainty
         if ty_is_unobserved(EXPR_TY) && (FN_EFFECTS[CURRENT_FN as usize] & 64) == 0 {
             tc_observe_boundary(EP - 1, "cannot pattern-match on Unobserved<T> — requires `with Observe`")
@@ -36867,8 +37695,8 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                     emit_store_var_a64(vb_slot_a64)
                     if VAR_COUNT > 0 {
                         let vbi = VAR_COUNT - 1
-                        VAR_TY[vbi as usize] = MATCH_SCRUT_TY
-                        VAR_TY_HASH[vbi as usize] = MATCH_SCRUT_HASH
+                        VAR_TY[vbi as usize] = match_scrut_ty_a
+                        VAR_TY_HASH[vbi as usize] = match_scrut_hash_a
                         // β⁹ GTT week-7 follow-up (a64): bound var inherits scrutinee topology.
                         VAR_CH_SET[vbi as usize] = match_scrut_ch_set_a
                     }
@@ -36921,9 +37749,9 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                             // struct → spurious E001 type-mismatch at call sites.
                             if VAR_COUNT > 0 {
                                 let bvi = VAR_COUNT - 1
-                                if type_is_option_inline(MATCH_SCRUT_TY, MATCH_SCRUT_HASH) && option_hash_is(MATCH_SCRUT_HASH) {
-                                    VAR_TY[bvi as usize] = option_hash_inner_ty(MATCH_SCRUT_HASH)
-                                    VAR_TY_HASH[bvi as usize] = option_hash_inner_hash(MATCH_SCRUT_HASH)
+                                if type_is_option_inline(match_scrut_ty_a, match_scrut_hash_a) && option_hash_is(match_scrut_hash_a) {
+                                    VAR_TY[bvi as usize] = option_hash_inner_ty(match_scrut_hash_a)
+                                    VAR_TY_HASH[bvi as usize] = option_hash_inner_hash(match_scrut_hash_a)
                                 }
                                 // β⁹ GTT week-7 follow-up (a64): tagged inner bind inherits
                                 // scrutinee topology (mirror of x86 :~24336).
@@ -37028,7 +37856,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         // falling through to this merge after a `ret`-ending arm must not let the implicit-return
         // guard skip the epilogue; emit a nop so the last word != ret.
         em32(0xD503201F)  // nop
-        if MATCH_SCRUT_TY == 7 && match_arms < 1000000 && match_arms < en_variant_count(MATCH_SCRUT_HASH) {
+        if match_scrut_ty_a == 7 && match_arms < 1000000 && match_arms < en_variant_count(match_scrut_hash_a) {
             tc_error_hard(EP - 1, "match must be exhaustive")
             LAST_STMT_HAS_VALUE = 0
             LAST_STMT_TY = 0
@@ -37073,7 +37901,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         let body_close = FN_BODY_CLOSE[fn_idx as usize]
         if body_open < 0 { fn_idx = fn_idx + 1; continue }
         if p <= 0 || p >= TC || body_open == 0 || body_close <= body_open || body_close > TC {
-            print("error: invalid function body span for fn#")
+            print("error[E217]: invalid function body span for fn#")
             print_int(fn_idx)
             print(" ")
             print_fn_name(fn_idx)
@@ -37339,7 +38167,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         if fi >= 0 && fi < FN_COUNT && off >= 0 && off + 3 < CL {
             let target = FN_OFF[fi as usize]
             if target == -1 {
-                print("error: unresolved function body for call target fn#")
+                print("error[E220]: unresolved function body for call target fn#")
                 print_int(fi)
                 print(" ")
                 print_fn_name(fi)
@@ -37371,7 +38199,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         if main_fn < 0 && t > 0 && TE[t as usize] - TS[t as usize] == 4 && sb(TS[t as usize]) == 109 && sb(TS[t as usize]+1) == 97 && sb(TS[t as usize]+2) == 105 && sb(TS[t as usize]+3) == 110 { main_fn = mi }
         mi = mi + 1
     }
-    if main_fn < 0 { print("error: no main\n"); return 1 }
+    if main_fn < 0 { print("error[E221]: no main\n"); return 1 }
     // Trampoline
     TRAMP_OFF = CL
     if TARGET_OS == 2 {
@@ -37937,10 +38765,17 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("    var sign: f64 = 1.0\n")
     append_src_lit("    if t < 0.0 { t = 0.0 - t; sign = 0.0 - 1.0 }\n")
     append_src_lit("    var base: f64 = 0.0\n")
-    append_src_lit("    if t > 1.0 { t = 1.0 / t; base = pi2 }\n")
+    // `base > 0` was used as the proxy for \"the reciprocal branch fired\", and it
+    // is not one: the second reduction also raises base, to pi4. So atan(0.5) --
+    // one reduction, no reciprocal -- took the minus branch and returned
+    // 1.10715, which is atan(2). The endpoints hid it: atan(1) and atan(2) are
+    // right either way, and asin/acos are built on atan, so asin(0.5) returned
+    // acos(0.5) and vice versa. Track the branch explicitly.
+    append_src_lit("    var recip: bool = false\n")
+    append_src_lit("    if t > 1.0 { t = 1.0 / t; base = pi2; recip = true }\n")
     append_src_lit("    if t > 0.4142135623730951 {\n")
     append_src_lit("        t = (t - 1.0) / (t + 1.0)\n")
-    append_src_lit("        if base > 0.0 { base = base - pi4 } else { base = pi4 }\n")
+    append_src_lit("        if recip { base = base - pi4 } else { base = pi4 }\n")
     append_src_lit("    }\n")
     append_src_lit("    let t2 = t * t\n")
     append_src_lit("    let t3 = t * t2\n")
@@ -37950,7 +38785,9 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("    let t11 = t9 * t2\n")
     append_src_lit("    let t13 = t11 * t2\n")
     append_src_lit("    let a = t - t3 / 3.0 + t5 / 5.0 - t7 / 7.0 + t9 / 9.0 - t11 / 11.0 + t13 / 13.0\n")
-    append_src_lit("    if base > 0.0 { return sign * (base - a) }\n")
+    // atan(x) = pi/2 - atan(1/x) subtracts; atan(t) = pi/4 + atan((t-1)/(t+1))
+    // adds. Which one applies is decided by `recip`, never by base's sign.
+    append_src_lit("    if recip { return sign * (base - a) }\n")
     append_src_lit("    sign * (base + a)\n")
     append_src_lit("}\n\n")
 
@@ -38688,7 +39525,7 @@ fn resolve_imports() with IO, Mut, Panic, Div {
             }
             if copy_len <= 0 {
                 IMPORT_RESOLUTION_FAILED = 1
-                print("error: unreadable import: ")
+                print("error[E224]: unreadable import: ")
                 print_imp_path()
                 print("\n")
             } else {
@@ -38717,17 +39554,17 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 if already == 0 {
                     if IMP_COUNT >= 1024 {
                         IMPORT_RESOLUTION_FAILED = 1
-                        print("error: import dedup table full: ")
+                        print("error[E225]: import dedup table full: ")
                         print_imp_path()
                         print("\n")
                     } else if IMP_PATHS_USED + fp_len > 262144 {
                         IMPORT_RESOLUTION_FAILED = 1
-                        print("error: import path table full: ")
+                        print("error[E226]: import path table full: ")
                         print_imp_path()
                         print("\n")
                     } else if copy_len >= 16777216 || SRC_LEN + fp_len + copy_len + 3 >= 16777216 {
                         IMPORT_RESOLUTION_FAILED = 1
-                        print("error: import too large for SRC buffer: ")
+                        print("error[E227]: import too large for SRC buffer: ")
                         print_imp_path()
                         print(" (")
                         print_int(copy_len)
@@ -38754,7 +39591,7 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                         if ci != copy_len {
                             SRC_LEN = prev_src_len
                             IMPORT_RESOLUTION_FAILED = 1
-                            print("error: import copy truncated: ")
+                            print("error[E228]: import copy truncated: ")
                             print_imp_path()
                             print("\n")
                         } else {
@@ -38835,6 +39672,30 @@ fn extern_stub_name_eq(idx: i64, lit: string) -> i64 with Panic, Mut {
         k = k + 1
     }
     return 1
+}
+
+// Keep math intrinsics available for names declared through `extern "C"`.
+// Those declarations are replaced with Sounio stubs before function discovery;
+// imported Sounio functions are deliberately not matched here.
+fn extern_stub_matches_src(ns: i64, ne: i64) -> i64 with Panic, Mut {
+    let name_len = ne - ns
+    var idx: i64 = 0
+    while idx < EXTERN_STUB_COUNT {
+        let stub_len = EXTERN_STUB_NAME_LEN[idx as usize]
+        if stub_len == name_len {
+            let stub_off = EXTERN_STUB_NAME_OFF[idx as usize]
+            var k: i64 = 0
+            var matches: i64 = 1
+            while k < name_len {
+                let stub_byte = EXTERN_STUB_NAME_BUF[(stub_off + k) as usize] as i64 & 0xFF
+                if sb(ns + k) != stub_byte { matches = 0 }
+                k = k + 1
+            }
+            if matches == 1 { return 1 }
+        }
+        idx = idx + 1
+    }
+    return 0
 }
 
 // Append extern stub name to SRC (for generating stub function text).

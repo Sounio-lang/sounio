@@ -15,9 +15,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.self-
 
 # Self-falsifying compilation R22 — the gate that certifies a literal
 
-**Date:** 2026-07-29
+**Date:** 2026-07-29 (closed by inversion 2026-08-16)
 **Orthography:** EN-UK
-**Status:** `EXECUTABLE` — `VALIDATION_DATE_IS_A_LITERAL__GATE_REJECTS_THE_TRUE_DATE`
+**Status:** `EXECUTABLE` — `PROVENANCE_IS_PRESERVED__GATE_ACCEPTS_THE_TRUE_DATE`
 **Parents:** `self_falsifying_compilation_line_r1_2026-07-26.md` (claims bound to no gate; the hermeticity rule this rung obeys), `self_falsifying_compilation_line_r20_2026-07-28.md` (an oracle never committed), `self_falsifying_compilation_line_r21_2026-07-28.md` (the preceding rung)
 **Harness:** `scripts/research/self_falsifying_compilation_line_r22_contract.py`
 **Gate:** `scripts/ci/self_falsifying_compilation_line_r22_gate.sh`
@@ -42,7 +42,42 @@ named `last_validated`. It has the form of a measurement. It is a constant.
 > failure. The gate is green exactly when the field it guards carries no
 > information.**
 
-Verdict: `SELF_FALSIFYING_R22_VERDICT VALIDATION_DATE_IS_A_LITERAL__GATE_REJECTS_THE_TRUE_DATE`.
+Verdict at discovery (2026-07-29): `VALIDATION_DATE_IS_A_LITERAL__GATE_REJECTS_THE_TRUE_DATE`.
+
+## 1a. Closure — Closed by inversion, 2026-08-16
+
+**#1752 closed the defect.** The provenance pair is now preserve-per-document:
+`preservedProvenance` (governance_registry.mjs) keeps an existing well-formed
+record — a real calendar date and, when present, a non-empty validator — and
+the generator's defaults apply only where a document carries no record or a
+malformed one. The checker stopped enforcing constant equality on the pair and
+enforces shape instead, while the structural four (topic_id, authority,
+audience, source_of_truth) remain registry-authoritative. The motivating
+incident — a real 2026-08-13/`claude` header regressed to the placeholder by
+a mandatory sync — is recorded in `.claude/llm_offload_log.md` (2026-08-16,
+WAIVED row).
+
+**The instrument was inverted the same day, not retired.** A rung that ends
+as a document saying "the bug is gone" has no arms against the bug coming
+back; a guard has five. The original four clauses demonstrated the defect;
+the inverted four guard the fix:
+
+| clause (inverted) | | |
+|---|---|---|
+| `V1_GENERATOR_PRESERVES_PROVENANCE` | the default literal still exists at two sites (a headerless doc still gets stamped) but is a FALLBACK; `preservedProvenance` and `metadataFieldsForTopic` measured over crafted records | the field has an input now |
+| `V2_CORPUS_PAIR_IS_WELL_FORMED` | census over every governed repo doc: every declared date is a real `YYYY-MM-DD`, every validator non-empty; uniformity no longer required | shape is the contract, not uniformity |
+| `V3_STRUCTURE_STAYS_REGISTRY_BOUND` | forged structural fields in a doc's meta do not reach the expected fields; a malformed date falls back to defaults | the inversion loosened only the pair |
+| `V4_TRUTHFUL_DATE_IS_ACCEPTED` | hermetic synced farm, five arms: unmodified → `rc=0`; git-true date → `rc=0` **accepted**; the true date **survives a re-sync** (the exact regression #1752 fixed); a malformed date → `rc≥1` `expected a YYYY-MM-DD date`; a forged `topic_id` → `rc≥1` `metadata mismatch for topic_id` | the truth accepted, and the checker still bites |
+
+**The inverted instrument earned its keep on first run.** It found that the
+fix's original shape test (`^\d{4}-\d{2}-\d{2}$`) accepted `2026-13-45` —
+shaped like a date, and not a day anyone validated anything on. An impossible
+date carries no more information than the placeholder literal did: the
+original defect, one size smaller. The contract was tightened to
+`isRealValidationDate` (calendar-valid, leap years included) in the same
+change, shared by generator and checker.
+
+Verdict: `SELF_FALSIFYING_R22_VERDICT PROVENANCE_IS_PRESERVED__GATE_ACCEPTS_THE_TRUE_DATE`.
 
 **No counts in the headline, and R1 is the reason.** R1's headline carried a
 measured count and went stale the moment a claim was added to the manifest it
@@ -73,6 +108,11 @@ check runs on every push — `.github/workflows/ci.yml` →
 corpus is uniform because uniformity is what passes.
 
 ## 3. Verified, and how
+
+*(The clause table below is the receipt of the ORIGINAL instrument as it ran
+on 2026-07-29; those clause names belonged to the pre-inversion contract and
+are kept verbatim as history. The clauses that run today are the inverted set
+in §1a.)*
 
 Corpus figures measured 2026-07-29 at `7d376f4b8` plus this rung's own commit;
 they move with the corpus, and the contract re-measures them on every run.
@@ -179,12 +219,15 @@ rather than paraphrased.
   was found is the canonical tool's own output; the constant predates it and
   applies to every governed document. Blaming the sweep would have been the
   comfortable error.
-- **Not fixed.** No change is made to the generator or the checker in this
-  rung. Deriving the field from evidence (last gate run, last commit, an
-  explicit review record) rewrites the meta block of every governed document
-  and changes what the check means; that is a separate rung with its own
-  falsifier, and doing it inside the rung that discovered the defect would
-  destroy the evidence.
+- **Not fixed in this rung — and closed later, on the record.** The 2026-07-29
+  rung deliberately changed nothing: deriving the field from evidence rewrites
+  the meta block of every governed document, and doing it inside the rung that
+  discovered the defect would have destroyed the evidence. The closure came
+  afterwards and separately: #1752 (2026-08-16) made the pair
+  preserve-per-document and shape-checked, and the same change inverted this
+  instrument into the guard described in §1a. The original indictment above is
+  the receipt for why the guard exists; the two verdicts (at discovery, and
+  now) are both on this page on purpose.
 - **Not a compiler change.**
 
 ## 7. Reproduce
@@ -204,3 +247,9 @@ The literal sites were found by reading `governance_registry.mjs` while triaging
 an uncommitted governance sweep; all four clauses are machine-measured. One
 earlier measurement was discarded as unsound and the reason is recorded in §3
 rather than removed. No clinical content. GAIDeT-ICMJE 2025.
+
+Inversion (2026-08-16) drafted under human direction as part of #1752: the
+contract and gate were rewritten to guard the fixed property, the closure
+(§1a) and the real-date tightening it surfaced were recorded, and the original
+finding was left in place as the receipt. All inverted clauses are
+machine-measured. No clinical content. GAIDeT-ICMJE 2025.

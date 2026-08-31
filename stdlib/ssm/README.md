@@ -81,6 +81,7 @@ fn demo() with IO, Mut, Div, Panic {
 | H-SSM no reset: ‖A_quat ⊗ (e6-e15)‖ ≈ 0.95 | PASS |
 | Gate ∈ (0, 1) | PASS |
 | Gate does not amplify | PASS |
+| Negative `exp` tail: `exp(-13.855)` and `exp(-16)` | PASS |
 | ker(A_sed) basis k=0 annihilated | PASS |
 | ker(A_sed) basis k=1 annihilated | PASS |
 | coker direction survives A_sed | PASS |
@@ -95,7 +96,7 @@ fn demo() with IO, Mut, Div, Panic {
 
 ```bash
 ./bin/souc run stdlib/ssm/lib.sio
-# expect: 13/13 PASS, ALL PASS
+# expect: 14/14 PASS, ALL PASS
 
 ./bin/souc run stdlib/ssm/fingerprint.sio
 # expect: 11/11 PASS, ALL PASS

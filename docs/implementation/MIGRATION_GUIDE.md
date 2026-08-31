@@ -172,7 +172,7 @@ Example change:
 
 ```bash
 # Edit self-hosted code
-vim self-hosted/check/type_inference.sio
+vim self-hosted/check/infer.sio
 
 # Test your changes
 cargo run --release -- run self-hosted/test_check.sio
@@ -218,7 +218,7 @@ cargo test --test rustless_e2e
 
 **Steps**:
 
-1. **Add to parser** (`self-hosted/parser/expr.sio`):
+1. **Add to parser** (`self-hosted/parser/exprs.sio`):
 ```sio
 fn parse_match_expr(parser: Parser) -> Expr {
     // Parse "match" keyword
@@ -234,7 +234,7 @@ fn parse_match_expr(parser: Parser) -> Expr {
 }
 ```
 
-2. **Add to type checker** (`self-hosted/check/type_check.sio`):
+2. **Add to type checker** (`self-hosted/check/check.sio`):
 ```sio
 fn check_match_expr(ctx: CheckContext, expr: Expr) -> Type {
     // Check scrutinee type
@@ -292,7 +292,7 @@ cargo test --test rustless_e2e
 
 #### Task: Fix a Bug in Self-Hosted Code
 
-**Example**: Type inference bug in `self-hosted/check/type_inference.sio`
+**Example**: Type inference bug in `self-hosted/check/infer.sio`
 
 **Steps**:
 
@@ -413,7 +413,7 @@ cargo run -p souc -- run program.sio
 
 ```bash
 # Edit self-hosted compiler
-vim self-hosted/check/type_check.sio
+vim self-hosted/check/check.sio
 
 # Test
 cargo run -- run self-hosted/test_check.sio
@@ -463,7 +463,7 @@ vim crates/souc/src/check/type_check.rs  # Edit Rust code
 
 **After**:
 ```bash
-vim self-hosted/check/type_check.sio  # Edit self-hosted code
+vim self-hosted/check/check.sio  # Edit self-hosted code
 cargo run -- run self-hosted/test_check.sio
 ```
 
@@ -600,7 +600,40 @@ The following env vars now hard-error with migration guidance:
 - `SOUNIO_SELFHOST_NO_RUST_HARNESS`
 - `SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT`
 
-Use signed bundle/state commands instead:
+The answer below then pointed at signed bundle/state commands.
+
+> **These commands do not exist.** `bootstrap` and `opt` were subcommands of the
+> Rust `souc` (`crates/souc/src/main.rs`), removed on 2026-02-26 by
+> `79acc192e1 [cutover] Remove Rust crates -- compiler is self-hosted`. The
+> Madaros compiler shipped as `bin/souc` has no `bootstrap` or `opt` verb --
+> `souc --help` does not list them. They do fail loudly rather than silently:
+> `souc bootstrap verify --bundle bootstrap` exits **1**, because `souc` falls
+> back to treating an unrecognised argument as a source filename and
+> reports `error: at bootstrap:0:0 - could not read input file`. The diagnostic
+> names a missing file rather than a missing subcommand, so it misdirects, but
+> it is a real refusal and no script relying on it can pass silently. (Note that
+> `souc --help` is not a complete inventory of what the binary dispatches --
+> `souc ontology`, for instance, is a real, working subcommand that the help
+> text omits. Absence from `--help` is not by itself proof a verb is gone;
+> running it is.) The signed
+> data these verbs operated on is still in the tree
+> (`bootstrap/artifacts/manifest.v2.json`, `bootstrap/policies/policy.v1.json`),
+> but nothing in the shipped compiler reads it, and every in-repo wrapper that
+> still calls these verbs (`scripts/selfhost/selfhost_independence_gate.sh`,
+> `scripts/selfhost/selfhost_cycle_gate.sh`,
+> `scripts/omega/omega_strict_closure_gate.sh`,
+> `scripts/bootstrap/bootstrap_verify_artifacts.sh`,
+> `scripts/omega/omega_prepare_policy_smoke.sh`,
+> `scripts/omega/omega_policy_status.sh`,
+> `scripts/bootstrap/omega_canonical_policy_sign.sh`,
+> `scripts/dev/diverse_double_compile_check.sh`) is dead for the same reason.
+> The bootstrap chain that is actually exercised today is
+> `scripts/ci/bootstrap_chain_gate.sh`, which drives `bootstrap/stage0.c` ->
+> `bootstrap/boot1.sio` directly without any `souc` subcommand, alongside
+> `scripts/bootstrap/bootstrap_full_gate.sh`. Seed rebuilds go through
+> `scripts/bootstrap/build_bootstrap_seed.sh` and
+> `scripts/dev/refresh_lean_seed.sh`. The optimization-policy lane has no
+> surviving entrypoint at all. The list below is retained for lineage only.
 
 ```bash
 souc bootstrap verify --bundle bootstrap
@@ -676,12 +709,12 @@ Poseidon VM is pure C99 and works anywhere.
 
 ## Additional Resources
 
-- **Rustless Cutover Documentation**: `docs/RUSTLESS_CUTOVER.md`
-- **SOIR Format Specification**: `docs/SOIR_REFERENCE.md`
-- **Developer Workflow Guide**: `docs/DEVELOPER_WORKFLOW.md`
+- **Rustless Cutover Documentation**: `docs/implementation/RUSTLESS_CUTOVER.md`
+- **SOIR Format Specification**: `docs/architecture/SOIR_REFERENCE.md`
+- **Developer Workflow Guide**: `docs/contributor-guide/DEVELOPER_WORKFLOW.md`
 - **Poseidon VM Documentation**: `bootstrap/poseidon/README.md`
 - **SOIR Library Documentation**: `crates/soir/README.md`
-- **Complete Implementation Guide**: `docs/RUSTLESS_COMPLETE.md`
+- **Complete Implementation Guide**: `docs/implementation/RUSTLESS_COMPLETE.md`
 
 ---
 

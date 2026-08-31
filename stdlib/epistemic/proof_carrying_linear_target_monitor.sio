@@ -1,0 +1,141 @@
+// stdlib/epistemic/proof_carrying_linear_target_monitor.sio
+//
+// Proof-Carrying Linear Target Monitor — D12.
+//
+// Frozen bounded synthetic kernel. Specification:
+//   docs/research/proof_carrying_linear_target_monitor_d12_2026-07-26.md
+//
+// The stage closes the custody hole D10 states about itself ("proves stage
+// non-substitution, not caller authenticity or evidence origin") on its
+// second axis: evidence in D2-D11 is freely copyable and freely discardable,
+// so a stale observation can be re-presented to renew authority, and an
+// observation that would force a downgrade can be quietly dropped.
+//
+// D12 makes a monitoring observation a LINEAR resource — consumed exactly
+// once. Linearity (not affinity) is deliberate: a linear type admits neither
+// contraction (no replay) NOR weakening (no silent discard). An affine type
+// would give only the first half.
+//
+// Two negative obligations follow directly from the type:
+//   (1) consuming the same observation twice  -> linear double use;
+//   (2) producing one and not consuming it    -> linear value not consumed.
+//
+// Barrier receipts additionally carry an UNINHABITED seal, so they cannot be
+// forged at all: no value of `D12ReceiptSeal` exists, hence `{ receipt_id: 1 }`
+// is a field-type error and `{ receipt_id: D12ReceiptSeal {} }` is a
+// construction error for an uninhabited type. Both are rejected by BOTH
+// `souc check` and `souc compile`, at typecheck.
+//
+// This is not a patient model, a monitoring algorithm, a statistical
+// procedure, or a clinical pathway.
+
+// ---------------------------------------------------------------------------
+// Uninhabited seal: no value of this type can ever be constructed.
+// ---------------------------------------------------------------------------
+enum D12ReceiptSeal {}
+
+// ---------------------------------------------------------------------------
+// Barrier receipts — nameable by importers, but unconstructable.
+// There is deliberately no producer for any of these.
+// ---------------------------------------------------------------------------
+pub struct D12TargetAuthorityReceipt { receipt_id: D12ReceiptSeal }
+pub struct D12ExternalValidationReceipt { receipt_id: D12ReceiptSeal }
+pub struct D12ProductionAuthorityReceipt { receipt_id: D12ReceiptSeal }
+pub struct D12PatientStateReceipt { receipt_id: D12ReceiptSeal }
+
+// ---------------------------------------------------------------------------
+// The linear monitoring observation.
+//
+// drift_code is a frozen synthetic label, not a measurement:
+//   0 = no observed drift, 1 = degradation observed, 2 = revocation trigger.
+// ---------------------------------------------------------------------------
+// NOTE on the single packed field: in Sounio, reading ANY field of a linear
+// struct consumes the whole value (see tests/run-pass/linear_struct_field_access.sio:
+// "only access one field to consume"). Two reads would be a double use. The
+// payload therefore carries one integer encoding both quantities:
+//     packed = observation_id * 4 + drift_code,  drift_code in {0,1,2}
+// so a single read yields both, and consumption stays exactly-once.
+//
+// NOTE on unforgeability: marking a struct `pub` makes it CONSTRUCTIBLE by
+// importers — visibility of the constructor follows the struct, not its
+// fields. The barrier therefore has to be the field's TYPE. Both payload
+// types below are non-`pub`, so an importer can name
+// `D12MonitorObservation` / `D12AccountedOutcome` in a signature but cannot
+// build one: the only routes are `certify_d12_monitor_observation` and the
+// three accounting functions. (This is the same construction D11 uses for its
+// barrier receipts, whose field type `D11ReceiptSeal` is likewise non-`pub`.)
+struct D12ObservationPayload { packed: i64 }
+struct D12OutcomePayload { outcome_id: i64, disposition: i64 }
+
+pub linear struct D12MonitorObservation {
+    payload: D12ObservationPayload,
+}
+
+// The accounted outcome. Ordinary (non-linear) value: once an observation has
+// been accounted for, the record of that accounting may be freely used.
+//
+// disposition mirrors the three admissible dispositions:
+//   1 = renewed, 2 = degraded, 3 = revoked.
+pub struct D12AccountedOutcome {
+    payload: D12OutcomePayload,
+}
+
+// ---------------------------------------------------------------------------
+// Producer. The only way to obtain an observation.
+// ---------------------------------------------------------------------------
+pub fn certify_d12_monitor_observation(
+    observation_id: i64,
+    drift_code: i64,
+) -> D12MonitorObservation with Panic {
+    assert(observation_id > 0)
+    assert(drift_code >= 0 && drift_code <= 2)
+    D12MonitorObservation { payload: D12ObservationPayload { packed: observation_id * 4 + drift_code } }
+}
+
+// ---------------------------------------------------------------------------
+// The three admissible dispositions. Each CONSUMES the observation exactly
+// once. There is no fourth option: an observation cannot be dropped, and it
+// cannot be consumed twice.
+// ---------------------------------------------------------------------------
+
+// Renew: admissible only when no drift was observed.
+pub fn d12_account_renew(obs: D12MonitorObservation) -> D12AccountedOutcome with Panic, Div {
+    let p = obs.payload.packed
+    assert(p - (p / 4) * 4 == 0)
+    D12AccountedOutcome { payload: D12OutcomePayload { outcome_id: p / 4, disposition: 1 } }
+}
+
+// Degrade: admissible when degradation was observed.
+pub fn d12_account_degrade(obs: D12MonitorObservation) -> D12AccountedOutcome with Panic, Div {
+    let p = obs.payload.packed
+    assert(p - (p / 4) * 4 == 1)
+    D12AccountedOutcome { payload: D12OutcomePayload { outcome_id: p / 4, disposition: 2 } }
+}
+
+// Revoke: admissible on a revocation trigger.
+pub fn d12_account_revoke(obs: D12MonitorObservation) -> D12AccountedOutcome with Panic, Div {
+    let p = obs.payload.packed
+    assert(p - (p / 4) * 4 == 2)
+    D12AccountedOutcome { payload: D12OutcomePayload { outcome_id: p / 4, disposition: 3 } }
+}
+
+// ---------------------------------------------------------------------------
+// Readers for the accounted outcome.
+// ---------------------------------------------------------------------------
+pub fn d12_outcome_id(o: D12AccountedOutcome) -> i64 { o.payload.outcome_id }
+pub fn d12_outcome_disposition(o: D12AccountedOutcome) -> i64 { o.payload.disposition }
+
+// A degraded or revoked disposition never rises again: this mirrors the D11
+// asymmetry (target evidence may preserve or lower a rank, never raise it).
+pub fn d12_disposition_is_downward(o: D12AccountedOutcome) -> bool {
+    o.payload.disposition == 2 || o.payload.disposition == 3
+}
+
+// ---------------------------------------------------------------------------
+// Barrier acceptors. Reachable only with a receipt that cannot be built.
+// Bodies are unreachable; they return 0.
+// ---------------------------------------------------------------------------
+pub fn d12_accept_target_authority(receipt: D12TargetAuthorityReceipt) -> i64 { 0 }
+pub fn d12_accept_external_validation(receipt: D12ExternalValidationReceipt) -> i64 { 0 }
+pub fn d12_accept_production_authority(receipt: D12ProductionAuthorityReceipt) -> i64 { 0 }
+pub fn d12_accept_patient_state(receipt: D12PatientStateReceipt) -> i64 { 0 }

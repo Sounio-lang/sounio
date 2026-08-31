@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # llm-offload — Fan-out a prompt to multiple LLM providers
-# Usage: ./scripts/llm-offload.sh <prompt-file> [providers...]
+# Usage: ./scripts/mcp/llm-offload.sh <prompt-file> [providers...]
 # If no providers specified, fans out to the default 5 (diverse consensus set).
 #
 # Available providers:
-#   deepseek     — DeepSeek V4 Pro (code intuition, different training data; DEEPSEEK_MODEL overrides)
-#   xai|grok     — Grok 4.5 (primary adversarial math/review lane; XAI_MODEL overrides)
+#   deepseek     — DeepSeek V4 Pro (reasoning; 'deepseek-coder' silently
+#                  resolved to the weaker v4-flash and is no longer a listed model)
+#   xai|grok     — Grok 4.3 (primary adversarial math/review lane)
 #   xai-fast     — Grok 4.1 Fast Reasoning (lower-latency fallback)
 #   zai|glm      — Z.AI GLM-5.2 direct (independent math/review provider)
 #   local        — a LOCAL OpenAI-compatible endpoint (Ollama/vLLM/llama.cpp/LM Studio):
@@ -61,12 +62,11 @@ call_openai_compat() {
             *) max_tok=8192 ;;
         esac
     fi
-    # Reasoning models spend their whole budget in reasoning_content; a deep audit at
-    # OFFLOAD_MAX_TOKENS=32000 needs well over 180s, and a curl timeout lands as an EMPTY file
-    # (which reads like a provider error). Scale the deadline with the budget.
-    local deadline="${OFFLOAD_TIMEOUT:-$(( max_tok > 8192 ? 600 : 180 ))}"
-    echo "  -> Sending to $name ($model, max=$max_tok, timeout=${deadline}s)..."
-    curl -s -m "$deadline" "$url/chat/completions" \
+    echo "  -> Sending to $name ($model, max=$max_tok)..."
+    # Local reasoning models are slow; give them room rather than losing the leg.
+    local _tmo="${OFFLOAD_TIMEOUT:-180}"
+    case "$name" in Local*) _tmo="${OFFLOAD_TIMEOUT:-600}" ;; esac
+    curl -s -m "$_tmo" "$url/chat/completions" \
         -H "Authorization: Bearer $key" \
         -H "Content-Type: application/json" \
         -d "$(jq -n --arg model "$model" --arg prompt "$PROMPT" --argjson maxtok "$max_tok" '{
@@ -74,7 +74,13 @@ call_openai_compat() {
             messages: [{role: "user", content: $prompt}],
             max_tokens: $maxtok,
             temperature: 0.7
-        }')" > "$outfile" 2>&1
+        }')" > "$outfile" 2>&1 || true
+    # `|| true` is load-bearing under `set -e`: curl exits non-zero on a TIMEOUT or a
+    # connection failure (unlike an HTTP error, where it exits 0 with a JSON body), and
+    # without it the whole background subshell dies right here — no "<- name: ERROR" line,
+    # no mention of the provider at all.  The fan-out then prints a clean Results section
+    # and exits 0 having silently lost a leg.  Measured 2026-08-24 with a local reasoning
+    # model that needed longer than the 180 s cap.
 
     # Prefer .content; fall back to .reasoning_content for reasoning models
     # (e.g. Z.AI GLM-5.x) that leave .content empty. Treat empty output as error.
@@ -82,7 +88,11 @@ call_openai_compat() {
         jq -r 'if (.choices[0].message.content // "") != "" then .choices[0].message.content else .choices[0].message.reasoning_content end' "$outfile" > "${outfile%.json}.md"
         echo "  <- $name: DONE ($(wc -c < "${outfile%.json}.md") bytes)"
     else
-        echo "  <- $name: ERROR (see $outfile)"
+        if [[ ! -s "$outfile" ]]; then
+            echo "  <- $name: EMPTY after ${_tmo}s — timeout or unreachable endpoint (raise OFFLOAD_TIMEOUT)"
+        else
+            echo "  <- $name: ERROR (see $outfile)"
+        fi
     fi
 }
 
@@ -91,15 +101,11 @@ run_provider() {
     case "$p" in
         deepseek)
             [[ -n "${DEEPSEEK_API_KEY:-}" ]] && \
-            # `deepseek-coder` is RETIRED: the API still accepts it but silently serves
-            # deepseek-v4-flash, so every run under the old id was quietly the weaker model.
-            # Pin v4-pro; override with DEEPSEEK_MODEL (e.g. deepseek-v4-flash for cheap runs).
-            call_openai_compat "DeepSeek ${DEEPSEEK_MODEL:-deepseek-v4-pro}" "https://api.deepseek.com" "$DEEPSEEK_API_KEY" "${DEEPSEEK_MODEL:-deepseek-v4-pro}" "$OUTDIR/deepseek.json"
+            call_openai_compat "DeepSeek" "https://api.deepseek.com" "$DEEPSEEK_API_KEY" "deepseek-v4-pro" "$OUTDIR/deepseek.json"
             ;;
         xai|grok)
             [[ -n "${XAI_API_KEY:-}" ]] && \
-            # grok-4.5 is the current flagship; 4.3 stays reachable via XAI_MODEL=grok-4.3.
-            call_openai_compat "Grok ${XAI_MODEL:-grok-4.5}" "https://api.x.ai/v1" "$XAI_API_KEY" "${XAI_MODEL:-grok-4.5}" "$OUTDIR/grok.json"
+            call_openai_compat "Grok 4.3" "https://api.x.ai/v1" "$XAI_API_KEY" "grok-4.3" "$OUTDIR/grok.json"
             ;;
         xai-fast)
             [[ -n "${XAI_API_KEY:-}" ]] && \

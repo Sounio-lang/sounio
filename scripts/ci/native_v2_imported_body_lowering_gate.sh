@@ -160,7 +160,17 @@ CASES_JSON="$(
   done < "$ARTIFACT_DIR/cases.tsv"
 )"
 CASES_JSON="[$CASES_JSON]"
-case_count="$(grep -c . "$ARTIFACT_DIR/cases.tsv" 2>/dev/null || echo 0)"
+# `grep -c` prints 0 itself on an empty file, so `|| echo 0` would append a
+# second 0 (a two-line count) -- `|| true` rescues the exit code only.
+case_count="$(grep -c . "$ARTIFACT_DIR/cases.tsv" 2>/dev/null || true)"
+# Plan floor: the three run_case calls above each append exactly one row or
+# exit 1; anything else at summary time means the plan did not complete and
+# the summary would certify a run that never happened.
+EXPECTED_CASES=3
+if [[ "$case_count" -ne "$EXPECTED_CASES" ]]; then
+  echo "[native-v2-imported-body-lowering] FAIL: cases.tsv has $case_count rows, expected $EXPECTED_CASES -- the plan did not complete" >&2
+  exit 1
+fi
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 "$ROOT_DIR/bin/kretikos" json-emit \

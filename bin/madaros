@@ -20,6 +20,10 @@
 #   SOUNIO_STDLIB_PATH     — forwarded to the raw ELF unchanged
 #   MADAROS_RAW_BIN        — override the underlying modular raw ELF
 #   SOUNIO_MADAROS_BIN     — alias for MADAROS_RAW_BIN
+#   MADAROS_STACK_KB       — soft stack limit (default 524288 = 512 MiB). Measured
+#                            floor 2026-08-13: minimal ok at 16 MiB+, helper at 32 MiB+.
+#                            Set 0 for unlimited. See MADAROS_HARDENING_PLAN_2026-08-12.md.
+#   MADAROS_VMEM_LIMIT_KB  — virtual-memory guard (default 32 GiB)
 #
 # To obtain the raw ELF, run:
 #   make build-madaros
@@ -29,6 +33,37 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Resolve the underlying modular raw ELF.
+# An explicit raw-ELF override that cannot be used ABORTS rather than being
+# skipped. The loop below moves past any candidate failing the -x test, so a
+# build that left its output non-executable resolves silently to the COMMITTED
+# bin/madaros-linux-x86_64 — which lags self-hosted/ source. The caller then
+# measures the shipped compiler while believing they measured theirs. Observed
+# 2026-08-28: `check: OK` and `error[E245]` from the same file, the only
+# difference being `chmod +x`, with no message in between.
+_madaros_reject_override() {  # _madaros_reject_override <var-name> <path>
+  local var="$1" path="$2" why
+  if   [[ ! -e "$path" ]]; then why="no such file"
+  elif [[ -d "$path" ]];   then why="is a directory"
+  elif [[ ! -x "$path" ]]; then why="not executable (chmod +x it)"
+  elif [[ "$(head -c 2 "$path" 2>/dev/null)" == "#!" ]]; then why="is a script, not a raw ELF"
+  else why="unusable"; fi
+  echo "error: madaros: $var is set but cannot be used: $why" >&2
+  echo "  $var=$path" >&2
+  echo "  refusing to fall back to the committed compiler: it lags self-hosted/ source," >&2
+  echo "  so this run would measure a different compiler than the one you named." >&2
+  echo "  fix the path, or unset $var to use the default resolution order." >&2
+  exit 78
+}
+
+for _mv in MADAROS_RAW_BIN SOUNIO_MADAROS_BIN; do
+  _mv_val="${!_mv:-}"
+  if [[ -n "$_mv_val" ]] \
+     && ! { [[ -x "$_mv_val" ]] && [[ "$(head -c 2 "$_mv_val" 2>/dev/null)" != "#!" ]]; }; then
+    _madaros_reject_override "$_mv" "$_mv_val"
+  fi
+done
+unset _mv _mv_val
+
 # Resolution order:
 #   1. MADAROS_RAW_BIN / SOUNIO_MADAROS_BIN env var
 #   2. artifacts/self-hosted/madaros (built by make build-madaros)
@@ -60,11 +95,17 @@ SCIENCE_CLAIM_CONTRACT=""
 SCIENCE_BOUNDARY_RECEIPT=""
 SCIENCE_BOUNDARY_ARGS=()
 
-# Madaros rebuilt after IR_MAX_INSTRS=512 uses compiler frames that can exceed
-# the default 8 MB thread stack. Lift the limit so the compiler does not segfault
-# while compiling normal user programs. This is a conservative runtime guard; it
-# does not change compiler semantics.
-ulimit -s unlimited 2>/dev/null || true
+# Stack reservation (Lane A2-lite of MADAROS_HARDENING_PLAN_2026-08-12).
+# Raw Madaros needs more than the default 8 MiB Linux stack. The EISA v1 bridge
+# lowering path fails through 384 MiB and passes at 448 MiB; reserve 512 MiB.
+# Named reservation replaces blanket unlimited until IR-arena root fix lands.
+# MADAROS_STACK_KB=0 restores unlimited.
+MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"
+if [[ "$MADAROS_STACK_KB" == "0" ]]; then
+  ulimit -s unlimited 2>/dev/null || true
+else
+  ulimit -s "$MADAROS_STACK_KB" 2>/dev/null || true
+fi
 
 usage() {
   cat <<USAGE
@@ -237,7 +278,15 @@ _science_evaluate() {
     return 0
   fi
   if [[ ! -x "$SCIENCE_BOUNDARY_TOOL" ]]; then
-    echo "error[E-SRB-000]: science boundary attestor is unavailable: $SCIENCE_BOUNDARY_TOOL" >&2
+    # Advisory in auto/off mode without a requested receipt: a plain `souc run`
+    # on a released tarball (which does not bundle the internal governance
+    # tooling under tools/science_boundary/) must not print an error[...] line
+    # for a defect that is already silently non-fatal here -- both call sites
+    # only escalate to a hard failure when mode=strict. Stay loud exactly where
+    # the guarantee is claimed: strict mode, or an explicit receipt request.
+    if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" || -n "$receipt" ]]; then
+      echo "error[E-SRB-000]: science boundary attestor is unavailable: $SCIENCE_BOUNDARY_TOOL" >&2
+    fi
     return 2
   fi
   local command=(
@@ -445,7 +494,13 @@ _run_raw_check() {
   fi
   # Guard: bounded vmem + 120 s timeout. Current Madaros pre-maps a large arena;
   # older 8/16 GB caps trip the arena guard before larger checks can run.
+  # Lane A1: surface the raw status instead of relying on set -e alone.
+  local rc=0
+  set +e
   ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 120 "$RAW_MADAROS" --check "$src" "$@" )
+  rc=$?
+  set -e
+  return "$rc"
 }
 
 _parse_build_options() {
@@ -519,23 +574,46 @@ _parse_build_options() {
 }
 
 _compile_source_to_artifact() {
+  # Lane A1: always propagate the raw compiler exit status. Non-zero after a
+  # partial write is still failure — never "file non-empty alone".
   local src="$1"
   local out="$2"
+  local rc=0
   if [[ "$BUILD_BACKEND" == "gpu" ]]; then
     local gpu_args=("$src" -o "$out" --gpu-target "$BUILD_GPU_TARGET")
     if [[ -n "$BUILD_GPU_BINARY_FORMAT" ]]; then
       gpu_args+=(--gpu-binary-format "$BUILD_GPU_BINARY_FORMAT")
     fi
-    # Guard: bounded vmem + 300 s timeout
+    set +e
     ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "${gpu_args[@]}" )
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]]; then
+      echo "error: madaros build: compiler exited with status $rc" >&2
+      if [[ -s "$out" ]]; then
+        echo "error: madaros build: discarding partial GPU artifact at $out" >&2
+        rm -f "$out"
+      fi
+      return "$rc"
+    fi
     if [[ ! -s "$out" ]]; then
       echo "error: madaros build: compiler produced no GPU artifact at $out" >&2
       return 1
     fi
     return 0
   fi
-  # Guard: bounded vmem + 300 s timeout
+  set +e
   ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "$src" -o "$out" )
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    echo "error: madaros build: compiler exited with status $rc" >&2
+    if [[ -s "$out" ]]; then
+      echo "error: madaros build: discarding partial ELF at $out" >&2
+      rm -f "$out"
+    fi
+    return "$rc"
+  fi
   if [[ ! -s "$out" ]]; then
     echo "error: madaros build: compiler produced no ELF at $out" >&2
     return 1

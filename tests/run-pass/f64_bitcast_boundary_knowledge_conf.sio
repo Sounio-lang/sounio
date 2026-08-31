@@ -1,0 +1,104 @@
+//@ run-pass
+//@ description: F2 closed — Knowledge.confidence is f64 at IR layout (is_float=1);
+//@   typed-base field kind keeps MiniI/Epistemic i64 confidence honest (#1496).
+//@   Was sitofp ~4e18 under is_float=3; see MADAROS_F64_BITCAST_SITOFP_BOUNDARY.
+
+fn main() -> i64 with IO, Mut, Div, Panic, Epistemic {
+    // R20 — ctor form Knowledge(v, e=ε, prov=…)
+    let k0 = Knowledge(12.5, e=0.671038, prov="probe")
+    let c0 = k0.confidence
+    print("R20_conf ")
+    print_f64(c0)
+    println("")
+    // print_f64 alone often looks correct (bits still IEEE of 0.671038).
+    // The defect fires on arithmetic / compare against f64.
+    let half = c0 * 0.5
+    print("R20_half ")
+    print_f64(half)
+    println("")
+    let r20_ok = c0 > 0.20 && c0 < 0.90 && half > 0.10 && half < 0.45
+    if r20_ok {
+        println("R20_OK")
+    } else if c0 > 1.0e15 || half > 1.0e15 {
+        println("R20_BITCAST_SITOFP")
+        println("EPISTEMIC_FABRICATION: Knowledge.confidence arithmetic sitofp of f64 bits")
+    } else {
+        println("R20_BAD")
+    }
+
+    // R21 — struct-literal form used by ep28 priors
+    let k1 = Knowledge {
+        value: 12.5,
+        variance: 0.01,
+        epsilon: 0.671038,
+        provenance: "probe",
+    }
+    let c1 = k1.confidence
+    print("R21_conf ")
+    print_f64(c1)
+    println("")
+    let prod = c1 * 1.0
+    print("R21_prod ")
+    print_f64(prod)
+    println("")
+    var wsum: f64 = 0.0
+    wsum = wsum + c1 * 0.50
+    wsum = wsum + c1 * 0.30
+    wsum = wsum + c1 * 0.20
+    print("R21_wsum ")
+    print_f64(wsum)
+    println("")
+    let r21_ok = wsum > 0.20 && wsum < 0.90
+    if r21_ok {
+        println("R21_OK")
+    } else if wsum > 1.0e15 || prod > 1.0e15 {
+        println("R21_BITCAST_SITOFP")
+        println("EPISTEMIC_FABRICATION: Knowledge.confidence weighted sum sitofp")
+    } else {
+        println("R21_BAD")
+    }
+
+    // R22 — .epsilon is a separate pre-existing gap (reads 0.0 under Madaros)
+    print("R22_eps ")
+    print_f64(k0.epsilon)
+    println("")
+    print("R22_conf ")
+    print_f64(k0.confidence)
+    println("")
+    println("R22_DONE")
+
+    // R25 — array of Knowledge[f64] + weighted conf (ep28 priors.kn shape)
+    var kn: [Knowledge[f64]; 4] = [Knowledge(0.0, e=1.0, prov="x"); 4]
+    kn[0] = Knowledge { value: 1.0, variance: 0.01, epsilon: 0.80, provenance: "a" }
+    kn[1] = Knowledge { value: 2.0, variance: 0.01, epsilon: 0.60, provenance: "b" }
+    kn[2] = Knowledge { value: 3.0, variance: 0.01, epsilon: 0.40, provenance: "c" }
+    var conf: f64 = 0.0
+    conf = conf + kn[0].confidence * 0.50
+    conf = conf + kn[1].confidence * 0.30
+    conf = conf + kn[2].confidence * 0.20
+    print("R25 ")
+    print_f64(conf)
+    println("")
+    // expected 0.80*0.5 + 0.60*0.3 + 0.40*0.2 = 0.66
+    let r25_ok = conf > 0.20 && conf < 0.90
+    if r25_ok {
+        println("R25_OK")
+    } else if conf > 1.0e15 {
+        println("R25_BITCAST_SITOFP")
+        println("EPISTEMIC_FABRICATION: ep28-shaped Knowledge array conf sitofp")
+    } else {
+        println("R25_BAD")
+    }
+
+    // R21+R25 are the ep28-shaped load-bearing rows (struct-lit / array Knowledge).
+    // R20 (call-form Knowledge(v, e=…)) differs across engines on whether e= lands
+    // in .confidence (Madaros stores 0.671038; lean_single has been measured at 1.0)
+    // — still useful as a Madaros sitofp probe, not as the cross-engine oracle.
+    if r21_ok && r25_ok {
+        println("KCONF_ALL_OK")
+        return 0
+    }
+    // Fail-closed: do not exit 0 while the ep28-shaped rows fabricate.
+    println("KCONF_FABRICATED")
+    return 1
+}

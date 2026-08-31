@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/diverse_double_compile_check.sh
+# scripts/dev/diverse_double_compile_check.sh
 #
 # Phase 7 — Diverse Double-Compilation (DDC) Check
 #
@@ -12,7 +12,7 @@
 # output is a reliable signal that something is wrong.
 #
 # USAGE:
-#   bash scripts/diverse_double_compile_check.sh [--ref-program PATH]
+#   bash scripts/dev/diverse_double_compile_check.sh [--ref-program PATH]
 #
 # OPTIONS:
 #   --ref-program PATH   Path to a .sio file to use as the reference program.
@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 # ── configurable paths ──────────────────────────────────────────────────────

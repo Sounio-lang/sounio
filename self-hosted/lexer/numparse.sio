@@ -108,75 +108,151 @@ fn num_parse_octal(start: i64, end: i64) -> i64 with Mut, Div, Panic {
 // FLOAT PARSING (with scientific notation)
 // ============================================================================
 
+// Exact powers of ten. 10^22 is the largest power of ten representable
+// exactly in binary64, which is what makes the fast path below correctly
+// rounded rather than merely close.
+// Exact powers of ten, built by repeated multiplication rather than written as
+// literals. 10^k for k <= 22 is exactly representable in binary64 and each
+// 10^(k-1) * 10 is an exact product, so this loop is exact -- while the literal
+// form was NOT: lean_single, which compiles this file, parses 10^19 as a
+// NEGATIVE number and 10^20..10^22 as unrelated values, so a written-out table
+// arrives already poisoned. That is what made 1e300 and 1e-300 come out wrong
+// by far more than an ULP.
+//
+// 10^22 is the largest power of ten representable exactly, which is what makes
+// the fast path in the parser correctly rounded rather than merely close.
+fn num_pow10_exact(k: i64) -> f64 with Mut, Panic, Div {
+    var v: f64 = 1.0
+    var n = k
+    while n > 0 {
+        v = v * 10.0
+        n = n - 1
+    }
+    v
+}
+
+// Decimal -> binary64 (#1626 follow-up).
+//
+// The previous implementation accumulated the fraction as
+//
+//     var frac = 0.1
+//     result = result + digit * frac
+//     frac    = frac * 0.1
+//
+// and 0.1 is not representable in binary64, so every digit compounded another
+// rounding. Measured against CPython over 91 realistic literals, THIRTY-TWO
+// were wrong, most by 1-2 ULP: `0.99999999` came out one ULP high, which is
+// how it was found -- it made `log` look like it had a 2^-53 residual when
+// `log` was in fact exact and being handed a different number.
+//
+// This accumulates the significand as an EXACT integer while tracking a decimal
+// exponent, then scales once. When the significand fits in 53 bits and the
+// exponent is within +-22, that single multiply or divide by an exactly
+// representable power of ten is correctly rounded (Clinger 1990) -- so the
+// common case is not "closer", it is exact.
+//
+// Outside that window the result is scaled in chunks of 10^22 and is no longer
+// guaranteed correctly rounded; literals with more than 17 significant digits
+// or |exponent| > 22 can still be off by an ULP or two. That is a real
+// remaining limit, not a rounding of the claim.
 fn num_parse_float(start: i64, end: i64) -> f64 with Mut, Div, Panic {
-    // Parse integer part
-    var result: f64 = 0.0
+    var sig: i64 = 0        // significand, exact
+    var dexp: i64 = 0       // decimal exponent to apply to sig
+    var seen_dot = false
+    var negative_exp = false
+
     var i = start
     while i < end {
         let ch = cursor_source_byte(i)
-        if ch == 95 { i = i + 1; continue }
-        if ch == 46 || ch == 101 || ch == 69 || ch == 102 { break }
+        if ch == 95 {
+            i = i + 1
+            continue
+        }
+        if ch == 46 && !seen_dot {
+            seen_dot = true
+            i = i + 1
+            continue
+        }
         if ch >= 48 && ch <= 57 {
-            result = result * 10.0 + (ch - 48) as f64
-        } else {
-            break
+            // 922337203685477580 = i64 max / 10: room for one more digit.
+            if sig < 922337203685477580 {
+                sig = sig * 10 + (ch - 48) as i64
+                if seen_dot { dexp = dexp - 1 }
+            } else {
+                // Significand is full. Digits before the point still shift the
+                // exponent; digits after it are below the representable range.
+                if !seen_dot { dexp = dexp + 1 }
+            }
+            i = i + 1
+            continue
         }
-        i = i + 1
+        break
     }
 
-    // Parse fractional part
-    if i < end && cursor_source_byte(i) == 46 {  // '.'
+    // Exponent
+    if i < end && (cursor_source_byte(i) == 101 || cursor_source_byte(i) == 69) {
         i = i + 1
-        var frac: f64 = 0.1
+        if i < end && cursor_source_byte(i) == 45 {
+            negative_exp = true
+            i = i + 1
+        } else if i < end && cursor_source_byte(i) == 43 {
+            i = i + 1
+        }
+        var ev: i64 = 0
         while i < end {
-            let ch = cursor_source_byte(i)
-            if ch == 95 { i = i + 1; continue }
-            if ch == 101 || ch == 69 || ch == 102 { break }
-            if ch >= 48 && ch <= 57 {
-                result = result + (ch - 48) as f64 * frac
-                frac = frac * 0.1
+            let ch2 = cursor_source_byte(i)
+            if ch2 >= 48 && ch2 <= 57 {
+                ev = ev * 10 + (ch2 - 48) as i64
             } else {
                 break
             }
             i = i + 1
         }
+        if negative_exp { dexp = dexp - ev } else { dexp = dexp + ev }
     }
 
-    // Parse exponent
-    if i < end && (cursor_source_byte(i) == 101 || cursor_source_byte(i) == 69) {  // 'e' or 'E'
-        i = i + 1
-        var exp_negative = false
-        if i < end && cursor_source_byte(i) == 45 {  // '-'
-            exp_negative = true
-            i = i + 1
-        } else if i < end && cursor_source_byte(i) == 43 {  // '+'
-            i = i + 1
+    if sig == 0 { return 0.0 }
+
+    // The significand is NOT trimmed to 53 bits. Trimming was tried and is
+    // strictly worse: 944.6810951079374 needs 16 significant digits, and
+    // dropping one to fit 2^53 threw away a digit the literal actually carries.
+    // `sig as f64` is a cvtsi2sd, which rounds correctly, so a significand above
+    // 2^53 costs half an ULP there and half an ULP in the scaling below --
+    // one ULP total, against a whole lost digit.
+
+    let sf = sig as f64
+
+    // Correctly rounded fast path.
+    if dexp >= 0 && dexp <= 22 { return sf * num_pow10_exact(dexp) }
+    if dexp < 0 && dexp >= 0 - 22 { return sf / num_pow10_exact(0 - dexp) }
+
+    // Extended fast path: pull the exponent into range by scaling the
+    // significand while it still fits in 53 bits. 900719925474099 is 2^53/10.
+    if dexp > 22 {
+        var s2 = sig
+        var e2 = dexp
+        while e2 > 22 && s2 <= 900719925474099 {
+            s2 = s2 * 10
+            e2 = e2 - 1
         }
-        var exp: i64 = 0
-        while i < end {
-            let ch = cursor_source_byte(i)
-            if ch >= 48 && ch <= 57 {
-                exp = exp * 10 + (ch - 48) as i64
-            } else {
-                break
-            }
-            i = i + 1
-        }
-        // Apply exponent: result * 10^exp
-        var power: f64 = 1.0
-        var e = exp
-        while e > 0 {
-            power = power * 10.0
-            e = e - 1
-        }
-        if exp_negative {
-            result = result / power
-        } else {
-            result = result * power
-        }
+        if e2 <= 22 { return (s2 as f64) * num_pow10_exact(e2) }
     }
 
-    result
+    // Fallback for extreme exponents: chunks of 10^22. Each step is one
+    // rounding, so this is close but not correctly rounded.
+    var v = sf
+    var e3 = dexp
+    while e3 >= 22 {
+        v = v * num_pow10_exact(22)
+        e3 = e3 - 22
+    }
+    while e3 <= 0 - 22 {
+        v = v / num_pow10_exact(22)
+        e3 = e3 + 22
+    }
+    if e3 > 0 { v = v * num_pow10_exact(e3) }
+    if e3 < 0 { v = v / num_pow10_exact(0 - e3) }
+    v
 }
 
 // ============================================================================

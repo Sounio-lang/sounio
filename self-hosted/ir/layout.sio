@@ -4,7 +4,7 @@
 // in .sprof profile) are emitted first in the binary. Improves I-cache
 // locality without a post-link tool (BOLT, AutoFDO).
 //
-// Critical: IrCall.fn_id is a positional index into module.functions[].
+// Critical: IrCall.fn_id is a positional index into (*module.functions)[].
 // After reordering, all fn_id references must be patched via a remap table.
 //
 // References:
@@ -53,7 +53,9 @@ fn layout_score_functions(module: &IrModule, profile: &SprofProfile) -> ([Layout
     var scores: [LayoutScore; 1024] = [layout_empty_score(); 1024]
     var i: i64 = 0
     while i < module.fn_count && i < LAYOUT_MAX_FUNCS {
-        let count = sprof_lookup(profile, &module.functions[i as usize].name)
+        // #1678: hoist before taking the reference -- see ir/profile.sio.
+        var f = ir_fn_get(module, i as usize)
+        let count = sprof_lookup(profile, &f.name)
         scores[i as usize] = LayoutScore { func_idx: i, count: count }
         i = i + 1
     }
@@ -128,15 +130,15 @@ fn layout_build_remap(scores: &[LayoutScore; 1024], count: i64) -> [i64; 1024] w
 }
 
 // ============================================================================
-// Reorder: physically rearrange module.functions[]
+// Reorder: physically rearrange (*module.functions)[]
 // ============================================================================
 
-fn layout_reorder_functions(module: IrModule, scores: &[LayoutScore; 1024]) -> IrModule with Mut, Panic, Div {
+fn layout_reorder_functions(module: IrModule, scores: &[LayoutScore; 1024]) -> IrModule with Alloc, Mut, Panic, Div {
     var result = module
     var i: i64 = 0
     while i < module.fn_count {
         let old_idx = scores[i as usize].func_idx
-        result.functions[i as usize] = module.functions[old_idx as usize]
+        ir_fn_set(&! result, i as usize, ir_fn_get(&module, old_idx as usize))
         i = i + 1
     }
     result
@@ -157,13 +159,13 @@ fn layout_patch_fn_ids(module: &!IrModule, remap: &[i64; 1024]) with Mut, Panic,
     var fi: i64 = 0
     while fi < module.fn_count {
         var ii: i64 = 0
-        while ii < module.functions[fi as usize].instr_count {
-            if layout_is_call_opcode(module.functions[fi as usize].instrs[ii as usize].op) {
-                let old_id = module.functions[fi as usize].instrs[ii as usize].fn_id
+        while ii < ir_fn_get(module, fi as usize).instr_count {
+            if layout_is_call_opcode((IR_A_OP[(ir_region_slot_r(ir_fn_get(module, fi as usize).region, (ii))) as usize] as IrOpcode)) {
+                let old_id = IR_A_FN_ID[(ir_region_slot_r(ir_fn_get(module, fi as usize).region, (ii))) as usize]
                 if old_id >= 0 && old_id < module.fn_count {
-                    var instr = module.functions[fi as usize].instrs[ii as usize]
+                    var instr = ir_arena_load(ir_region_slot_r(ir_fn_get(module, fi as usize).region, (ii)))
                     instr.fn_id = remap[old_id as usize]
-                    module.functions[fi as usize].instrs[ii as usize] = instr
+                    ir_arena_store(ir_region_slot_w(ir_fn_get(module, fi as usize).region, (ii)), instr)
                 }
             }
             ii = ii + 1
@@ -176,11 +178,15 @@ fn layout_patch_fn_ids(module: &!IrModule, remap: &[i64; 1024]) with Mut, Panic,
 // Top-level: score -> sort -> reorder -> patch -> return
 // ============================================================================
 
-fn layout_sort_by_profile(module: IrModule, profile: &SprofProfile) -> LayoutResult with Mut, Panic, Div {
+pub(crate) fn layout_sort_by_profile(module: IrModule, profile: &SprofProfile) -> LayoutResult with Alloc, Mut, Panic, Div {
     var scores: [LayoutScore; 1024] = [layout_empty_score(); 1024]
     var si: i64 = 0
     while si < module.fn_count && si < LAYOUT_MAX_FUNCS {
-        let sc = sprof_lookup(profile, &module.functions[si as usize].name)
+        // #1678: hoist before taking the reference. This site is also why
+        // `madaros --self-test` segfaulted at T24 -- the wrong address was
+        // dereferenced rather than merely misread. See #1680.
+        var sf = ir_fn_get(&module, si as usize)
+        let sc = sprof_lookup(profile, &sf.name)
         scores[si as usize] = LayoutScore { func_idx: si, count: sc }
         si = si + 1
     }

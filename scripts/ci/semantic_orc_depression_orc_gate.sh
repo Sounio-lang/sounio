@@ -29,23 +29,23 @@ SWOW_OUT="$("${SOUC}" run "${SWOW_SRC}" 2>&1)" || fail "depression_swow_orc.sio 
 echo "${SWOW_OUT}"
 echo ""
 
-echo "${SWOW_OUT}" | grep -q "SOUNIO_DEPRESSION_SWOW_ORC_PASS" \
+grep -q "SOUNIO_DEPRESSION_SWOW_ORC_PASS" <<<"${SWOW_OUT}" \
     || fail "token SOUNIO_DEPRESSION_SWOW_ORC_PASS not found"
 echo "✓ SOUNIO_DEPRESSION_SWOW_ORC_PASS present"
 
 # Verify all 5 groups produced output
-echo "${SWOW_OUT}" | grep -q "control" \
+grep -q "control" <<<"${SWOW_OUT}" \
     || fail "control group missing from output"
-echo "${SWOW_OUT}" | grep -q "minimum" \
+grep -q "minimum" <<<"${SWOW_OUT}" \
     || fail "minimum group missing from output"
-echo "${SWOW_OUT}" | grep -q "severe" \
+grep -q "severe" <<<"${SWOW_OUT}" \
     || fail "severe group missing from output"
 echo "✓ all 5 groups present in output"
 
 # Verify minimum has highest neg% (non-monotonic finding)
 # Extract neg% for minimum and severe; minimum should be higher
-MIN_LINE="$(echo "${SWOW_OUT}" | grep "minimum")"
-echo "${MIN_LINE}" | grep -q "neg%=0\." || echo "${MIN_LINE}" | grep -q "neg%=1\." \
+MIN_LINE="$(grep "minimum" <<<"${SWOW_OUT}")"
+grep -q "neg%=0\." <<<"${MIN_LINE}" || grep -q "neg%=1\." <<<"${MIN_LINE}" \
     || fail "minimum group neg% field missing"
 echo "✓ minimum group neg% field present"
 
@@ -58,20 +58,21 @@ SEM_OUT="$("${SOUC}" run "${SEMANTIC_SRC}" 2>&1)" || fail "depression_semantic_o
 echo "${SEM_OUT}"
 echo ""
 
-echo "${SEM_OUT}" | grep -q "SOUNIO_DEPRESSION_SEMANTIC_ORC_PASS" \
+grep -q "SOUNIO_DEPRESSION_SEMANTIC_ORC_PASS" <<<"${SEM_OUT}" \
     || fail "token SOUNIO_DEPRESSION_SEMANTIC_ORC_PASS not found"
 echo "✓ SOUNIO_DEPRESSION_SEMANTIC_ORC_PASS present"
 
-echo "${SEM_OUT}" | grep -q "VERIFIED: minimum group has most negative mean curvature" \
+grep -q "VERIFIED: minimum group has most negative mean curvature" <<<"${SEM_OUT}" \
     || fail "minimum group ordering verification failed"
 echo "✓ minimum most-hyperbolic ordering verified"
 
-echo "${SEM_OUT}" | grep -q "VERIFIED: moderate group least hyperbolic" \
+grep -q "VERIFIED: moderate group least hyperbolic" <<<"${SEM_OUT}" \
     || fail "non-monotonic finding verification failed"
 echo "✓ non-monotonic finding (moderate least hyperbolic) verified"
 
 # Verify CI format: minimum CI should be entirely negative
-echo "${SEM_OUT}" | grep "minimum" | grep -q "CI=\[-" \
+min_ci="$(grep "minimum" <<<"${SEM_OUT}" || true)"
+grep -q "CI=\[-" <<<"$min_ci" \
     || fail "minimum CI does not start negative"
 echo "✓ minimum CI negative-definite"
 
@@ -87,12 +88,12 @@ EPI_OUT="$("${SOUC}" run "${EPI_SRC}" 2>&1)" || fail "depression_epistemic_orc.s
 echo "${EPI_OUT}"
 echo ""
 
-echo "${EPI_OUT}" | grep -q "SOUNIO_DEPRESSION_EPISTEMIC_ORC_PASS" \
+grep -q "SOUNIO_DEPRESSION_EPISTEMIC_ORC_PASS" <<<"${EPI_OUT}" \
     || fail "token SOUNIO_DEPRESSION_EPISTEMIC_ORC_PASS not found"
 echo "✓ SOUNIO_DEPRESSION_EPISTEMIC_ORC_PASS present"
 
 # Density-matched separation gate must verify (effect survives density control)
-echo "${EPI_OUT}" | grep -q "VERIFIED: subclinical most hyperbolic" \
+grep -q "VERIFIED: subclinical most hyperbolic" <<<"${EPI_OUT}" \
     || fail "density-matched separation gate not verified"
 echo "✓ subclinical-most-hyperbolic separation verified at matched density"
 echo ""

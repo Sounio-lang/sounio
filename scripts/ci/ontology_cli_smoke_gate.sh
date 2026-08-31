@@ -6,8 +6,20 @@
 # subcommand tests covering resolve, search, list, count, stats, validate,
 # ancestors, is-subclass, fuzzy, batch, and format/limit flags.
 #
-# Exit 0 = all tests passed.
-# Exit 1 = at least one test failed.
+# Exit 0 = all 18 tests passed, OR the subject is absent and that absence is
+#          inventoried in scripts/ci/fixtures/vacuous_gate_debt.txt.
+# Exit 1 = at least one test failed, or the subject is absent and NOT inventoried.
+#
+# 2026-08-26: this gate has been reporting green while running zero of its
+# eighteen tests. It patches main() to dispatch to `ontology_run_cli()`, and
+# that function does not exist anywhere in self-hosted/ -- the compile dies with
+# `unknown identifier ontology_run_cli`, and the handler printed SKIP and
+# returned 0. The environment was never the problem; the subject is missing.
+#
+# A skip whose reason is "no GPU" is a fact about the machine. A skip whose
+# reason is "the thing under test does not exist" is a fact about the compiler,
+# and reporting it as a pass is how a hole stays invisible. The two are now
+# distinguished, and the second kind must be written down to be tolerated.
 
 set -euo pipefail
 
@@ -75,6 +87,45 @@ with open('$PATCHED_SRC', 'w') as f:
 PYEOF
 }
 
+# ── Absent subject ───────────────────────────────────────────────────────────
+# Eighteen tests exist below. When the entry point they all go through is not in
+# the tree, none of them runs. Say that in the artifact rather than in a word
+# that reads like a pass, and refuse unless the absence is written down.
+TOTAL_TESTS=18
+DEBT_FILE="$ROOT_DIR/scripts/ci/fixtures/vacuous_gate_debt.txt"
+
+report_absent_subject() {
+    local absent="$1"
+    local art_dir="$ROOT_DIR/artifacts/gates"
+    mkdir -p "$art_dir"
+    local art="$art_dir/ontology_cli_smoke.json"
+    local payload
+    payload="$(printf '{"status": "not_run", "metrics": {"total": %d, "passed": 0, "failed": 0, "not_run": %d}, "absent_subject": "%s"}' \
+        "$TOTAL_TESTS" "$TOTAL_TESTS" "$absent")"
+    # Write only when the bytes differ: a gate must not dirty the tree it, or the
+    # next gate, then inspects.
+    if [[ ! -f "$art" ]] || [[ "$(cat "$art")" != "$payload" ]]; then
+        printf '%s' "$payload" >"$art"
+    fi
+
+    echo "[ontology-smoke] THIS GATE VERIFIED NOTHING."
+    echo "[ontology-smoke]   subject absent: \`$absent\` is in no file under self-hosted/"
+    echo "[ontology-smoke]   $TOTAL_TESTS tests defined, 0 run, 0 passed."
+    echo "[ontology-smoke]   The environment is fine. The thing under test is missing."
+
+    if [[ -r "$DEBT_FILE" ]] && grep -qP "^\\Qscripts/ci/ontology_cli_smoke_gate.sh\\E\\t\\Q$absent\\E$" "$DEBT_FILE"; then
+        echo "[ontology-smoke]   Inventoried in scripts/ci/fixtures/vacuous_gate_debt.txt."
+        echo "[ontology-smoke]   Tolerated as debt. Delete that line when the subject lands."
+        exit 0
+    fi
+    echo "[ontology-smoke] FAIL: this absence is not inventoried." >&2
+    echo "                 Either implement \`$absent\`, or add the line" >&2
+    echo "                   scripts/ci/ontology_cli_smoke_gate.sh<TAB>$absent" >&2
+    echo "                 to scripts/ci/fixtures/vacuous_gate_debt.txt, which makes the" >&2
+    echo "                 hole visible in a diff instead of green in a check." >&2
+    exit 1
+}
+
 # ── Compile test binary ──────────────────────────────────────────────────────
 compile_test_binary() {
     if [[ ! -x "$SOUC_BIN" ]]; then
@@ -82,15 +133,32 @@ compile_test_binary() {
         exit 1
     fi
     patch_source
-    if "$SOUC_BIN" --help 2>/dev/null | grep -q "compile <file.sio>"; then
+    # Capture, don't pipe: through the pipe it is grep's match that decides,
+    # so a failing `--help` whose stdout happens to contain the flag would
+    # still select the new interface, and an early-exiting `grep -q` can
+    # EPIPE the writer under pipefail. The rc decides; the match only refines.
+    help_rc=0
+    help_out="$("$SOUC_BIN" --help 2>/dev/null)" || help_rc=$?
+    if [[ "$help_rc" -eq 0 ]] && grep -q "compile <file.sio>" <<<"$help_out"; then
         compile_cmd=( "$SOUC_BIN" compile "$PATCHED_SRC" -o "$TEST_BIN" )
     else
         compile_cmd=( "$SOUC_BIN" "$PATCHED_SRC" "$TEST_BIN" )
     fi
     if ! "${compile_cmd[@]}" >"$TMP_DIR/build.log" 2>&1; then
-        echo "[ontology-smoke] SKIP: selected compiler could not build patched ontology CLI source"
-        tail -n 20 "$TMP_DIR/build.log" || true
-        exit 0
+        # WHY it could not build decides whether this is a skip or a failure.
+        # An absent subject is not an environment limitation.
+        local absent=""
+        if grep -qE "unknown identifier .?ontology_run_cli" "$TMP_DIR/build.log"; then
+            absent="ontology_run_cli"
+        fi
+        if [[ -z "$absent" ]]; then
+            echo "[ontology-smoke] FAIL: the patched ontology CLI source did not build," >&2
+            echo "                 and not because its entry point is missing. The build" >&2
+            echo "                 log is below; this is a real failure, not a skip." >&2
+            tail -n 20 "$TMP_DIR/build.log" >&2 || true
+            exit 1
+        fi
+        report_absent_subject "$absent"
     fi
     chmod +x "$TEST_BIN"
 }
@@ -99,7 +167,7 @@ compile_test_binary() {
 test_resolve_curie() {
     local out
     out="$(run_ont resolve ALG:0000001)"
-    if echo "$out" | grep -q 'curie: ALG:0000001'; then
+    if grep -q 'curie: ALG:0000001' <<<"$out"; then
         ok "resolve CURIE"
     else
         fail "resolve CURIE"
@@ -109,7 +177,7 @@ test_resolve_curie() {
 test_resolve_label() {
     local out
     out="$(run_ont resolve "Ring")"
-    if echo "$out" | grep -q 'curie: ALG:0000005'; then
+    if grep -q 'curie: ALG:0000005' <<<"$out"; then
         ok "resolve by label"
     else
         fail "resolve by label"
@@ -119,7 +187,7 @@ test_resolve_label() {
 test_resolve_synonym() {
     local out
     out="$(run_ont resolve "Algebraic group")"
-    if echo "$out" | grep -q 'curie: ALG:0000002'; then
+    if grep -q 'curie: ALG:0000002' <<<"$out"; then
         ok "resolve by synonym"
     else
         fail "resolve by synonym"
@@ -173,7 +241,7 @@ test_fuzzy_limit() {
 test_count_prefix() {
     local out
     out="$(run_ont count GO:)"
-    if echo "$out" | grep -q '112'; then
+    if grep -q '112' <<<"$out"; then
         ok "count prefix"
     else
         fail "count prefix"
@@ -183,7 +251,7 @@ test_count_prefix() {
 test_count_total() {
     local out
     out="$(run_ont count)"
-    if echo "$out" | grep -q '1008'; then
+    if grep -q '1008' <<<"$out"; then
         ok "count total"
     else
         fail "count total"
@@ -193,7 +261,7 @@ test_count_total() {
 test_is_subclass() {
     local out
     out="$(run_ont is-subclass ALG:0000003 ALG:0000001)"
-    if echo "$out" | grep -q 'yes'; then
+    if grep -q 'yes' <<<"$out"; then
         ok "is-subclass true"
     else
         fail "is-subclass true"
@@ -203,7 +271,7 @@ test_is_subclass() {
 test_ancestors() {
     local out
     out="$(run_ont ancestors ALG:0000003)"
-    if echo "$out" | grep -q 'ALG:0000002' && echo "$out" | grep -q 'ALG:0000001'; then
+    if grep -q 'ALG:0000002' <<<"$out" && grep -q 'ALG:0000001' <<<"$out"; then
         ok "ancestors"
     else
         fail "ancestors"
@@ -213,7 +281,7 @@ test_ancestors() {
 test_validate() {
     local out rc=0
     out="$(run_ont validate)" || rc=$?
-    if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'VALID'; then
+    if [[ "$rc" -eq 0 ]] && grep -q 'VALID' <<<"$out"; then
         ok "validate"
     else
         fail "validate"
@@ -223,7 +291,7 @@ test_validate() {
 test_stats() {
     local out
     out="$(run_ont stats)"
-    if echo "$out" | grep -q 'ALG:' && echo "$out" | grep -q 'Max depth:' && echo "$out" | grep -q 'Root terms:'; then
+    if grep -q 'ALG:' <<<"$out" && grep -q 'Max depth:' <<<"$out" && grep -q 'Root terms:' <<<"$out"; then
         ok "stats"
     else
         fail "stats"
@@ -233,7 +301,7 @@ test_stats() {
 test_format_json() {
     local out
     out="$(run_ont --format json resolve ALG:0000001)"
-    if echo "$out" | grep -q '"curie": "ALG:0000001"'; then
+    if grep -q '"curie": "ALG:0000001"' <<<"$out"; then
         ok "--format json"
     else
         fail "--format json"
@@ -243,7 +311,7 @@ test_format_json() {
 test_format_tsv() {
     local out
     out="$(run_ont --format tsv resolve ALG:0000001)"
-    if echo "$out" | grep -q $'ALG:0000001\tAlgebra'; then
+    if grep -q $'ALG:0000001\tAlgebra' <<<"$out"; then
         ok "--format tsv"
     else
         fail "--format tsv"
@@ -275,7 +343,7 @@ validate
 EOF
     local out
     out="$(run_ont batch "$batch_file")"
-    if echo "$out" | grep -q 'ALG:0000001' && echo "$out" | grep -q '112' && echo "$out" | grep -q 'ALG:0000002' && echo "$out" | grep -q 'ALG:' && echo "$out" | grep -q 'VALID'; then
+    if grep -q 'ALG:0000001' <<<"$out" && grep -q '112' <<<"$out" && grep -q 'ALG:0000002' <<<"$out" && grep -q 'ALG:' <<<"$out" && grep -q 'VALID' <<<"$out"; then
         ok "batch mode"
     else
         fail "batch mode"
@@ -285,7 +353,7 @@ EOF
 test_unresolved() {
     local out
     out="$(run_ont resolve NONEXISTENT:999)"
-    if echo "$out" | grep -q 'unresolved'; then
+    if grep -q 'unresolved' <<<"$out"; then
         ok "unresolved CURIE"
     else
         fail "unresolved CURIE"

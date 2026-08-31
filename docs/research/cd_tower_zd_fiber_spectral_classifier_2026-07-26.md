@@ -30,7 +30,8 @@ The orbit theorem (frozen `PSL(2,7)=168` on the `2^{n-1}-1` zero-divisor fibers 
 action **cannot** answer: how many distinct **fiber geometries** (annihilation-graph isomorphism
 classes) are there? The naive "distinct orbits ⇒ distinct geometries" was **false** (retracted): the
 **parity-collapse law** (nauty-complete `n≤8`) gives `#geometries = 3·2^{n-5} < #orbits = 2^{n-3}-1`,
-because even-weight seams collapse onto Fano orbits. The combinatorial Weisfeiler–Leman / degree
+because even-weight seams collapse onto Fano orbits. The combinatorial colour-refinement (1-WL) /
+degree
 invariants **over-merge** the near-regular Fano stratum — so the reviewer flagged **odd/Fano-stratum
 injectivity** as *"needs spectral, not degrees"* and **OPEN**.
 

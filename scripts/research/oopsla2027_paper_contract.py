@@ -32,6 +32,33 @@ SPEC_TOKEN_RE = re.compile(
     r"^\*\*Status:\*\*\s*`[^`]*`\s*[—-]+\s*`([A-Za-z0-9_]+)`", re.MULTILINE)
 CITE_RE = re.compile(r"\|\s*(R[0-9]+)\s*\|\s*`([A-Za-z0-9_]+)`\s*\|")
 
+# A contribution can rest on more than one rung — C2 is measured at R1 and
+# closed at R29 — so a row may carry a rung LIST against a token LIST:
+#
+#   | C2 | ... | R1, R29 | `BOUND_16__...`; `CLOSURE_WALKED__...` |
+#
+# The two lists are zipped positionally, and a length mismatch is a failure
+# rather than a truncation: silently dropping the tail is exactly how a paper
+# ends up citing a rung it no longer supports.
+MULTI_CITE_RE = re.compile(
+    r"\|\s*(R[0-9]+(?:\s*,\s*R[0-9]+)+)\s*\|\s*((?:`[A-Za-z0-9_]+`\s*;?\s*)+)\|")
+
+
+def multi_citations(paper: str) -> tuple[dict[str, str], bool]:
+    """Rung->token pairs from multi-rung contribution rows."""
+    out: dict[str, str] = {}
+    ok = True
+    for rung_cell, token_cell in MULTI_CITE_RE.findall(paper):
+        rungs = [r.strip() for r in rung_cell.split(",")]
+        tokens = re.findall(r"`([A-Za-z0-9_]+)`", token_cell)
+        if len(rungs) != len(tokens):
+            print(f"  row cites {len(rungs)} rungs ({', '.join(rungs)}) "
+                  f"against {len(tokens)} tokens — cannot be paired")
+            ok = False
+            continue
+        out.update(zip(rungs, tokens))
+    return out, ok
+
 
 def read(rel: str) -> str:
     try:
@@ -60,7 +87,9 @@ def spec_token(rel: str) -> str | None:
 
 def clause_p1(paper: str, rungs: dict[str, str]) -> tuple[bool, dict]:
     cited = dict(CITE_RE.findall(paper))
-    ok = bool(cited)
+    multi, multi_ok = multi_citations(paper)
+    cited.update(multi)
+    ok = bool(cited) and multi_ok
     if not cited:
         print("  no rung/token citations found in the draft")
     for rung, token in sorted(cited.items(), key=lambda kv: int(kv[0][1:])):

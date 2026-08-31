@@ -258,8 +258,30 @@ sounio_resolve_gpu_souc() {
   return 1
 }
 
-# If SOUC_BIN is not set or not executable, try to resolve it.
-if [[ -z "${SOUC_BIN:-}" ]] || [[ ! -x "${SOUC_BIN:-}" ]]; then
+# SOUC_BIN set but unusable: say so, and do NOT resolve past it.
+#
+# The block below treats "set but not executable" the same as "not set" and
+# silently substitutes another binary. The caller then measures a compiler it
+# did not name, with nothing on stderr to say so. Same defect as the one fixed
+# in bin/souc and bin/madaros (#2256); this library is sourced by 126 scripts,
+# so it is the wider door of the two.
+#
+# SOUC_BIN is left exactly as the caller set it -- substituting it is the bug --
+# and a non-zero return stops any `set -e` caller at the source line.
+if [[ -n "${SOUC_BIN:-}" && ! -x "${SOUC_BIN:-}" ]]; then
+  if [[ ! -e "$SOUC_BIN" ]]; then _why="no such file"
+  elif [[ -d "$SOUC_BIN" ]];    then _why="is a directory"
+  else                               _why="not executable (chmod +x it)"; fi
+  echo "error: SOUC_BIN is set but cannot be used: $_why" >&2
+  echo "  SOUC_BIN=$SOUC_BIN" >&2
+  echo "  not substituting another compiler: this run would then measure a" >&2
+  echo "  binary you did not name. Fix the path, or unset SOUC_BIN." >&2
+  unset _why
+  return 1 2>/dev/null || exit 78
+fi
+
+# If SOUC_BIN is not set, try to resolve it.
+if [[ -z "${SOUC_BIN:-}" ]]; then
   _resolved="$(_sounio_resolve_bin 2>/dev/null || true)"
   if [[ -n "$_resolved" ]]; then
     SOUC_BIN="$_resolved"

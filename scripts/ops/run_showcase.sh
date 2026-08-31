@@ -3,9 +3,9 @@
 # First geometry theorem prover with honest confidence intervals
 #
 # Usage:
-#   ./scripts/run_showcase.sh          # Quick showcase (5 problems)
-#   ./scripts/run_showcase.sh full     # Full IMO-AG-30 (30 problems)
-#   ./scripts/run_showcase.sh train    # With self-play training
+#   ./scripts/ops/run_showcase.sh          # Quick showcase (5 problems)
+#   ./scripts/ops/run_showcase.sh full     # Full IMO-AG-30 (30 problems)
+#   ./scripts/ops/run_showcase.sh train    # With self-play training
 
 set -e
 

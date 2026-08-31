@@ -11,7 +11,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.imple
 
 ## Cutover Status (No-Rust Build+Run)
 
-Current cutover contract is bundle/state driven:
+Current cutover contract is bundle/state driven. These subcommands live on the
+checked artifact `artifacts/omega/souc-bin/souc-linux-x86_64-gpu`; the default
+`./bin/souc` (Madaros) has neither `bootstrap` nor `opt`, so set `SOUC_BIN` to the
+checked artifact before running them:
 
 - `souc bootstrap verify --bundle <dir>`
 - `souc bootstrap init --bundle <dir> --state <dir>`
@@ -21,7 +24,8 @@ Current cutover contract is bundle/state driven:
 - `souc opt policy promote --policy <file> --output <file>`
 - `souc opt policy status --policy <file>`
 
-Artifacts are validated from `manifest.v2.json` with Ed25519 signatures.
+Artifacts are validated from `bootstrap/artifacts/manifest.v2.json` with Ed25519
+signatures by `souc bootstrap verify --bundle bootstrap` on the checked artifact.
 Legacy Rust-bridge transition env knobs are removed and treated as hard errors.
 Optimization policy decisions are tracked by `bootstrap/policies/policy.v1.json`
 (`schema = "sounio.optimization.policy.v1"`).

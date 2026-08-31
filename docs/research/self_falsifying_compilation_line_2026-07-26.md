@@ -260,7 +260,7 @@ build artifact to a **proposition**, and what that costs:
 | Rung | What it does | Verdict type fixed **now** |
 |---|---|---|
 | **R0** | this audit | done: `SUBSTRATE_LIVE__CORPUS_BOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE` (opened as `…UNBOUND…`, see §1.1) |
-| **R1** | bind a sample of real gates to native claims in real sources; bind one in an **imported** module deliberately | `BOUND_N__MODULE_CLOSURE_{BLOCKS,PASSES}`; the module-closure result is reported whichever way it goes. **Done:** `BOUND_15__MODULE_CLOSURE_BLOCKS` (`self_falsifying_compilation_line_r1_2026-07-26.md`) |
+| **R1** | bind a sample of real gates to native claims in real sources; bind one in an **imported** module deliberately | `BOUND_N__MODULE_CLOSURE_{BLOCKS,PASSES}`; the module-closure result is reported whichever way it goes. **Done:** `BOUND_15__MODULE_CLOSURE_BLOCKS` (`self_falsifying_compilation_line_r1_2026-07-26.md`); module-closure half **superseded 2026-08-01** by R29 → `BOUND_16__MODULE_CLOSURE_PASSES` |
 | **R2** | verdict-token binding (harness emits, claim declares, mismatch is a compile error) | `TOKEN_BINDING_{IMPLEMENTED,BLOCKED}__CATCHES_DRIFT_NOT_MISINTERPRETATION` |
 | **R3** | executable falsifiers (must fail for the claim to live) | `FALSIFIERS_EXECUTABLE__GUARD_{NONVACUOUS,VACUOUS}` |
 | **R4** | retrospective over the correction history | see the operational definition below |

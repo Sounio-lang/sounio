@@ -17,8 +17,32 @@ mkdir -p "$RUN_PASS_DIR" "$COMPILE_FAIL_DIR"
 "$ROOT_DIR/scripts/ontology/build_dontology_ffi_importer.sh" "$IMPORTER" >/dev/null
 
 {
-    printf 'bundle\tstub\tontology\tclass_count\tclass_limit\tconst_count\tdisjoint_count\tdisjoint_limit\tsurface\tpositive_witness\tnegative_witnesses\ttyped_bridge\ttyped_witness\n'
+    printf 'bundle\tstub\tontology\tclass_count\tclass_limit\tconst_count\tdisjoint_count\tdisjoint_limit\tsurface\tpositive_witness\tnegative_witnesses\ttyped_bridge\ttyped_witness\tupstream_release\tfetched_at\tsource_uri\tsource_sha256\n'
 } >"$MANIFEST"
+
+# Provenance of the source slice a bundle was built from. Emitted into the
+# manifest so the generated artifacts carry where they came from, not just what
+# they contain.
+#
+# UNKNOWN is written deliberately and is not a placeholder to fill in later. The
+# committed slices declare `version: "fixture-2026.03"` and nothing else -- no
+# upstream release, no fetch time, no URI. Promoting a fixture version into
+# `upstream_release` would state a provenance that does not exist, which is the
+# failure this column was added to prevent. The sha256 is real: it is the slice
+# on disk, so a drifted slice shows up as a changed manifest.
+slice_provenance() {
+    local stem="$1"
+    local slice="$ROOT_DIR/stdlib/data/data/ontology/source/${stem}_slice.json"
+    local rel="upstream_release" fetched="fetched_at" uri="source_uri"
+    local up="UNKNOWN" at="UNKNOWN" src="UNKNOWN" sha="UNKNOWN"
+    if [[ -f "$slice" ]]; then
+        sha="$(sha256sum "$slice" | awk '{print $1}')"
+        up="$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(d.get('$rel') or 'UNKNOWN')" "$slice" 2>/dev/null || printf 'UNKNOWN')"
+        at="$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(d.get('$fetched') or 'UNKNOWN')" "$slice" 2>/dev/null || printf 'UNKNOWN')"
+        src="$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(d.get('$uri') or 'UNKNOWN')" "$slice" 2>/dev/null || printf 'UNKNOWN')"
+    fi
+    printf '%s\t%s\t%s\t%s' "$up" "$at" "$src" "$sha"
+}
 
 extract_ontology_block() {
     local stub="$1"
@@ -386,7 +410,10 @@ generate_one() {
         negative_witnesses="$disjoint_negative"
     fi
 
-    printf '%s\t%s\t%s\t%s\t64\t%s\t%s\t64\t%s\t%s\t%s\t%s\t%s\n' \
+    local provenance
+    provenance="$(slice_provenance "$stem")"
+
+    printf '%s\t%s\t%s\t%s\t64\t%s\t%s\t64\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$bundle" \
         "stdlib/ontology/generated/$stem.sio" \
         "$ontology_name" \
@@ -397,7 +424,8 @@ generate_one() {
         "$positive_witness" \
         "$negative_witnesses" \
         "stdlib/ontology/typed/$stem.sio" \
-        "tests/run-pass/ontology_typed_bridge_$stem.sio" >>"$MANIFEST"
+        "tests/run-pass/ontology_typed_bridge_$stem.sio" \
+        "$provenance" >>"$MANIFEST"
 }
 
 generate_one alg ALGGenerated

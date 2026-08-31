@@ -58,6 +58,27 @@ lean_lib «SounioGradedModal» where
 @[default_target]
 lean_lib «SounioMeasConf» where
 
+-- Machine-checked algebra backing demos/hydrogen/ (Jensen/variance gap,
+-- correlated-sum variance decomposition, monotone p-box propagation).
+@[default_target]
+lean_lib «SounioHydrogenPbox» where
+
+-- The demo numbers as theorems: exact-rational receipt for the IDM and
+-- delivered-cost claims (native_decide over Rat; Python oracle retired).
+@[default_target]
+lean_lib «SounioHydrogenReceipt» where
+
+-- The van't Hoff extrapolation gate: rational spine of the calcite
+-- scaling demo (corner exactness, pK sandwiches, SI straddle, gate).
+@[default_target]
+lean_lib «SounioHydrogenVanthoff» where
+
+-- Valley-chain composition: corner-exactness of the composed
+-- subsurface·compressor·capacity-factor p-box (explicit premises,
+-- exact-rational receipt for the demo's constants).
+@[default_target]
+lean_lib «SounioHydrogenValleyPbox» where
+
 @[default_target]
 lean_lib «SounioProofObligation» where
 
@@ -74,6 +95,13 @@ lean_lib «SounioSedenionMeasurement» where
 
 @[default_target]
 lean_lib «SounioCDCocycle» where
+
+-- CD-tower ZD fibers: the fiber-antisymmetry development.  Mathlib-free, no `sorry`, no
+-- `native_decide`; imports only SounioCDCocycle.  Carries the deviation law
+-- (`deviation_law_all`) and both rows of the level transfer (`s3_level_recursion`,
+-- `cp2_level_recursion`).
+@[default_target]
+lean_lib «SounioZDFiberAntisym» where
 
 @[default_target]
 lean_lib «SounioCDTowerSeam» where
@@ -450,6 +478,11 @@ lean_lib «SounioDeGreyChi529Exact» where
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where
 
+-- Physical approximation effects: NonUnitary × NarrowWidthApproximation composition
+-- (particle amp→σ honesty leaves). Mathlib-free, no sorry.
+@[default_target]
+lean_lib «SounioNonUnitaryNWA» where
+
 -- M2: Vancomycin-Knightian thrust — Ferson p-box operator
 @[default_target]
 lean_lib «SounioKnightian» where
@@ -468,15 +501,6 @@ lean_lib «SounioTacrolimusDosingSafety» where
 -- epistemic floor argument).
 @[default_target]
 lean_lib «SounioTacrolimusDDI» where
-
--- Mercyful Learning scheduler correctness (MIMIC-IV vancomycin TDM line,
--- Task 3): constrained argmin reaches the target (anti-Goodhart
--- sufficiency), Goodhart-trap theorem (necessity), naive toxicity
--- minimizer under-doses. Mathlib-free; abstract theorems pure,
--- concrete MIMIC-IV instance via native_decide. Gate:
--- scripts/ci/mercyful_lean_gate.sh.
-@[default_target]
-lean_lib «SounioMercyfulScheduler» where
 
 -- M2.5: Vancomycin-Knightian thrust — Fréchet outer enclosure for
 -- monotone-in-each-arg functions (joint-dependence resolution)
@@ -607,6 +631,12 @@ lean_lib «SounioFanoArcsBlocking» where
 @[default_target]
 lean_lib «SounioSunflower» where
 
+-- Measurement: seven xor-fibers of 12 as a partition of the 84, nested
+-- (not orthogonal) with the annihilator kernel. See
+-- docs/audit/SEVEN_FIBERS_OF_TWELVE_2026-08-19.md
+@[default_target]
+lean_lib «SounioSevenFibers» where
+
 -- Erdős [90] CLASSICAL planar attack: exact triangular-lattice (Eisenstein ℤ[ω]) lower
 -- bound u(n) ≥ ⌊3n−√(12n−3)⌋, witnessed. Baseline for the cluster search.
 -- See docs/research/erdos-90-planar-search-plan.md
@@ -648,6 +678,33 @@ lean_lib «EpistemicEffectsV2» where
 @[default_target]
 lean_lib «EpistemicEffectsNS» where
 
+-- First Lean importer of V2: the V1 `preservation_is_false` witness,
+-- inverted. `measure (lit_nat 0)` stays `Knowledge<Nat>` after reduction.
+@[default_target]
+lean_lib «EpistemicEffectsV2_measure_nat» where
+
+-- Second V2 importer: cites `preservation` on `kvalue` of `Knowledge<Nat>`.
+-- Dual of measure — the compiler's `check_knowledge_unwrap` path.
+@[default_target]
+lean_lib «EpistemicEffectsV2_kvalue_nat» where
+
+-- Third V2 importer: cites `invKraw` on the V1 propagation witness.
+-- `f (kraw nat)` with `f : Knowledge<Nat> → Knowledge<Nat>` is typable.
+@[default_target]
+lean_lib «EpistemicEffectsV2_invkraw_nat» where
+
+-- Fourth V2 importer: the inverted V1 witness at a payload the language
+-- ships. `f (kraw mg)` with `f : Knowledge<mg> → Knowledge<mg>` is typable.
+@[default_target]
+lean_lib «EpistemicEffectsV2_invkraw_mg» where
+
+-- Refusal as a first-class compilation outcome (E219 / P0-F). A well-typed
+-- program in the extern-call fragment produces a value or refuses; it never
+-- fabricates a zero. Models the historical stub-to-zero backend as a second
+-- relation and proves they disagree on `abs + 1`. Mathlib-free, no sorry.
+@[default_target]
+lean_lib «SounioRefusalHonesty» where
+
 -- Cayley–Dickson erasure ladder: the native-erasure law ker = 2^(n-1) − 4.
 -- Algebra-level exact ℤ-rank of the verified cdSigma product certifies the
 -- kernel dimensions L4–L8 (native_decide), matching the runtime float-Gauss
@@ -664,80 +721,49 @@ lean_lib «SounioCayleyDicksonErasure» where
 @[default_target]
 lean_lib «SounioG2Derivations» where
 
--- CD monomial-automorphism tower — third independent kernel checker (native_decide)
--- for the program's FINITE facts: seam is the unique associator-degree arg-max (n=4,5),
--- octonion alternativity Psi_3, block lemma at n=4 (β=0), and the 168 count. Not built by
--- CI (heavy GL(4,2) sweeps); build on demand `lake build SounioCDTowerAutomorphism`.
-lean_lib «SounioCDTowerAutomorphism» where
+@[default_target]
+lean_lib «SounioMercyfulScheduler» where
 
--- FO oral Css algebraic surface parity (residual §5.4 mathematical half of the
--- FO PK method-science handoff). Import ≡ site ≡ method ≡ call-result by `rfl`;
--- default-seed FO freezes as exact ℚ via native_decide. Companion executable
--- certificate: scripts/research/fo_css_surface_parity_cert.py (CI gate always);
--- lake build optional under FO_CSS_LEAN_BUILD=1.
 @[default_target]
 lean_lib «SounioFoCssSurfaceParity» where
 
--- FO residual §5.4 semantic bridge (compiler half intermediate): surfaces
--- desugar to one FoExpr AST; FO var is a function of (AST, seeds). Not a
--- Madaros FO_XFER soundness proof — that remains L2-full open (R4 gates).
--- Companion: scripts/research/fo_surface_transfer_cert.py.
 @[default_target]
 lean_lib «SounioFoSurfaceTransfer» where
 
--- FO residual §5.4 L2-fragment: Madaros FO bytecode ops 1–6 stack machine for
--- oral Css. Site ≡ import-expanded ≡ method programs interpret to L1 desugar.
--- Does not prove lower.sio emits them — R4 is the executable L2 witness.
--- Companion: scripts/research/fo_bytecode_fragment_cert.py.
 @[default_target]
 lean_lib «SounioFoBytecodeFragment» where
 
--- FO residual §5.4 L2 pure-emit: fo_bc_compile_expr pure fragment (lower.sio
--- ~9358–9367) formalised; compile(cssSite)=cssSiteProg; fo_css expand = site.
--- Companion: scripts/research/fo_emit_pure_cert.py.
 @[default_target]
 lean_lib «SounioFoEmitPure» where
 
--- FO residual §5.4 L2 registration fragment: multipass FO_XFER expand for
--- oral Css pure helpers (local ≡ import registry).
--- Companion: scripts/research/fo_registration_fragment_cert.py.
 @[default_target]
 lean_lib «SounioFoRegistrationFragment» where
 
--- FO residual §5.4 L2 engine-install fragment: multipass register of oral Css
--- pure helpers (forward/reverse/4-pass).
--- Companion: scripts/research/fo_engine_install_fragment_cert.py.
 @[default_target]
 lean_lib «SounioFoEngineInstallFragment» where
 
--- FO residual §5.4 L2 method FO_XFER peel (Pk.css / call-result → cssSite).
--- Companion: scripts/research/fo_method_xfer_fragment_cert.py.
 @[default_target]
 lean_lib «SounioFoMethodXferFragment» where
 
--- FO residual §5.4 L2 multi-mod prepass model (local ≡ import ≡ union).
--- Companion: scripts/research/fo_multimod_fragment_cert.py.
 @[default_target]
 lean_lib «SounioFoMultimodFragment» where
 
--- Oral Css residual §5.4 closeout: docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md
--- Stack gate: scripts/ci/fo_residual4_stack_gate.sh → ORAL_CSS_RESIDUAL4_CLOSED
 
--- CD-tower ZD fibers, the (★) lane (2026-07-31/08-01). SounioZDCollapse IMPORTS
--- SounioZDFiberAntisym: the collapse law's `hres` hypothesis is discharged by `star_forall`,
--- so the two must build together or the discharge is not checked.
--- Companions: scripts/research/cd_tower_zd_fiber_{antisymmetry_lemma,l1_reduction,
--- l2_switching,v1_reduction,collapse_l1l2}_contract.py
-@[default_target]
-lean_lib «SounioZDFiberAntisym» where
-
--- E5 L4 pure-arithmetic package (F closed under (T)+(C)). Separate from the tip:
--- no import of SounioZDFiberAntisym; safe to build in parallel with E4b tiers.
-@[default_target]
-lean_lib «SounioZDE5Inductive» where
-
+-- P3: Opioid weaning safety (F5c) — MOVED to sibling repo
+-- ../sounio-pbpk-sedation-weaning/formal/lean4/SounioOpioidWeaningSafety.lean
+-- (see stdlib/darwin_pbpk/WEANING_MOVED.md). Build there:
+--   cd ../sounio-pbpk-sedation-weaning/formal/lean4 && lake build SounioOpioidWeaningSafety
+--
+-- NOTE (rebase 2026-08-27): this PR's original lakefile also registered
+-- `lean_lib «SounioCDTowerAutomorphism»`, but `formal/lean4/SounioCDTowerAutomorphism.lean`
+-- exists on neither `origin/main` nor this PR head. The registration was dangling
+-- (non-default target, so `lake build` never surfaced it) and is dropped here.
+--
+-- NOTE (merge 2026-08-30): the #1580-split block that stood here also registered
+-- «SounioCDCoreLaw» and «SounioSeamFlip». Both landed on `origin/main`
+-- independently and are registered above; re-adding them here would declare the
+-- same target twice. Only «SounioZDChi» is still carried by this branch alone --
+-- formal/lean4/SounioZDChi.lean exists on neither `origin/main` nor any other
+-- lane -- so it keeps its entry, or the file would sit in the tree unbuilt.
 @[default_target]
 lean_lib «SounioZDChi» where
-
-@[default_target]
-lean_lib «SounioZDCollapse» where

@@ -1,0 +1,63 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: MADAROS_HESSIAN_QUOTIENT_PASS
+//@ sabotage: quotient-hessian
+
+// hessian_of over the quotient rule.
+//
+// Before this rule existed the division branch cleared the Hessian outright.
+// That was the honest choice at the time -- a missing number rather than an
+// operand's Hessian wearing the quotient's name -- but it meant every ratio
+// in the clinical corpus (clearance over volume, dose over weight, any
+// concentration) had a second-order term of exactly zero, and no diagnostic
+// said so. A confident zero from a shipped builtin is indistinguishable
+// from a true zero at the call site.
+//
+//   H(a/b)_jk = a_jk/b - (a_j*b_k + a_k*b_j)/b^2 - a*b_jk/b^2 + 2*a*b_j*b_k/b^3
+//
+// h_bb is the row that pins the rule. A two-term approximation -- the part
+// that looks like the product rule with a reciprocal -- reproduces h_ab
+// exactly and gets h_bb wrong, so the mixed partial alone cannot tell a
+// correct implementation from a plausible one.
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn main() -> i64 with Mut, Panic, Div, Alloc, Epistemic, IO {
+    let ka: Knowledge<f64> = measure(6.0, uncertainty: 0.1)
+    let kb: Knowledge<f64> = measure(2.0, uncertainty: 0.3)
+    let a = ka.value
+    let b = kb.value
+
+    // channel 0 = a, channel 1 = b
+    let h_aa = hessian_of(a / b, 0, 0)   // 0
+    let h_ab = hessian_of(a / b, 0, 1)   // -1/b^2      = -0.25
+    let h_bb = hessian_of(a / b, 1, 1)   // 2*a/b^3     =  1.5
+    let h_rec = hessian_of(1.0 / b, 1, 1)  // 2/b^3     =  0.25
+
+    // controls: the product rule must not have moved
+    let c_mul = hessian_of(a * b, 0, 1)  // 1
+    let c_sq  = hessian_of(b * b, 1, 1)  // 2
+
+    print("h_aa=");  print_f64(h_aa);  print("\n")
+    print("h_ab=");  print_f64(h_ab);  print("\n")
+    print("h_bb=");  print_f64(h_bb);  print("\n")
+    print("h_rec="); print_f64(h_rec); print("\n")
+    print("c_mul="); print_f64(c_mul); print("\n")
+    print("c_sq=");  print_f64(c_sq);  print("\n")
+
+    let ok = abs_f(h_aa - 0.0) < 1.0e-12
+        && abs_f(h_ab - (0.0 - 0.25)) < 1.0e-12
+        && abs_f(h_bb - 1.5) < 1.0e-12
+        && abs_f(h_rec - 0.25) < 1.0e-12
+        && abs_f(c_mul - 1.0) < 1.0e-12
+        && abs_f(c_sq - 2.0) < 1.0e-12
+
+    if ok {
+        print("MADAROS_HESSIAN_QUOTIENT_PASS\n")
+        return 0
+    }
+    print("MADAROS_HESSIAN_QUOTIENT_FAIL\n")
+    1
+}

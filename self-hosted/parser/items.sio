@@ -57,6 +57,22 @@ pub fn items_reset_pure_fn_reg() with Mut {
     pure_fn_local_reset()
 }
 
+// The extern-block pending queue (#1547) was REMOVED here, 2026-08-23, in the
+// same change that deleted its last caller.
+//
+// It queued declarations 2..N of an `extern "C" { .. }` block on a
+// module-global side channel for parse_program_loop to drain. The re-entrant
+// parser in this file replaces it: one wrapper item per parse_item() call, so
+// nothing is dropped and no aggregate crosses a module-global queue -- which
+// is the defect that motivated the rewrite, since the gen seed corrupts large
+// Item aggregates stored in module globals.
+//
+// Deleting the definition and not only the callers is deliberate. A `pub fn`
+// with zero callers is an inert surface, and this repository landed a ratchet
+// against exactly that on the same day: a thing that exists must mean
+// something or be refused. Leaving a dead queue behind would have been the
+// disease the rewrite was curing.
+
 fn pure_fn_local_bind(name: Name, value: i64) with Mut, Div {
     if PURE_FN_LOCAL_N < 32 {
         PURE_FN_LOCAL_H[PURE_FN_LOCAL_N as usize] = ast_name_hash(name)
@@ -940,25 +956,32 @@ fn items_reverse_item_list_loop(
     }
 }
 
-// ── Track A: extern "C" declarations become wrapper fns ────────────
+// ── Track A: some extern "C" declarations become wrapper fns ───────
 // MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16: the bodyless FnDef
 // this parser used to emit for an `extern "C"` declaration lowers (under
 // Madaros) as a real function whose body returns 0, shadowing the by-name
 // builtin resolution — proven with extern-declared str_len/sqrt returning
 // 0 while the undeclared calls resolve and work. lean_single solves the
 // same problem with strip_extern_blocks() stub-rewriting; the Madaros
-// equivalent lives here: each declaration becomes an ordinary Sounio fn
+// equivalent lives here: the declaration becomes an ordinary Sounio fn
 // (declared signature preserved for callers) whose body forwards to a
 // ffi_<name> intrinsic, resolved by the checker's runtime builtin table
-// and emitted by the native builtin registry. Unimplemented externs fail
-// at the wrapper's inner call with a clear E137 instead of silently
-// returning 0 at runtime.
+// and emitted by the native builtin registry.
+//
+// The rewrite applies ONLY to the names that have such an intrinsic —
+// extern_name_has_ffi_intrinsic below. An earlier draft rewrote every
+// declaration, which silently moved the refusal of an unimplemented extern
+// from the call to the DECLARATION: the wrapper body called an unbound
+// ffi_<name> and tripped E137 before E250 was ever consulted, so declaring
+// a binding without calling it stopped compiling. That property is what a
+// bindings module depends on and it now has a fixture,
+// tests/run-pass/ffi_declared_never_called_is_legal.sio.
 
-// Brace-form extern "C" blocks yield ONE wrapper item per parse_item() call:
+// Brace-form extern "C" blocks yield ONE item per parse_item() call:
 // parse_extern_fn_item consumes only the first declaration and leaves the
 // parser positioned inside the block with EXTERN_BLOCK_ACTIVE set; the item
 // loops' next parse_item() call re-enters via parse_extern_block_decl until
-// the closing brace. Every wrapper therefore flows through the ordinary
+// the closing brace. Every item therefore flows through the ordinary
 // parse_item return path, and no aggregate is ever stored in a global.
 // (Earlier Track A drafts queued built Items — or their small components —
 // through a module-global list and rebuilt them at drain time; every variant
@@ -1005,7 +1028,7 @@ fn param_name_path(pl: ParamList, span: Span) -> Expr with Mut, Panic {
     e
 }
 
-fn extern_forward_args_list(pl: ParamList, span: Span) -> ExprList with Panic, Alloc {
+fn extern_forward_args_list(pl: ParamList, span: Span) -> ExprList with Panic, Alloc, Mut {
     ExprList {
         label: empty_name(),
         head: param_name_path(pl, span),
@@ -1014,6 +1037,44 @@ fn extern_forward_args_list(pl: ParamList, span: Span) -> ExprList with Panic, A
             Some(rest) => Some(Box::new(extern_forward_args_list(*rest, span)))
         }
     }
+}
+
+// The `extern "C"` names for which an ffi_<name> forwarding target actually
+// exists. Three lists have to agree and scripts/ci/extern_builtin_mirror_gate.sh
+// diffs them: this one, the ffi_* arms of native_v2_builtin_id_for_func_ref
+// (self-hosted/native/codegen_x86_linux.sio, ids 39..50), and the
+// checker_bind_import_unknown_inplace("ffi_*") block in
+// check/check.sio::checker_collect_runtime_builtins_inplace.
+//
+// A name that is NOT here keeps the bodyless declaration, which is what main
+// emits for every extern, and main's pipeline handles it: ir/lower.sio flushes
+// it as an instr_count == 0 stub, native_v2_builtin_id_for_func_ref maps it to
+// a plain builtin id where one exists (exp, log, sin, cos, str_len, read_i64,
+// ...), codegen traps it via nc_emit_unimplemented_extern_trap_into where none
+// does (guarded by native_v2_empty_stub_would_fabricate), and E250 refuses the
+// CALL. Forwarding such a name to a ffi_<name> that does not exist is what
+// broke declaration-without-call: the wrapper body tripped E137 on the unbound
+// intrinsic at the DECLARATION, before any call-site rule was reached.
+fn extern_name_has_ffi_intrinsic(n: Name) -> bool with Mut, Panic, Div {
+    if name_eq(n, make_name("getpid")) { return true }   // ffi_getpid,  id 39
+    if name_eq(n, make_name("getppid")) { return true }  // ffi_getppid, id 40
+    if name_eq(n, make_name("exit")) { return true }     // ffi_exit,    id 41
+    if name_eq(n, make_name("abort")) { return true }    // ffi_abort,   id 42
+    if name_eq(n, make_name("malloc")) { return true }   // ffi_malloc,  id 43
+    if name_eq(n, make_name("free")) { return true }     // ffi_free,    id 44
+    if name_eq(n, make_name("system")) { return true }   // ffi_system,  id 45
+    if name_eq(n, make_name("sqrt")) { return true }     // ffi_sqrt,    id 46
+    if name_eq(n, make_name("floor")) { return true }    // ffi_floor,   id 47
+    if name_eq(n, make_name("ceil")) { return true }     // ffi_ceil,    id 48
+    if name_eq(n, make_name("pow")) { return true }      // ffi_pow,     id 49
+    if name_eq(n, make_name("tgamma")) { return true }   // ffi_tgamma,  id 50
+    false
+}
+
+// The bodyless FnDef an `extern "C"` declaration has always produced on main.
+// Kept for every name the forwarding rewrite cannot serve.
+fn extern_decl_fn_def(name: Name, params_opt: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, span: Span) -> FnDef with Mut, Panic, Alloc {
+    FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false, is_extern: true }
 }
 
 fn extern_wrapper_fn_def(name: Name, params_opt: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, span: Span) -> FnDef with Mut, Panic, Alloc {
@@ -1031,11 +1092,27 @@ fn extern_wrapper_fn_def(name: Name, params_opt: Option<Box<ParamList>>, ret_ty:
         }
     }
     let stmt = Stmt { kind: StmtKind::StmtExpr, span: span, name: empty_name(), ty: None, expr: Some(Box::new(call)), target: None, assign_op: AssignOp::AssignEq }
-    FnDef { name: name, params: params_kept, return_type: ret_ty, effects: None, body: Block { stmts: Some(Box::new(StmtList { head: stmt, tail: None })), span: span }, span: span, is_kernel: false }
+    FnDef { name: name, params: params_kept, return_type: ret_ty, effects: None, body: Block { stmts: Some(Box::new(StmtList { head: stmt, tail: None })), span: span }, span: span, is_kernel: false,
+        // is_extern is FALSE deliberately: main added this field via #1547 after
+        // the branch forked, and the wrapper is an ordinary Sounio fn forwarding
+        // to ffi_<name>, not a bodyless extern declaration. Marking it true would
+        // restore the very stub this change exists to stop emitting.
+        is_extern: false }
 }
 
-fn extern_wrapper_item(visibility: Visibility, name: Name, params_opt: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, span: Span) -> Item with Panic, Alloc {
-    let fn_def = extern_wrapper_fn_def(name, params_opt, ret_ty, span)
+// The single decision point: forward to ffi_<name> when that intrinsic exists,
+// otherwise leave the declaration a declaration.
+fn extern_decl_or_wrapper_fn_def(name: Name, params_opt: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, span: Span) -> FnDef with Mut, Panic, Div, Alloc {
+    if extern_name_has_ffi_intrinsic(name) {
+        return extern_wrapper_fn_def(name, params_opt, ret_ty, span)
+    }
+    extern_decl_fn_def(name, params_opt, ret_ty, span)
+}
+
+// No caller today (the re-entrant block path builds its own Item literal), kept
+// so a second construction site cannot diverge from the decision above.
+fn extern_wrapper_item(visibility: Visibility, name: Name, params_opt: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, span: Span) -> Item with Panic, Alloc, Mut, Div {
+    let fn_def = extern_decl_or_wrapper_fn_def(name, params_opt, ret_ty, span)
     Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None }
 }
 
@@ -1225,21 +1302,6 @@ impl Parser {
             let span = p.current_span()
             p.had_error = true
             p.error_count = p.error_count + 1
-            if p.error_count <= 20 {
-                // item_kind (bound at :1000) is the token that matched none of
-                // the item forms above; span locates it. The site tag alone told
-                // you WHICH counter fired but not WHAT it refused, which still
-                // left a bisect between the message and the cause.
-                print("parse error: unrecognised item start token=")
-                print_int(item_kind as i64)
-                if span.start > 0 || span.end > 0 {
-                    print(" at ")
-                    print_int(span.start)
-                    print("..")
-                    print_int(span.end)
-                }
-                print(" [items.sio:1115]\n")
-            }
             let pa = p.advance()
             let en = empty_name()
             let ep2 = empty_path()
@@ -1515,9 +1577,6 @@ impl Parser {
             var p_bad = self
             p_bad.had_error = true
             p_bad.error_count = p_bad.error_count + 1
-            if p_bad.error_count <= 20 {
-                print("parse error: silent-site items.sio:1373\n")
-            }
             p_bad = p_bad.advance()
             return (p_bad, Item {
                 kind: ItemKind::ItemFn,
@@ -1605,6 +1664,7 @@ impl Parser {
             body: body,
             span: span,
             is_kernel: is_kernel,
+            is_extern: false,
         }
 
         (p, Item {
@@ -1989,9 +2049,6 @@ impl Parser {
                     // Record unexpected input, but preserve the impl boundary after incomplete visibility.
                     p.had_error = true
                     p.error_count = p.error_count + 1
-                    if p.error_count <= 20 {
-                        print("parse error: silent-site items.sio:1844\n")
-                    }
                     if parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
                         p = p.advance()
                     }
@@ -2075,9 +2132,6 @@ impl Parser {
                 // Recovery: consume one unexpected token inside trait body.
                 p.had_error = true
                 p.error_count = p.error_count + 1
-                if p.error_count <= 20 {
-                    print("parse error: silent-site items.sio:1927\n")
-                }
                 p = p.advance()
             }
         }
@@ -2162,6 +2216,7 @@ impl Parser {
             body: body,
             span: span,
             is_kernel: false,
+            is_extern: false,
         }
 
         (p, Item {
@@ -2636,9 +2691,6 @@ impl Parser {
                 } else {
                     p.had_error = true
                     p.error_count = p.error_count + 1
-                    if p.error_count <= 20 {
-                        print("parse error: silent-site items.sio:2485\n")
-                    }
                     p = p.advance()
                 }
             } else if parser_peek(p) == TokenKind::RollbackRoute {
@@ -2648,9 +2700,6 @@ impl Parser {
             } else {
                 p.had_error = true
                 p.error_count = p.error_count + 1
-                if p.error_count <= 20 {
-                    print("parse error: silent-site items.sio:2494\n")
-                }
                 p = p.advance()
             }
 
@@ -2752,9 +2801,6 @@ impl Parser {
             } else {
                 p.had_error = true
                 p.error_count = p.error_count + 1
-                if p.error_count <= 20 {
-                    print("parse error: silent-site items.sio:2595\n")
-                }
                 p = p.advance()
             }
 
@@ -2827,9 +2873,6 @@ impl Parser {
         } else {
             p.had_error = true
             p.error_count = p.error_count + 1
-            if p.error_count <= 20 {
-                print("parse error: silent-site items.sio:2667\n")
-            }
         }
 
         let policy_name = p.current_name()
@@ -2947,17 +2990,11 @@ impl Parser {
                 } else {
                     p.had_error = true
                     p.error_count = p.error_count + 1
-                    if p.error_count <= 20 {
-                        print("parse error: silent-site items.sio:2784\n")
-                    }
                     p = p.advance()
                 }
             } else {
                 p.had_error = true
                 p.error_count = p.error_count + 1
-                if p.error_count <= 20 {
-                    print("parse error: silent-site items.sio:2789\n")
-                }
                 p = p.advance()
             }
 
@@ -3030,9 +3067,6 @@ impl Parser {
         } else {
             p.had_error = true
             p.error_count = p.error_count + 1
-            if p.error_count <= 20 {
-                print("parse error: silent-site items.sio:2861\n")
-            }
         }
 
         let policy_name = p.current_name()
@@ -3117,9 +3151,6 @@ impl Parser {
         } else {
             p.had_error = true
             p.error_count = p.error_count + 1
-            if p.error_count <= 20 {
-                print("parse error: silent-site items.sio:2945\n")
-            }
         }
 
         let metric_name = p.current_name()
@@ -3151,9 +3182,6 @@ impl Parser {
             } else {
                 p.had_error = true
                 p.error_count = p.error_count + 1
-                if p.error_count <= 20 {
-                    print("parse error: silent-site items.sio:2976\n")
-                }
             }
         }
 
@@ -3202,9 +3230,6 @@ impl Parser {
             } else {
                 p.had_error = true
                 p.error_count = p.error_count + 1
-                if p.error_count <= 20 {
-                    print("parse error: silent-site items.sio:3024\n")
-                }
                 p = p.advance()
             }
         }
@@ -3232,9 +3257,6 @@ impl Parser {
         } else {
             p.had_error = true
             p.error_count = p.error_count + 1
-            if p.error_count <= 20 {
-                print("parse error: silent-site items.sio:3051\n")
-            }
         }
 
         let name = p.current_name()
@@ -3270,9 +3292,6 @@ impl Parser {
             } else {
                 p.had_error = true
                 p.error_count = p.error_count + 1
-                if p.error_count <= 20 {
-                    print("parse error: silent-site items.sio:3086\n")
-                }
                 p = p.advance()
             }
 
@@ -3761,9 +3780,6 @@ impl Parser {
             var p = self
             p.had_error = true
             p.error_count = p.error_count + 1
-            if p.error_count <= 20 {
-                print("parse error: silent-site items.sio:3574\n")
-            }
             (p.advance(), empty_name())
         }
     }
@@ -3784,9 +3800,6 @@ impl Parser {
             var p = self
             p.had_error = true
             p.error_count = p.error_count + 1
-            if p.error_count <= 20 {
-                print("parse error: silent-site items.sio:3594\n")
-            }
             (p.advance(), CompareOp::CmpEq)
         }
     }
@@ -3818,9 +3831,6 @@ impl Parser {
         } else {
             p.had_error = true
             p.error_count = p.error_count + 1
-            if p.error_count <= 20 {
-                print("parse error: silent-site items.sio:3625\n")
-            }
             p = p.advance()
         }
 
@@ -3851,9 +3861,6 @@ impl Parser {
         } else {
             p.had_error = true
             p.error_count = p.error_count + 1
-            if p.error_count <= 20 {
-                print("parse error: silent-site items.sio:3655\n")
-            }
             p = p.advance()
         }
 
@@ -4298,9 +4305,11 @@ impl Parser {
     }
 
     // One extern-"C"-block declaration per call (re-entrant; see the
-    // EXTERN_BLOCK_ACTIVE note above). Emits the ffi-forwarding wrapper for
-    // the next declaration; on '}' closes the block and returns an empty
-    // filler item (the same shape an empty extern block always produced).
+    // EXTERN_BLOCK_ACTIVE note above). Emits the next declaration as an
+    // ffi-forwarding wrapper when that intrinsic exists and as a bodyless
+    // extern declaration otherwise; on '}' closes the block and returns an
+    // empty filler item (the same shape an empty extern block always
+    // produced).
     fn parse_extern_block_decl(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self
@@ -4342,19 +4351,24 @@ impl Parser {
             parser_reset_extern_block_state()
         }
         let span = p.span_from(start)
-        // Track A: the declaration becomes an ffi-forwarding wrapper; the
-        // bodyless FnDef this used to build lowered as a shadow fn whose
-        // body returned a fabricated 0.
-        let fn_def = extern_wrapper_fn_def(name, params_opt, ret_ty, span)
+        // Track A: a declaration whose ffi_<name> intrinsic exists becomes an
+        // ffi-forwarding wrapper, because the bodyless FnDef lowered as a
+        // shadow fn whose body returned a fabricated 0. Every other name keeps
+        // the bodyless declaration — see extern_name_has_ffi_intrinsic for why
+        // wrapping it would refuse the DECLARATION instead of the call.
+        let fn_def = extern_decl_or_wrapper_fn_def(name, params_opt, ret_ty, span)
         return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
     }
 
     // Sprint 108: extern "C" fn name(params) -> RetType (no body)
-    // Also accept brace-form extern blocks. Track A: every declaration is
-    // rewritten into an ffi-forwarding wrapper fn (see above); brace-form
-    // blocks are handled re-entrantly, one declaration per parse_item()
-    // call, so nothing is dropped (dispatch M1) and no aggregate crosses a
-    // module-global queue.
+    // Also accept brace-form extern blocks. Brace-form blocks are handled
+    // re-entrantly, one declaration per parse_item() call, so nothing is
+    // dropped (dispatch M1) and no aggregate crosses a module-global queue;
+    // each of those declarations goes through the Track A rewrite decision
+    // (extern_decl_or_wrapper_fn_def). The bare form below does NOT go
+    // through it: it emits the bodyless declaration unconditionally, which is
+    // main's representation for every extern and already resolves by name in
+    // the native builtin registry.
     fn parse_extern_fn_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'extern'
@@ -4374,9 +4388,6 @@ impl Parser {
             let span = p.current_span()
             p.had_error = true
             p.error_count = p.error_count + 1
-            if p.error_count <= 20 {
-                print("parse error: silent-site items.sio:4159\n")
-            }
             p = p.advance()
             return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
         }
@@ -4395,8 +4406,7 @@ impl Parser {
             p = p.advance()
         }
         let span = p.span_from(start)
-        // Track A: single-declaration form — same ffi-forwarding wrapper.
-        let fn_def = extern_wrapper_fn_def(name, params_opt, ret_ty, span)
+        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false, is_extern: true }
         (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
     }
 
@@ -4898,9 +4908,6 @@ fn study_parse_i64_value(p: Parser) -> (Parser, i64) with Mut, IO, Panic, Div, A
         var pa = p
         pa.had_error = true
         pa.error_count = pa.error_count + 1
-        if pa.error_count <= 20 {
-            print("parse error: silent-site items.sio:4679\n")
-        }
         (pa.advance(), 0)
     }
 }
@@ -4916,9 +4923,6 @@ fn study_parse_f64_value(p: Parser) -> (Parser, f64) with Mut, IO, Panic, Div, A
         var pa = p
         pa.had_error = true
         pa.error_count = pa.error_count + 1
-        if pa.error_count <= 20 {
-            print("parse error: silent-site items.sio:4694\n")
-        }
         (pa.advance(), 0.0)
     }
 }
@@ -5907,9 +5911,6 @@ fn parse_claim_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mu
                 fv_ok = false
                 pa.had_error = true
                 pa.error_count = pa.error_count + 1
-                if pa.error_count <= 20 {
-                    print("parse error: silent-site items.sio:5682\n")
-                }
                 pa = pa.advance()
             }
             let vend = pt_read_end(pa.pos - 1)

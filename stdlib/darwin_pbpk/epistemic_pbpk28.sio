@@ -664,8 +664,44 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     }
     println("")
 
-    // TEST 5: Sensitivity fractions sum to 1.0 (exactly after normalization)
-    println("TEST 5: Sensitivity fractions sum to 1.0")
+    // TEST 5: Sensitivity SPECTRUM - per-parameter, not only the aggregate
+    // -------------------------------------------------------------------
+    // The previous form of this test asserted only sum(sensitivity) == 1.0 and
+    // max(sensitivity) > 0.3. Both hold BY CONSTRUCTION after the normalisation
+    // loop in ep28_run, however many components are zero. So when issue #1497
+    // zeroed four of the seven Jacobian columns under Madaros, this test still
+    // printed a sum of 1.000000, a max ABOVE the reference (missing mass is
+    // redistributed by the normalisation), and reported 9/9 PASSED. A test that
+    // cannot fail on the defect it covers is worse than no test. These can:
+    //   (a) all seven parameters carry variance > 0 and a non-zero influence on
+    //       AUC_blood (under lean_single the smallest, kp_adipose, is 3.24e-8 -
+    //       small, but not zero), so NO component may be exactly 0.0;
+    //   (b) the two dominant components are PINNED to the lean_single reference
+    //       spectrum, so redistribution of lost mass - which leaves the sum at
+    //       1.0 and only raises the max - surfaces as a magnitude failure.
+    println("TEST 5: Sensitivity spectrum (per-parameter, not just the sum)")
+    print("  sens[0] cl_hepatic: ")
+    print_f64(ep.sensitivity[0])
+    println("")
+    print("  sens[1] cl_renal:   ")
+    print_f64(ep.sensitivity[1])
+    println("")
+    print("  sens[2] fu_plasma:  ")
+    print_f64(ep.sensitivity[2])
+    println("")
+    print("  sens[3] kp_brain:   ")
+    print_f64(ep.sensitivity[3])
+    println("")
+    print("  sens[4] kp_liver:   ")
+    print_f64(ep.sensitivity[4])
+    println("")
+    print("  sens[5] kp_kidney:  ")
+    print_f64(ep.sensitivity[5])
+    println("")
+    print("  sens[6] kp_adipose: ")
+    print_f64(ep.sensitivity[6])
+    println("")
+
     var s_sum = 0.0
     var si: i32 = 0
     while si < 7 {
@@ -684,23 +720,100 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     print("  max(sensitivity): ")
     print_f64(s_max)
     println("")
-    let sum_ok = s_sum > 0.999999 && s_sum < 1.000001   // tightened (normalization guarantees ~1.0 within FP error)
+
+    // (a) STRUCTURAL: a lost Jacobian column shows up as an exact 0.0 here.
+    var n_zero = 0.0
+    var sz: i32 = 0
+    while sz < 7 {
+        if ep.sensitivity[sz] == 0.0 { n_zero = n_zero + 1.0 }
+        sz = sz + 1
+    }
+    print("  zeroed components (must be 0): ")
+    print_f64(n_zero)
+    println("")
+
+    // (b) MAGNITUDE: pinned against the lean_single reference spectrum.
+    // Tolerance is 1.0e-4 relative. It is not fitted to an observed failure:
+    // both engines evaluate the same deterministic f64 kernel, so the only
+    // legitimate spread is FP association, orders of magnitude below this.
+    // The #1497 deviation on sens[0] was 3.3e-4 relative, outside the band.
+    let ref_s0 = 0.697376
+    let ref_s2 = 0.301837
+    let rel_s0 = ep28_abs(ep.sensitivity[0] - ref_s0) / ref_s0
+    let rel_s2 = ep28_abs(ep.sensitivity[2] - ref_s2) / ref_s2
+    print("  rel dev sens[0] vs reference: ")
+    print_f64(rel_s0)
+    println("")
+    print("  rel dev sens[2] vs reference: ")
+    print_f64(rel_s2)
+    println("")
+
+    // The two smallest components sit below print_f64's fixed-notation
+    // resolution on Madaros, which prints 0.000000 where lean_single switches
+    // to 5.234690e-8. Scale them so the transcript shows a real number on both
+    // engines and "all seven non-zero" is readable rather than asserted.
+    print("  sens[3] x 1e8: ")
+    print_f64(ep.sensitivity[3] * 1.0e8)
+    println("")
+    print("  sens[6] x 1e8: ")
+    print_f64(ep.sensitivity[6] * 1.0e8)
+    println("")
+    let ref_s3 = 5.234690e-8
+    let ref_s6 = 3.240925e-8
+    let rel_s3 = ep28_abs(ep.sensitivity[3] - ref_s3) / ref_s3
+    let rel_s6 = ep28_abs(ep.sensitivity[6] - ref_s6) / ref_s6
+    print("  rel dev sens[3] vs reference: ")
+    print_f64(rel_s3)
+    println("")
+    print("  rel dev sens[6] vs reference: ")
+    print_f64(rel_s6)
+    println("")
+
+    let sum_ok = s_sum > 0.999999 && s_sum < 1.000001
     let dom_ok = s_max > 0.3
-    if sum_ok && dom_ok {
-        println("  [PASS] Fractions sum to 1.0; dominant parameter identified")
+    let nz_ok  = n_zero < 0.5
+    // The two tail components carry a looser band (1.0e-3) than the dominant
+    // pair. They are ~7 orders of magnitude smaller, so their central
+    // difference has correspondingly less significance left; 1.0e-3 is still
+    // three orders inside the defect, which drives them to exactly zero.
+    let pin_ok = rel_s0 < 1.0e-4 && rel_s2 < 1.0e-4 && rel_s3 < 1.0e-3 && rel_s6 < 1.0e-3
+    if sum_ok && dom_ok && nz_ok && pin_ok {
+        println("  [PASS] all 7 components non-zero; dominant pair matches reference")
         passed = passed + 1
     } else {
-        println("  FAIL: sensitivity fractions malformed")
+        if nz_ok == false {
+            println("  FAIL: a sensitivity component is EXACTLY 0.0 (Jacobian column lost)")
+        }
+        if pin_ok == false {
+            println("  FAIL: dominant components deviate from the reference spectrum")
+        }
+        if sum_ok == false || dom_ok == false {
+            println("  FAIL: sensitivity fractions malformed")
+        }
         failed = failed + 1
     }
     println("")
 
     // TEST 6: Evidence-weighted confidence in [0.20, 0.90]
+    // Fabrication detector (Madaros, 2026-08-17): print_f64 has been measured
+    // emitting ~4.6e18 (IEEE bits of a plausible ~0.67 confidence re-read as an
+    // integer then printed as f64). Refuse any confidence outside (0,1] and name
+    // bit-pattern scale so the lie cannot look like a green probability.
     println("TEST 6: Confidence in [0.20, 0.90]")
+    let conf = ep.auc_blood_conf
     print("  AUC confidence: ")
-    print_f64(ep.auc_blood_conf)
+    print_f64(conf)
     println("")
-    if ep.auc_blood_conf > 0.20 && ep.auc_blood_conf < 0.90 {
+    let in_band = conf > 0.20 && conf < 0.90
+    let conf_gt_one = conf > 1.0
+    let conf_bitpat = conf > 1.0e15
+    if conf_gt_one {
+        println("  EPISTEMIC_FABRICATION: confidence > 1.0 (not a probability)")
+    }
+    if conf_bitpat {
+        println("  EPISTEMIC_FABRICATION: confidence looks like f64 bit-pattern-as-integer")
+    }
+    if in_band && conf_gt_one == false && conf_bitpat == false {
         println("  [PASS]")
         passed = passed + 1
     } else {

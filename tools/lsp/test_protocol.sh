@@ -41,18 +41,22 @@ run_session() {
     shift
   done
   printf '%s' "${payloads[@]}" \
-    | timeout 30 ./bin/souc lsp --stdio >"$out" 2>"$out.err"
+    | timeout 30 ${LSP_SERVER_CMD:-./bin/souc lsp --stdio} >"$out" 2>"$out.err"
 }
 
-echo "[lsp-proto] building lsp binary"
-./bin/souc compile self-hosted/lsp/server.sio -o "$LOG_DIR/sounio-lsp.bin" \
-  >"$LOG_DIR/build.log" 2>&1 || {
-  echo "FAIL: build of self-hosted/lsp/server.sio"
-  tail -10 "$LOG_DIR/build.log"
-  exit 1
-}
-chmod +x "$LOG_DIR/sounio-lsp.bin"
-echo "  built ($(wc -c <"$LOG_DIR/sounio-lsp.bin") bytes)"
+if [ -n "${LSP_SERVER_CMD:-}" ]; then
+  echo "[lsp-proto] using external server: $LSP_SERVER_CMD (skipping build)"
+else
+  echo "[lsp-proto] building lsp binary"
+  ./bin/souc compile self-hosted/lsp/server.sio -o "$LOG_DIR/sounio-lsp.bin" \
+    >"$LOG_DIR/build.log" 2>&1 || {
+    echo "FAIL: build of self-hosted/lsp/server.sio"
+    tail -10 "$LOG_DIR/build.log"
+    exit 1
+  }
+  chmod +x "$LOG_DIR/sounio-lsp.bin"
+  echo "  built ($(wc -c <"$LOG_DIR/sounio-lsp.bin") bytes)"
+fi
 
 # ----- T1: initialize → capabilities envelope ---------------------------
 T1_OUT="$LOG_DIR/t1.out"
@@ -570,6 +574,234 @@ run_session "$T8_OUT" \
 
 grep -q '"id":2,"result":null' "$T8_OUT" && \
   note_pass "T8.shutdown ack" || note_fail "T8.shutdown ack"
+
+# ----- T9: Sprint-2 #5 — semanticTokens/full resultId + full/delta ------
+# /full must now carry a resultId and advertise delta support.
+T9A_OUT="$LOG_DIR/t9a.out"
+run_session "$T9A_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"// hello\nfn helper(x: i64) -> i64 { return 42 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":65,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///tmp/t.sio"}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"full":{"delta":true}' "$T9A_OUT" && \
+  note_pass "T9a.cap.full.delta" || note_fail "T9a.cap.full.delta"
+grep -q '"id":65,"result":{"data":\[0,0,8,6,0,' "$T9A_OUT" && \
+  note_pass "T9a.full data unchanged" || note_fail "T9a.full data unchanged"
+grep -q '\],"resultId":"st1"}' "$T9A_OUT" && \
+  note_pass "T9a.full resultId st1" || note_fail "T9a.full resultId st1"
+
+# Delta with the matching previousResultId and no edit → empty edits.
+T9B_OUT="$LOG_DIR/t9b.out"
+run_session "$T9B_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"// hello\nfn helper(x: i64) -> i64 { return 42 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":65,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///tmp/t.sio"}}}' \
+  '{"jsonrpc":"2.0","id":66,"method":"textDocument/semanticTokens/full/delta","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"previousResultId":"st1"}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"id":66,"result":{"resultId":"st2","edits":\[\]}' "$T9B_OUT" && \
+  note_pass "T9b.no-change delta → edits:[]" || note_fail "T9b.no-change delta → edits:[]"
+
+# Delta after a trailing-line append → one edit with deleteCount 0 and
+# the new tokens as data.
+T9C_OUT="$LOG_DIR/t9c.out"
+run_session "$T9C_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn helper(x: i64) -> i64 { return 42 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":65,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///tmp/t.sio"}}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///tmp/t.sio","version":2},"contentChanges":[{"text":"fn helper(x: i64) -> i64 { return 42 }\n// tail\n"}]}}' \
+  '{"jsonrpc":"2.0","id":66,"method":"textDocument/semanticTokens/full/delta","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"previousResultId":"st1"}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"id":66,"result":{"resultId":"st2","edits":\[{"start":[0-9]*,"deleteCount":0,"data":\[1,0,7,6,0\]}' "$T9C_OUT" && \
+  note_pass "T9c.append delta → single insert edit" || note_fail "T9c.append delta → single insert edit"
+
+# Delta with an unknown previousResultId → full-result fallback.
+T9D_OUT="$LOG_DIR/t9d.out"
+run_session "$T9D_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn helper(x: i64) -> i64 { return 42 }\n"}}}' \
+  '{"jsonrpc":"2.0","id":66,"method":"textDocument/semanticTokens/full/delta","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"previousResultId":"st99"}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"id":66,"result":{"data":\[[0-9]' "$T9D_OUT" && \
+  note_pass "T9d.stale resultId → full fallback" || note_fail "T9d.stale resultId → full fallback"
+
+# ----- T10: Sprint-2 #7 — workspace/symbol cross-file scan ---------------
+# Fixture: a workspace root with two *.sio files on disk, neither opened
+# via didOpen. initialize carries rootUri; workspace/symbol must find
+# symbols from both files.
+WS_TEST_DIR="$LOG_DIR/ws_test"
+rm -rf "$WS_TEST_DIR"
+mkdir -p "$WS_TEST_DIR"
+printf 'fn alpha_fn(x: i64) -> i64 { x }\n' > "$WS_TEST_DIR/a.sio"
+printf 'struct BetaPoint {\n    x: i64\n}\n' > "$WS_TEST_DIR/b.sio"
+printf 'not sounio, must be ignored\n' > "$WS_TEST_DIR/c.txt"
+
+T10A_OUT="$LOG_DIR/t10a.out"
+run_session "$T10A_OUT" \
+  "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://$WS_TEST_DIR\"}}" \
+  '{"jsonrpc":"2.0","id":70,"method":"workspace/symbol","params":{"query":""}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"id":70,"result":\[' "$T10A_OUT" && \
+  note_pass "T10a.symbol result array" || note_fail "T10a.symbol result array"
+grep -q '"name":"alpha_fn"' "$T10A_OUT" && \
+  note_pass "T10a.finds a.sio alpha_fn" || note_fail "T10a.finds a.sio alpha_fn"
+grep -q '"name":"BetaPoint"' "$T10A_OUT" && \
+  note_pass "T10a.finds b.sio BetaPoint" || note_fail "T10a.finds b.sio BetaPoint"
+grep -q "\"uri\":\"file://$WS_TEST_DIR/a.sio\"" "$T10A_OUT" && \
+  note_pass "T10a.uri has file:// prefix" || note_fail "T10a.uri has file:// prefix"
+
+# Filtered query: "alph" matches alpha_fn but not BetaPoint.
+T10B_OUT="$LOG_DIR/t10b.out"
+run_session "$T10B_OUT" \
+  "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://$WS_TEST_DIR\"}}" \
+  '{"jsonrpc":"2.0","id":71,"method":"workspace/symbol","params":{"query":"alph"}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"name":"alpha_fn"' "$T10B_OUT" && \
+  note_pass "T10b.query filter hit" || note_fail "T10b.query filter hit"
+grep -q '"name":"BetaPoint"' "$T10B_OUT" && \
+  note_fail "T10b.query filter leaks BetaPoint" || note_pass "T10b.query filter excludes BetaPoint"
+
+# An open slot must not be duplicated by the on-disk scan: didOpen a.sio,
+# then query "alpha" → exactly one alpha_fn hit.
+T10C_OUT="$LOG_DIR/t10c.out"
+run_session "$T10C_OUT" \
+  "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://$WS_TEST_DIR\"}}" \
+  "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file://$WS_TEST_DIR/a.sio\",\"languageId\":\"sounio\",\"version\":1,\"text\":\"fn alpha_fn(x: i64) -> i64 { x }\\n\"}}}" \
+  '{"jsonrpc":"2.0","id":72,"method":"workspace/symbol","params":{"query":"alpha"}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+[ "$(grep -o '"name":"alpha_fn"' "$T10C_OUT" | wc -l)" -eq 1 ] && \
+  note_pass "T10c.open slot deduped vs disk" || note_fail "T10c.open slot deduped vs disk"
+
+# ----- T11: Sprint-2 #8 — incremental textDocumentSync (kind=2) ----------
+T11A_OUT="$LOG_DIR/t11a.out"
+run_session "$T11A_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"textDocumentSync":2' "$T11A_OUT" && \
+  note_pass "T11a.cap sync kind=2" || note_fail "T11a.cap sync kind=2"
+
+# One ranged edit: replace the `1` initializer with "hi" → the stored
+# document must update and the diagnostic pipeline must flag it.
+T11B_OUT="$LOG_DIR/t11b.out"
+run_session "$T11B_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"fn main() -> i32 {\n    let x: i64 = 1\n    0\n}\n"}}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///tmp/t.sio","version":2},"contentChanges":[{"range":{"start":{"line":1,"character":17},"end":{"line":1,"character":18}},"text":"\"hi\""}]}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q 'Type mismatch' "$T11B_OUT" && \
+  note_pass "T11b.ranged edit re-diagnosed" || note_fail "T11b.ranged edit re-diagnosed"
+
+# Two ranged edits in one notification, applied in order: aaa→ccc and
+# bbb→ddd. workspace/symbol must see the post-edit names only.
+T11C_OUT="$LOG_DIR/t11c.out"
+run_session "$T11C_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"let aaa = 1\nlet bbb = 2\n"}}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///tmp/t.sio","version":2},"contentChanges":[{"range":{"start":{"line":0,"character":4},"end":{"line":0,"character":7}},"text":"ccc"},{"range":{"start":{"line":1,"character":4},"end":{"line":1,"character":7}},"text":"ddd"}]}}' \
+  '{"jsonrpc":"2.0","id":73,"method":"workspace/symbol","params":{"query":""}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"name":"ccc"' "$T11C_OUT" && \
+  note_pass "T11c.first edit applied" || note_fail "T11c.first edit applied"
+grep -q '"name":"ddd"' "$T11C_OUT" && \
+  note_pass "T11c.second edit applied in order" || note_fail "T11c.second edit applied in order"
+grep -q '"name":"aaa"' "$T11C_OUT" && \
+  note_fail "T11c.stale aaa leaks" || note_pass "T11c.no stale aaa"
+grep -q '"name":"bbb"' "$T11C_OUT" && \
+  note_fail "T11c.stale bbb leaks" || note_pass "T11c.no stale bbb"
+
+# A full-replacement change object (no "range") still works under kind=2.
+T11D_OUT="$LOG_DIR/t11d.out"
+run_session "$T11D_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/t.sio","languageId":"sounio","version":1,"text":"let aaa = 1\n"}}}' \
+  '{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///tmp/t.sio","version":2},"contentChanges":[{"text":"let zzz = 3\n"}]}}' \
+  '{"jsonrpc":"2.0","id":74,"method":"workspace/symbol","params":{"query":""}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"name":"zzz"' "$T11D_OUT" && \
+  note_pass "T11d.full-replacement change works" || note_fail "T11d.full-replacement change works"
+grep -q '"name":"aaa"' "$T11D_OUT" && \
+  note_fail "T11d.stale aaa leaks" || note_pass "T11d.no stale aaa"
+
+# ----- T12: Sprint-2 #6 — typeHierarchy (prepare + super/sub) ------------
+# Fixture doc declares trait Greet, struct Point, and `impl Greet for
+# Point`. Hierarchy semantics: supertypes(S) = traits implemented by S,
+# subtypes(T) = implementors of trait T (single-document scope).
+T12_DOC='trait Greet {\n    fn greet(self) -> i64\n}\nstruct Point {\n    x: i64\n}\nimpl Greet for Point {\n    fn greet(self) -> i64 { 1 }\n}\n'
+
+T12A_OUT="$LOG_DIR/t12a.out"
+run_session "$T12A_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"typeHierarchyProvider":true' "$T12A_OUT" && \
+  note_pass "T12a.cap.typeHierarchy" || note_fail "T12a.cap.typeHierarchy"
+
+# prepare on `Point` (line 3, char 8) → one item, kind 23 (Struct).
+T12B_OUT="$LOG_DIR/t12b.out"
+run_session "$T12B_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/t.sio\",\"languageId\":\"sounio\",\"version\":1,\"text\":\"$T12_DOC\"}}}" \
+  '{"jsonrpc":"2.0","id":80,"method":"textDocument/prepareTypeHierarchy","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":3,"character":8}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"id":80,"result":\[{"name":"Point","kind":23' "$T12B_OUT" && \
+  note_pass "T12b.prepare struct item" || note_fail "T12b.prepare struct item"
+grep -q '"uri":"file:///tmp/t.sio"' "$T12B_OUT" && \
+  note_pass "T12b.item carries uri" || note_fail "T12b.item carries uri"
+
+# prepare on a non-type identifier (`x`, line 4 char 4) → result null.
+T12C_OUT="$LOG_DIR/t12c.out"
+run_session "$T12C_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/t.sio\",\"languageId\":\"sounio\",\"version\":1,\"text\":\"$T12_DOC\"}}}" \
+  '{"jsonrpc":"2.0","id":81,"method":"textDocument/prepareTypeHierarchy","params":{"textDocument":{"uri":"file:///tmp/t.sio"},"position":{"line":4,"character":4}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"id":81,"result":null' "$T12C_OUT" && \
+  note_pass "T12c.prepare non-type → null" || note_fail "T12c.prepare non-type → null"
+
+# supertypes of Point → trait Greet (kind 11 = Interface).
+T12D_OUT="$LOG_DIR/t12d.out"
+run_session "$T12D_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/t.sio\",\"languageId\":\"sounio\",\"version\":1,\"text\":\"$T12_DOC\"}}}" \
+  '{"jsonrpc":"2.0","id":82,"method":"typeHierarchy/supertypes","params":{"item":{"name":"Point","kind":23,"uri":"file:///tmp/t.sio","range":{"start":{"line":3,"character":0},"end":{"line":5,"character":1}},"selectionRange":{"start":{"line":3,"character":7},"end":{"line":3,"character":12}}}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"id":82,"result":\[{"name":"Greet","kind":11' "$T12D_OUT" && \
+  note_pass "T12d.supertypes → trait Greet" || note_fail "T12d.supertypes → trait Greet"
+
+# subtypes of Greet → implementor Point (kind 23).
+T12E_OUT="$LOG_DIR/t12e.out"
+run_session "$T12E_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/t.sio\",\"languageId\":\"sounio\",\"version\":1,\"text\":\"$T12_DOC\"}}}" \
+  '{"jsonrpc":"2.0","id":83,"method":"typeHierarchy/subtypes","params":{"item":{"name":"Greet","kind":11,"uri":"file:///tmp/t.sio","range":{"start":{"line":0,"character":0},"end":{"line":2,"character":1}},"selectionRange":{"start":{"line":0,"character":6},"end":{"line":0,"character":11}}}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"id":83,"result":\[{"name":"Point","kind":23' "$T12E_OUT" && \
+  note_pass "T12e.subtypes → implementor Point" || note_fail "T12e.subtypes → implementor Point"
+
+# subtypes of Point → [] (no struct inheritance in Sounio).
+T12F_OUT="$LOG_DIR/t12f.out"
+run_session "$T12F_OUT" \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/t.sio\",\"languageId\":\"sounio\",\"version\":1,\"text\":\"$T12_DOC\"}}}" \
+  '{"jsonrpc":"2.0","id":84,"method":"typeHierarchy/subtypes","params":{"item":{"name":"Point","kind":23,"uri":"file:///tmp/t.sio","range":{"start":{"line":3,"character":0},"end":{"line":5,"character":1}},"selectionRange":{"start":{"line":3,"character":7},"end":{"line":3,"character":12}}}}}' \
+  '{"jsonrpc":"2.0","method":"exit"}'
+
+grep -q '"id":84,"result":\[\]' "$T12F_OUT" && \
+  note_pass "T12f.subtypes of struct → []" || note_fail "T12f.subtypes of struct → []"
 
 echo
 echo "[lsp-proto] tally: $PASS pass, $FAIL fail"

@@ -119,7 +119,7 @@ fn compute_free_vars(func: IrFunction) -> FreeVarSet with Mut, Panic, Div {
     }
     i = 0
     while i < func.instr_count {
-        let instr = func.instrs[i]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if instr.dst >= 0 {
             defined = free_var_add(defined, instr.dst)
         }
@@ -130,7 +130,7 @@ fn compute_free_vars(func: IrFunction) -> FreeVarSet with Mut, Panic, Div {
     var used = free_var_set_new()
     i = 0
     while i < func.instr_count {
-        let instr = func.instrs[i]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if instr.src1 >= 0 {
             used = free_var_add(used, instr.src1)
         }
@@ -262,7 +262,7 @@ fn build_parent_scope(parent: IrFunction) -> FreeVarSet with Mut, Panic, Div {
     }
     i = 0
     while i < parent.instr_count {
-        let instr = parent.instrs[i]
+        let instr = ir_arena_load(ir_region_slot_r(parent.region, (i)))
         if instr.dst >= 0 {
             scope = free_var_add(scope, instr.dst)
         }
@@ -276,8 +276,8 @@ fn closure_emit_instr(func: IrFunction, instr: IrInstr) -> IrFunction with Mut, 
     if func.instr_count >= 32768 {
         return func
     }
-    var result = func
-    result.instrs[result.instr_count] = instr
+    var result = ir_function_clone(&func)
+    ir_arena_store(ir_region_slot_w(result.region, (result.instr_count)), instr)
     result.instr_count = result.instr_count + 1
     result
 }
@@ -341,7 +341,7 @@ fn closure_convert_function(func: IrFunction, parent_scope: FreeVarSet, table: C
     // Rewrite instructions: replace free var reads with field loads from env
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         var new_instr = instr
 
         // Replace src1 if it is a free variable
@@ -367,7 +367,7 @@ fn closure_convert_function(func: IrFunction, parent_scope: FreeVarSet, table: C
                     imm_flags: 0,
                     bin_op: new_instr.bin_op,
                     un_op: new_instr.un_op,
-                    name: new_instr.name,
+                    name_id: new_instr.name_id,
                     call_args: new_instr.call_args,
                     arg_count: new_instr.arg_count,
                 }
@@ -395,7 +395,7 @@ fn closure_convert_function(func: IrFunction, parent_scope: FreeVarSet, table: C
                     imm_flags: 0,
                     bin_op: new_instr.bin_op,
                     un_op: new_instr.un_op,
-                    name: new_instr.name,
+                    name_id: new_instr.name_id,
                     call_args: new_instr.call_args,
                     arg_count: new_instr.arg_count,
                 }
@@ -423,7 +423,7 @@ fn closure_convert_function(func: IrFunction, parent_scope: FreeVarSet, table: C
                     imm_flags: 0,
                     bin_op: new_instr.bin_op,
                     un_op: new_instr.un_op,
-                    name: new_instr.name,
+                    name_id: new_instr.name_id,
                     call_args: new_instr.call_args,
                     arg_count: new_instr.arg_count,
                 }
@@ -544,7 +544,7 @@ fn lambda_lift(func: IrFunction, module: IrModule) -> LiftResult with Mut, Panic
     // Copy instructions verbatim (free vars are now parameters)
     var i: i64 = 0
     while i < func.instr_count {
-        lifted.instrs[i] = func.instrs[i]
+        ir_arena_copy_slot(ir_region_slot_w(lifted.region, (i)),ir_region_slot_r(func.region, (i)))
         i = i + 1
     }
     lifted.instr_count = func.instr_count
@@ -566,21 +566,21 @@ fn lambda_lift(func: IrFunction, module: IrModule) -> LiftResult with Mut, Panic
 }
 
 // Lift all functions in a module that have free variables.
-fn lambda_lift_module(module: IrModule) -> IrModule with Mut, Panic, Div {
+fn lambda_lift_module(module: IrModule) -> IrModule with Alloc, Mut, Panic, Div {
     var result = ir_empty_module()
     result.string_table = module.string_table
     result.string_count = module.string_count
 
     var fn_idx: i64 = 0
     while fn_idx < module.fn_count {
-        let func = module.functions[fn_idx]
+        let func = ir_fn_get(&module, fn_idx)
         let lr = lambda_lift(func, module)
 
         // Add all lifted functions to the result module
         var li: i64 = 0
         while li < lr.lift_count {
             if result.fn_count < 4096 {
-                result.functions[result.fn_count] = lr.lifted_functions[li]
+                ir_fn_set(&! result, result.fn_count, lr.lifted_functions[li])
                 result.fn_count = result.fn_count + 1
             }
             li = li + 1
@@ -671,7 +671,7 @@ fn lower_closure_call(func: IrFunction, call_idx: i64, closure_table: ClosureTab
         return func
     }
 
-    let call_instr = func.instrs[call_idx]
+    let call_instr = ir_arena_load(ir_region_slot_r(func.region, (call_idx)))
 
     // Look up the target function in the closure table
     let ct_idx = closure_table_lookup(closure_table, call_instr.fn_id)
@@ -727,13 +727,13 @@ fn lower_closure_call(func: IrFunction, call_idx: i64, closure_table: ClosureTab
                 imm_flags: 0,
                 bin_op: call_instr.bin_op,
                 un_op: call_instr.un_op,
-                name: call_instr.name,
+                name_id: call_instr.name_id,
                 call_args: call_instr.call_args,
                 arg_count: call_instr.arg_count + 1,
             }
             result = closure_emit_instr(result, lifted_call)
         } else {
-            result = closure_emit_instr(result, func.instrs[i])
+            result = closure_emit_instr(result, ir_arena_load(ir_region_slot_r(func.region, (i))))
         }
         i = i + 1
     }
@@ -742,18 +742,18 @@ fn lower_closure_call(func: IrFunction, call_idx: i64, closure_table: ClosureTab
 }
 
 // Lower all closure calls in an entire module.
-fn lower_all_closure_calls(module: IrModule, closure_table: ClosureTable) -> IrModule with Mut, Panic, Div {
+fn lower_all_closure_calls(module: IrModule, closure_table: ClosureTable) -> IrModule with Alloc, Mut, Panic, Div {
     var result = module
 
     var fn_idx: i64 = 0
     while fn_idx < result.fn_count {
-        var func = result.functions[fn_idx]
+        var func = ir_fn_get(&result, fn_idx)
 
         // Scan for call instructions that target closures.
         // Process in reverse order so indices remain valid.
         var ci: i64 = func.instr_count - 1
         while ci >= 0 {
-            let instr = func.instrs[ci]
+            let instr = ir_arena_load(ir_region_slot_r(func.region, (ci)))
             match instr.op {
                 IrOpcode::IrCall => {
                     let ct_idx = closure_table_lookup(closure_table, instr.fn_id)
@@ -768,7 +768,7 @@ fn lower_all_closure_calls(module: IrModule, closure_table: ClosureTable) -> IrM
             ci = ci - 1
         }
 
-        result.functions[fn_idx] = func
+        ir_fn_set(&! result, fn_idx, func)
         fn_idx = fn_idx + 1
     }
 
@@ -786,7 +786,7 @@ fn make_test_func(name: Name, num_instrs: i64) -> IrFunction with Mut, Panic, Di
     func.reg_count = num_instrs + 2
     var i: i64 = 0
     while i < num_instrs {
-        func.instrs[i] = ir_load_imm(i, i * 10)
+        ir_arena_store(ir_region_slot_w(func.region, (i)), ir_load_imm(i, i * 10))
         i = i + 1
     }
     func.instr_count = num_instrs
@@ -809,13 +809,13 @@ fn make_closure_func(free_regs: [i64; 8], free_count: i64) -> IrFunction with Mu
     while i < free_count && i < 4 {
         let src_reg = free_regs[i]
         let dst_reg = 50 + i
-        func.instrs[func.instr_count] = ir_binop(dst_reg, src_reg, BinaryOp::OpAdd, 0)
+        ir_arena_store(ir_region_slot_w(func.region, (func.instr_count)), ir_binop(dst_reg, src_reg, BinaryOp::OpAdd, 0))
         func.instr_count = func.instr_count + 1
         i = i + 1
     }
 
     // Return
-    func.instrs[func.instr_count] = ir_return(50)
+    ir_arena_store(ir_region_slot_w(func.region, (func.instr_count)), ir_return(50))
     func.instr_count = func.instr_count + 1
 
     func
@@ -904,10 +904,10 @@ fn test_compute_free_vars_none() -> i64 with Mut, Panic, Div {
     func.param_regs[0] = 0
     func.param_count = 1
     // dst=1, src1=0 (param), src2 not used (IR_INVALID_REG)
-    func.instrs[0] = ir_load_imm(1, 42)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(1, 42))
     // dst=2, src1=1 (locally defined)
-    func.instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
-    func.instrs[2] = ir_return(2)
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_binop(2, 0, BinaryOp::OpAdd, 1))
+    ir_arena_store(ir_region_slot_w(func.region, (2)), ir_return(2))
     func.instr_count = 3
 
     let fv = compute_free_vars(func)
@@ -984,13 +984,13 @@ fn test_closure_convert_no_free() -> i64 with Mut, Panic, Div {
     func.reg_count = 2
     func.param_regs[0] = 0
     func.param_count = 1
-    func.instrs[0] = ir_load_imm(1, 99)
-    func.instrs[1] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(1, 99))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(1))
     func.instr_count = 2
 
-    let scope = free_var_set_new()
+    let parent_scope = free_var_set_new()
     let table = closure_table_new()
-    let pair = closure_convert_function(func, scope, table)
+    let pair = closure_convert_function(func, parent_scope, table)
     let converted = pair.0
     let new_table = pair.1
 
@@ -1009,9 +1009,9 @@ fn test_closure_convert_with_free() -> i64 with Mut, Panic, Div {
     free_regs[1] = 20
     let func = make_closure_func(free_regs, 2)
 
-    let scope = free_var_set_new()
+    let parent_scope = free_var_set_new()
     let table = closure_table_new()
-    let pair = closure_convert_function(func, scope, table)
+    let pair = closure_convert_function(func, parent_scope, table)
     let converted = pair.0
     let new_table = pair.1
 
@@ -1025,13 +1025,13 @@ fn test_closure_convert_with_free() -> i64 with Mut, Panic, Div {
     0
 }
 
-fn test_lambda_lift_no_free() -> i64 with Mut, Panic, Div {
+fn test_lambda_lift_no_free() -> i64 with Alloc, Mut, Panic, Div {
     var func = ir_empty_function()
     func.reg_count = 2
     func.param_regs[0] = 0
     func.param_count = 1
-    func.instrs[0] = ir_load_imm(1, 7)
-    func.instrs[1] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(1, 7))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(1))
     func.instr_count = 2
 
     let module = ir_empty_module()
@@ -1042,7 +1042,7 @@ fn test_lambda_lift_no_free() -> i64 with Mut, Panic, Div {
     0
 }
 
-fn test_lambda_lift_with_free() -> i64 with Mut, Panic, Div {
+fn test_lambda_lift_with_free() -> i64 with Alloc, Mut, Panic, Div {
     var free_regs: [i64; 8] = [0; 8]
     free_regs[0] = 10
     free_regs[1] = 20
@@ -1060,22 +1060,22 @@ fn test_lambda_lift_with_free() -> i64 with Mut, Panic, Div {
     0
 }
 
-fn test_lambda_lift_module_identity() -> i64 with Mut, Panic, Div {
+fn test_lambda_lift_module_identity() -> i64 with Alloc, Mut, Panic, Div {
     // A module with only non-closure functions should pass through unchanged
     var module = ir_empty_module()
     var f1 = ir_empty_function()
     f1.reg_count = 2
     f1.param_regs[0] = 0
     f1.param_count = 1
-    f1.instrs[0] = ir_load_imm(1, 5)
-    f1.instrs[1] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(f1.region, (0)), ir_load_imm(1, 5))
+    ir_arena_store(ir_region_slot_w(f1.region, (1)), ir_return(1))
     f1.instr_count = 2
-    module.functions[0] = f1
+    ir_fn_set(&! module, 0, f1)
     module.fn_count = 1
 
     let result = lambda_lift_module(module)
     if result.fn_count != 1 { return 1 }
-    if result.functions[0].param_count != 1 { return 2 }
+    if ir_fn_get(&result, 0).param_count != 1 { return 2 }
     0
 }
 
@@ -1104,7 +1104,7 @@ fn test_emit_env_alloc() -> i64 with Mut, Panic, Div {
     // Should have 1 new instruction (IrAlloc)
     if result.instr_count != 1 { return 1 }
     // The alloc instruction should target the struct id
-    let alloc_instr = result.instrs[0]
+    let alloc_instr = ir_arena_load(ir_region_slot_r(result.region, (0)))
     match alloc_instr.op {
         IrOpcode::IrAlloc => {}
         _ => { return 2 }
@@ -1130,11 +1130,11 @@ fn test_emit_env_pack() -> i64 with Mut, Panic, Div {
     let result = emit_env_pack(func, env, captures)
     // Should have 2 field_set instructions
     if result.instr_count != 2 { return 1 }
-    match result.instrs[0].op {
+    match (IR_A_OP[(ir_region_slot_r(result.region, (0))) as usize] as IrOpcode) {
         IrOpcode::IrFieldSet => {}
         _ => { return 2 }
     }
-    match result.instrs[1].op {
+    match (IR_A_OP[(ir_region_slot_r(result.region, (1))) as usize] as IrOpcode) {
         IrOpcode::IrFieldSet => {}
         _ => { return 3 }
     }
@@ -1154,7 +1154,7 @@ fn test_emit_env_unpack() -> i64 with Mut, Panic, Div {
     let result = emit_env_unpack(func, env, 0)
     // Should have 3 field_get instructions
     if result.instr_count != 3 { return 1 }
-    match result.instrs[0].op {
+    match (IR_A_OP[(ir_region_slot_r(result.region, (0))) as usize] as IrOpcode) {
         IrOpcode::IrFieldGet => {}
         _ => { return 2 }
     }
@@ -1167,9 +1167,9 @@ fn test_lower_closure_call_miss() -> i64 with Mut, Panic, Div {
     // Lowering a call that is NOT in the closure table should be a no-op
     var func = ir_empty_function()
     func.reg_count = 3
-    func.instrs[0] = ir_load_imm(0, 1)
-    func.instrs[1] = ir_call(1, 99, ir_empty_name(), None, 1)
-    func.instrs[2] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 1))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_call(1, 99, ir_empty_name(), None, 1))
+    ir_arena_store(ir_region_slot_w(func.region, (2)), ir_return(1))
     func.instr_count = 3
 
     let table = closure_table_new()
@@ -1195,39 +1195,39 @@ fn test_lower_closure_call_hit() -> i64 with Mut, Panic, Div {
     // Build a function with a call to fn_id=5
     var func = ir_empty_function()
     func.reg_count = 4
-    func.instrs[0] = ir_load_imm(0, 1)
-    func.instrs[1] = ir_call(1, 5, ir_empty_name(), None, 1)
-    func.instrs[2] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 1))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_call(1, 5, ir_empty_name(), None, 1))
+    ir_arena_store(ir_region_slot_w(func.region, (2)), ir_return(1))
     func.instr_count = 3
 
     let result = lower_closure_call(func, 1, table)
     // Should have more instructions (env load + call replaced)
     if result.instr_count < 3 { return 1 }
     // Should have the load_imm for env struct id
-    match result.instrs[1].op {
+    match (IR_A_OP[(ir_region_slot_r(result.region, (1))) as usize] as IrOpcode) {
         IrOpcode::IrLoadImm => {}
         _ => { return 2 }
     }
     // The call should target the lifted function id
-    match result.instrs[2].op {
+    match (IR_A_OP[(ir_region_slot_r(result.region, (2))) as usize] as IrOpcode) {
         IrOpcode::IrCall => {
-            if result.instrs[2].fn_id != 50 { return 3 }
+            if IR_A_FN_ID[(ir_region_slot_r(result.region, (2))) as usize] != 50 { return 3 }
         }
         _ => { return 4 }
     }
     0
 }
 
-fn test_lower_all_closure_calls() -> i64 with Mut, Panic, Div {
+fn test_lower_all_closure_calls() -> i64 with Alloc, Mut, Panic, Div {
     // Build module with one function containing a closure call
     var module = ir_empty_module()
     var func = ir_empty_function()
     func.reg_count = 4
-    func.instrs[0] = ir_load_imm(0, 1)
-    func.instrs[1] = ir_call(1, 5, ir_empty_name(), None, 1)
-    func.instrs[2] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 1))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_call(1, 5, ir_empty_name(), None, 1))
+    ir_arena_store(ir_region_slot_w(func.region, (2)), ir_return(1))
     func.instr_count = 3
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
 
     var table = closure_table_new()
@@ -1244,7 +1244,7 @@ fn test_lower_all_closure_calls() -> i64 with Mut, Panic, Div {
     let result = lower_all_closure_calls(module, table)
     // The function should have been rewritten
     if result.fn_count != 1 { return 1 }
-    let rewritten = result.functions[0]
+    let rewritten = ir_fn_get(&result, 0)
     // Should have more instructions than the original 3
     if rewritten.instr_count < 3 { return 2 }
     0
@@ -1308,17 +1308,17 @@ fn test_build_parent_scope() -> i64 with Mut, Panic, Div {
     parent.param_regs[0] = 0
     parent.param_regs[1] = 1
     parent.param_count = 2
-    parent.instrs[0] = ir_load_imm(2, 10)
-    parent.instrs[1] = ir_load_imm(3, 20)
+    ir_arena_store(ir_region_slot_w(parent.region, (0)), ir_load_imm(2, 10))
+    ir_arena_store(ir_region_slot_w(parent.region, (1)), ir_load_imm(3, 20))
     parent.instr_count = 2
 
-    let scope = build_parent_scope(parent)
+    let parent_scope = build_parent_scope(parent)
     // Should contain param regs 0, 1 and dst regs 2, 3
-    if !free_var_contains(scope, 0) { return 1 }
-    if !free_var_contains(scope, 1) { return 2 }
-    if !free_var_contains(scope, 2) { return 3 }
-    if !free_var_contains(scope, 3) { return 4 }
-    if free_var_contains(scope, 4) { return 5 }
+    if !free_var_contains(parent_scope, 0) { return 1 }
+    if !free_var_contains(parent_scope, 1) { return 2 }
+    if !free_var_contains(parent_scope, 2) { return 3 }
+    if !free_var_contains(parent_scope, 3) { return 4 }
+    if free_var_contains(parent_scope, 4) { return 5 }
     0
 }
 

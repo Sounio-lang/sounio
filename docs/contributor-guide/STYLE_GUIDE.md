@@ -537,23 +537,31 @@ if temperature > 100.0 {  // What is 100.0?
 
 ### Automatic Formatting
 ```bash
-# Format single file
+# Format a single file (prints the formatted source on stdout; it does not
+# rewrite the file in place)
 souc fmt file.sio
-
-# Format entire project
-souc fmt --all
-
-# Check without modifying
-souc fmt --check
 ```
 
-### Linting
-```bash
-# Run linter
-souc lint file.sio
+There is no whole-project formatting flag -- `souc fmt --all` is rejected with
+`error: unknown flag: --all`. Loop over the files you touched instead.
 
-# Fix automatically fixable issues
-souc lint --fix file.sio
+### Linting
+There is no `souc lint` subcommand. Linting is a separate script,
+`scripts/dev/sounio-lint.py` (the grammar enforcer that catches Rust-isms):
+
+```bash
+# Lint a single file
+python3 scripts/dev/sounio-lint.py file.sio
+
+# Errors only, machine-readable
+python3 scripts/dev/sounio-lint.py --errors-only --json file.sio
+
+# Print the auto-fixed source on stdout (it does not edit the file in place)
+python3 scripts/dev/sounio-lint.py --fix file.sio
+make lint-fix FILE=file.sio          # same thing, via the Makefile
+
+# Sweep the tree the way CI does (tests/stdlib and examples)
+make lint
 ```
 
 ---

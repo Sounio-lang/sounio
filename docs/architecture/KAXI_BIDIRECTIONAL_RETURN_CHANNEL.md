@@ -106,7 +106,7 @@ Existing modules extended by wiring only:
 
 Scripts (optional, non-hard-gate additions):
 
-- `scripts/run_fpga_epistemic_seed.sh`: run bidirectional TB when files exist.
+- `scripts/research/run_fpga_epistemic_seed.sh`: run bidirectional TB when files exist.
 - `artifacts/fpga/fpga_seed_report.json`: append `k_axi_return_*` fields when available.
 
 ## Compatibility Contract

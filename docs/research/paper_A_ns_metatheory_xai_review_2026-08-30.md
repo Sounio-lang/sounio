@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.paper-a-ns-metatheory-xai-review-2026-08-30
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.paper-a-ns-metatheory-xai-review-2026-08-30
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # xai (Grok 4.5) adversarial review — `EpistemicEffectsNS.lean` (2026-08-30)
 
 **Dispatch:** `bin/llm-offload -t math-review -p xai` (Grok grok-4.5, `OFFLOAD_MAX_TOKENS=16384`),

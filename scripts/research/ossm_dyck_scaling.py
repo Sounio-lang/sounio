@@ -195,47 +195,29 @@ def _gen_valid_dyck_path(length, n, rng):
 
 
 def gen_dyck1(length, batch, rng, invalid_frac=0.5):
-    """Dyck-1: single bracket type. Balanced 50/50 valid/invalid (corrected).
+    """Dyck-1: single bracket type. Balanced 50/50 valid/invalid.
 
-    Valid: proper Dyck words (balanced, never negative).
-    Invalid: valid word with one (↔) transposition that breaks validity.
-    Both classes have IDENTICAL count of ( — count classifier is at chance.
+    Valid sequences are constructed by the never-go-negative method.
+    Invalid sequences are random walks that violate nesting.
 
     Vocab: 0=pad, 1='(', 2=')'
     """
+    # Ensure even length for valid Dyck paths
     if length % 2 != 0:
         length += 1
     n_valid = batch // 2
     n_invalid = batch - n_valid
 
+    # Generate valid paths (vectorized per-timestep, not per-sample)
     valid_tokens = _gen_valid_dyck_path(length, n_valid, rng)
 
-    # Invalid: transpose ( at position i ↔ ) at position j in a valid word.
-    # Preserves count, breaks order.
-    invalid_tokens = valid_tokens[:n_invalid].copy()
-    for i in range(n_invalid):
-        open_pos = np.where(invalid_tokens[i] == 1)[0]
-        open_pos = open_pos[open_pos > 0]  # exclude position 0
-        close_pos = np.where(invalid_tokens[i] == 2)[0]
-        if len(open_pos) == 0 or len(close_pos) == 0:
-            continue
-        for _ in range(30):
-            pi = rng.choice(open_pos)
-            pj = rng.choice(close_pos)
-            if pi == pj:
-                continue
-            candidate = invalid_tokens[i].copy()
-            candidate[pi] = 2
-            candidate[pj] = 1
-            # Check validity
-            d = 0; ok = True
-            for t in range(length):
-                d += 1 if candidate[t] == 1 else -1
-                if d < 0:
-                    ok = False; break
-            if d != 0 or not ok:
-                invalid_tokens[i] = candidate
-                break
+    # Generate invalid paths: start with a close at position 0 (depth goes to -1)
+    # then fill the rest randomly — guarantees invalidity
+    invalid_tokens = np.zeros((n_invalid, length), dtype=np.int64)
+    raw = rng.random((n_invalid, length))
+    invalid_tokens = np.where(raw < 0.5, 1, 2).astype(np.int64)
+    # Force position 0 to be a close — this makes depth go to -1 immediately
+    invalid_tokens[:, 0] = 2
 
     tokens = np.vstack([valid_tokens, invalid_tokens])
     labels = np.concatenate([

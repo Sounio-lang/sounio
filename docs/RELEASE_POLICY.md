@@ -22,7 +22,7 @@ Sounio follows [Semantic Versioning 2.0.0](https://semver.org/) with pre-release
 
 **Current version:** See `CITATION.cff` (single source of truth for version metadata).
 
-The checked-in JIT artifact (`bin/souc`) is not rebuilt for every changelog entry. Its `--version` output may trail the source version by one or two pre-release increments. The discrepancy is documented in `README.md`.
+The checked-in **legacy** JIT artifact (`bin/souc`) is a development/reference binary, not the shipped engine (see Artifact Policy below), and is not rebuilt for every changelog entry. Its `--version` output may trail the authoritative version in `CITATION.cff` by one or two increments; the discrepancy is documented in `README.md`.
 
 ## Release Cadence
 
@@ -59,9 +59,15 @@ Before tagging a release:
 
 | Artifact | Path | Purpose |
 |----------|------|---------|
-| JIT compiler | `bin/souc` | Default: Cranelift JIT backend |
+| Native compiler (default) | `artifacts/omega/souc-bin/souc-linux-x86_64` | **Shipped engine**: self-hosted native-v2 (Madaros) x86-64 backend |
 | GPU compiler | `artifacts/omega/souc-bin/souc-linux-x86_64-gpu` | PTX/CUDA codegen |
-| Native compiler | `artifacts/omega/souc-bin/souc-linux-x86_64` | Full native x86-64 backend |
+| Wrapper (legacy path) | `bin/souc` | A bash wrapper that routes to Madaros — **not** a Cranelift artifact and not an artifact at all. Development/reference entry point; not the shipped engine |
+
+> **The Cranelift row was removed rather than demoted — measured 2026-08-27.** It
+> read "Cranelift JIT backend"; `bin/souc` is a 318-line bash script whose
+> `--version` reports `elf=bin/madaros-linux-x86_64`, and no binary in this tree
+> has a Cranelift backend compiled in. Demoting the claim from "default" to
+> "legacy" left an object that does not exist still named in the Artifact Policy.
 
 ### Signing and Provenance
 

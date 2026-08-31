@@ -1,0 +1,57 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: MADAROS_CORRELATE_PER_FUNCTION_PASS
+
+// A correlation declared in one function must not reach another.
+//
+// FO_COV_RHO is a module global and channel ids restart at 0 in every
+// function, so before the per-function reset a `correlate(a, b, 1.0)` in the
+// first function silently supplied rho to the second one, which had never
+// mentioned correlation at all. That is worse than losing a correlation:
+// losing one returns the old, wrong-but-familiar number, while this invents a
+// dependence no source line asked for -- in a system whose entire claim is
+// that the independence assumption is deniable rather than ambient.
+//
+// pair_correlated MUST run first. It is the contaminating call.
+//
+//   correlated:   Var(a+b) = 0.01 + 0.09 + 2*0.1*0.3*1.0 = 0.16
+//   independent:  Var(c+d) = 0.01 + 0.09                 = 0.10
+//
+// Before the fix the second function also read 0.16.
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn pair_correlated() -> f64 with IO, Mut, Div, Epistemic {
+    let ka: Knowledge<f64> = measure(1.0, uncertainty: 0.1)
+    let kb: Knowledge<f64> = measure(2.0, uncertainty: 0.3)
+    let a = ka.value
+    let b = kb.value
+    let _r = correlate(a, b, 1.0)
+    return variance_of(a + b)
+}
+
+fn pair_independent() -> f64 with IO, Mut, Div, Epistemic {
+    let kc: Knowledge<f64> = measure(1.0, uncertainty: 0.1)
+    let kd: Knowledge<f64> = measure(2.0, uncertainty: 0.3)
+    let c = kc.value
+    let d = kd.value
+    return variance_of(c + d)
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    let v_cor = pair_correlated()
+    let v_ind = pair_independent()
+
+    print("v_cor="); print_f64(v_cor); print("\n")
+    print("v_ind="); print_f64(v_ind); print("\n")
+
+    let ok = abs_f(v_cor - 0.16) < 1.0e-12 && abs_f(v_ind - 0.10) < 1.0e-12
+    if ok {
+        print("MADAROS_CORRELATE_PER_FUNCTION_PASS\n")
+    } else {
+        print("MADAROS_CORRELATE_PER_FUNCTION_FAIL\n")
+    }
+}

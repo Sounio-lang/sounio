@@ -1,0 +1,64 @@
+//@ run-pass
+//@ expect-stdout: GLOBAL_ARRAY_LIST_INIT_OK
+// Regression for #1574 -- a literal-LIST initialiser on a global array stored
+// only element 0, repeated across every slot.
+//
+// Before (bin/souc-lean-single-x86_64, 2026-08-28): this file printed
+// `1` seven times. Madaros was already correct.
+//
+// Root cause: emit_global_inits_x86 treated every `[...]` after `=` as the
+// REPEAT form `[V; N]`. On a list it parsed `1` as V, never found the `;`, and
+// rep-stosq`d that one value across all N slots. The local declaration path had
+// gated on array_init_is_repeat since it was written; only the two global
+// emitters had not.
+//
+// The array is checked ELEMENT BY ELEMENT rather than by a sum: `[1,2,3,4,5,6,7]`
+// collapsed to element 0 sums to 7, and a sum-based assertion would also pass on
+// `[7,0,0,0,0,0,0]`. The bug it is guarding is precisely a wrong DISTRIBUTION.
+//
+// The i8 array pins the esiz == 1 store, which takes the byte branch, and the
+// SHORT list pins that a list shorter than the declared length leaves the tail
+// on its BSS zero rather than running off the end of the array.
+
+var G_WORDS: [i64; 7] = [1, 2, 3, 4, 5, 6, 7]
+var G_BYTES: [i8; 4] = [10, 20, 30, 40]
+var G_SHORT: [i64; 5] = [100, 200]
+var G_REPEAT: [i64; 4] = [9; 4]
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var ok: i64 = 1
+
+    var i: i64 = 0
+    while i < 7 {
+        if G_WORDS[i as usize] != i + 1 { ok = 0 }
+        i = i + 1
+    }
+
+    var b: i64 = 0
+    while b < 4 {
+        if (G_BYTES[b as usize] as i64) != (b + 1) * 10 { ok = 0 }
+        b = b + 1
+    }
+
+    if G_SHORT[0] != 100 { ok = 0 }
+    if G_SHORT[1] != 200 { ok = 0 }
+    var z: i64 = 2
+    while z < 5 {
+        if G_SHORT[z as usize] != 0 { ok = 0 }
+        z = z + 1
+    }
+
+    // The repeat form must keep working: this fix adds a branch beside it.
+    var r: i64 = 0
+    while r < 4 {
+        if G_REPEAT[r as usize] != 9 { ok = 0 }
+        r = r + 1
+    }
+
+    if ok == 1 {
+        print("GLOBAL_ARRAY_LIST_INIT_OK\n")
+        return 0
+    }
+    print("GLOBAL_ARRAY_LIST_INIT_BROKEN\n")
+    1
+}

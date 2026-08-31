@@ -203,11 +203,64 @@ pub fn empty_label_patch() -> LabelPatch {
 // Global label-tracking arrays for native_v2 path.
 // Array element writes through &! NativeCompiler fail for large struct offsets,
 // so label state lives in module-level globals instead.
-pub var NC_V2_LABEL_OFFSETS: [i64; 256] = [0; 256]
-pub var NC_V2_LABEL_PATCH_OFFSETS: [i64; 256] = [0; 256]
-pub var NC_V2_LABEL_PATCH_IDS: [i64; 256] = [0; 256]
+//
+// These were [i64; 256] and BOTH bounds were silent (no else, no sentinel), which
+// made every function with more than ~128 `if`s miscompile at rc=0 with no
+// diagnostic: a dropped patch leaves the jz/jmp rel32 operand at its placeholder
+// 0, so the branch falls through instead of jumping. Measured on a flat chain of
+// N comparisons, the number of WRONG answers was exactly N-128, and past ~160 the
+// program printed nothing at all -- still rc=0. That is the shape reported in
+// #1586/#1570/#1577, and it is why the documented workaround in all three ("move
+// the code into a helper function") worked: nc_v2_reset_label_state runs per
+// function, so a helper gets a fresh 256.
+pub var NC_V2_LABEL_OFFSETS: [i64; 16384] = [0; 16384]
+pub var NC_V2_LABEL_PATCH_OFFSETS: [i64; 16384] = [0; 16384]
+pub var NC_V2_LABEL_PATCH_IDS: [i64; 16384] = [0; 16384]
 pub var NC_V2_LABEL_PATCH_COUNT: i64 = 0
 pub var NC_V2_NEXT_CMP_LABEL: i64 = 210
+// Which function tripped the capacity FIRST, so the rc=22 message can name it.
+// NativeCompiler.label_overflow is only checked after the whole per-function loop
+// has run, by which point the identity is gone, and nc_define_label /
+// nc_add_label_patch have no fn_index in scope. Threading one down would mean
+// changing three hot signatures on the very path whose &!-with-large-offsets
+// miscompile is what pushed this state into globals to begin with, so it is
+// recorded here instead. -1 = none. Reset per COMPILE in compiler_new, beside
+// label_overflow itself -- not per function, or it would forget the offender it
+// exists to remember.
+pub var NC_V2_LABEL_OVERFLOW_FN: i64 = -1
+
+// Single source of truth for the NC_V2_LABEL_* bound, same contract as
+// nc_flat_reloc_capacity() below: the three DECLARATIONS above must stay literals
+// (Sounio array sizes are not expressions); every bound CHECK calls this instead.
+//
+// 16384 is not a guess. Every label id reaching codegen came from a fresh_label in
+// the SAME function and is materialised by an IrLabel; every patch comes from an
+// IrJump/IrBranchFalse/IrBranchTrue. All of them are read by the one emit loop in
+// compile_ir_function_v2_core_ir_into, which is bounded by IR_MAX_INSTRS. So
+//
+//     nc_v2_label_capacity() >= IR_MAX_INSTRS  =>  this tier cannot overflow.
+//
+// scripts/ci/native_capacity_tiers_gate.sh pins that inequality (>=, not ==, so a
+// later IR_MAX_INSTRS bump is caught rather than silently invalidating the proof).
+// Overflowing it anyway is NOT silent any more: nc_define_label/nc_add_label_patch
+// set NativeCompiler.label_overflow and both writers return rc=22 (distinct from
+// the code-buffer rc=19, the reloc rc=20 and the ELF rc=21).
+//
+// The reset stays FULL (0..capacity). A reset bounded by the function's label_count
+// was considered and rejected: it leaves real code offsets from the PREVIOUS
+// function live above the bound, which is the same wrong-target bug wearing a
+// different hat. At 4096 the full reset cost ~1.8M stores for a 449-function
+// compile -- immaterial. If this tier ever goes past 65536, revisit with a dirty-
+// length cursor; the gate fails if it does without one.
+//
+// Raised 4096 -> 16384 on 2026-08-28, because IR_MAX_INSTRS had been raised
+// 4096 -> 16384 and the tier had not followed. The gate caught it exactly as its
+// author intended -- native_capacity_tiers_gate.sh was RED on main with
+// label_tier_4096_below_ir_max_instrs_16384, which is the >= clause doing its
+// job rather than a new defect. The full reset now costs ~4x what the note above
+// measured; still immaterial, and still below the 65536 line where a dirty-length
+// cursor becomes worth it.
+pub fn nc_v2_label_capacity() -> i64 { 16384 }
 
 // Off-stack flat relocation table for the native_v2 x86 Linux path. This is
 // module-WIDE (accumulates across ALL functions of a compile, reset via
@@ -220,10 +273,36 @@ pub var NC_V2_NEXT_CMP_LABEL: i64 = 210
 // so they live off-stack here (BSS, demand-paged). flat_reloc_count stays a scalar
 // in NativeCompiler and indexes these. Accessed INLINE only (never a returning
 // helper — that miscompiles under the seed).
-pub var NC_FLAT_RELOC_OFFSETS: [i64; 65536] = [0; 65536]
-pub var NC_FLAT_RELOC_KIND_CODES: [i64; 65536] = [0; 65536]
-pub var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 65536] = [0; 65536]
-pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 65536] = [0; 65536]
+pub var NC_FLAT_RELOC_OFFSETS: [i64; 131072] = [0; 131072]
+pub var NC_FLAT_RELOC_KIND_CODES: [i64; 131072] = [0; 131072]
+pub var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 131072] = [0; 131072]
+pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 131072] = [0; 131072]
+
+// Single source of truth for the NC_FLAT_RELOC_* bound. The four DECLARATIONS
+// above must stay literals (Sounio array sizes are not expressions); every bound
+// CHECK (nc_add_flat_reloc, apply_relocations_into) calls this accessor instead.
+// Overflowing this tier is NOT silent any more: nc_add_flat_reloc sets
+// NativeCompiler.reloc_overflow and compile_native_v2_preview_to_file returns
+// rc=20 (distinct from the code-buffer rc=19). Pinned by
+// scripts/ci/native_capacity_tiers_gate.sh.
+pub fn nc_flat_reloc_capacity() -> i64 { 131072 }
+
+// Flat .rodata payload storage (string literals et al). Moved off the
+// NativeCompiler struct for the same reason as NC_FLAT_RELOC_* above:
+// keeping it in the struct capped .rodata at 8192 bytes (struct-copy cost
+// forbids growth), which silently truncated every literal past the cap —
+// programs with more than ~8KB of string data (e.g. the pure LSP server)
+// miscompiled. 256KB, accessed INLINE only; flat_rodata_len stays in the
+// struct as the cursor.
+pub var NC_BIG_RODATA: [i8; 262144] = [0; 262144]
+
+// Runtime metadata is also emitted into .data.  Keeping that payload in the
+// inline StringTable truncated stack maps after 8 KiB, even though the compiler
+// records up to 256 safepoints.  Use the same off-stack pattern as rodata so the
+// compiler state remains cheap to copy while the emitted ELF keeps all bytes.
+pub var NC_BIG_DATA: [i8; 262144] = [0; 262144]
+
+pub fn nc_flat_data_capacity() -> i64 { 262144 }
 
 // ============================================================================
 // Compiler state
@@ -232,18 +311,36 @@ pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 65536] = [0; 65536]
 pub struct NativeCompiler {
     pub code: CodeBuffer,
     pub code_overflow: bool,
+    // Set when nc_add_flat_reloc is asked to record a relocation past
+    // nc_flat_reloc_capacity(). Mirrors code_overflow: the emitter drops the
+    // entry, so the ELF would ship unpatched call/rodata sites (jump to garbage
+    // -> SIGSEGV). Checked beside code_overflow before the ELF is written.
+    pub reloc_overflow: bool,
+    // Set when nc_define_label / nc_add_label_patch is asked to record a label or
+    // a jump patch past nc_v2_label_capacity(). Mirrors reloc_overflow: the
+    // emitter drops the entry, so the ELF would ship a jz/jmp whose rel32 operand
+    // is still the placeholder 0 -- the branch falls through and the program
+    // computes the wrong answer at rc=0. Checked beside the other two before the
+    // ELF is written; the offending function index is in NC_V2_LABEL_OVERFLOW_FN.
+    pub label_overflow: bool,
     pub relocs: RelocationTable,
     // flat_reloc storage moved off-stack to module globals NC_FLAT_RELOC_* (above);
     // only the count remains here (module-wide, indexes the globals).
     pub flat_reloc_count: i64,
-    pub flat_rodata_bytes: [i8; 8192],
+    // flat_rodata payload moved off-struct to NC_BIG_RODATA (above);
+    // only the length cursor remains here.
     pub flat_rodata_len: i64,
+    // Writable .data beyond the legacy 8 KiB StringTable lives in NC_BIG_DATA.
+    // The inline table mirrors its prefix for existing small-blob decoders.
+    pub flat_data_len: i64,
+    // Refuse to write an ELF with a truncated flat .data payload.
+    pub data_overflow: bool,
     pub rodata: StringTable,            // String literals for .rodata
     pub data: StringTable,              // Writable .data section (profiling counters)
     pub symbols: SymbolData,            // Function name symbol table for .symtab/.strtab
 
     // Module-level: function layout
-    pub fn_offsets: [i64; 2048],         // function index -> code buffer offset
+    pub fn_offsets: [i64; 16384],        // function index -> code buffer offset
     pub fn_count: i64,
 
     // Per-function: return jump patching
@@ -334,13 +431,18 @@ pub struct NativeCompiler {
     pub bss_total_size: i64,
 }
 
-pub fn compiler_new() -> NativeCompiler {
+pub fn compiler_new() -> NativeCompiler with Mut {
     var out: NativeCompiler
     out.code = code_buffer_new()
     out.code_overflow = false
+    out.reloc_overflow = false
+    out.label_overflow = false
+    NC_V2_LABEL_OVERFLOW_FN = -1
     out.relocs = reloc_table_new()
     out.flat_reloc_count = 0
     out.flat_rodata_len = 0
+    out.flat_data_len = 0
+    out.data_overflow = false
     out.rodata = string_table_new()
     out.data = string_table_new()
     out.symbols = symbol_data_new()
@@ -383,7 +485,7 @@ pub fn compiler_new() -> NativeCompiler {
     out
 }
 
-pub fn codegen_new() -> NativeCompiler {
+pub fn codegen_new() -> NativeCompiler with Mut {
     compiler_new()
 }
 
@@ -543,10 +645,21 @@ fn label_patch_is_rel32_branch(nc: &NativeCompiler, patch_off: i64) -> bool with
 // so label state lives in globals instead.
 pub fn patch_label_forwards_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
     var i = 0
-    while i < NC_V2_LABEL_PATCH_COUNT {
+    while i < NC_V2_LABEL_PATCH_COUNT && i < nc_v2_label_capacity() {
         let patch_off = NC_V2_LABEL_PATCH_OFFSETS[i as usize]
         let patch_lid = NC_V2_LABEL_PATCH_IDS[i as usize]
-        let target = NC_V2_LABEL_OFFSETS[patch_lid as usize]
+        // patch_lid MUST be bounded before it indexes NC_V2_LABEL_OFFSETS.
+        // It used to be read unchecked: nc_add_label_patch bounds the patch INDEX
+        // but never the label id, so an out-of-range id read past the end of a
+        // [i64; N] into whatever global follows it -- NC_V2_LABEL_PATCH_OFFSETS,
+        // i.e. code offsets, always >= 0, so the `target >= 0` guard below let it
+        // through and it patched a plausible-looking WRONG branch target. An OOB
+        // read must not depend on some other bound being correct, so this is
+        // checked here independently of the capacity check at the recording sites.
+        var target: i64 = -1
+        if patch_lid >= 0 && patch_lid < nc_v2_label_capacity() {
+            target = NC_V2_LABEL_OFFSETS[patch_lid as usize]
+        }
         if target >= 0 && patch_off >= 0 && label_patch_is_rel32_branch(nc, patch_off) {
             let rel = target - (patch_off + 4)
             NC_BIG_CODE[patch_off as usize] = low8(rel) as i8

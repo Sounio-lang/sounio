@@ -1,0 +1,52 @@
+//@ known-failure: MODE-DEPENDENT BY DESIGN. Without SOUNIO_EFFECT_INFER=1 this file reports E035
+//@ known-failure: and does not compile — which is the CORRECT shipped behaviour, since the
+//@ known-failure: intermediate functions mutate through an exclusive reference without declaring
+//@ known-failure: Mut. It is a known-failure and not a run-pass for exactly that reason: a
+//@ known-failure: run-pass whose verdict depends on an environment variable is a test that passes
+//@ known-failure: or fails depending on how it is invoked, the same defect that put
+//@ known-failure: incomplete_assignment_at_eof.sio in tests/compile-fail and broke CI.
+//@ known-failure:
+//@ known-failure: Run it deliberately, with the flag, to see the design under test:
+//@ known-failure:   SOUNIO_EFFECT_INFER=1 SOUNIO_EFFECT_INFER_TRACE=1 <madaros> --check <this file>
+//@ known-failure: exactly ONE W045 must appear, on pub_top and not on priv_mid.
+
+
+// The boundary half of §7.2.1: inference is SILENT inside a module and VISIBLE at its edge.
+//
+//   SOUNIO_EFFECT_INFER=1 SOUNIO_EFFECT_INFER_TRACE=1 <madaros> --check <this file>
+//
+// must print exactly ONE warning, and the trace must show both propagations:
+//   effect_infer: priv_mid += Mut (from leaf)     <- private: infers, stays silent
+//   warning[W045]                                  <- only here
+//   effect_infer: pub_top  += Mut (from priv_mid)  <- pub: infers AND warns
+//
+// One warning and not two is the whole contract. `priv_mid` inferring quietly is the point of
+// inference — the author does not reason about effects internally. `pub_top` warns because outside
+// the module the declaration is all a caller can read, so that is where the annotation earns its
+// keep.
+//
+// Controls, all measured: with the flag off there are zero W045 and the E035 returns (shipped
+// semantics unchanged); a pub fn that already declares the effect produces zero W045.
+
+struct S {
+    v: i64,
+}
+
+fn leaf(s: &!S) with Mut {
+    (*s).v = 1
+}
+
+fn priv_mid(s: &!S) {
+    leaf(s)
+}
+
+pub fn pub_top(s: &!S) {
+    priv_mid(s)
+}
+
+fn main() with IO, Mut, Panic, Div {
+    var x = S { v: 0 }
+    pub_top(&!x)
+    print_int(x.v)
+    println(" boundary")
+}

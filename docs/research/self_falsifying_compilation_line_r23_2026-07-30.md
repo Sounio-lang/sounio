@@ -15,9 +15,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.self-
 
 # Self-falsifying compilation R23 — validated_by is path ownership
 
-**Date:** 2026-07-30
+**Date:** 2026-07-30 (closed by inversion 2026-08-16)
 **Orthography:** EN-UK
-**Status:** `EXECUTABLE` — `VALIDATED_BY_IS_PATH_OWNERSHIP__GATE_REJECTS_TRUE_VALIDATOR`
+**Status:** `EXECUTABLE` — `VALIDATOR_IS_PRESERVED__GATE_ACCEPTS_THE_TRUE_VALIDATOR`
 **Parents:** `self_falsifying_compilation_line_r22_2026-07-29.md` (the sibling field in the same docs:meta block; a green gate that certifies a date literal), `self_falsifying_compilation_line_r1_2026-07-26.md` (claims bound to no gate; the hermeticity rule this rung obeys)
 **Harness:** `scripts/research/self_falsifying_compilation_line_r23_contract.py`
 **Gate:** `scripts/ci/self_falsifying_compilation_line_r23_gate.sh`
@@ -37,7 +37,30 @@ like a measurement and is not.
 > failure. The gate is green exactly when the field answers a directory question
 > under a validation name.**
 
-Verdict: `SELF_FALSIFYING_R23_VERDICT VALIDATED_BY_IS_PATH_OWNERSHIP__GATE_REJECTS_TRUE_VALIDATOR`.
+Verdict at discovery (2026-07-30): `VALIDATED_BY_IS_PATH_OWNERSHIP__GATE_REJECTS_TRUE_VALIDATOR`.
+
+## 1a. Closure — Closed by inversion, 2026-08-16
+
+**#1752 closed the defect, sibling and same day as R22's.** The provenance
+pair is now preserve-per-document: `preservedProvenance`
+(governance_registry.mjs) keeps an existing well-formed record — a real
+calendar date and a non-empty validator — and the owner-agent default applies
+only where a document carries no record or an empty one. The checker enforces
+shape instead of equality, while the structural four (topic_id, authority,
+audience, source_of_truth) remain registry-authoritative.
+
+**The instrument was inverted the same day, not retired**, for the same
+reason as R22: a receipt says the bug is gone; a guard has arms against it
+coming back. The inverted clauses:
+
+| clause (inverted) | | |
+|---|---|---|
+| `V1_GENERATOR_PRESERVES_VALIDATOR` | the owner_agent default sites still exist (fallback) but are bypassed; `preservedProvenance` and `metadataFieldsForTopic` measured over crafted records — a blank or absent validator falls back, a real name wins | the field has an input now |
+| `V2_CORPUS_VALIDATORS_WELL_FORMED` | census over every governed repo doc: every declared validator non-empty; owner-label equality no longer required | shape is the contract, not ownership |
+| `V3_STRUCTURE_STAYS_REGISTRY_BOUND` | forged structural fields do not reach the expected fields; a blank validator falls back to the owner default | the inversion loosened only the pair |
+| `V4_TRUTHFUL_VALIDATOR_IS_ACCEPTED` | hermetic synced farm, five arms: unmodified → `rc=0`; `validated_by: human` → `rc=0` **accepted**; the real name **survives a re-sync** (the exact regression #1752 fixed); a blanked validator → `rc≥1` `expected a non-empty validator`; a forged `topic_id` → `rc≥1` `metadata mismatch for topic_id` | the truth accepted, and the checker still bites |
+
+Verdict: `SELF_FALSIFYING_R23_VERDICT VALIDATOR_IS_PRESERVED__GATE_ACCEPTS_THE_TRUE_VALIDATOR`.
 
 **Sibling of R22.** Same generator, same checker, same meta block. R22's field is
 a universal constant; this field varies by path prefix and is still not a
@@ -59,6 +82,11 @@ literal `'A6'` in `inferRepoTopicDetails`. The checker
 against `metadataFieldsForTopic(topic)` and fails on any difference.
 
 ## 3. Verified, and how
+
+*(The clause table below is the receipt of the ORIGINAL instrument as it ran
+on 2026-07-30; those clause names belonged to the pre-inversion contract and
+are kept verbatim as history. The clauses that run today are the inverted set
+in §1a.)*
 
 Corpus figures measured 2026-07-30; the contract re-measures them on every run.
 
@@ -101,9 +129,14 @@ carries it.
   question, and the check that reads it cannot notice.
 - **Sibling of R22, not a duplicate.** R22 is about a universal date literal.
   This is about a path-derived owner label misnamed as validation authorship.
-- **Not fixed.** No change is made to the generator or the checker. Renaming the
-  field to `owned_by`, or deriving it from an actual review record, is a
-  separate rung with its own falsifier; doing it here would destroy the evidence.
+- **Not fixed in this rung — and closed later, on the record.** The 2026-07-30
+  rung deliberately changed nothing: doing it inside the rung that discovered
+  the defect would have destroyed the evidence. The closure came afterwards
+  and separately: #1752 (2026-08-16) made the pair preserve-per-document and
+  shape-checked, and the same change inverted this instrument into the guard
+  described in §1a. The original indictment above is the receipt for why the
+  guard exists; the two verdicts (at discovery, and now) are both on this page
+  on purpose.
 - **Not a compiler change.**
 
 ## 6. Reproduce
@@ -121,3 +154,9 @@ if any is absent. Leaves the working tree byte-identical.
 Finding, contract, gate and spec drafted under human direction (2026-07-30)
 while a parallel agent held the Madaros FO method-on-Call residual. All four
 clauses are machine-measured. No clinical content. GAIDeT-ICMJE 2025.
+
+Inversion (2026-08-16) drafted under human direction as part of #1752,
+sibling of R22's inversion: the contract and gate were rewritten to guard the
+fixed property, and the closure (§1a) was recorded beside the original
+finding. All inverted clauses are machine-measured. No clinical content.
+GAIDeT-ICMJE 2025.

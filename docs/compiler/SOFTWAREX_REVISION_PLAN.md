@@ -77,13 +77,13 @@ Work items:
 - Add “compiler maturity / self-host” evidence:
   - strict self-host corpus gate (`scripts/selfhost/selfhost_zero_fallback_gate.sh`)
   - strict driver-output smoke gate for the bootstrap subset (`scripts/ci/selfhost_driver_output_gate.sh`)
-  - machine-readable report generator for CI artifacts (`scripts/selfhost_reproducibility_report.py`)
+  - machine-readable report generator for CI artifacts (`scripts/selfhost/selfhost_reproducibility_report.py`)
 - Add a minimal end-to-end example relevant to DL:
   - forward pass of a toy octonion layer (already doable)
   - training demo if/when autodiff integration is real and verifiable
 
 Deliverables:
-- `scripts/reproduce_octonion_preprint.sh` (tests + benches)
+- `scripts/paper/reproduce_octonion_preprint.sh` (tests + benches)
 - `scripts/selfhost/selfhost_zero_fallback_gate.sh` + `scripts/ci/selfhost_driver_output_gate.sh` (self-host maturity gates)
 - Manuscript appendix that names the scripts, commit/tag, and outputs
 
@@ -115,7 +115,7 @@ Work items:
 
 Deliverables:
 - `docs/compiler/TECHNICAL_REPORT.tex`: roofline figure
-- `scripts/roofline_octonion.py`: emits CSV for pgfplots (no external Python deps)
+- `scripts/benchmarks/roofline_octonion_matmul.py`: emits CSV for pgfplots (no external Python deps)
 
 ## Execution Order (Recommended)
 1. Fix reproducibility paths and scripts (so every future claim is verifiable).

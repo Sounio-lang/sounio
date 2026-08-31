@@ -1,0 +1,64 @@
+// Leaf of the let-annotation multimodule probe.
+//
+// Checked ALONE this file reports 3 errors: E001 for `var n: ST = 7` (an integer
+// bound to a struct annotation) and two E004 for the arithmetic on it. Checked as
+// an IMPORTED module it reports none of them, because the type annotation on a
+// let/var statement does not survive the multimodule path — the binding takes the
+// initializer's type instead, and when there is no initializer it takes unit.
+//
+// That second case is the one with consequences in the real tree: `var out: T`
+// with no initializer is how several `*_new` constructors in elf/encode/reloc are
+// written, and every field access on such a binding is reported as
+// "no field <x> on type ()".
+
+// ------------------------------------------------------------------
+// INSTRUMENTED RESULT (2026-08-02). A throwaway build printed, at every
+// StmtLet/StmtVar site in the parser and in all four statement checkers,
+// whether the type annotation was present. It refutes the heading above this
+// block as originally written:
+//
+//   Stmt.ty ARRIVES. Both the single-module and the multimodule run print
+//   "check-inplace var SOME". The annotation is not lost in transit, and only
+//   the in-place checker runs in either case — no value-path checker fires at
+//   all. What differs is what LOWERING that annotation returns.
+//
+// Follow-up probes, same binary, no rebuild:
+//
+//   var k: i64      -> "no field len on type i64"     in BOTH runs
+//   var w: ST       -> "on type ST" single, "on type ()" multimodule
+//   var v: ST = ST{..} -> "on type ST" in BOTH  (the literal supplies the type)
+//   let r = mk()    -> "on type ST" single, NO DIAGNOSTIC AT ALL multimodule
+//
+// So it is not statement annotations. Built-in type names lower fine
+// everywhere; NAMED type names do not lower in the multimodule path at all —
+// the fourth line shows a function's declared return type failing the same way.
+// The struct table itself is populated, which the third line proves: a struct
+// literal resolves ST in exactly the run where the annotation cannot.
+//
+// The two suspects named in the previous commit are BOTH eliminated, and by
+// the same observation: checker_collect_items_mut is a one-line delegation to
+// checker_collect_items_inplace, and check_items_verdict_boot4 is a one-line
+// delegation to check_items_verdict_boot4_with_module_path. Single and
+// multimodule run the same collector and the same checker over the same AST.
+// The divergence is therefore checker STATE at the moment
+// checker_lower_named_type_with_args_mut runs, not a different code path.
+
+pub struct ST {
+    len: i64,
+    last: i64,
+}
+
+// Loses its annotation when imported: `n` becomes i64, so `n + 1` type-checks.
+pub fn probe_arith_on_struct_ann() -> i64 {
+    var n: ST = 7
+    n + 1
+}
+
+// The shape that matters. No initializer, so with the annotation gone the
+// binding is unit and both field accesses fail with E012.
+pub fn probe_uninit_annotated() -> ST {
+    var out: ST
+    out.len = 0
+    out.last = 0
+    out
+}

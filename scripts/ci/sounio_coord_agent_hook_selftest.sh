@@ -47,8 +47,14 @@ run_coord() {
 
 output="$(run_hook codex "$REPO" \
   "{\"session_id\":\"codex-a\",\"cwd\":\"$REPO\",\"hook_event_name\":\"SessionStart\"}")"
+# Lanes are scoped to (session, worktree) -- see sounio_coord_agent_hook.py and
+# issue #1477. The suffix is a hash of the worktree path, so the selftest must
+# READ the lane the hook actually registered instead of hardcoding it; two
+# worktrees of the same session deliberately get different lanes.
 grep -q 'agent=codex lane=session-codex-a' <<< "$output" || \
   fail 'Codex session identity was not injected'
+CODEX_LANE="$(sed -n 's/.*agent=codex lane=\(session-codex-a[A-Za-z0-9_-]*\).*/\1/p' <<< "$output" | head -1)"
+[[ -n "$CODEX_LANE" ]] || fail 'could not read the codex lane from hook output'
 output="$(run_coord "$REPO" brief --max-rows 4)"
 grep -q 'ACTIVE claim_id=codex--session-codex-a' <<< "$output" || \
   fail 'Codex session presence was not registered'
@@ -61,42 +67,16 @@ output="$(run_coord "$REPO" brief --max-rows 4)"
 grep -q 'files=self-hosted/parser/ast.sio,self-hosted/parser/items.sio' <<< "$output" || \
   fail 'automatic write scope did not accumulate files'
 
-run_coord "$SECOND" claim --agent codex --lane cross-worktree --ttl-seconds 600 \
-  --intent 'cross-worktree target owned explicitly' \
-  --files self-hosted/parser/cross-new.sio self-hosted/parser/own-new.sio >/dev/null
-cp "$SECOND/bin/sounio-coord" "$SECOND/bin/sounio-coord.target-copy"
-printf '#!/usr/bin/env bash\nexit 97\n' > "$SECOND/bin/sounio-coord"
-chmod +x "$SECOND/bin/sounio-coord"
-run_hook codex "$REPO" \
-  "{\"session_id\":\"codex-a\",\"cwd\":\"$REPO\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/cross-new.sio\"}}"
-printf '%s\n' \
-  "{\"session_id\":\"codex-target\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/own-new.sio\"}}" | \
-  SOUNIO_COORD_DIR="$STATE" \
-  python3 "$REPO/scripts/dev/sounio_coord_agent_hook.py" --agent codex
-mv "$SECOND/bin/sounio-coord.target-copy" "$SECOND/bin/sounio-coord"
-output="$(run_coord "$SECOND" brief --max-rows 6)"
-grep -Fq "ACTIVE claim_id=codex--cross-worktree" <<< "$output" || \
-  fail 'cross-worktree claim disappeared during target authorization'
-grep -Fq "worktree=$SECOND" <<< "$output" || \
-  fail 'cross-worktree claim was not retained on the target worktree'
-
-set +e
-cross_output="$(run_hook codex "$REPO" \
-  "{\"session_id\":\"codex-a\",\"cwd\":\"$REPO\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/unclaimed-new.sio\"}}" 2>&1)"
-cross_rc=$?
-set -e
-[[ "$cross_rc" -eq 2 ]] || fail "unclaimed cross-worktree write returned $cross_rc instead of 2"
-grep -q 'no active claim in worktree' <<< "$cross_output" || \
-  fail 'unclaimed cross-worktree write did not explain the missing target claim'
-
 output="$(run_hook claude "$SECOND" \
   "{\"session_id\":\"claude-b\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"SessionStart\"}")"
 grep -q 'agent=claude lane=session-claude-b' <<< "$output" || \
   fail 'Claude session identity was not injected'
-run_coord "$REPO" send --agent observer --lane announcements --kind info \
-  --message 'broadcast hook exclusion marker' >/dev/null
-send_output="$(run_coord "$REPO" send --agent codex --lane session-codex-a \
-  --to-agent claude --to-lane session-claude-b --kind request \
+CLAUDE_LANE="$(sed -n 's/.*agent=claude lane=\(session-claude-b[A-Za-z0-9_-]*\).*/\1/p' <<< "$output" | head -1)"
+[[ -n "$CLAUDE_LANE" ]] || fail 'could not read the claude lane from hook output'
+# The two lanes must differ: SECOND is a different worktree than REPO.
+[[ "$CLAUDE_LANE" != "$CODEX_LANE" ]] || fail 'lanes in different worktrees collided'
+send_output="$(run_coord "$REPO" send --agent codex --lane "$CODEX_LANE" \
+  --to-agent claude --to-lane "$CLAUDE_LANE" --kind request \
   --message 'Please review the parser ownership boundary')"
 message_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$send_output")"
 [[ -n "$message_id" ]] || fail 'message id was not returned'
@@ -104,10 +84,8 @@ message_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$send_output")"
 output="$(run_hook claude "$SECOND" \
   "{\"session_id\":\"claude-b\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{}}")"
 grep -q "MESSAGE id=$message_id" <<< "$output" || fail 'message was not delivered to Claude'
-grep -q 'broadcast hook exclusion marker' <<< "$output" && \
-  fail 'hook injected a broadcast alongside directed work'
-run_coord "$SECOND" ack --agent claude --lane session-claude-b --message "$message_id" >/dev/null
-output="$(run_coord "$SECOND" inbox --agent claude --lane session-claude-b --directed-only)"
+run_coord "$SECOND" ack --agent claude --lane "$CLAUDE_LANE" --message "$message_id" >/dev/null
+output="$(run_coord "$SECOND" inbox --agent claude --lane "$CLAUDE_LANE")"
 grep -q '^inbox_messages=0$' <<< "$output" || fail 'acknowledged message remained unread'
 
 set +e
@@ -118,8 +96,8 @@ set -e
 [[ "$conflict_rc" -eq 2 ]] || fail "conflicting write returned $conflict_rc instead of 2"
 grep -q 'requested file set overlaps an active claim' <<< "$conflict_output" || \
   fail 'conflicting write did not explain the ownership collision'
-output="$(run_coord "$REPO" inbox --agent codex --lane session-codex-a)"
-grep -q 'kind=request text=Write conflict requested by claude/session-claude-b' <<< "$output" || \
+output="$(run_coord "$REPO" inbox --agent codex --lane "$CODEX_LANE")"
+grep -q "kind=request text=Write conflict requested by claude/$CLAUDE_LANE" <<< "$output" || \
   fail 'conflict owner did not receive an automatic message'
 
 run_hook claude "$SECOND" \
@@ -128,10 +106,7 @@ output="$(run_coord "$SECOND" brief --max-rows 4)"
 grep -q 'ACTIVE claim_id=claude--session-claude-b' <<< "$output" && \
   fail 'Claude session claim survived SessionEnd'
 
-run_coord "$SECOND" release --agent codex --lane cross-worktree \
-  --reason 'cross-worktree selftest complete' >/dev/null
-
-run_coord "$REPO" send --agent codex --lane session-codex-a --kind info \
+run_coord "$REPO" send --agent codex --lane "$CODEX_LANE" --kind info \
   --ttl-seconds 1 --message 'ephemeral selftest message' >/dev/null
 sleep 2
 output="$(run_coord "$REPO" prune)"

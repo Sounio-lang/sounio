@@ -1,0 +1,76 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: PASS: kernel lane loop
+
+// Regression pin for #1504 — Madaros ran a `kernel fn` body exactly once with
+// every GPU intrinsic reading 0, which is a silent wrong answer rather than a
+// missing feature: results at index 0 were correct and everything else sat at
+// its zero-initialised value.
+//
+// This test asserts the two properties the defect violated, directly:
+//
+//   1. the body executes once per lane  (count, not a spot check at an index)
+//   2. gpu_thread_id_x() takes every value in 0..n  (sum, not just the last)
+//
+// The seven pre-existing gpu_vec_* / gpu_epistemic_* tests check sentinel
+// indices, which is why the defect read as "correct at 0, zero elsewhere" for
+// weeks rather than as a failure. Counting is what makes the one-iteration case
+// impossible to pass.
+//
+// Deliberately no `//@ requires: gpu`. There is no GPU on the CI host and none
+// is needed: the CPU lane loop is the point. lean_single has had this fallback
+// since lean_single.sio:29335; the Madaros path grew it in ir/lower.sio.
+
+kernel fn lane_probe(n: i64, acc: &![f64]) with GPU {
+    let tid = gpu_thread_id_x()
+    // acc[0] counts iterations; acc[1] accumulates the thread ids seen.
+    acc[0] = acc[0] + 1.0
+    acc[1] = acc[1] + (tid as f64)
+}
+
+// `return` inside a kernel ends THAT LANE, as it does in CUDA — it must not
+// abandon the rest of the launch. Pinned separately because both engines got
+// this wrong before: emitting a plain return here ran 2 lanes of 8, and
+// lean_single still does (measured 2026-07-26). The `if early_out { return }`
+// shape is common enough in kernels that this silently truncates real work.
+kernel fn lane_return(n: i64, acc: &![f64]) with GPU {
+    let tid = gpu_thread_id_x()
+    if tid == 2 { return }
+    acc[2] = acc[2] + 1.0
+}
+
+fn main() -> i32 with IO, Mut, Panic, GPU {
+    var acc: [f64; 4] = [0.0; 4]
+
+    lane_probe(8, &!acc)
+    lane_return(8, &!acc)
+
+    // 8 lanes, thread ids 0..7, so the ids sum to 8*7/2 = 28.
+    let ran_every_lane = acc[0] > 7.99 && acc[0] < 8.01
+    let saw_every_tid = acc[1] > 27.99 && acc[1] < 28.01
+    // 8 lanes, one of which returns early: 7 increments.
+    let return_ends_lane_only = acc[2] > 6.99 && acc[2] < 7.01
+
+    if ran_every_lane && saw_every_tid && return_ends_lane_only {
+        println("PASS: kernel lane loop")
+        return 0
+    }
+
+    print("FAIL: kernel lane loop executions=")
+    print_f64(acc[0])
+    print(" tid_sum=")
+    print_f64(acc[1])
+    print(" after_return=")
+    print_f64(acc[2])
+    println("")
+    // Exit non-zero on failure, deliberately.
+    //
+    // The harness's `expect-stdout` extraction is quoted, so the capture group
+    // comes back empty and every expect-stdout assertion in the corpus matches
+    // vacuously — the suite source says so at scripts/dev/run_sio_test_suite.sh:306
+    // and estimates ~305 latent vacuous passes. A run-pass test that prints FAIL
+    // and returns 0 is therefore green everywhere, which is exactly how the seven
+    // gpu_* tests hid #1504 for weeks. Returning 1 makes this pin bite under the
+    // harness that actually exists rather than the one that is documented.
+    1
+}

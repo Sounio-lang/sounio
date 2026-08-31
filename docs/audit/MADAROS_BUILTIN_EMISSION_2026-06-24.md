@@ -33,7 +33,13 @@ Route **every** builtin in `native_v2_emit_builtin_by_id_into` through
 `(*nc) = emit_builtin_X((*nc))`. Same proven workaround as #422, applied to the whole family.
 
 ## Verified (madaros from this source)
-- **Now work (were crashing): `str_len(str_slice("hello",1,4)) → 4`, `file_size(path) → 13`.**
+- **Now work (were crashing): `str_len(str_slice("hello",1,4))`, `file_size(path) -> 13`.**
+  The `-> 4` recorded here for the `str_slice` call was the *defect*, not the
+  expectation: `[1, 4)` of `"hello"` is `"ell"`, length **3**. This fix restored the
+  call rather than crashing it, but the emitted stub still took only `(s, start)`
+  and returned the whole suffix `"ello"`. Corrected while fixing #2244, which
+  retags 3-argument call sites onto their own builtin; the value is now **3**.
+  Nothing else on this page changes -- the emission-path fix it documents stands.
 - Still correct: `str_char_at("hello",1) → 101`, `str_eq → 1`, string concat `"ab"+"cde" → 5`.
 - No regression: 47/80 run-pass = prebuilt main +6, 0 regressed; madaros self-builds.
 

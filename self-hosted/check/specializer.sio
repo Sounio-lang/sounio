@@ -1147,8 +1147,20 @@ fn spec_finalize_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> wi
     }
 }
 
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var SPEC_TRACE_ENABLED_ON: i64 = 0
+var SPEC_TRACE_ENABLED_CHECKED: i64 = 0
+
 fn spec_trace_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_SPEC_TRACE"), "1")
+    if SPEC_TRACE_ENABLED_CHECKED == 0 {
+        SPEC_TRACE_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_SPEC_TRACE"), "1") {
+            SPEC_TRACE_ENABLED_ON = 1
+        }
+    }
+    SPEC_TRACE_ENABLED_ON == 1
 }
 
 fn spec_trace_out_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div {
@@ -1254,36 +1266,92 @@ pub fn spec_append_item_lists(a: Option<Box<ItemList>>, b: Option<Box<ItemList>>
 //
 // Seed-safe: local i64 hash tables only (no Name/Option globals).
 
-let SPEC_DCE_MAX: i64 = 512
+// WHY THIS TABLE IS A HASH SET AND NOT A LIST.
+//
+// It used to be `[i64; 512]` scanned linearly, and both halves of that were
+// load-bearing in the wrong direction.
+//
+// The FATAL half: when the list was full, spec_dce_hash_insert returned false
+// and inserted nothing — silently. A callee whose mark could not be recorded is
+// then not found by spec_dce_filter_items, and filter_items DELETES every
+// top-level ItemFn it cannot find. So past 512 distinct reachable names this
+// pass did not merely stop optimising, it started removing live functions from
+// the program. Measured on 2026-08-04: a name-based reachability census over
+// main.sio's own 120-module closure marks 5889 names. The compiler was 11x past
+// the point where its own dead-code pass begins deleting reachable code.
+//
+// It compounded: spec_dce_scan_item_if_marked reports "changed" as
+// `*count > before`, and once the table is full nothing can be inserted, so
+// `changed` is false and the fixed-point loop EXITS SATISFIED with the mark set
+// incomplete. A saturated table looked exactly like convergence.
+//
+// The LINEAR half is why the cap could not simply be raised: find is O(count),
+// run for every item on every round, so at 16k marks over ~10k items the pass
+// would be quadratic and the build would not finish. Open addressing makes the
+// cap affordable, which is what makes the refusal below affordable too.
+//
+// The table is a power of two so the probe wraps by mask, and 0 stays the empty
+// sentinel — ast_name_hash returns |hash| and insert rejects 0, so no live name
+// can be confused with an empty slot.
+let SPEC_DCE_SLOTS: i64 = 16384
+let SPEC_DCE_SLOT_MASK: i64 = 16383
+// 50% load. Past this the probe lengths stop being constant and, more to the
+// point, the pass must refuse rather than guess.
+let SPEC_DCE_MAX: i64 = 8192
+// Fixed-point rounds. Was the same constant as the table size, which meant
+// nothing in particular; reachability over this graph converges in far fewer.
+let SPEC_DCE_MAX_ROUNDS: i64 = 64
 
-fn spec_dce_hash_find(marks: &[i64; 512], count: i64, h: i64) -> bool {
-    var i: i64 = 0
-    while i < count {
-        if marks[i as usize] == h {
+fn spec_dce_hash_find(marks: &[i64; 16384], count: i64, h: i64) -> bool with Mut, Panic, Div {
+    if h == 0 {
+        return false
+    }
+    var slot = h % SPEC_DCE_SLOTS
+    var probes: i64 = 0
+    while probes < SPEC_DCE_SLOTS {
+        let cur = marks[slot as usize]
+        if cur == 0 {
+            return false
+        }
+        if cur == h {
             return true
         }
-        i = i + 1
+        slot = (slot + 1) % SPEC_DCE_SLOTS
+        probes = probes + 1
     }
     false
 }
 
-fn spec_dce_hash_insert(marks: &! [i64; 512], count: &! i64, h: i64) -> bool with Mut {
+fn spec_dce_hash_insert(marks: &! [i64; 16384], count: &! i64, h: i64) -> bool with Mut, Panic, Div {
     if h == 0 {
         return false
     }
-    if spec_dce_hash_find(marks, *count, h) {
-        return false
-    }
     if *count >= SPEC_DCE_MAX {
+        // Do NOT insert and do NOT pretend this was a no-op: the caller reads
+        // *count against SPEC_DCE_MAX and abandons filtering entirely. Silence
+        // here is what deleted live code before.
         return false
     }
-    marks[(*count) as usize] = h
-    *count = *count + 1
-    true
+    var slot = h % SPEC_DCE_SLOTS
+    var probes: i64 = 0
+    while probes < SPEC_DCE_SLOTS {
+        let cur = marks[slot as usize]
+        if cur == h {
+            return false
+        }
+        if cur == 0 {
+            marks[slot as usize] = h
+            *count = *count + 1
+            return true
+        }
+        slot = (slot + 1) % SPEC_DCE_SLOTS
+        probes = probes + 1
+    }
+    false
 }
 
 // Walk an expression tree; insert callee / method name hashes into `marks`.
-fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 512], count: &! i64) with Mut, Panic, Div {
+fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
     if e.kind == ExprKind::ExprCall {
         let callee = spec_call_expr_callee_name(e)
         if !name_is_empty(callee) {
@@ -1292,6 +1360,20 @@ fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 512], count: &! i64) with Mut, Pa
     } else if e.kind == ExprKind::ExprMethodCall {
         if !name_is_empty(e.name) {
             var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(e.name))
+        }
+    } else if e.kind == ExprKind::ExprIdent {
+        // First-class fn refs (`call_it(square, x)`, `let f = square`) are
+        // ExprIdent, not ExprCall. Without marking the name, spec_dce deletes
+        // the target function and LoadFnRef binds to a stale/wrong fn_id.
+        if !name_is_empty(e.name) {
+            var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(e.name))
+        }
+    } else if e.kind == ExprKind::ExprPath {
+        if e.path.seg_count == 1 {
+            let n = spec_path_single_name(e.path)
+            if !name_is_empty(n) {
+                var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(n))
+            }
         }
     }
     match e.left {
@@ -1379,7 +1461,7 @@ fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 512], count: &! i64) with Mut, Pa
     }
 }
 
-fn spec_dce_scan_block(b: Block, marks: &! [i64; 512], count: &! i64) with Mut, Panic, Div {
+fn spec_dce_scan_block(b: Block, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
     var cur = b.stmts
     var going = true
     while going {
@@ -1400,12 +1482,14 @@ fn spec_dce_scan_block(b: Block, marks: &! [i64; 512], count: &! i64) with Mut, 
     }
 }
 
-// If item is a marked callable (top-level ItemFn or impl/trait method),
-// scan its body and extend the mark set. Returns true if any new hash
+// If item is a body the filter can delete (a top-level ItemFn), scan its
+// body only when it is marked. Impl and trait methods are never deleted by
+// the filter, so their bodies are scanned unconditionally — a retained body
+// must contribute its callees to the mark set. Returns true if any new hash
 // was inserted.
 fn spec_dce_scan_item_if_marked(
     it: Item,
-    marks: &! [i64; 512],
+    marks: &! [i64; 16384],
     count: &! i64
 ) -> bool with Mut, Panic, Div {
     let before = *count
@@ -1418,6 +1502,20 @@ fn spec_dce_scan_item_if_marked(
             }
         }
     } else if it.kind == ItemKind::ItemImpl {
+        // Method bodies are scanned UNCONDITIONALLY, not only when the bare
+        // method name is marked. The filter below never deletes an ItemImpl,
+        // and the dep body pass lowers every method of a kept impl, so a
+        // method body is retained even when nothing reachable calls it. A
+        // retained body's callees must therefore be marked, or the callee is
+        // deleted from the item list while the wrapper that calls it still
+        // lowers — the call then binds to an instr_count==0 stub and native
+        // codegen traps it (ud2). Measured 2026-08-19 on madaros_root2_associated_
+        // import: Epistemic::measured lowered with a real delegation body while
+        // ep_measured (called only from that impl) was filtered out — SIGILL
+        // rc=132; the same program runs green with SOUNIO_DISABLE_MM_DCE=1. The
+        // associated call could not mark "measured" either, because
+        // spec_call_expr_callee_name returns empty for multi-segment paths —
+        // so the gate could never open for this shape at all.
         match it.impl_def {
             Some(id) => {
                 var mcur = (*id).methods
@@ -1428,12 +1526,9 @@ fn spec_dce_scan_item_if_marked(
                         Some(mlist) => {
                             let mit = (*mlist).head
                             if mit.kind == ItemKind::ItemFn {
-                                let mh = ast_name_hash(mit.name)
-                                if spec_dce_hash_find(marks, *count, mh) {
-                                    match mit.fn_def {
-                                        Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
-                                        None => {}
-                                    }
+                                match mit.fn_def {
+                                    Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                                    None => {}
                                 }
                             }
                             mcur = (*mlist).tail
@@ -1444,6 +1539,9 @@ fn spec_dce_scan_item_if_marked(
             None => {}
         }
     } else if it.kind == ItemKind::ItemTrait {
+        // Same unconditional scan as ItemImpl above: the filter keeps
+        // ItemTrait whole, so a default-method body is retained and its
+        // callees must be marked.
         match it.trait_def {
             Some(td) => {
                 var mcur = (*td).methods
@@ -1454,12 +1552,9 @@ fn spec_dce_scan_item_if_marked(
                         Some(mlist) => {
                             let mit = (*mlist).head
                             if mit.kind == ItemKind::ItemFn {
-                                let mh = ast_name_hash(mit.name)
-                                if spec_dce_hash_find(marks, *count, mh) {
-                                    match mit.fn_def {
-                                        Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
-                                        None => {}
-                                    }
+                                match mit.fn_def {
+                                    Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                                    None => {}
                                 }
                             }
                             mcur = (*mlist).tail
@@ -1475,7 +1570,7 @@ fn spec_dce_scan_item_if_marked(
 
 fn spec_dce_scan_list_if_marked(
     items: Option<Box<ItemList>>,
-    marks: &! [i64; 512],
+    marks: &! [i64; 16384],
     count: &! i64
 ) -> bool with Mut, Panic, Div {
     var changed = false
@@ -1538,7 +1633,7 @@ fn spec_dce_count_item_fns(items: Option<Box<ItemList>>) -> i64 with Mut, Panic,
 // non-fn item (and keep order of survivors).
 fn spec_dce_filter_items(
     items: Option<Box<ItemList>>,
-    marks: &[i64; 512],
+    marks: &[i64; 16384],
     mark_count: i64
 ) -> Option<Box<ItemList>> with Mut, Alloc, Panic, Div {
     match items {
@@ -1547,6 +1642,37 @@ fn spec_dce_filter_items(
             let it = (*list).head
             let rest = spec_dce_filter_items((*list).tail, marks, mark_count)
             if it.kind == ItemKind::ItemFn {
+                // A MODULE-LEVEL GLOBAL IS ALSO AN ItemFn. parse_global_var_item
+                // and parse_global_let_item (parser/items.sio:1394, :1338) both
+                // build `kind: ItemKind::ItemFn` with `fn_def: None` -- there is
+                // no ItemVar in the enum. Lowering then gives each one an
+                // IrFunction slot with compile_strategy = IR_STRATEGY_BSS_GLOBAL,
+                // carrying its BSS offset and size (ir/lower.sio:1609).
+                //
+                // Nothing CALLS a global -- globals are read, not called -- so no
+                // reachability scan rooted at `main` can ever mark one, and
+                // filtering by marks alone deletes the program's BSS slots.
+                //
+                // Measured 2026-08-06, before this guard, on the ordinary
+                // multi-module path:
+                //
+                //   var G: [i64; 4]                    merged 4 -> 3, and
+                //   fn main() { print_int(G[0]) ... }  the binary printed NOTHING
+                //
+                // No crash and no diagnostic: bss_total_size is accumulated as
+                // the slots are lowered, so dropping one shifts every global
+                // after it and the program reads someone else's storage. A
+                // struct-typed global then segfaults outright. Confirmed by
+                // A/B against SOUNIO_DISABLE_MM_DCE=1 on the same binary.
+                //
+                // `fn_def: None` is the discriminator, and it is the RIGHT one:
+                // a real function always carries a body here, and the other
+                // fn_def-less ItemFns the parser builds are error-recovery
+                // stubs, which are harmless to keep and dangerous to guess at.
+                match it.fn_def {
+                    None => return Some(Box::new(ItemList { head: it, tail: rest }))
+                    Some(_) => {}
+                }
                 let h = ast_name_hash(it.name)
                 if spec_dce_hash_find(marks, mark_count, h) {
                     return Some(Box::new(ItemList { head: it, tail: rest }))
@@ -1561,26 +1687,214 @@ fn spec_dce_filter_items(
 // Public entry: reachability-DCE unused top-level ItemFns from a specialized
 // (or otherwise merged) item list, rooted at `main`. No-op when main is
 // missing (caller keeps the list for hollow-main fallback paths).
+// ---------------------------------------------------------------------------
+// Cross-module reachability DCE for the ORDINARY multi-module path.
+//
+// spec_dce_unreachable_item_fns below only runs on the specialized-collapse
+// path (module_frontend_specialized_prepare returns early when there are no
+// monomorphisation markers), so a program with no generics gets no pruning at
+// all. Measured 2026-08-05: compiling self-hosted/compiler/main.sio loads 120
+// modules, typechecks clean, lowers, and then dies in the merge —
+// "too many functions: shared IR module capacity exceeded (max 8191 slots)" —
+// with 10705 declared functions, of which a reachability census from `main`
+// says 5997 are live. The pruning that would have fitted it already exists and
+// was simply never asked to run here.
+//
+// MARKS LIVE IN GLOBALS, and that is not a style choice. Filtering in place
+// would mean `(*programs)[k].items = filtered`, a nested field-in-array store
+// through `&!` — the shape module_frontend.sio's own comments record as
+// dropped by lean_single ("Handoff MUST NOT rely on nested field-in-array
+// store"). So the marks are computed once into globals and the caller filters
+// at its two READ sites, where the result is an ordinary local.
+var SPEC_DCE_G_MARKS: [i64; 16384]
+var SPEC_DCE_G_COUNT: i64 = 0
+var SPEC_DCE_G_READY: i64 = 0
+
+// Memoised for the same reason as every other read_env in this file: the
+// runtime allocator never reclaims, so a call per invocation is a per-compile
+// leak.
+var SPEC_DCE_MM_OFF: i64 = 0
+var SPEC_DCE_MM_OFF_CHECKED: i64 = 0
+
+fn spec_dce_mm_disabled() -> bool with IO, Mut, Panic, Div {
+    if SPEC_DCE_MM_OFF_CHECKED == 0 {
+        SPEC_DCE_MM_OFF_CHECKED = 1
+        if str_eq(read_env("SOUNIO_DISABLE_MM_DCE"), "1") {
+            SPEC_DCE_MM_OFF = 1
+        }
+    }
+    SPEC_DCE_MM_OFF == 1
+}
+
+// Compute the live set across every loaded program. Returns the mark count, 0
+// if there is no `main` to root from, or -1 if the mark set could not be
+// completed — in which case the caller must NOT filter.
+pub fn spec_dce_mark_across_programs(
+    programs: &! [Program; 256],
+    loaded: i64
+) -> i64 with IO, Mut, Panic, Div, Alloc {
+    SPEC_DCE_G_READY = 0
+    SPEC_DCE_G_COUNT = 0
+
+    // SOUNIO_DISABLE_MM_DCE=1 forces the refusal path. Two reasons it exists.
+    //
+    // First, it is the only cheap way to attribute a miscompile to this pass. A
+    // Madaros built before cross-module DCE ran on the ordinary path and one
+    // built after are ~100 MB binaries from tree states that cannot be diffed,
+    // so "did the DCE do this?" otherwise costs a 40-minute rebuild per guess.
+    //
+    // Second, this pass deletes by SOURCE-LEVEL reachability, and lowering
+    // emits calls that no source-level scan can see. Measured 2026-08-06 on a
+    // 5-function program with a struct-typed global: 9 merged functions before,
+    // 7 after, and the emitted binary SILENTLY SKIPS `print_int(G.len)` -- no
+    // crash, no diagnostic, a statement that simply does not execute. The
+    // filter's own contract ("returns its input unchanged unless a COMPLETE
+    // mark set is ready") was honoured: the mark set was complete for the AST
+    // and still wrong for the program.
+    //
+    // Until the seed set covers what lowering synthesises, this knob is the
+    // difference between a suspected miscompile and a demonstrated one.
+    if spec_dce_mm_disabled() {
+        return 0 - 1
+    }
+
+    var z: i64 = 0
+    while z < SPEC_DCE_SLOTS {
+        SPEC_DCE_G_MARKS[z as usize] = 0
+        z = z + 1
+    }
+
+    var has_main = false
+    var i: i64 = 0
+    while i < loaded && i < 256 {
+        if spec_dce_has_main((*programs)[i as usize].items) {
+            has_main = true
+        }
+        i = i + 1
+    }
+    if !has_main {
+        return 0
+    }
+
+    var count: i64 = 0
+    let main_h = ast_name_hash(make_name("main"))
+    var _seeded = spec_dce_hash_insert(&! SPEC_DCE_G_MARKS, &! count, main_h)
+
+    // Fixed point over ALL programs at once: a callee in module B reached from
+    // a body in module A must extend the same mark set, which is the whole
+    // reason this cannot be done per module.
+    var fuel: i64 = 0
+    var going = true
+    while going {
+        var changed = false
+        var m: i64 = 0
+        while m < loaded && m < 256 {
+            if spec_dce_scan_list_if_marked((*programs)[m as usize].items, &! SPEC_DCE_G_MARKS, &! count) {
+                changed = true
+            }
+            m = m + 1
+        }
+        fuel = fuel + 1
+        if !changed || fuel > SPEC_DCE_MAX_ROUNDS {
+            going = false
+        }
+    }
+
+    // Same refusal as the single-list entry point, and for the same reason: a
+    // saturated table and a converged one look identical from inside the loop,
+    // so the test is on capacity. Filtering against an incomplete mark set
+    // deletes reachable code.
+    if count >= SPEC_DCE_MAX || fuel > SPEC_DCE_MAX_ROUNDS {
+        print("spec_dce_mm: REFUSING to filter — mark set incomplete (marks ")
+        print_int(count)
+        print(" of ")
+        print_int(SPEC_DCE_MAX)
+        print(", rounds ")
+        print_int(fuel)
+        print(")\n")
+        return 0 - 1
+    }
+
+    SPEC_DCE_G_COUNT = count
+    SPEC_DCE_G_READY = 1
+    count
+}
+
+// Filter one module's items against the marks computed above. Returns the input
+// unchanged unless a complete mark set is ready, so a refusal upstream cannot
+// silently become a deletion here.
+pub fn spec_dce_filter_with_global_marks(
+    items: Option<Box<ItemList>>
+) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    if SPEC_DCE_G_READY != 1 {
+        return items
+    }
+    spec_dce_filter_items(items, &SPEC_DCE_G_MARKS, SPEC_DCE_G_COUNT)
+}
+
+pub fn spec_dce_global_marks_ready() -> bool {
+    SPEC_DCE_G_READY == 1
+}
+
+// How many top-level fns survive in `items` under the current marks. Lets the
+// caller's capacity preflight count what will ACTUALLY be lowered rather than
+// what was parsed.
+pub fn spec_dce_live_item_fns(items: Option<Box<ItemList>>) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if SPEC_DCE_G_READY != 1 {
+        return spec_dce_count_item_fns(items)
+    }
+    spec_dce_count_item_fns(spec_dce_filter_items(items, &SPEC_DCE_G_MARKS, SPEC_DCE_G_COUNT))
+}
+
 pub fn spec_dce_unreachable_item_fns(
     items: Option<Box<ItemList>>
 ) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
     if !spec_dce_has_main(items) {
         return items
     }
-    var marks: [i64; 512] = [0; 512]
+    var marks: [i64; 16384] = [0; 16384]
     var mark_count: i64 = 0
     let main_h = ast_name_hash(make_name("main"))
     var _seeded = spec_dce_hash_insert(&! marks, &! mark_count, main_h)
 
     // Fixed-point: scan bodies of marked callables, extend mark set.
+    //
+    // `changed` is only trustworthy while the table can still accept marks.
+    // When it cannot, `changed` is false for a reason that has nothing to do
+    // with convergence, so the round count alone must not be read as "done" —
+    // that is checked separately below, against mark_count, not against this
+    // loop's exit.
     var fuel: i64 = 0
     var going = true
     while going {
         let changed = spec_dce_scan_list_if_marked(items, &! marks, &! mark_count)
         fuel = fuel + 1
-        if !changed || fuel > SPEC_DCE_MAX {
+        if !changed || fuel > SPEC_DCE_MAX_ROUNDS {
             going = false
         }
+    }
+
+    // REFUSE RATHER THAN DELETE. Filtering is only sound if the mark set is
+    // complete, and it is complete only if nothing was ever turned away. A
+    // saturated table and a converged one are indistinguishable from the loop
+    // above, so the test is on capacity: at the limit, hand back the input
+    // untouched. The cost of refusing is a larger IrModule; the cost of
+    // filtering against a truncated mark set is a compiler with live functions
+    // missing, which is what this pass did before.
+    //
+    // Rounds are checked too, for the same reason: exhausting them means the
+    // reachable set was still growing when the loop stopped.
+    if mark_count >= SPEC_DCE_MAX || fuel > SPEC_DCE_MAX_ROUNDS {
+        print("spec_dce: REFUSING to filter — the mark set is not complete (marks ")
+        print_int(mark_count)
+        print(" of ")
+        print_int(SPEC_DCE_MAX)
+        print(", rounds ")
+        print_int(fuel)
+        print(" of ")
+        print_int(SPEC_DCE_MAX_ROUNDS)
+        print("). Every top-level fn is kept; the module will be larger than it needs to be.\n")
+        return items
     }
 
     let before_fns = spec_dce_count_item_fns(items)

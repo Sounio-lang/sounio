@@ -1,7 +1,11 @@
 #!/bin/bash
 # souc_v2_gate.sh -- Gate test for lean_single.sio / souc_v2 bootstrap compiler
 # Runs bootstrap fixed-point, souc_v2 split fixed-point, feature tests, regression.
-set -e
+# pipefail: a pipeline's rc must be the producer's, not the reader's.
+# Without it every `prog | tail -1` below read tail's rc (0 for a prog that
+# crashed after printing). The early-exiting-reader shapes this file used to
+# carry are gone too: assertions grep here-strings, not `echo | grep -q`.
+set -eo pipefail
 PASS=0; FAIL=0; TOTAL=0
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -59,19 +63,28 @@ fi
 S=/tmp/gate_s2.elf
 
 # --- souc_v2 split fixed-point ---
+# Each stage's status must be the compiler's own. This chain used to pipe
+# every stage through `tail -1`, so tail's rc=0 stood in for a stage that
+# failed after emitting output, and all but the last line of each stage's
+# evidence was destroyed in the same stroke. Log to files (the shape the
+# bootstrap stages above already use) and let the chain read the real rc.
 echo ""
 echo "--- souc_v2 split ---"
 TOTAL=$((TOTAL+1))
-if $S self-hosted/compiler/souc_v2/main.sio /tmp/gate_split1.elf 2>&1 | tail -1 && \
+rm -f /tmp/gate_split1.elf /tmp/gate_split2.elf /tmp/gate_split3.elf
+if $S self-hosted/compiler/souc_v2/main.sio /tmp/gate_split1.elf >/tmp/gate_split1.log 2>&1 && \
    chmod +x /tmp/gate_split1.elf && \
-   /tmp/gate_split1.elf self-hosted/compiler/souc_v2/main.sio /tmp/gate_split2.elf 2>&1 | tail -1 && \
+   /tmp/gate_split1.elf self-hosted/compiler/souc_v2/main.sio /tmp/gate_split2.elf >/tmp/gate_split2.log 2>&1 && \
    chmod +x /tmp/gate_split2.elf && \
-   /tmp/gate_split2.elf self-hosted/compiler/souc_v2/main.sio /tmp/gate_split3.elf 2>&1 | tail -1 && \
+   /tmp/gate_split2.elf self-hosted/compiler/souc_v2/main.sio /tmp/gate_split3.elf >/tmp/gate_split3.log 2>&1 && \
    cmp -s /tmp/gate_split2.elf /tmp/gate_split3.elf; then
     echo "PASS: souc_v2 split fixed-point"
     PASS=$((PASS+1))
 else
     echo "FAIL: souc_v2 split fixed-point"
+    for lg in 1 2 3; do
+        tail -n 3 /tmp/gate_split$lg.log 2>/dev/null
+    done
     FAIL=$((FAIL+1))
 fi
 
@@ -82,19 +95,26 @@ echo "--- Feature tests ---"
 run_test() {
     local name=$1 src=$2 expected=$3
     TOTAL=$((TOTAL+1))
-    if timeout 30 $S "$src" /tmp/gate_out.elf 2>/dev/null && \
+    if timeout 30 $S "$src" /tmp/gate_out.elf >/tmp/gate_compile.log 2>&1 && \
        chmod +x /tmp/gate_out.elf 2>/dev/null; then
-        local output
-        output=$(timeout 10 /tmp/gate_out.elf 2>/dev/null) || true
-        if echo "$output" | grep -q "$expected"; then
+        local output rc
+        # The program's exit status is part of the contract. This used to be
+        # `$(...) || true`, which let a binary print the expected text and
+        # then crash and still score PASS. Capture the rc; require 0.
+        set +e
+        output=$(timeout 10 /tmp/gate_out.elf 2>/dev/null)
+        rc=$?
+        set -e
+        if [ $rc -eq 0 ] && grep -q "$expected" <<<"$output"; then
             echo "PASS: $name"
             PASS=$((PASS+1))
         else
-            echo "FAIL: $name (got: $(echo "$output" | head -c 60))"
+            echo "FAIL: $name (rc=$rc, got: ${output:0:60})"
             FAIL=$((FAIL+1))
         fi
     else
         echo "FAIL: $name (compile error)"
+        tail -n 20 /tmp/gate_compile.log 2>/dev/null || true
         FAIL=$((FAIL+1))
     fi
 }
@@ -105,13 +125,17 @@ run_test_exact() {
     TOTAL=$((TOTAL+1))
     if timeout 30 $S "$src" /tmp/gate_out.elf >/tmp/gate_compile.log 2>&1 && \
        chmod +x /tmp/gate_out.elf 2>/dev/null; then
-        local output
-        output=$(timeout 10 /tmp/gate_out.elf "$@" 2>/dev/null) || true
-        if [ "$output" = "$expected" ]; then
+        local output rc
+        # Same contract as run_test: the program's own exit status must be 0.
+        set +e
+        output=$(timeout 10 /tmp/gate_out.elf "$@" 2>/dev/null)
+        rc=$?
+        set -e
+        if [ $rc -eq 0 ] && [ "$output" = "$expected" ]; then
             echo "PASS: $name"
             PASS=$((PASS+1))
         else
-            echo "FAIL: $name"
+            echo "FAIL: $name (rc=$rc)"
             echo "  expected: $(printf '%q' "$expected")"
             echo "  got:      $(printf '%q' "$output")"
             FAIL=$((FAIL+1))
@@ -129,7 +153,7 @@ run_cross_compile_test() {
     if timeout 30 $S "$src" /tmp/gate_cross.out --target "$target" >/tmp/gate_cross.log 2>&1; then
         local kind
         kind=$(file /tmp/gate_cross.out 2>/dev/null || true)
-        if echo "$kind" | grep -q "$expected_kind"; then
+        if grep -q "$expected_kind" <<<"$kind"; then
             echo "PASS: $name"
             PASS=$((PASS+1))
         else
@@ -151,6 +175,14 @@ cat > /tmp/gate_t1.sio << 'EOF'
 fn main() -> i64 with IO { let p = 3.14 + 2.0; print_int(f64_to_i64(p)); print("\n"); return 0 }
 EOF
 run_test "f64_infix" /tmp/gate_t1.sio "5"
+
+# Test: epistemic::propagate transcendental calls shadow the f64 builtins.
+run_test "propagate_epistemic_exp" tests/run-pass/propagate_epistemic_exp.sio "PROPAGATE_EPISTEMIC_EXP_OK"
+run_test "propagate_epistemic_ln" tests/run-pass/propagate_epistemic_ln.sio "PROPAGATE_EPISTEMIC_LN_OK"
+run_test "propagate_epistemic_pow" tests/run-pass/propagate_epistemic_pow.sio "PROPAGATE_EPISTEMIC_POW_OK"
+
+# Test: extern "C" math declarations retain intrinsic lowering.
+run_test "extern_c_math_intrinsics" tests/run-pass/extern_c_math_intrinsics.sio "EXTERN_C_MATH_INTRINSICS_OK"
 
 # Test: struct + impl method
 cat > /tmp/gate_t2.sio << 'EOF'
@@ -221,6 +253,11 @@ run_cross_compile_test \
     self-hosted/compiler/native_read64_smoke.sio \
     aarch64-macos \
     "Mach-O 64-bit arm64"
+run_cross_compile_test \
+    "extern_c_math_intrinsics_aarch64_linux" \
+    tests/run-pass/extern_c_math_intrinsics.sio \
+    aarch64-linux \
+    "ARM aarch64"
 
 # Test: error reporting (compile-time warning)
 cat > /tmp/gate_t8.sio << 'EOF'
@@ -228,11 +265,16 @@ fn main() -> i64 with IO { let x = unknown_var; return 0 }
 EOF
 TOTAL=$((TOTAL+1))
 err_out=$($S /tmp/gate_t8.sio /tmp/gate_err.elf 2>&1 || true)
-if echo "$err_out" | grep -q "line"; then
+# #1634: the assertion used to be `grep -q "line"`, which the old vague
+# `E200 \`x\` at line N` satisfied while carrying no file and no `error:`
+# prefix -- so `grep '^error'` on a failing build returned nothing. The
+# contract this test is really for is "a diagnostic names a location and is
+# greppable as an error", so assert that instead of the word "line".
+if grep -q "^error" <<<"$err_out" && grep -qE ":[0-9]+" <<<"$err_out"; then
     echo "PASS: error_line_numbers"
     PASS=$((PASS+1))
 else
-    echo "FAIL: error_line_numbers (got: $(echo "$err_out" | head -c 80))"
+    echo "FAIL: error_line_numbers (got: ${err_out:0:80})"
     FAIL=$((FAIL+1))
 fi
 

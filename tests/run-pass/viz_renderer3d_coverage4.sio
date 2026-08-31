@@ -1,0 +1,79 @@
+//@ run-pass
+// tests/run-pass/viz_renderer3d_coverage4.sio - edge coverage + depth proof
+//
+// Expected output:
+//   VIZ_RENDERER3D_COVERAGE4_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use render::renderer3d::{FogParams, Light3D, Vec3f, r3d_depth_buf_alloc, r3d_depth_buf_clear, r3d_rasterize_tri_phong}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pixels = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pixels, width: w, height: h }
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    let bg: i64 = 30 | (18 << 8) | (12 << 16)
+    var canvas = make_canvas(64, 64)
+    canvas_clear(&!canvas, 12, 18, 30)
+
+    let depth = r3d_depth_buf_alloc(canvas.width, canvas.height)
+    r3d_depth_buf_clear(depth, canvas.width, canvas.height)
+    let normal = Vec3f { x: 0.0, y: 0.0, z: 1.0 }
+    let light = Light3D {
+        dx: 0.0, dy: 0.0, dz: 1.0,
+        r: 255, g: 255, b: 255,
+        ambient: 0.2,
+    }
+    let fog = FogParams { near: 100.0, far: 200.0, r: 12, g: 18, b: 30 }
+
+    r3d_rasterize_tri_phong(
+        8, 7, 57, 16, 19, 57,
+        2.0, 2.0, 2.0,
+        normal, normal, normal,
+        68, 178, 226,
+        &fog, &light, depth, &!canvas,
+    )
+
+    let full = read_i64(canvas.pixels, 30 * canvas.width + 28)
+    assert(full != bg)
+
+    var partial: i64 = 0
+    var covered: i64 = 0
+    var i: i64 = 0
+    while i < canvas.width * canvas.height {
+        let px = read_i64(canvas.pixels, i)
+        if px != bg {
+            covered = covered + 1
+            if px != full { partial = partial + 1 }
+        }
+        i = i + 1
+    }
+
+    // A hard one-sample fill has no pixels between background and face color.
+    assert(covered > 800)
+    assert(partial > 40)
+    // Sub-unit depth differences must survive storage, and the near surface
+    // must win regardless of draw order.
+    canvas_clear(&!canvas, 12, 18, 30)
+    r3d_depth_buf_clear(depth, canvas.width, canvas.height)
+    r3d_rasterize_tri_phong(8, 7, 57, 16, 19, 57, 2.75, 2.75, 2.75,
+        normal, normal, normal, 38, 72, 210, &fog, &light, depth, &!canvas)
+    r3d_rasterize_tri_phong(8, 7, 57, 16, 19, 57, 2.25, 2.25, 2.25,
+        normal, normal, normal, 226, 92, 54, &fog, &light, depth, &!canvas)
+    let near_after_far = read_i64(canvas.pixels, 30 * canvas.width + 28)
+
+    canvas_clear(&!canvas, 12, 18, 30)
+    r3d_depth_buf_clear(depth, canvas.width, canvas.height)
+    r3d_rasterize_tri_phong(8, 7, 57, 16, 19, 57, 2.25, 2.25, 2.25,
+        normal, normal, normal, 226, 92, 54, &fog, &light, depth, &!canvas)
+    r3d_rasterize_tri_phong(8, 7, 57, 16, 19, 57, 2.75, 2.75, 2.75,
+        normal, normal, normal, 38, 72, 210, &fog, &light, depth, &!canvas)
+    let near_before_far = read_i64(canvas.pixels, 30 * canvas.width + 28)
+    assert(near_after_far == near_before_far)
+
+    println("VIZ_RENDERER3D_COVERAGE4_PASS")
+
+    heap_free(depth as *mut i8)
+    heap_free(canvas.pixels as *mut i8)
+}

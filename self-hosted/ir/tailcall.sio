@@ -205,7 +205,7 @@ fn tco_stats_new() -> TcoStats {
     }
 }
 
-fn tco_context_new() -> TcoContext {
+pub(crate) fn tco_context_new() -> TcoContext {
     TcoContext {
         func_infos: [tco_default_func_info(); 512],
         func_info_count: 0,
@@ -229,7 +229,7 @@ fn tco_mutual_group_new() -> TcoMutualGroup {
 // ============================================================================
 
 // Check if an instruction is a call
-fn tco_is_call(instr: IrInstr) -> bool {
+pub(crate) fn tco_is_call(instr: IrInstr) -> bool {
     if instr.op == IrOpcode::IrCall {
         return true
     }
@@ -313,11 +313,11 @@ fn tco_is_copy(instr: IrInstr) -> bool {
 //   2. The return uses the call's destination register (or returns void)
 //
 // Returns true if the call is in tail position.
-fn tco_is_tail_position(func: IrFunction, call_idx: i64) -> bool with Mut, Div, Panic {
+pub(crate) fn tco_is_tail_position(func: IrFunction, call_idx: i64) -> bool with Mut, Div, Panic {
     if call_idx < 0 || call_idx >= func.instr_count {
         return false
     }
-    let call_instr = func.instrs[call_idx as usize]
+    let call_instr = ir_arena_load(ir_region_slot_r(func.region, (call_idx)))
     if !tco_is_call(call_instr) {
         return false
     }
@@ -327,7 +327,7 @@ fn tco_is_tail_position(func: IrFunction, call_idx: i64) -> bool with Mut, Div, 
     // Scan forward from call_idx+1, skipping nops, looking for return
     var j: i64 = call_idx + 1
     while j < func.instr_count {
-        let next = func.instrs[j as usize]
+        let next = ir_arena_load(ir_region_slot_r(func.region, (j)))
         if tco_is_nop(next) {
             j = j + 1
         } else if tco_is_return(next) {
@@ -350,16 +350,16 @@ fn tco_is_tail_position(func: IrFunction, call_idx: i64) -> bool with Mut, Div, 
 }
 
 // Check if a call at `call_idx` is a self-recursive call (calls same function)
-fn tco_is_self_call(func: IrFunction, call_idx: i64) -> bool with Mut, Div, Panic {
+pub(crate) fn tco_is_self_call(func: IrFunction, call_idx: i64) -> bool with Mut, Div, Panic {
     if call_idx < 0 || call_idx >= func.instr_count {
         return false
     }
-    let call_instr = func.instrs[call_idx as usize]
+    let call_instr = ir_arena_load(ir_region_slot_r(func.region, (call_idx)))
     if !tco_is_call(call_instr) {
         return false
     }
     // Compare the call's target name with the function's own name
-    return ir_name_eq(call_instr.name, func.name)
+    return ir_name_eq(ir_name_at(call_instr.name_id), func.name)
 }
 
 // Extract argument registers from a call instruction into a fixed array.
@@ -392,7 +392,7 @@ fn tco_extract_call_args(instr: IrInstr, out: [i64; 16]) -> (i64, [i64; 16]) wit
 
 // Analyze a single function for TCO eligibility and tail call sites.
 // Returns the updated TcoFuncInfo.
-fn tco_analyze_function(func: IrFunction, fid: i64) -> TcoFuncInfo with Mut, Div, Panic {
+pub(crate) fn tco_analyze_function(func: IrFunction, fid: i64) -> TcoFuncInfo with Mut, Div, Panic {
     var info = tco_func_info_new(fid)
     info.instr_count = func.instr_count
     info.param_count = func.param_count
@@ -400,7 +400,7 @@ fn tco_analyze_function(func: IrFunction, fid: i64) -> TcoFuncInfo with Mut, Div
     // Scan for alloca and cleanup patterns
     var i: i64 = 0
     while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
         if tco_is_alloc(instr) {
             info.has_alloca = true
             info.is_eligible = false
@@ -417,7 +417,7 @@ fn tco_analyze_function(func: IrFunction, fid: i64) -> TcoFuncInfo with Mut, Div
     var tc_count: i64 = 0
     var j: i64 = 0
     while j < func.instr_count {
-        let instr = func.instrs[j as usize]
+        let instr = ir_arena_load(ir_region_slot_r(func.region, (j)))
         if tco_is_call(instr) {
             if tco_is_tail_position(func, j) {
                 tc_count = tc_count + 1
@@ -442,7 +442,7 @@ fn tco_has_varargs(func: IrFunction) -> bool {
 }
 
 // Full eligibility check: cleanup, alloca, varargs all disqualify
-fn tco_check_eligibility(func: IrFunction, info: TcoFuncInfo) -> (bool, i64) {
+pub(crate) fn tco_check_eligibility(func: IrFunction, info: TcoFuncInfo) -> (bool, i64) {
     if info.has_cleanup {
         return (false, TCO_REJECT_CLEANUP)
     }
@@ -460,14 +460,14 @@ fn tco_check_eligibility(func: IrFunction, info: TcoFuncInfo) -> (bool, i64) {
 // ============================================================================
 
 // Discover all tail calls in a module, populating call_infos in the context.
-fn tco_discover_tail_calls(ctx: TcoContext, module: IrModule) -> TcoContext with Mut, Div, Panic {
+pub(crate) fn tco_discover_tail_calls(ctx: TcoContext, module: IrModule) -> TcoContext with Mut, Div, Panic {
     var result = ctx
     var fi: i64 = 0
     while fi < module.fn_count && fi < TCO_MAX_FUNCS {
-        let func = module.functions[fi as usize]
+        let func = ir_fn_get(&module, fi as usize)
         var ii: i64 = 0
         while ii < func.instr_count {
-            let instr = func.instrs[ii as usize]
+            let instr = ir_arena_load(ir_region_slot_r(func.region, (ii)))
             if tco_is_call(instr) {
                 if tco_is_tail_position(func, ii) {
                     if result.call_info_count < TCO_MAX_CALLS {
@@ -499,7 +499,7 @@ fn tco_analyze_module(ctx: TcoContext, module: IrModule) -> TcoContext with Mut,
     var result = ctx
     var fi: i64 = 0
     while fi < module.fn_count && fi < TCO_MAX_FUNCS {
-        let func = module.functions[fi as usize]
+        let func = ir_fn_get(&module, fi as usize)
         let info = tco_analyze_function(func, fi)
         result.func_infos[result.func_info_count as usize] = info
         result.func_info_count = result.func_info_count + 1
@@ -527,7 +527,7 @@ fn tco_detect_self_recursive(ctx: TcoContext, module: IrModule) -> TcoContext wi
         let ci = result.call_infos[i as usize]
         let fid = ci.func_id
         if fid >= 0 && fid < module.fn_count {
-            let func = module.functions[fid as usize]
+            let func = ir_fn_get(&module, fid as usize)
             if tco_is_self_call(func, ci.call_instr_idx) {
                 result.call_infos[i as usize].is_self_recursive = true
                 result.stats.self_recursive = result.stats.self_recursive + 1
@@ -562,17 +562,17 @@ fn tco_get_callee_id(module: IrModule, func_id: i64, call_idx: i64) -> i64 with 
     if func_id < 0 || func_id >= module.fn_count {
         return TCO_INVALID
     }
-    let func = module.functions[func_id as usize]
+    let func = ir_fn_get(&module, func_id as usize)
     if call_idx < 0 || call_idx >= func.instr_count {
         return TCO_INVALID
     }
-    let call_instr = func.instrs[call_idx as usize]
-    let target_name = call_instr.name
+    let call_instr = ir_arena_load(ir_region_slot_r(func.region, (call_idx)))
+    let target_name = ir_name_at(call_instr.name_id)
 
     // Search module for function with matching name
     var fi: i64 = 0
     while fi < module.fn_count {
-        if ir_name_eq(module.functions[fi as usize].name, target_name) {
+        if ir_name_eq(ir_fn_get(&module, fi as usize).name, target_name) {
             return fi
         }
         fi = fi + 1
@@ -722,7 +722,7 @@ fn tco_needs_shuffle(arg_regs: [i64; 16], arg_count: i64, param_regs: [i64; 64],
 fn tco_emit_shuffle(func: IrFunction, insert_at: i64, arg_regs: [i64; 16],
                     arg_count: i64, param_regs: [i64; 64], param_count: i64,
                     temps: [i64; 16]) -> (IrFunction, i64) with Mut, Div, Panic {
-    var result = func
+    var result = ir_function_clone(&func)
     var pos = insert_at
     let count = if arg_count < param_count { arg_count } else { param_count }
 
@@ -730,7 +730,7 @@ fn tco_emit_shuffle(func: IrFunction, insert_at: i64, arg_regs: [i64; 16],
     var i: i64 = 0
     while i < count && i < TCO_MAX_PARAMS {
         if pos < IR_MAX_INSTRS {
-            result.instrs[pos as usize] = ir_copy(temps[i as usize], arg_regs[i as usize])
+            ir_arena_store(ir_region_slot_w(result.region, (pos)), ir_copy(temps[i as usize], arg_regs[i as usize]))
             pos = pos + 1
         }
         i = i + 1
@@ -740,7 +740,7 @@ fn tco_emit_shuffle(func: IrFunction, insert_at: i64, arg_regs: [i64; 16],
     var j: i64 = 0
     while j < count && j < TCO_MAX_PARAMS {
         if pos < IR_MAX_INSTRS {
-            result.instrs[pos as usize] = ir_copy(param_regs[j as usize], temps[j as usize])
+            ir_arena_store(ir_region_slot_w(result.region, (pos)), ir_copy(param_regs[j as usize], temps[j as usize]))
             pos = pos + 1
         }
         j = j + 1
@@ -754,14 +754,14 @@ fn tco_emit_shuffle(func: IrFunction, insert_at: i64, arg_regs: [i64; 16],
 fn tco_emit_direct_copy(func: IrFunction, insert_at: i64, arg_regs: [i64; 16],
                         arg_count: i64, param_regs: [i64; 64],
                         param_count: i64) -> (IrFunction, i64) with Mut, Div, Panic {
-    var result = func
+    var result = ir_function_clone(&func)
     var pos = insert_at
     let count = if arg_count < param_count { arg_count } else { param_count }
 
     var i: i64 = 0
     while i < count && i < TCO_MAX_PARAMS {
         if pos < IR_MAX_INSTRS {
-            result.instrs[pos as usize] = ir_copy(param_regs[i as usize], arg_regs[i as usize])
+            ir_arena_store(ir_region_slot_w(result.region, (pos)), ir_copy(param_regs[i as usize], arg_regs[i as usize]))
             pos = pos + 1
         }
         i = i + 1
@@ -792,14 +792,14 @@ fn tco_emit_direct_copy(func: IrFunction, insert_at: i64, arg_regs: [i64; 16],
 //   }
 fn tco_transform_self_to_loop(func: IrFunction, call_idx: i64,
                                loop_label: i64) -> (IrFunction, TcoTransform) with Mut, Div, Panic {
-    var result = func
+    var result = ir_function_clone(&func)
     var xform = tco_transform_new(0, TCO_KIND_SELF_TO_LOOP, loop_label)
 
     if call_idx < 0 || call_idx >= result.instr_count {
         return (result, xform)
     }
 
-    let call_instr = result.instrs[call_idx as usize]
+    let call_instr = ir_arena_load(ir_region_slot_r(result.region, (call_idx)))
 
     // Extract call arguments
     var arg_regs: [i64; 16] = [TCO_INVALID; 16]
@@ -824,17 +824,17 @@ fn tco_transform_self_to_loop(func: IrFunction, call_idx: i64,
         // Place jump after the shuffle copies
         let jump_pos = call_idx + emitted
         if jump_pos < IR_MAX_INSTRS {
-            result.instrs[jump_pos as usize] = ir_jump(loop_label)
+            ir_arena_store(ir_region_slot_w(result.region, (jump_pos)), ir_jump(loop_label))
         }
 
         // Nop out the return instruction that followed the call
         var ri: i64 = jump_pos + 1
         while ri < result.instr_count {
-            let ri_instr = result.instrs[ri as usize]
+            let ri_instr = ir_arena_load(ir_region_slot_r(result.region, (ri)))
             if tco_is_nop(ri_instr) {
                 ri = ri + 1
             } else if tco_is_return(ri_instr) {
-                result.instrs[ri as usize] = ir_nop()
+                ir_arena_store(ir_region_slot_w(result.region, (ri)), ir_nop())
                 ri = result.instr_count
             } else {
                 ri = result.instr_count
@@ -851,17 +851,17 @@ fn tco_transform_self_to_loop(func: IrFunction, call_idx: i64,
 
         let jump_pos = call_idx + emitted
         if jump_pos < IR_MAX_INSTRS {
-            result.instrs[jump_pos as usize] = ir_jump(loop_label)
+            ir_arena_store(ir_region_slot_w(result.region, (jump_pos)), ir_jump(loop_label))
         }
 
         // Nop out the return
         var ri: i64 = jump_pos + 1
         while ri < result.instr_count {
-            let ri_instr = result.instrs[ri as usize]
+            let ri_instr = ir_arena_load(ir_region_slot_r(result.region, (ri)))
             if tco_is_nop(ri_instr) {
                 ri = ri + 1
             } else if tco_is_return(ri_instr) {
-                result.instrs[ri as usize] = ir_nop()
+                ir_arena_store(ir_region_slot_w(result.region, (ri)), ir_nop())
                 ri = result.instr_count
             } else {
                 ri = result.instr_count
@@ -881,7 +881,7 @@ fn tco_transform_self_to_loop(func: IrFunction, call_idx: i64,
 // Insert a label instruction at the beginning of a function body.
 // Shifts all instructions right by 1 to make room.
 fn tco_insert_loop_label(func: IrFunction, label_id: i64) -> IrFunction with Mut, Div, Panic {
-    var result = func
+    var result = ir_function_clone(&func)
     if result.instr_count >= IR_MAX_INSTRS - 1 {
         return result
     }
@@ -889,12 +889,12 @@ fn tco_insert_loop_label(func: IrFunction, label_id: i64) -> IrFunction with Mut
     // Shift all instructions right by 1
     var i: i64 = result.instr_count
     while i > 0 {
-        result.instrs[i as usize] = result.instrs[(i - 1) as usize]
+        ir_arena_copy_slot(ir_region_slot_w(result.region, (i)),ir_region_slot_r(result.region, ((i - 1))))
         i = i - 1
     }
 
     // Insert label at position 0
-    result.instrs[0] = ir_label(label_id)
+    ir_arena_store(ir_region_slot_w(result.region, (0)), ir_label(label_id))
     result.instr_count = result.instr_count + 1
     result.label_count = result.label_count + 1
 
@@ -971,7 +971,7 @@ fn tco_build_trampoline(group: TcoMutualGroup, dispatch_label: i64) -> IrFunctio
     var pos: i64 = 0
 
     // Label for the dispatch loop
-    func.instrs[pos as usize] = ir_label(dispatch_label)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_label(dispatch_label))
     pos = pos + 1
 
     // For each function in the group, emit:
@@ -985,16 +985,16 @@ fn tco_build_trampoline(group: TcoMutualGroup, dispatch_label: i64) -> IrFunctio
         // Load the group index as immediate
         let idx_reg = func.reg_count
         func.reg_count = func.reg_count + 1
-        func.instrs[pos as usize] = ir_load_imm(idx_reg, gi)
+        ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_load_imm(idx_reg, gi))
         pos = pos + 1
 
         // Compare tag (reg 0) with group index
-        func.instrs[pos as usize] = ir_binop(cmp_reg, 0, BinaryOp::OpEq, idx_reg)
+        ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_binop(cmp_reg, 0, BinaryOp::OpEq, idx_reg))
         pos = pos + 1
 
         // Branch to a dispatch target label (dispatch_label + 1 + gi)
         let target_label = dispatch_label + 1 + gi
-        func.instrs[pos as usize] = ir_branch_true(cmp_reg, target_label)
+        ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_branch_true(cmp_reg, target_label))
         pos = pos + 1
 
         gi = gi + 1
@@ -1003,9 +1003,9 @@ fn tco_build_trampoline(group: TcoMutualGroup, dispatch_label: i64) -> IrFunctio
     // Default: return 0 (should not reach here)
     let zero_reg = func.reg_count
     func.reg_count = func.reg_count + 1
-    func.instrs[pos as usize] = ir_load_imm(zero_reg, 0)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_load_imm(zero_reg, 0))
     pos = pos + 1
-    func.instrs[pos as usize] = ir_return(zero_reg)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_return(zero_reg))
     pos = pos + 1
 
     func.instr_count = pos
@@ -1045,13 +1045,13 @@ fn tco_verify_self_transform(func: IrFunction, call_idx: i64) -> (bool, i64) wit
     if call_idx < 0 || call_idx >= func.instr_count {
         return (false, TCO_REJECT_TYPE_MISMATCH)
     }
-    let call_instr = func.instrs[call_idx as usize]
+    let call_instr = ir_arena_load(ir_region_slot_r(func.region, (call_idx)))
     if !tco_is_call(call_instr) {
         return (false, TCO_REJECT_TYPE_MISMATCH)
     }
 
     // Check name matches
-    if !ir_name_eq(call_instr.name, func.name) {
+    if !ir_name_eq(ir_name_at(call_instr.name_id), func.name) {
         return (false, TCO_REJECT_TYPE_MISMATCH)
     }
 
@@ -1074,7 +1074,7 @@ fn tco_verify_mutual_transform(module: IrModule, group: TcoMutualGroup) -> bool 
     if first_fid < 0 || first_fid >= module.fn_count {
         return false
     }
-    let expected_params = module.functions[first_fid as usize].param_count
+    let expected_params = ir_fn_get(&module, first_fid as usize).param_count
 
     var i: i64 = 1
     while i < group.count {
@@ -1082,7 +1082,7 @@ fn tco_verify_mutual_transform(module: IrModule, group: TcoMutualGroup) -> bool 
         if fid < 0 || fid >= module.fn_count {
             return false
         }
-        if module.functions[fid as usize].param_count != expected_params {
+        if ir_fn_get(&module, fid as usize).param_count != expected_params {
             return false
         }
         i = i + 1
@@ -1095,7 +1095,7 @@ fn tco_verify_mutual_transform(module: IrModule, group: TcoMutualGroup) -> bool 
 // ============================================================================
 
 // Run the full TCO pipeline on a module.
-pub fn tco_run_pass(module: IrModule) -> (IrModule, TcoContext) with Mut, Div, Panic {
+pub fn tco_run_pass(module: IrModule) -> (IrModule, TcoContext) with Alloc, Mut, Div, Panic {
     var result = module
     var ctx = tco_context_new()
 
@@ -1119,7 +1119,7 @@ pub fn tco_run_pass(module: IrModule) -> (IrModule, TcoContext) with Mut, Div, P
             // Check eligibility
             let fi_idx = info.func_id
             if fi_idx < ctx.func_info_count && ctx.func_infos[fi_idx as usize].is_eligible {
-                let func = result.functions[fi_idx as usize]
+                let func = ir_fn_get(&result, fi_idx as usize)
                 let loop_label = func.label_count
 
                 // Verify before transforming
@@ -1132,7 +1132,7 @@ pub fn tco_run_pass(module: IrModule) -> (IrModule, TcoContext) with Mut, Div, P
 
                     // Insert loop label at beginning
                     transformed_func = tco_insert_loop_label(transformed_func, loop_label)
-                    result.functions[fi_idx as usize] = transformed_func
+                    ir_fn_set(&! result, fi_idx as usize, transformed_func)
 
                     // Record transform
                     if ctx.transform_count < TCO_MAX_TRANSFORMS {
@@ -1154,7 +1154,7 @@ pub fn tco_run_pass(module: IrModule) -> (IrModule, TcoContext) with Mut, Div, P
 // ============================================================================
 
 // Count total tail calls discovered for a function
-fn tco_count_tail_calls_for_func(ctx: TcoContext, fid: i64) -> i64 with Mut, Div, Panic {
+pub(crate) fn tco_count_tail_calls_for_func(ctx: TcoContext, fid: i64) -> i64 with Mut, Div, Panic {
     var count: i64 = 0
     var i: i64 = 0
     while i < ctx.call_info_count {
@@ -1234,7 +1234,7 @@ fn tco_was_transformed(ctx: TcoContext, fid: i64) -> bool with Mut, Div, Panic {
 // ============================================================================
 
 // Build a function name from a prefix character and id
-fn tco_make_func_name(prefix: i8, fid: i64) -> Name with Mut, Div, Panic {
+pub(crate) fn tco_make_func_name(prefix: i8, fid: i64) -> Name with Mut, Div, Panic {
     var name = ir_empty_name()
     name.buf[0] = prefix
     if fid >= 0 && fid <= 9 {
@@ -1251,19 +1251,19 @@ fn tco_make_func_name(prefix: i8, fid: i64) -> Name with Mut, Div, Panic {
 }
 
 // Build a simple test function with N load-imm instructions + a return.
-fn tco_make_test_func(fid: i64, body_size: i64) -> IrFunction with Mut, Div, Panic {
+pub(crate) fn tco_make_test_func(fid: i64, body_size: i64) -> IrFunction with Mut, Div, Panic {
     var func = ir_empty_function()
     func.name = tco_make_func_name(102 as i8, fid)  // 'f'
 
     var i: i64 = 0
     while i < body_size - 1 && i < 32767 {
-        func.instrs[i as usize] = ir_load_imm(i, i + 100)
+        ir_arena_store(ir_region_slot_w(func.region, (i)), ir_load_imm(i, i + 100))
         i = i + 1
     }
 
     if body_size > 0 {
         let ret_reg = if body_size > 1 { body_size - 2 } else { 0 }
-        func.instrs[(body_size - 1) as usize] = ir_return(ret_reg)
+        ir_arena_store(ir_region_slot_w(func.region, ((body_size - 1))), ir_return(ret_reg))
     }
 
     func.instr_count = body_size
@@ -1275,7 +1275,7 @@ fn tco_make_test_func(fid: i64, body_size: i64) -> IrFunction with Mut, Div, Pan
 }
 
 // Build a function that self-tail-calls: body... call self, return call_result
-fn tco_make_self_tail_call_func(fid: i64, body_before: i64, param_count: i64) -> IrFunction with Mut, Div, Panic {
+pub(crate) fn tco_make_self_tail_call_func(fid: i64, body_before: i64, param_count: i64) -> IrFunction with Mut, Div, Panic {
     var func = ir_empty_function()
     func.name = tco_make_func_name(102 as i8, fid)  // 'f'
 
@@ -1294,7 +1294,7 @@ fn tco_make_self_tail_call_func(fid: i64, body_before: i64, param_count: i64) ->
     var b: i64 = 0
     while b < body_before {
         let dst = func.reg_count
-        func.instrs[pos as usize] = ir_load_imm(dst, b + 200)
+        ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_load_imm(dst, b + 200))
         func.reg_count = func.reg_count + 1
         pos = pos + 1
         b = b + 1
@@ -1306,19 +1306,19 @@ fn tco_make_self_tail_call_func(fid: i64, body_before: i64, param_count: i64) ->
 
     // Build arg list using first param_count regs
     var args = ir_empty_reg_list()
-    func.instrs[pos as usize] = ir_call(call_dst, fid, func.name, args, param_count)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_call(call_dst, fid, func.name, args, param_count))
     // Put param regs in src1/src2 for up to 2 args
     if param_count > 0 {
-        func.instrs[pos as usize].src1 = func.param_regs[0]
+        IR_A_SRC1[(ir_region_slot_w(func.region, (pos))) as usize] = func.param_regs[0]
     }
     if param_count > 1 {
-        func.instrs[pos as usize].src2 = func.param_regs[1]
+        IR_A_SRC2[(ir_region_slot_w(func.region, (pos))) as usize] = func.param_regs[1]
     }
-    func.instrs[pos as usize].arg_count = param_count
+    IR_A_ARG_COUNT[(ir_region_slot_w(func.region, (pos))) as usize] = param_count
     pos = pos + 1
 
     // Return the call result
-    func.instrs[pos as usize] = ir_return(call_dst)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_return(call_dst))
     pos = pos + 1
 
     func.instr_count = pos
@@ -1337,18 +1337,18 @@ fn tco_make_tail_call_to(fid: i64, target_name: Name, target_fid: i64,
     // Body instructions
     var b: i64 = 0
     while b < body_before {
-        func.instrs[pos as usize] = ir_load_imm(pos, b + 100)
+        ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_load_imm(pos, b + 100))
         pos = pos + 1
         b = b + 1
     }
 
     // Tail call to target
     let call_dst = pos
-    func.instrs[pos as usize] = ir_call(call_dst, target_fid, target_name, ir_empty_reg_list(), 0)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_call(call_dst, target_fid, target_name, ir_empty_reg_list(), 0))
     pos = pos + 1
 
     // Return call result
-    func.instrs[pos as usize] = ir_return(call_dst)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_return(call_dst))
     pos = pos + 1
 
     func.instr_count = pos
@@ -1358,7 +1358,7 @@ fn tco_make_tail_call_to(fid: i64, target_name: Name, target_fid: i64,
 }
 
 // Build a function that has a non-tail call (operation after the call)
-fn tco_make_non_tail_call_func(fid: i64, target_name: Name, target_fid: i64) -> IrFunction with Mut, Div, Panic {
+pub(crate) fn tco_make_non_tail_call_func(fid: i64, target_name: Name, target_fid: i64) -> IrFunction with Mut, Div, Panic {
     var func = ir_empty_function()
     func.name = tco_make_func_name(102 as i8, fid)
 
@@ -1366,19 +1366,19 @@ fn tco_make_non_tail_call_func(fid: i64, target_name: Name, target_fid: i64) -> 
 
     // Call to target
     let call_dst = pos
-    func.instrs[pos as usize] = ir_call(call_dst, target_fid, target_name, ir_empty_reg_list(), 0)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_call(call_dst, target_fid, target_name, ir_empty_reg_list(), 0))
     pos = pos + 1
 
     // Operation AFTER the call (add 1 to result) — breaks tail position
     let add_dst = pos
     let one_reg = pos + 1
-    func.instrs[pos as usize] = ir_load_imm(one_reg, 1)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_load_imm(one_reg, 1))
     pos = pos + 1
-    func.instrs[pos as usize] = ir_binop(add_dst, call_dst, BinaryOp::OpAdd, one_reg)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_binop(add_dst, call_dst, BinaryOp::OpAdd, one_reg))
     pos = pos + 1
 
     // Return the modified result
-    func.instrs[pos as usize] = ir_return(add_dst)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_return(add_dst))
     pos = pos + 1
 
     func.instr_count = pos
@@ -1388,23 +1388,23 @@ fn tco_make_non_tail_call_func(fid: i64, target_name: Name, target_fid: i64) -> 
 }
 
 // Build a function with an alloca instruction (ineligible for TCO)
-fn tco_make_func_with_alloca(fid: i64) -> IrFunction with Mut, Div, Panic {
+pub(crate) fn tco_make_func_with_alloca(fid: i64) -> IrFunction with Mut, Div, Panic {
     var func = ir_empty_function()
     func.name = tco_make_func_name(102 as i8, fid)
 
     var pos: i64 = 0
 
     // Alloca
-    func.instrs[pos as usize] = ir_alloc(pos, 0)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_alloc(pos, 0))
     pos = pos + 1
 
     // Self-tail-call
     let call_dst = pos
-    func.instrs[pos as usize] = ir_call(call_dst, fid, func.name, ir_empty_reg_list(), 0)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_call(call_dst, fid, func.name, ir_empty_reg_list(), 0))
     pos = pos + 1
 
     // Return
-    func.instrs[pos as usize] = ir_return(call_dst)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_return(call_dst))
     pos = pos + 1
 
     func.instr_count = pos
@@ -1421,10 +1421,10 @@ fn tco_make_mutual_pair(fid_a: i64, fid_b: i64) -> (IrFunction, IrFunction) with
     // Function A: body + tail-call to B + return
     var func_a = ir_empty_function()
     func_a.name = name_a
-    func_a.instrs[0] = ir_load_imm(0, 42)
+    ir_arena_store(ir_region_slot_w(func_a.region, (0)), ir_load_imm(0, 42))
     let call_dst_a = 1
-    func_a.instrs[1] = ir_call(call_dst_a, fid_b, name_b, ir_empty_reg_list(), 0)
-    func_a.instrs[2] = ir_return(call_dst_a)
+    ir_arena_store(ir_region_slot_w(func_a.region, (1)), ir_call(call_dst_a, fid_b, name_b, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(func_a.region, (2)), ir_return(call_dst_a))
     func_a.instr_count = 3
     func_a.reg_count = 2
     func_a.param_count = 0
@@ -1432,10 +1432,10 @@ fn tco_make_mutual_pair(fid_a: i64, fid_b: i64) -> (IrFunction, IrFunction) with
     // Function B: body + tail-call to A + return
     var func_b = ir_empty_function()
     func_b.name = name_b
-    func_b.instrs[0] = ir_load_imm(0, 99)
+    ir_arena_store(ir_region_slot_w(func_b.region, (0)), ir_load_imm(0, 99))
     let call_dst_b = 1
-    func_b.instrs[1] = ir_call(call_dst_b, fid_a, name_a, ir_empty_reg_list(), 0)
-    func_b.instrs[2] = ir_return(call_dst_b)
+    ir_arena_store(ir_region_slot_w(func_b.region, (1)), ir_call(call_dst_b, fid_a, name_a, ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(func_b.region, (2)), ir_return(call_dst_b))
     func_b.instr_count = 3
     func_b.reg_count = 2
     func_b.param_count = 0
@@ -1444,7 +1444,7 @@ fn tco_make_mutual_pair(fid_a: i64, fid_b: i64) -> (IrFunction, IrFunction) with
 }
 
 // Build a function with conditional tail calls (if/else both tail-calling self)
-fn tco_make_conditional_tail_call(fid: i64) -> IrFunction with Mut, Div, Panic {
+fn tco_make_conditional_tail_call(fid: i64) -> IrFunction with Alloc, Mut, Div, Panic {
     var func = ir_empty_function()
     func.name = tco_make_func_name(102 as i8, fid)
     func.param_count = 1
@@ -1456,43 +1456,43 @@ fn tco_make_conditional_tail_call(fid: i64) -> IrFunction with Mut, Div, Panic {
     // r1 = 0 (comparison value)
     let zero_reg = func.reg_count
     func.reg_count = func.reg_count + 1
-    func.instrs[pos as usize] = ir_load_imm(zero_reg, 0)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_load_imm(zero_reg, 0))
     pos = pos + 1
 
     // r2 = (param0 > 0)
     let cmp_reg = func.reg_count
     func.reg_count = func.reg_count + 1
-    func.instrs[pos as usize] = ir_binop(cmp_reg, 0, BinaryOp::OpGt, zero_reg)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_binop(cmp_reg, 0, BinaryOp::OpGt, zero_reg))
     pos = pos + 1
 
     // branch_false cmp_reg, else_label (label 1)
-    func.instrs[pos as usize] = ir_branch_false(cmp_reg, 1)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_branch_false(cmp_reg, 1))
     pos = pos + 1
 
     // Then branch: self-tail-call
     let call_dst_1 = func.reg_count
     func.reg_count = func.reg_count + 1
-    func.instrs[pos as usize] = ir_call(call_dst_1, fid, func.name, ir_empty_reg_list(), 1)
-    func.instrs[pos as usize].src1 = 0
-    func.instrs[pos as usize].arg_count = 1
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_call(call_dst_1, fid, func.name, ir_empty_reg_list(), 1))
+    IR_A_SRC1[(ir_region_slot_w(func.region, (pos))) as usize] = 0
+    IR_A_ARG_COUNT[(ir_region_slot_w(func.region, (pos))) as usize] = 1
     pos = pos + 1
 
-    func.instrs[pos as usize] = ir_return(call_dst_1)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_return(call_dst_1))
     pos = pos + 1
 
     // Else label
-    func.instrs[pos as usize] = ir_label(1)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_label(1))
     pos = pos + 1
 
     // Else branch: also self-tail-call
     let call_dst_2 = func.reg_count
     func.reg_count = func.reg_count + 1
-    func.instrs[pos as usize] = ir_call(call_dst_2, fid, func.name, ir_empty_reg_list(), 1)
-    func.instrs[pos as usize].src1 = 0
-    func.instrs[pos as usize].arg_count = 1
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_call(call_dst_2, fid, func.name, ir_empty_reg_list(), 1))
+    IR_A_SRC1[(ir_region_slot_w(func.region, (pos))) as usize] = 0
+    IR_A_ARG_COUNT[(ir_region_slot_w(func.region, (pos))) as usize] = 1
     pos = pos + 1
 
-    func.instrs[pos as usize] = ir_return(call_dst_2)
+    ir_arena_store(ir_region_slot_w(func.region, (pos)), ir_return(call_dst_2))
     pos = pos + 1
 
     func.instr_count = pos
@@ -1502,9 +1502,13 @@ fn tco_make_conditional_tail_call(fid: i64) -> IrFunction with Mut, Div, Panic {
 }
 
 // Build a test module from functions
-fn tco_make_test_module(funcs: [IrFunction; 1024], count: i64) -> IrModule {
+pub(crate) fn tco_make_test_module(funcs: [IrFunction; 1024], count: i64) -> IrModule with Panic, Div, Alloc, Mut {
     var module = ir_empty_module()
-    module.functions = funcs
+    var fi: i64 = 0
+    while fi < count && fi < 1024 {
+        ir_fn_set(&! module, fi as usize, funcs[fi as usize])
+        fi = fi + 1
+    }
     module.fn_count = count
     module
 }
@@ -1514,7 +1518,7 @@ fn tco_make_test_module(funcs: [IrFunction; 1024], count: i64) -> IrModule {
 // ============================================================================
 
 // T01: Context initialization — all counts zero
-fn test_tco_context_init() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_context_init() -> i32 with Alloc, IO, Mut, Div, Panic {
     let ctx = tco_context_new()
     if ctx.func_info_count != 0 {
         print("FAIL: test_tco_context_init (func_info_count)\n")
@@ -1537,7 +1541,7 @@ fn test_tco_context_init() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T02: Stats initialization — all zero
-fn test_tco_stats_init() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_stats_init() -> i32 with Alloc, IO, Mut, Div, Panic {
     let s = tco_stats_new()
     if s.analyzed != 0 || s.eligible != 0 || s.self_recursive != 0 {
         print("FAIL: test_tco_stats_init\n")
@@ -1552,7 +1556,7 @@ fn test_tco_stats_init() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T03: Simple tail position detection — call immediately before return
-fn test_tco_tail_position_simple() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_tail_position_simple() -> i32 with Alloc, IO, Mut, Div, Panic {
     let target_name = tco_make_func_name(103 as i8, 1)  // 'g1'
     let func = tco_make_tail_call_to(0, target_name, 1, 2)
     // The call is at position 2 (after 2 load_imm instructions)
@@ -1566,7 +1570,7 @@ fn test_tco_tail_position_simple() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T04: Non-tail position — operation after call
-fn test_tco_non_tail_position() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_non_tail_position() -> i32 with Alloc, IO, Mut, Div, Panic {
     let target_name = tco_make_func_name(103 as i8, 1)
     let func = tco_make_non_tail_call_func(0, target_name, 1)
     // The call is at position 0
@@ -1580,14 +1584,14 @@ fn test_tco_non_tail_position() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T05: Self-recursive call detection
-fn test_tco_self_recursive_detection() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_self_recursive_detection() -> i32 with Alloc, IO, Mut, Div, Panic {
     let func = tco_make_self_tail_call_func(0, 3, 0)
     // Find the call instruction
     var call_idx: i64 = 0
     var found: bool = false
     var si: i64 = 0
     while si < func.instr_count {
-        if tco_is_call(func.instrs[si as usize]) {
+        if tco_is_call(ir_arena_load(ir_region_slot_r(func.region, (si)))) {
             call_idx = si
             found = true
         }
@@ -1607,14 +1611,14 @@ fn test_tco_self_recursive_detection() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T06: Non-self call should not be detected as self-recursive
-fn test_tco_non_self_call() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_non_self_call() -> i32 with Alloc, IO, Mut, Div, Panic {
     let target_name = tco_make_func_name(103 as i8, 1)
     let func = tco_make_tail_call_to(0, target_name, 1, 1)
     // Find the call
     var call_idx: i64 = 0
     var si: i64 = 0
     while si < func.instr_count {
-        if tco_is_call(func.instrs[si as usize]) {
+        if tco_is_call(ir_arena_load(ir_region_slot_r(func.region, (si)))) {
             call_idx = si
         }
         si = si + 1
@@ -1629,7 +1633,7 @@ fn test_tco_non_self_call() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T07: Function analysis — simple function without tail calls
-fn test_tco_analyze_no_tail_calls() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_analyze_no_tail_calls() -> i32 with Alloc, IO, Mut, Div, Panic {
     let func = tco_make_test_func(0, 5)
     let info = tco_analyze_function(func, 0)
     if info.has_tail_calls {
@@ -1649,7 +1653,7 @@ fn test_tco_analyze_no_tail_calls() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T08: Function analysis — function with self-tail-call
-fn test_tco_analyze_with_tail_call() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_analyze_with_tail_call() -> i32 with Alloc, IO, Mut, Div, Panic {
     let func = tco_make_self_tail_call_func(0, 2, 0)
     let info = tco_analyze_function(func, 0)
     if !info.has_tail_calls {
@@ -1665,7 +1669,7 @@ fn test_tco_analyze_with_tail_call() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T09: Eligibility — alloca prevents TCO
-fn test_tco_alloca_prevents_tco() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_alloca_prevents_tco() -> i32 with Alloc, IO, Mut, Div, Panic {
     let func = tco_make_func_with_alloca(0)
     let info = tco_analyze_function(func, 0)
     if info.is_eligible {
@@ -1681,7 +1685,7 @@ fn test_tco_alloca_prevents_tco() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T10: Eligibility — cleanup prevents TCO
-fn test_tco_cleanup_prevents_tco() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_cleanup_prevents_tco() -> i32 with Alloc, IO, Mut, Div, Panic {
     let func = tco_make_func_with_alloca(0)
     let info = tco_analyze_function(func, 0)
     let elig = tco_check_eligibility(func, info)
@@ -1701,7 +1705,7 @@ fn test_tco_cleanup_prevents_tco() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T11: Module analysis — updates stats
-fn test_tco_module_analysis_stats() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_module_analysis_stats() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     funcs[0] = tco_make_self_tail_call_func(0, 2, 0)
     funcs[1] = tco_make_test_func(1, 5)
@@ -1723,7 +1727,7 @@ fn test_tco_module_analysis_stats() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T12: Discover tail calls in module
-fn test_tco_discover_tail_calls() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_discover_tail_calls() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     funcs[0] = tco_make_self_tail_call_func(0, 2, 0)
     funcs[1] = tco_make_test_func(1, 5)
@@ -1746,7 +1750,7 @@ fn test_tco_discover_tail_calls() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T13: Self-recursive marking
-fn test_tco_self_recursive_marking() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_self_recursive_marking() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     funcs[0] = tco_make_self_tail_call_func(0, 2, 0)
     let module = tco_make_test_module(funcs, 1)
@@ -1772,7 +1776,7 @@ fn test_tco_self_recursive_marking() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T14: Mutual recursion detection — A calls B, B calls A
-fn test_tco_mutual_recursion_detection() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_mutual_recursion_detection() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     let pair = tco_make_mutual_pair(0, 1)
     funcs[0] = pair.0
@@ -1799,7 +1803,7 @@ fn test_tco_mutual_recursion_detection() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T15: Non-mutual — A calls B but B doesn't call A
-fn test_tco_non_mutual_recursion() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_non_mutual_recursion() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     let name_b = tco_make_func_name(102 as i8, 1)
     funcs[0] = tco_make_tail_call_to(0, name_b, 1, 1)
@@ -1822,13 +1826,13 @@ fn test_tco_non_mutual_recursion() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T16: Self-recursive -> loop transformation
-fn test_tco_self_to_loop_transform() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_self_to_loop_transform() -> i32 with Alloc, IO, Mut, Div, Panic {
     let func = tco_make_self_tail_call_func(0, 2, 0)
     // Find the call instruction index
     var call_idx: i64 = TCO_INVALID
     var si: i64 = 0
     while si < func.instr_count {
-        if tco_is_call(func.instrs[si as usize]) {
+        if tco_is_call(ir_arena_load(ir_region_slot_r(func.region, (si)))) {
             call_idx = si
         }
         si = si + 1
@@ -1854,7 +1858,7 @@ fn test_tco_self_to_loop_transform() -> i32 with IO, Mut, Div, Panic {
 
     // The call instruction should have been replaced (not a call anymore)
     // It should now be either a copy or a jump
-    let replaced = transformed.instrs[call_idx as usize]
+    let replaced = ir_arena_load(ir_region_slot_r(transformed.region, (call_idx)))
     if tco_is_call(replaced) {
         print("FAIL: test_tco_self_to_loop_transform (still call)\n")
         return 1
@@ -1865,7 +1869,7 @@ fn test_tco_self_to_loop_transform() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T17: Loop label insertion
-fn test_tco_loop_label_insertion() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_loop_label_insertion() -> i32 with Alloc, IO, Mut, Div, Panic {
     let func = tco_make_test_func(0, 5)
     let label_id = 42
     let result = tco_insert_loop_label(func, label_id)
@@ -1877,7 +1881,7 @@ fn test_tco_loop_label_insertion() -> i32 with IO, Mut, Div, Panic {
     }
 
     // First instruction should be a label with the given id
-    let first = result.instrs[0]
+    let first = ir_arena_load(ir_region_slot_r(result.region, (0)))
     if !tco_is_label(first) {
         print("FAIL: test_tco_loop_label_insertion (not label)\n")
         return 1
@@ -1891,7 +1895,7 @@ fn test_tco_loop_label_insertion() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T18: Argument shuffling — overlap detection
-fn test_tco_shuffle_overlap_detection() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_shuffle_overlap_detection() -> i32 with Alloc, IO, Mut, Div, Panic {
     // Args use reg 0, params also use reg 0 => overlap
     var arg_regs: [i64; 16] = [TCO_INVALID; 16]
     arg_regs[0] = 0
@@ -1908,7 +1912,7 @@ fn test_tco_shuffle_overlap_detection() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T19: Argument shuffling — no overlap
-fn test_tco_shuffle_no_overlap() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_shuffle_no_overlap() -> i32 with Alloc, IO, Mut, Div, Panic {
     // Args use reg 5, params use reg 0 => no overlap
     var arg_regs: [i64; 16] = [TCO_INVALID; 16]
     arg_regs[0] = 5
@@ -1925,7 +1929,7 @@ fn test_tco_shuffle_no_overlap() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T20: Temp register computation
-fn test_tco_compute_shuffle_temps() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_compute_shuffle_temps() -> i32 with Alloc, IO, Mut, Div, Panic {
     let xform = tco_default_transform()
     let updated = tco_compute_shuffle_temps(xform, 3, 100)
 
@@ -1946,7 +1950,7 @@ fn test_tco_compute_shuffle_temps() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T21: Direct copy emission (no temps)
-fn test_tco_emit_direct_copy() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_emit_direct_copy() -> i32 with Alloc, IO, Mut, Div, Panic {
     var func = ir_empty_function()
     func.instr_count = 10
     func.reg_count = 10
@@ -1968,7 +1972,7 @@ fn test_tco_emit_direct_copy() -> i32 with IO, Mut, Div, Panic {
     }
 
     // First copy: param0 <- arg0 (reg 0 <- reg 5)
-    let copy1 = updated_func.instrs[0]
+    let copy1 = ir_arena_load(ir_region_slot_r(updated_func.region, (0)))
     if !tco_is_copy(copy1) {
         print("FAIL: test_tco_emit_direct_copy (instr 0 not copy)\n")
         return 1
@@ -1982,7 +1986,7 @@ fn test_tco_emit_direct_copy() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T22: Shuffle emission (with temps)
-fn test_tco_emit_shuffle() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_emit_shuffle() -> i32 with Alloc, IO, Mut, Div, Panic {
     var func = ir_empty_function()
     func.instr_count = 20
     func.reg_count = 10
@@ -2005,14 +2009,14 @@ fn test_tco_emit_shuffle() -> i32 with IO, Mut, Div, Panic {
     }
 
     // First: copy temp <- arg (reg 50 <- reg 0)
-    let c1 = updated_func.instrs[0]
+    let c1 = ir_arena_load(ir_region_slot_r(updated_func.region, (0)))
     if c1.dst != 50 || c1.src1 != 0 {
         print("FAIL: test_tco_emit_shuffle (phase1)\n")
         return 1
     }
 
     // Second: copy param <- temp (reg 0 <- reg 50)
-    let c2 = updated_func.instrs[1]
+    let c2 = ir_arena_load(ir_region_slot_r(updated_func.region, (1)))
     if c2.dst != 0 || c2.src1 != 50 {
         print("FAIL: test_tco_emit_shuffle (phase2)\n")
         return 1
@@ -2023,7 +2027,7 @@ fn test_tco_emit_shuffle() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T23: Instruction classification — call
-fn test_tco_is_call_helper() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_is_call_helper() -> i32 with Alloc, IO, Mut, Div, Panic {
     let call = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
     let nop = ir_nop()
     if !tco_is_call(call) {
@@ -2039,7 +2043,7 @@ fn test_tco_is_call_helper() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T24: Instruction classification — return
-fn test_tco_is_return_helper() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_is_return_helper() -> i32 with Alloc, IO, Mut, Div, Panic {
     let ret = ir_return(0)
     let nop = ir_nop()
     if !tco_is_return(ret) {
@@ -2055,7 +2059,7 @@ fn test_tco_is_return_helper() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T25: Instruction classification — nop
-fn test_tco_is_nop_helper() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_is_nop_helper() -> i32 with Alloc, IO, Mut, Div, Panic {
     let nop = ir_nop()
     let load = ir_load_imm(0, 42)
     if !tco_is_nop(nop) {
@@ -2071,15 +2075,15 @@ fn test_tco_is_nop_helper() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T26: Tail position with nops between call and return
-fn test_tco_tail_position_with_nops() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_tail_position_with_nops() -> i32 with Alloc, IO, Mut, Div, Panic {
     var func = ir_empty_function()
     func.name = tco_make_func_name(102 as i8, 0)
 
     // call at pos 0, nop at pos 1, return at pos 2
     let call_dst = 0
-    func.instrs[0] = ir_call(call_dst, 1, tco_make_func_name(103 as i8, 1), ir_empty_reg_list(), 0)
-    func.instrs[1] = ir_nop()
-    func.instrs[2] = ir_return(call_dst)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_call(call_dst, 1, tco_make_func_name(103 as i8, 1), ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_nop())
+    ir_arena_store(ir_region_slot_w(func.region, (2)), ir_return(call_dst))
     func.instr_count = 3
     func.reg_count = 1
 
@@ -2093,13 +2097,13 @@ fn test_tco_tail_position_with_nops() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T27: Non-tail — return uses different register than call result
-fn test_tco_non_tail_wrong_reg() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_non_tail_wrong_reg() -> i32 with Alloc, IO, Mut, Div, Panic {
     var func = ir_empty_function()
     func.name = tco_make_func_name(102 as i8, 0)
 
     // call dst = r0, return r1 (different register)
-    func.instrs[0] = ir_call(0, 1, tco_make_func_name(103 as i8, 1), ir_empty_reg_list(), 0)
-    func.instrs[1] = ir_return(1)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_call(0, 1, tco_make_func_name(103 as i8, 1), ir_empty_reg_list(), 0))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(1))
     func.instr_count = 2
     func.reg_count = 2
 
@@ -2113,7 +2117,7 @@ fn test_tco_non_tail_wrong_reg() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T28: Multiple tail calls in one function (conditional)
-fn test_tco_conditional_tail_calls() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_conditional_tail_calls() -> i32 with Alloc, IO, Mut, Div, Panic {
     let func = tco_make_conditional_tail_call(0)
     let info = tco_analyze_function(func, 0)
     if info.tail_call_count != 2 {
@@ -2131,7 +2135,7 @@ fn test_tco_conditional_tail_calls() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T29: Tail call count query helper
-fn test_tco_count_tail_calls_helper() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_count_tail_calls_helper() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     funcs[0] = tco_make_self_tail_call_func(0, 2, 0)
     funcs[1] = tco_make_test_func(1, 5)
@@ -2155,7 +2159,7 @@ fn test_tco_count_tail_calls_helper() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T30: Self-recursive count helper
-fn test_tco_count_self_tail_calls() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_count_self_tail_calls() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     funcs[0] = tco_make_self_tail_call_func(0, 2, 0)
     let module = tco_make_test_module(funcs, 1)
@@ -2174,7 +2178,7 @@ fn test_tco_count_self_tail_calls() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T31: Trampoline name generation
-fn test_tco_trampoline_name() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_trampoline_name() -> i32 with Alloc, IO, Mut, Div, Panic {
     let name = tco_trampoline_name(3)
     // "trampoline_3" => len 12, last char '3' (51)
     if name.len != 12 {
@@ -2194,7 +2198,7 @@ fn test_tco_trampoline_name() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T32: Trampoline generation
-fn test_tco_build_trampoline() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_build_trampoline() -> i32 with Alloc, IO, Mut, Div, Panic {
     var group = tco_mutual_group_new()
     group.func_ids[0] = 0
     group.func_ids[1] = 1
@@ -2209,7 +2213,7 @@ fn test_tco_build_trampoline() -> i32 with IO, Mut, Div, Panic {
     }
 
     // First instruction should be a label
-    if !tco_is_label(tramp.instrs[0]) {
+    if !tco_is_label(ir_arena_load(ir_region_slot_r(tramp.region, (0)))) {
         print("FAIL: test_tco_build_trampoline (first not label)\n")
         return 1
     }
@@ -2225,7 +2229,7 @@ fn test_tco_build_trampoline() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T33: Mutual group building
-fn test_tco_build_mutual_group() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_build_mutual_group() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     let pair = tco_make_mutual_pair(0, 1)
     funcs[0] = pair.0
@@ -2265,13 +2269,13 @@ fn test_tco_build_mutual_group() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T34: Verify self-transform — valid
-fn test_tco_verify_self_valid() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_verify_self_valid() -> i32 with Alloc, IO, Mut, Div, Panic {
     let func = tco_make_self_tail_call_func(0, 2, 0)
     // Find call idx
     var call_idx: i64 = TCO_INVALID
     var si: i64 = 0
     while si < func.instr_count {
-        if tco_is_call(func.instrs[si as usize]) {
+        if tco_is_call(ir_arena_load(ir_region_slot_r(func.region, (si)))) {
             call_idx = si
         }
         si = si + 1
@@ -2287,7 +2291,7 @@ fn test_tco_verify_self_valid() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T35: Verify self-transform — invalid (non-call instruction)
-fn test_tco_verify_self_invalid() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_verify_self_invalid() -> i32 with Alloc, IO, Mut, Div, Panic {
     let func = tco_make_test_func(0, 5)
     // Position 0 is a load_imm, not a call
     let verify = tco_verify_self_transform(func, 0)
@@ -2301,7 +2305,7 @@ fn test_tco_verify_self_invalid() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T36: Verify mutual transform — valid group
-fn test_tco_verify_mutual_valid() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_verify_mutual_valid() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     let pair = tco_make_mutual_pair(0, 1)
     funcs[0] = pair.0
@@ -2323,7 +2327,7 @@ fn test_tco_verify_mutual_valid() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T37: Verify mutual transform — invalid (single function)
-fn test_tco_verify_mutual_invalid_single() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_verify_mutual_invalid_single() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     funcs[0] = tco_make_test_func(0, 3)
     let module = tco_make_test_module(funcs, 1)
@@ -2342,7 +2346,7 @@ fn test_tco_verify_mutual_invalid_single() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T38: Get func info helper
-fn test_tco_get_func_info_helper() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_get_func_info_helper() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     funcs[0] = tco_make_self_tail_call_func(0, 2, 1)
     let module = tco_make_test_module(funcs, 1)
@@ -2364,7 +2368,7 @@ fn test_tco_get_func_info_helper() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T39: Has self-recursive calls helper
-fn test_tco_has_self_recursive_helper() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_has_self_recursive_helper() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     funcs[0] = tco_make_self_tail_call_func(0, 2, 0)
     funcs[1] = tco_make_test_func(1, 5)
@@ -2389,7 +2393,7 @@ fn test_tco_has_self_recursive_helper() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T40: Transform kind count helper
-fn test_tco_count_transforms_of_kind() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_count_transforms_of_kind() -> i32 with Alloc, IO, Mut, Div, Panic {
     var ctx = tco_context_new()
     // Add two self-to-loop transforms and one trampoline
     var x1 = tco_transform_new(0, TCO_KIND_SELF_TO_LOOP, 0)
@@ -2415,7 +2419,7 @@ fn test_tco_count_transforms_of_kind() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T41: Empty module analysis
-fn test_tco_empty_module() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_empty_module() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     let module = tco_make_test_module(funcs, 0)
 
@@ -2436,7 +2440,7 @@ fn test_tco_empty_module() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T42: Callee id lookup
-fn test_tco_get_callee_id() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_get_callee_id() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     let name_b = tco_make_func_name(102 as i8, 1)
     funcs[0] = tco_make_tail_call_to(0, name_b, 1, 1)
@@ -2447,7 +2451,8 @@ fn test_tco_get_callee_id() -> i32 with IO, Mut, Div, Panic {
     var call_idx: i64 = TCO_INVALID
     var si: i64 = 0
     while si < funcs[0].instr_count {
-        if tco_is_call(funcs[0].instrs[si as usize]) {
+        let f0_region = funcs[0].region
+        if tco_is_call(ir_arena_load(ir_region_slot_r(f0_region, (si)))) {
             call_idx = si
         }
         si = si + 1
@@ -2463,7 +2468,7 @@ fn test_tco_get_callee_id() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T43: A-tail-calls-B helper
-fn test_tco_a_tail_calls_b() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_a_tail_calls_b() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     let pair = tco_make_mutual_pair(0, 1)
     funcs[0] = pair.0
@@ -2489,7 +2494,7 @@ fn test_tco_a_tail_calls_b() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T44: Record trampoline in context
-fn test_tco_record_trampoline() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_record_trampoline() -> i32 with Alloc, IO, Mut, Div, Panic {
     var ctx = tco_context_new()
     var group = tco_mutual_group_new()
     group.func_ids[0] = 0
@@ -2515,7 +2520,7 @@ fn test_tco_record_trampoline() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T45: Func name generation
-fn test_tco_make_func_name() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_make_func_name() -> i32 with Alloc, IO, Mut, Div, Panic {
     let n0 = tco_make_func_name(102 as i8, 0)   // "f0"
     let n5 = tco_make_func_name(102 as i8, 5)   // "f5"
     let n12 = tco_make_func_name(102 as i8, 12) // "f12"
@@ -2537,7 +2542,7 @@ fn test_tco_make_func_name() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T46: Eligible function count in stats
-fn test_tco_eligible_stats() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_eligible_stats() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     funcs[0] = tco_make_self_tail_call_func(0, 2, 0)  // eligible
     funcs[1] = tco_make_func_with_alloca(1)             // not eligible
@@ -2564,7 +2569,7 @@ fn test_tco_eligible_stats() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T47: Non-recursive tail call (to different function, not mutual)
-fn test_tco_non_recursive_tail_call() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_non_recursive_tail_call() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     let name_b = tco_make_func_name(102 as i8, 1)
     funcs[0] = tco_make_tail_call_to(0, name_b, 1, 2)
@@ -2589,7 +2594,7 @@ fn test_tco_non_recursive_tail_call() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T48: Trampoline id allocation
-fn test_tco_allocate_trampoline_id() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_allocate_trampoline_id() -> i32 with Alloc, IO, Mut, Div, Panic {
     var ctx = tco_context_new()
     let id1 = tco_allocate_trampoline_id(ctx)
     if id1 != 10000 {
@@ -2609,7 +2614,7 @@ fn test_tco_allocate_trampoline_id() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T49: Instruction classification — label
-fn test_tco_is_label_helper() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_is_label_helper() -> i32 with Alloc, IO, Mut, Div, Panic {
     let label = ir_label(5)
     let nop = ir_nop()
     if !tco_is_label(label) {
@@ -2625,7 +2630,7 @@ fn test_tco_is_label_helper() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T50: Instruction classification — jump
-fn test_tco_is_jump_helper() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_is_jump_helper() -> i32 with Alloc, IO, Mut, Div, Panic {
     let jump = ir_jump(3)
     let nop = ir_nop()
     if !tco_is_jump(jump) {
@@ -2641,7 +2646,7 @@ fn test_tco_is_jump_helper() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T51: Instruction classification — branch
-fn test_tco_is_branch_helper() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_is_branch_helper() -> i32 with Alloc, IO, Mut, Div, Panic {
     let bt = ir_branch_true(0, 1)
     let bf = ir_branch_false(0, 2)
     let nop = ir_nop()
@@ -2662,7 +2667,7 @@ fn test_tco_is_branch_helper() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T52: Instruction classification — alloc
-fn test_tco_is_alloc_helper() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_is_alloc_helper() -> i32 with Alloc, IO, Mut, Div, Panic {
     let alloc = ir_alloc(0, 0)
     let nop = ir_nop()
     if !tco_is_alloc(alloc) {
@@ -2678,7 +2683,7 @@ fn test_tco_is_alloc_helper() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T53: Out-of-bounds call index returns false for tail position
-fn test_tco_tail_position_oob() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_tail_position_oob() -> i32 with Alloc, IO, Mut, Div, Panic {
     let func = tco_make_test_func(0, 5)
     let is_tail_neg = tco_is_tail_position(func, 0 - 1)
     let is_tail_big = tco_is_tail_position(func, 9999)
@@ -2691,7 +2696,7 @@ fn test_tco_tail_position_oob() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T54: Was-transformed helper
-fn test_tco_was_transformed_helper() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_was_transformed_helper() -> i32 with Alloc, IO, Mut, Div, Panic {
     var ctx = tco_context_new()
     var x = tco_transform_new(5, TCO_KIND_SELF_TO_LOOP, 0)
     ctx.transforms[0] = x
@@ -2712,7 +2717,7 @@ fn test_tco_was_transformed_helper() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T55: Extract call args
-fn test_tco_extract_call_args() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_extract_call_args() -> i32 with Alloc, IO, Mut, Div, Panic {
     var instr = ir_call(10, 0, ir_empty_name(), ir_empty_reg_list(), 2)
     instr.src1 = 3
     instr.src2 = 7
@@ -2740,7 +2745,7 @@ fn test_tco_extract_call_args() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T56: Default structs have correct sentinel values
-fn test_tco_default_structs() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_default_structs() -> i32 with Alloc, IO, Mut, Div, Panic {
     let ci = tco_default_call_info()
     if ci.func_id != TCO_INVALID {
         print("FAIL: test_tco_default_structs (call_info.func_id)\n")
@@ -2776,7 +2781,7 @@ fn test_tco_default_structs() -> i32 with IO, Mut, Div, Panic {
 }
 
 // T57: Full pipeline on empty module
-fn test_tco_full_pipeline_empty() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_full_pipeline_empty() -> i32 with Alloc, IO, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     let module = tco_make_test_module(funcs, 0)
 
@@ -2804,7 +2809,7 @@ fn test_tco_full_pipeline_empty() -> i32 with IO, Mut, Div, Panic {
 // Section 19: Test runner
 // ============================================================================
 
-fn test_tco_main() -> i32 with IO, Mut, Div, Panic {
+fn test_tco_main() -> i32 with Alloc, IO, Mut, Div, Panic {
     var passed: i64 = 0
     let total: i64 = 57
 

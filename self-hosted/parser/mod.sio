@@ -7,7 +7,7 @@ module parser::mod
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_new, parser_reset_last_errors, parser_set_last_errors, parser_set_tokens}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_new, parser_reset_last_errors, parser_reset_truncated_literals, parser_set_last_errors, parser_set_tokens, parser_truncated_literal_count, parser_truncated_literal_first_line, parser_truncated_literal_longest}
 use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
@@ -44,11 +44,15 @@ fn parse_program_loop(mut_p: Parser) -> Program with Mut, IO, Panic, Div, Alloc 
     }
 
     parser_set_last_errors(p.had_error, p.error_count)
+    // Silent data loss, said out loud. A string literal past Name's 128-byte
+    // buffer is cut at current_name() and the program runs on with the short
+    // one; before this the only way to notice was to compare the output by hand.
     Program { module_path: empty_path(), items: reverse_item_list_opt(rev_items_opt) }
 }
 
 fn parse_program(tokens: [Token; 2097152], token_count: i64) -> Program with Mut, IO, Panic, Div, Alloc {
     parser_reset_last_errors()
+    parser_reset_truncated_literals()
     var p = parser_new()
 
     // Load tokens into module-global parser storage.
@@ -59,6 +63,7 @@ fn parse_program(tokens: [Token; 2097152], token_count: i64) -> Program with Mut
 
 pub fn parse_program_preloaded(token_count: i64) -> Program with Mut, IO, Panic, Div, Alloc {
     parser_reset_last_errors()
+    parser_reset_truncated_literals()
     var p = parser_new()
     p.token_count = token_count
     let prog = parse_program_loop(p)
@@ -86,11 +91,25 @@ fn parse_items_loop(mut_p: Parser) -> Option<Box<ItemList>> with Mut, IO, Panic,
         }
     }
     parser_set_last_errors(p.had_error, p.error_count)
+    if parser_truncated_literal_count() > 0 {
+        print("warning: ")
+        print_int(parser_truncated_literal_count())
+        print(" string literal(s) TRUNCATED; first at line ")
+        print_int(parser_truncated_literal_first_line())
+        print(", longest ")
+        print_int(parser_truncated_literal_longest())
+        print(" bytes. Name holds 128 including quotes, so the text past 126\n")
+        print("         characters is gone -- silently, at run time.\n")
+    }
+    // Silent data loss, said out loud. A string literal past Name's 128-byte
+    // buffer is cut at current_name() and the program runs on with the short
+    // one; before this the only way to notice was to compare the output by hand.
     reverse_item_list_opt(rev_items_opt)
 }
 
 pub fn parse_items_preloaded(token_count: i64) -> Option<Box<ItemList>> with Mut, IO, Panic, Div, Alloc {
     parser_reset_last_errors()
+    parser_reset_truncated_literals()
     if GLOBAL_VAR_INIT_SUPPRESS_RESET == 0 {
         ast_reset_global_var_inits()
         items_reset_pure_fn_reg()

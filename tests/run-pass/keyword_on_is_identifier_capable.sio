@@ -1,0 +1,74 @@
+//@ run-pass
+//@ requires: madaros
+// Engine-gated, not silenced. The CI suite runs souc-stage2 -- the lean_single
+// self-host output, set as SOUNIO_TEST_SOUC_BIN in .github/workflows/ci.yml --
+// and lean_single has no TokenKind::On at all, so the Contest half of this
+// fixture has nothing to parse there. The property under test is a Madaros
+// lexer change. Verified PASS on a Madaros built from this branch, on Slurm.
+// `on` must be usable as an ordinary name, and the Contest form must still work.
+//
+// `on` is lexed into TokenKind::On by self-hosted/parser/parser.sio for the
+// Contest syntax `contest [ m1, m2 ] on subject`. lean_single has no such
+// lexical class at all, so before this fixture the two engines disagreed about
+// whether `on` is a valid identifier: this file parse-failed under Madaros and
+// compiled clean under lean_single.
+//
+// Four stdlib files use it as a name -- graphics/surface.sio, graphics/text.sio,
+// viz/ir.sio, theorem/cdcl.sio -- and one of them blocks a chain: surface.sio
+// is imported by canvas_ext, which is imported by renderer3d, which is imported
+// by viz/ir, so EVERY viz_* test sat behind a single file that would not parse.
+//
+// The fix is contextual, not a rename: TokenKind::On joins
+// tk_is_contextual_ident, so the three identifier positions accept it while the
+// token kind and the Contest parse are untouched.
+
+// The other half of the claim. `on` stays a keyword in exactly ONE position and
+// this is it: the Contest form. If making the token identifier-capable had
+// broken the form it exists for, the fix would be a rename in disguise. It does
+// not, and it cannot -- parse_contest_expr is entered on the `contest` keyword
+// and then does expect(RBracket) followed by expect(TokenKind::On), so the
+// token kind is unchanged and the position is deterministic.
+type M1 = Model<i64, i64>
+models OnModels = [M1]
+policy OnPolicy for i64 level Stable scope InDistribution {}
+
+fn still_a_keyword(x: i64) -> Contest<i64, OnModels, OnPolicy> {
+    // The let binding with an explicit annotation is required, not stylistic:
+    // E059 refuses a bare contest expression because inferring a plain result
+    // type would erase the unresolved disagreement the type exists to carry.
+    let c: Contest<i64, OnModels, OnPolicy> = contest [M1] on x
+    c
+}
+
+fn takes_on(on: i64) -> i64 {
+    on + 1
+}
+
+fn shadowing() -> i64 {
+    var on = 10
+    on = on + 5
+    on
+}
+
+struct Switch { on: bool }
+
+fn read_field(s: Switch) -> bool {
+    s.on
+}
+
+fn main() -> i32 with IO, Panic {
+    var bad = 0
+    if takes_on(41) != 42 { bad = bad + 1 }        // parameter position
+    if shadowing() != 15 { bad = bad + 1 }         // binding and assignment
+    // The struct literal is built OUTSIDE the condition on purpose: exprs.sio
+    // restricts struct literals inside an `if` condition to avoid ambiguity
+    // with the block brace, and that restriction has nothing to do with `on`.
+    let sw = Switch { on: true }
+    if !read_field(sw) { bad = bad + 1 }                    // field position
+    if bad == 0 {
+        println("keyword_on_is_identifier_capable: PASS")
+        return 0
+    }
+    println("keyword_on_is_identifier_capable: FAIL")
+    return 1
+}

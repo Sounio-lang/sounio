@@ -6,9 +6,9 @@
 #   EXP2 — NonUnitary at Z pole (deficit vs √s curve + JSON receipt)
 #   EXP3 — EW tension (M_W tree / Δρ / G_F-Δr pull ladder, S/T/U, Δρ)
 #
-# Prefer lean_single for full run (Madaros typecheck of particle_physics still
-# has E008 residuals). Science-boundary allowlist is verified under Madaros
-# advisory preflight: E-SRB-002 must be absent after science-rings carve-out.
+# Default engine for the full vertical is lean_single; Madaros full run is also
+# gated (SEGV closed via EXP2 split + local peak; see handoff). Science-boundary
+# allowlist: E-SRB-002 must be absent after science-rings carve-out.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -39,6 +39,8 @@ grep -q 'EXP3_MW_PULL_TREE' "$OUT"
 grep -q 'EXP3_MW_PULL_RAD' "$OUT"
 grep -q 'EXP3_MW_PULL_GF' "$OUT"
 grep -q 'EXP3_MW_PRED_GF' "$OUT"
+grep -q 'EXP3_TENSION_JSON' "$OUT"
+# grep -q 'EXP3_TENSION_CONSTRUCTION_GF' "$OUT"
 grep -q 'EXP1_DONE' "$OUT"
 grep -q 'EXP2_DONE' "$OUT"
 grep -q 'EXP3_DONE' "$OUT"
@@ -76,8 +78,6 @@ print(f"EXP2_DEFICIT_JSON_WRITTEN {json_path}")
 PY
 
 # Madaros check path: science-boundary allowlist + typecheck.
-# Full Madaros *run* still SEGV in imported lowering (compiler residual) —
-# not claimed green here. Typecheck must be clean.
 echo "== particle exp123 Madaros check (boundary + typecheck) =="
 BOUND_ERR=/tmp/particle_exp123_boundary_err.txt
 set +e
@@ -99,5 +99,45 @@ if ! grep -q 'check: OK' "$BOUND_ERR" && ! grep -q 'verdict=0' "$BOUND_ERR"; the
 fi
 echo "PARTICLE_EXP123_BOUNDARY_OK (no E-SRB-002)"
 echo "PARTICLE_EXP123_MADAROS_CHECK_OK"
+
+# Madaros native run of reduced core (imported eemm_z_peak_xsec_nu still works here)
+echo "== particle exp123 Madaros core run =="
+CORE=examples/particle_physics/exp123_madaros_core.sio
+CORE_OUT=/tmp/particle_exp123_madaros_core_out.txt
+CORE_ERR=/tmp/particle_exp123_madaros_core_err.txt
+set +e
+SOUNIO_SOUC_ENGINE=madaros ./bin/souc run "$CORE" >"$CORE_OUT" 2>"$CORE_ERR"
+CORE_RC=$?
+set -e
+if ! grep -q 'PARTICLE_MADAROS_CORE_OK' "$CORE_OUT"; then
+  echo "Madaros core run failed (rc=$CORE_RC):" >&2
+  tail -40 "$CORE_ERR" >&2
+  tail -20 "$CORE_OUT" >&2
+  exit 1
+fi
+echo "PARTICLE_EXP123_MADAROS_RUN_OK (core)"
+
+# Full EXP123 Madaros run — SEGV closed (EXP2 split + free-fn Epistemic +
+# main-module peak). Residual: imported eemm_z_peak_xsec_nu still returns 0
+# under full IR; vertical uses exp2_peak_xsec_local (see handoff).
+echo "== particle exp123 Madaros full run =="
+FULL_OUT=/tmp/particle_exp123_madaros_full_out.txt
+FULL_ERR=/tmp/particle_exp123_madaros_full_err.txt
+set +e
+SOUNIO_SOUC_ENGINE=madaros ./bin/souc run "$SRC" >"$FULL_OUT" 2>"$FULL_ERR"
+FULL_RC=$?
+set -e
+if ! grep -q 'PARTICLE_EXP123_OK' "$FULL_OUT" || ! grep -q 'PARTICLE_EXP123_PASS 58' "$FULL_OUT"; then
+  echo "Madaros full EXP123 run failed (rc=$FULL_RC):" >&2
+  tail -40 "$FULL_ERR" >&2
+  tail -30 "$FULL_OUT" >&2
+  exit 1
+fi
+if grep -q '^FAIL ' "$FULL_OUT"; then
+  echo "unexpected FAIL lines in Madaros full output" >&2
+  grep '^FAIL ' "$FULL_OUT" >&2
+  exit 1
+fi
+echo "PARTICLE_EXP123_MADAROS_RUN_OK (full)"
 
 echo "PARTICLE_EXP123_GATE_OK"

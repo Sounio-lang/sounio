@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.madaros-extern-c-builtin-port-dispatch-2026-08-16
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: 2026-08-16
+validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-extern-c-builtin-port-dispatch-2026-08-16
 -->
 
@@ -140,6 +140,42 @@ types) is a separate dispatch, out of P0-F scope.
 ## Impact if unaddressed
 
 Every default-engine user of `extern "C"` — the several `stdlib/` modules `KNOWN_LIMITATIONS.md:174` credits as unblocked — keeps either failing type-check (multi-decl blocks) or silently receiving fabricated zeros (single decls). `KNOWN_LIMITATIONS.md:174`'s "fixed" claim is false on the default engine until this lands; that paragraph is corrected in the close-out.
+
+## Addendum 2026-08-23 — the rewrite is not universal, and why
+
+The route above says "every extern \"C\" declaration ... is rewritten" (§ Route,
+and again in the close-out note about a "clear E137"). Both statements were
+implemented literally and both are now wrong as descriptions of the code.
+
+Rewriting *every* declaration changed a property this dispatch never intended to
+touch. `E219` fires on `sig.is_extern && !name_is_native_backend_builtin(...)`,
+and the wrapper is deliberately built with `is_extern: false`, so once every
+declaration became a wrapper E219 could no longer fire for anything. The refusal
+of an unimplemented extern moved to the unbound `ffi_<name>` inside the wrapper
+body — `E137`, raised at the **declaration**. Fail-closed survived; "declaring a
+binding you do not call is legal" did not. That property is what a bindings
+module is made of, and check.sio's own E219 design comment cites it.
+
+The rewrite now applies only to the names that have an `ffi_<name>` intrinsic:
+`parser/items.sio::extern_name_has_ffi_intrinsic`, the same twelve as the
+backend's ids 39..50 and the checker's `ffi_*` bindings. Every other declaration
+keeps main's bodyless `FnDef`, which `ir/lower.sio` flushes as an
+`instr_count == 0` stub; the backend answers it by name where a plain builtin id
+exists and emits a trap via `native_v2_empty_stub_would_fabricate` where none
+does, and E219 refuses the **call**.
+
+Two consequences worth recording. Names that are backend builtins but have no
+`ffi_` intrinsic — `exp`, `log`, `sin`, `cos`, `str_len`, `read_i64` — were
+broken by the universal rewrite (E137 on `ffi_exp` and friends at the
+declaration) and work again. And `tests/compile-fail/extern_c_unimplemented_builtin.sio`,
+which is main's fixture and pins the E219 text on `abs`, was silently getting
+E137 instead; it pins E219 again.
+
+Fixtures: `tests/run-pass/ffi_declared_never_called_is_legal.sio` (declared,
+never called, no intrinsic — must compile) and
+`tests/compile-fail/ffi_unimplemented_extern_must_reject.sio` (same shape, one
+call — must refuse, E219 at the call site). Coherence of the three name lists is
+gated by `scripts/ci/extern_builtin_mirror_gate.sh`.
 
 ## AI disclosure
 

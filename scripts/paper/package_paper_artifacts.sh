@@ -9,14 +9,14 @@
 #   - Self-hosting stage parity evidence
 #
 # Usage:
-#   bash scripts/package_paper_artifacts.sh
+#   bash scripts/paper/package_paper_artifacts.sh
 #
 # Output:
 #   artifacts/omega/paper_artifacts.tar.gz
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 MANIFEST="artifacts/omega/paper_artifact_manifest.v1.json"

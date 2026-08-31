@@ -271,7 +271,7 @@ Machine Code
 - **CPS Transform**: `crates/souc/src/backend/cps_transform.rs`
 - **Documentation**:
   - `PHASE_A_CPS_SUMMARY.md`
-  - `docs/EFFECT_HANDLERS_IMPLEMENTATION.md`
+  - `docs/architecture/EFFECT_HANDLERS_IMPLEMENTATION.md`
 
 ## Commit Message
 

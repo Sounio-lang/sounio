@@ -4,19 +4,22 @@
 // Content-Length framing. Reads request envelopes, dispatches by method,
 // emits framed responses.
 //
-// W2 surface (this file, minimal):
-//   - initialize / initialized
-//   - shutdown / exit
-//   - textDocument/didOpen, didChange, didClose (no-op, acknowledge)
-//   - any other method → error -32601 (MethodNotFound)
-//
-// Future modules will plug in:
-//   - diagnostics via api.check_source → self-hosted/lsp/diagnostics.sio
-//   - hover     via api.inspect_at   → self-hosted/lsp/hover.sio
-//   - etc.
+// Surface (see tools/lsp/CHANGELOG.md for the full history):
+//   - lifecycle: initialize / initialized / shutdown / exit
+//   - sync: didOpen, didChange (incremental, kind=2), didClose, didSave
+//   - language features: hover, completion, definition, references,
+//     rename (+prepare), documentSymbol, documentHighlight, formatting,
+//     rangeFormatting, onTypeFormatting, codeAction, codeLens,
+//     signatureHelp, foldingRange, selectionRange, inlayHint (+resolve),
+//     declaration, typeDefinition, implementation, callHierarchy,
+//     documentLink, linkedEditingRange, pull diagnostics, executeCommand
+//   - semantic tokens: full (resultId), full/delta, range
+//   - type hierarchy: prepareTypeHierarchy, supertypes, subtypes
+//   - workspace: symbol (open slots + *.sio scan under rootUri),
+//     willRenameFiles, didChangeWatchedFiles/WorkspaceFolders/Configuration
+//   - unknown method → error -32601 (MethodNotFound)
 //
 // Build: souc compile self-hosted/lsp/server.sio -o bin/sounio-lsp
-// Wire as `souc lsp` subcommand in lean_single.sio dispatcher (later).
 
 // ============================================================================
 // Buffers — fixed-size BSS, no heap
@@ -95,6 +98,10 @@ let M_PULL_DIAGNOSTIC: i64 = 52
 let M_LINKED_EDITING: i64 = 53
 let M_INLAY_HINT_RESOLVE: i64 = 54
 let M_SEM_TOKENS_RANGE: i64 = 55
+let M_SEM_TOKENS_DELTA: i64 = 56
+let M_PREPARE_TYPE_HIERARCHY: i64 = 57
+let M_TYPE_H_SUPERTYPES: i64 = 58
+let M_TYPE_H_SUBTYPES: i64 = 59
 
 // Shutdown state machine — LSP requires shutdown before exit
 var SAW_SHUTDOWN: i64 = 0
@@ -434,6 +441,7 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/rename")             { return M_RENAME      }
     if str_eq(s, "textDocument/codeAction")         { return M_CODE_ACTION }
     if str_eq(s, "textDocument/semanticTokens/full") { return M_SEM_TOKENS }
+    if str_eq(s, "textDocument/semanticTokens/full/delta") { return M_SEM_TOKENS_DELTA }
     if str_eq(s, "textDocument/semanticTokens/range") { return M_SEM_TOKENS_RANGE }
     if str_eq(s, "textDocument/formatting")         { return M_FORMATTING  }
     if str_eq(s, "textDocument/documentSymbol")     { return M_DOC_SYMBOL  }
@@ -463,6 +471,9 @@ fn classify_method() -> i64 with Mut, Panic {
     if str_eq(s, "textDocument/diagnostic")         { return M_PULL_DIAGNOSTIC }
     if str_eq(s, "textDocument/linkedEditingRange") { return M_LINKED_EDITING }
     if str_eq(s, "inlayHint/resolve")               { return M_INLAY_HINT_RESOLVE }
+    if str_eq(s, "textDocument/prepareTypeHierarchy") { return M_PREPARE_TYPE_HIERARCHY }
+    if str_eq(s, "typeHierarchy/supertypes")        { return M_TYPE_H_SUPERTYPES }
+    if str_eq(s, "typeHierarchy/subtypes")          { return M_TYPE_H_SUBTYPES }
     M_UNKNOWN
 }
 
@@ -1296,10 +1307,17 @@ fn parse_diagnostics() with Mut, Panic, Div {
     }
 }
 
-// Write DOC_TEXT to TMP_DOC_PATH using write_file. Returns true on success.
+// Write DOC_TEXT to TMP_DOC_PATH. Returns true on success.
+// Madaros gap: the write_file builtin mis-lowers a &!-of-global buffer
+// (writes DOC_TEXT_LEN bytes from the wrong address), while syscall6 with
+// &! globals is proven by scripts/ci/madaros_syscall6_gate.sh — so open/
+// write/close are done directly. 577 = O_WRONLY|O_CREAT|O_TRUNC, 420 = 0644.
 fn write_doc_to_disk() -> bool with IO, Mut, Panic {
-    let r = write_file("/tmp/sounio_lsp_doc.sio", &! DOC_TEXT, DOC_TEXT_LEN)
-    return r >= 0
+    let fd = syscall6(2, "/tmp/sounio_lsp_doc.sio", 577, 420, 0, 0, 0)
+    if fd < 0 { return false }
+    let w = syscall6(1, fd, &! DOC_TEXT, DOC_TEXT_LEN, 0, 0, 0)
+    syscall6(3, fd, 0, 0, 0, 0, 0)
+    return w == DOC_TEXT_LEN
 }
 
 // Build and send a textDocument/publishDiagnostics notification.
@@ -2869,6 +2887,161 @@ var WSYM_QUERY_LEN: i64 = 0
 var WSYM_EMITTED: i64 = 0
 var WSYM_COUNT:   i64 = 0
 
+// Sprint-2 #7: cross-file workspace/symbol. ROOT_URI is captured from
+// initialize params; WS_* scratch buffers back the getdents64 walk.
+var ROOT_URI: [i8; 1024] = [0; 1024]
+var ROOT_URI_LEN: i64 = 0
+var WS_DENTS: [i8; 4096] = [0; 4096]
+var WS_PATH: [i8; 1024] = [0; 1024]
+
+// Capture params.rootUri from an initialize request body.
+fn capture_root_uri() with Mut, Panic {
+    ROOT_URI_LEN = 0
+    let pos = body_find("\"rootUri\"", 0)
+    if pos < 0 { return }
+    var i = pos + 10
+    var saw_quote: i64 = 0
+    while i < RX_BODY_LEN && saw_quote == 0 {
+        let c = RX_BODY[i as usize] as i64
+        if c == 34 { saw_quote = 1 }
+        i = i + 1
+    }
+    if saw_quote == 0 { return }
+    while i < RX_BODY_LEN && ROOT_URI_LEN < 1024 {
+        let c = RX_BODY[i as usize] as i64
+        if c == 34 { return }
+        ROOT_URI[ROOT_URI_LEN as usize] = c as i8
+        ROOT_URI_LEN = ROOT_URI_LEN + 1
+        i = i + 1
+    }
+}
+
+// Unsigned byte helper for parsing getdents64 records (i8 is signed).
+fn ub(b: i64) -> i64 {
+    if b < 0 { return b + 256 }
+    b
+}
+
+// Convert ROOT_URI ("file:///a/b") to a NUL-terminated path in WS_PATH.
+// Returns path length (excluding NUL).
+fn ws_root_to_path() -> i64 with Mut {
+    var s: i64 = 0
+    if ROOT_URI_LEN >= 7 {
+        s = 7
+    }
+    var n: i64 = 0
+    var i = s
+    while i < ROOT_URI_LEN && n < 1000 {
+        WS_PATH[n as usize] = ROOT_URI[i as usize]
+        n = n + 1
+        i = i + 1
+    }
+    WS_PATH[n as usize] = 0
+    return n
+}
+
+// Scan one workspace file whose NUL-terminated full path is in WS_PATH.
+// Builds the file:// URI into DOC_URI, skips files already open as
+// document slots (dedup), loads the text into a transient slot and
+// runs the same declaration scanner used for open documents.
+fn wsym_scan_ws_file() with IO, Mut, Panic, Div {
+    // URI form: "file://" + "/a/b/f.sio" == "file:///a/b/f.sio", matching
+    // didOpen URIs so the open-slot dedup below is reliable.
+    DOC_URI_LEN = 0
+    let prefix = "file://"
+    var pi: i64 = 0
+    while pi < 7 {
+        DOC_URI[DOC_URI_LEN as usize] = str_char_at(prefix, pi) as i8
+        DOC_URI_LEN = DOC_URI_LEN + 1
+        pi = pi + 1
+    }
+    var i: i64 = 0
+    while i < 1024 && DOC_URI_LEN < 1020 {
+        let c = WS_PATH[i as usize] as i64
+        if c == 0 { i = 1024 } else {
+            DOC_URI[DOC_URI_LEN as usize] = c as i8
+            DOC_URI_LEN = DOC_URI_LEN + 1
+            i = i + 1
+        }
+    }
+    if slot_find_by_uri() >= 0 { return }
+    let fd = syscall6(2, &! WS_PATH, 0, 0, 0, 0, 0)
+    if fd < 0 { return }
+    let total = syscall6(0, fd, &! DOC_TEXT, 262144, 0, 0, 0)
+    syscall6(3, fd, 0, 0, 0, 0, 0)
+    if total <= 0 { return }
+    DOC_TEXT_LEN = total
+    let s = slot_alloc_for_uri()
+    if s < 0 { return }
+    slot_set_text(s)
+    slot_activate(s)
+    wsym_scan_active_slot(s)
+    slot_release(s)
+}
+
+// Walk ROOT_URI's directory with getdents64 (one level, regular *.sio
+// files only) and scan each file for workspace symbols.
+fn wsym_scan_workspace_files() with IO, Mut, Panic, Div {
+    if ROOT_URI_LEN <= 0 { return }
+    if WSYM_COUNT >= WSYM_CAP { return }
+    let root_len = ws_root_to_path()
+    if root_len <= 0 { return }
+    // open(root, O_RDONLY | O_DIRECTORY=65536)
+    let dfd = syscall6(2, &! WS_PATH, 65536, 0, 0, 0, 0)
+    if dfd < 0 { return }
+    var eof: i64 = 0
+    while eof == 0 && WSYM_COUNT < WSYM_CAP {
+        let nread = syscall6(217, dfd, &! WS_DENTS, 4096, 0, 0, 0)
+        if nread <= 0 {
+            eof = 1
+        } else {
+            var pos: i64 = 0
+            while pos < nread && WSYM_COUNT < WSYM_CAP {
+                let reclen = ub(WS_DENTS[(pos + 16) as usize] as i64) + ub(WS_DENTS[(pos + 17) as usize] as i64) * 256
+                // d_name at offset 19, NUL-terminated within the record.
+                var name_len: i64 = 0
+                var nul_seen: i64 = 0
+                while name_len < 255 && nul_seen == 0 && (pos + 19 + name_len) < nread {
+                    if (WS_DENTS[(pos + 19 + name_len) as usize] as i64) == 0 {
+                        nul_seen = 1
+                    } else {
+                        name_len = name_len + 1
+                    }
+                }
+                // *.sio suffix: 46 115 105 111
+                var is_sio: i64 = 0
+                if name_len > 4 {
+                    let e = pos + 19 + name_len
+                    if (WS_DENTS[(e - 4) as usize] as i64) == 46 && (WS_DENTS[(e - 3) as usize] as i64) == 115 && (WS_DENTS[(e - 2) as usize] as i64) == 105 && (WS_DENTS[(e - 1) as usize] as i64) == 111 {
+                        is_sio = 1
+                    }
+                }
+                if is_sio == 1 {
+                    // Rebuild WS_PATH = root + "/" + name + NUL.
+                    let rl = ws_root_to_path()
+                    var m = rl
+                    WS_PATH[m as usize] = 47
+                    m = m + 1
+                    var k: i64 = 0
+                    while k < name_len && m < 1000 {
+                        WS_PATH[m as usize] = WS_DENTS[(pos + 19 + k) as usize]
+                        m = m + 1
+                        k = k + 1
+                    }
+                    WS_PATH[m as usize] = 0
+                    wsym_scan_ws_file()
+                }
+                if reclen <= 0 {
+                    pos = nread
+                } else {
+                    pos = pos + reclen
+                }
+            }
+        }
+    }
+    syscall6(3, dfd, 0, 0, 0, 0, 0)
+}
+
 fn lower_byte(b: i64) -> i64 {
     if b >= 65 && b <= 90 { return b + 32 }
     b
@@ -2975,8 +3148,18 @@ fn wsym_scan_active_slot(slot: i64) with Mut, Panic, Div {
 
 fn respond_workspace_symbol() with IO, Mut, Panic, Div {
     if LAST_ID_PRESENT == 0 { return }
-    WSYM_QUERY_LEN = body_extract_str("\"query\"", &! WSYM_QUERY, 64)
+    // Madaros gap: a &! borrow of a GLOBAL array passed as a normal function
+    // parameter persists only the first byte written through it (locals are
+    // fine). Extract into a local, then copy into the global — direct global
+    // element writes work.
+    var qtmp: [i8; 64] = [0; 64]
+    WSYM_QUERY_LEN = body_extract_str("\"query\"", &! qtmp, 64)
     if WSYM_QUERY_LEN < 0 { WSYM_QUERY_LEN = 0 }
+    var qi: i64 = 0
+    while qi < WSYM_QUERY_LEN {
+        WSYM_QUERY[qi as usize] = qtmp[qi as usize]
+        qi = qi + 1
+    }
 
     tx_reset()
     tx_puts("{\"jsonrpc\":\"2.0\",")
@@ -2992,8 +3175,324 @@ fn respond_workspace_symbol() with IO, Mut, Panic, Div {
         }
         s = s + 1
     }
+    // Sprint-2 #7: also scan *.sio files under rootUri (cross-file).
+    wsym_scan_workspace_files()
     tx_puts("]}")
     write_frame()
+}
+
+// ============================================================================
+// Sprint-2 #6 — type hierarchy
+// ============================================================================
+//
+// Sounio's nominal type relations come from `impl Trait for Type`:
+//   - supertypes(struct/enum S) = traits A with `impl A for S` in the doc
+//   - subtypes(trait T)         = types B with `impl T for B` in the doc
+// There is no struct/enum inheritance, so structs have no subtypes and
+// traits have no supertypes. Scope is the active document (same scanner
+// recipe as documentSymbol). prepareTypeHierarchy resolves the identifier
+// under the cursor to a struct/enum/trait/algebra declaration; when the
+// identifier is not a declared type the result is null.
+
+var TH_NAME: [i8; 64] = [0; 64]
+var TH_NAME_LEN: i64 = 0
+var TH_KEEP: [i8; 64] = [0; 64]
+var TH_KEEP_LEN: i64 = 0
+var TH_KIND: i64 = 0
+var TH_DECL_S: i64 = 0
+var TH_DECL_E: i64 = 0
+var TH_NAME_S: i64 = 0
+var TH_NAME_E: i64 = 0
+var TH_EMITTED: i64 = 0
+
+// True if DOC_TEXT[ns..ne] equals TH_NAME.
+fn th_name_eq(ns: i64, ne: i64) -> bool with Mut, Panic {
+    if (ne - ns) != TH_NAME_LEN { return false }
+    var i: i64 = 0
+    while i < TH_NAME_LEN {
+        if (DOC_TEXT[(ns + i) as usize] as i64) != (TH_NAME[i as usize] as i64) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Decl end: from `from`, find the first `{` within 1024 bytes and return
+// the offset just past its matching `}` (naive brace balance, no string
+// awareness — same pragmatics as the rest of the server). A `;` first
+// means a bodyless declaration. Falls back to `from` when no brace.
+fn th_block_end(from: i64) -> i64 with Mut, Panic {
+    var i = from
+    let limit = from + 1024
+    var found: i64 = 0 - 1
+    while i < DOC_TEXT_LEN && i < limit && found < 0 {
+        let c = DOC_TEXT[i as usize] as i64
+        if c == 123 {
+            found = i
+        } else if c == 59 {
+            return i + 1
+        }
+        i = i + 1
+    }
+    if found < 0 { return from }
+    var depth: i64 = 0
+    var j = found
+    while j < DOC_TEXT_LEN {
+        let c = DOC_TEXT[j as usize] as i64
+        if c == 123 {
+            depth = depth + 1
+        } else if c == 125 {
+            depth = depth - 1
+            if depth == 0 { return j + 1 }
+        }
+        j = j + 1
+    }
+    return DOC_TEXT_LEN
+}
+
+// Find TH_NAME's struct/enum/trait/algebra declaration in DOC_TEXT.
+// Sets TH_KIND/TH_DECL_S/TH_DECL_E/TH_NAME_S/TH_NAME_E on success.
+// LSP SymbolKind: 10=Enum, 11=Interface (trait), 23=Struct.
+fn th_find_type_decl() -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < DOC_TEXT_LEN {
+        var at_word_start: bool = false
+        if i == 0 { at_word_start = true }
+        else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false { at_word_start = true }
+        if at_word_start == false {
+            i = i + 1
+        } else {
+            let je = read_ident_run(i)
+            if je == i {
+                i = i + 1
+            } else {
+                var kind: i64 = 0
+                if ident_slice_eq(i, je, "struct") {
+                    kind = 23
+                } else if ident_slice_eq(i, je, "enum") {
+                    kind = 10
+                } else if ident_slice_eq(i, je, "trait") {
+                    kind = 11
+                } else if ident_slice_eq(i, je, "algebra") {
+                    kind = 23
+                }
+                if kind == 0 {
+                    i = je
+                } else {
+                    let ns = skip_ws(je)
+                    let ne = read_ident_run(ns)
+                    if ne > ns && th_name_eq(ns, ne) == true {
+                        TH_KIND = kind
+                        TH_DECL_S = i
+                        TH_NAME_S = ns
+                        TH_NAME_E = ne
+                        TH_DECL_E = th_block_end(ne)
+                        return true
+                    }
+                    if ne > ns { i = ne } else { i = je }
+                }
+            }
+        }
+    }
+    return false
+}
+
+// Emit an LSP range for DOC_TEXT offsets [s, e).
+fn th_emit_range(s: i64, e: i64) with Mut, Panic, Div {
+    offset_to_position(s, 0)
+    tx_puts("{\"start\":{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR)
+    tx_puts("},\"end\":")
+    offset_to_position(e, 0)
+    tx_puts("{\"line\":")
+    tx_put_i64(DEF_LINE)
+    tx_puts(",\"character\":")
+    tx_put_i64(DEF_CHAR)
+    tx_puts("}}")
+}
+
+// Emit one TypeHierarchyItem. Name is DOC_TEXT[ns..ne]; kind is the LSP
+// SymbolKind; [rs,re) is the decl range, [ss,se) the selection range.
+fn th_emit_item(ns: i64, ne: i64, kind: i64, rs: i64, re: i64, ss: i64, se: i64) with Mut, Panic, Div {
+    if TH_EMITTED == 1 { tx_putc(44) }
+    TH_EMITTED = 1
+    tx_puts("{\"name\":\"")
+    var i = ns
+    while i < ne {
+        let c = DOC_TEXT[i as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        i = i + 1
+    }
+    tx_puts("\",\"kind\":")
+    tx_put_i64(kind)
+    tx_puts(",\"uri\":\"")
+    var u: i64 = 0
+    while u < DOC_URI_LEN {
+        let c = DOC_URI[u as usize] as i64
+        if c == 34 { tx_putc(92); tx_putc(34) }
+        else if c == 92 { tx_putc(92); tx_putc(92) }
+        else { tx_putc(c) }
+        u = u + 1
+    }
+    tx_puts("\",\"range\":")
+    th_emit_range(rs, re)
+    tx_puts(",\"selectionRange\":")
+    th_emit_range(ss, se)
+    tx_puts("}")
+}
+
+// Emit a related-type item for DOC_TEXT[ns..ne]: prefer the declaration
+// site (kind + full range) when that type is declared in this document,
+// otherwise emit at the impl-site token with fallback_kind.
+fn th_emit_related(ns: i64, ne: i64, fallback_kind: i64) with Mut, Panic, Div {
+    TH_KEEP_LEN = TH_NAME_LEN
+    var k: i64 = 0
+    while k < TH_NAME_LEN {
+        TH_KEEP[k as usize] = TH_NAME[k as usize]
+        k = k + 1
+    }
+    TH_NAME_LEN = ne - ns
+    if TH_NAME_LEN > 64 { TH_NAME_LEN = 64 }
+    k = 0
+    while k < TH_NAME_LEN {
+        TH_NAME[k as usize] = DOC_TEXT[(ns + k) as usize]
+        k = k + 1
+    }
+    if th_find_type_decl() == true {
+        th_emit_item(TH_NAME_S, TH_NAME_E, TH_KIND, TH_DECL_S, TH_DECL_E, TH_NAME_S, TH_NAME_E)
+    } else {
+        th_emit_item(ns, ne, fallback_kind, ns, ne, ns, ne)
+    }
+    TH_NAME_LEN = TH_KEEP_LEN
+    k = 0
+    while k < TH_KEEP_LEN {
+        TH_NAME[k as usize] = TH_KEEP[k as usize]
+        k = k + 1
+    }
+}
+
+// Walk `impl A for B` statements. mode 1 (supertypes): B==TH_NAME → emit
+// trait A. mode 2 (subtypes): A==TH_NAME → emit implementor B.
+fn th_scan_impls(mode: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < DOC_TEXT_LEN {
+        var at_word_start: bool = false
+        if i == 0 { at_word_start = true }
+        else if is_ident_byte(DOC_TEXT[(i - 1) as usize] as i64) == false { at_word_start = true }
+        if at_word_start == false {
+            i = i + 1
+        } else {
+            let je = read_ident_run(i)
+            if je == i {
+                i = i + 1
+            } else if ident_slice_eq(i, je, "impl") == false {
+                i = je
+            } else {
+                let a_s = skip_ws(je)
+                let a_e = read_ident_run(a_s)
+                if a_e <= a_s {
+                    i = je
+                } else {
+                    let b_s = skip_ws(a_e)
+                    let b_e = read_ident_run(b_s)
+                    if b_e > b_s && ident_slice_eq(b_s, b_e, "for") == true {
+                        let c_s = skip_ws(b_e)
+                        let c_e = read_ident_run(c_s)
+                        if c_e > c_s {
+                            if mode == 1 {
+                                if th_name_eq(c_s, c_e) == true {
+                                    th_emit_related(a_s, a_e, 11)
+                                }
+                            } else {
+                                if th_name_eq(a_s, a_e) == true {
+                                    th_emit_related(c_s, c_e, 23)
+                                }
+                            }
+                        }
+                    }
+                    i = a_e
+                }
+            }
+        }
+    }
+}
+
+fn respond_prepare_type_hierarchy() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        respond_empty_result()
+        return
+    }
+    parse_hover_position()
+    if HOVER_OK == 0 {
+        respond_empty_result()
+        return
+    }
+    if locate_ident() <= 0 {
+        respond_empty_result()
+        return
+    }
+    TH_NAME_LEN = 0
+    var i: i64 = 0
+    while i < IDENT_LEN && i < 64 {
+        TH_NAME[i as usize] = IDENT_BUF[i as usize]
+        TH_NAME_LEN = TH_NAME_LEN + 1
+        i = i + 1
+    }
+    if th_find_type_decl() == false {
+        respond_empty_result()
+        return
+    }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    TH_EMITTED = 0
+    th_emit_item(TH_NAME_S, TH_NAME_E, TH_KIND, TH_DECL_S, TH_DECL_E, TH_NAME_S, TH_NAME_E)
+    tx_puts("]}")
+    write_frame()
+}
+
+// Shared tail for supertypes/subtypes: pull item.name + item.uri from
+// params, activate the slot, scan impls, emit the item array.
+fn respond_type_hierarchy_related(mode: i64) with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    // Same Madaros &!-global-param gap as respond_workspace_symbol: extract
+    // into a local first, then copy into the global.
+    var ntmp: [i8; 64] = [0; 64]
+    TH_NAME_LEN = body_extract_str("\"name\"", &! ntmp, 64)
+    var ni: i64 = 0
+    while ni < TH_NAME_LEN {
+        TH_NAME[ni as usize] = ntmp[ni as usize]
+        ni = ni + 1
+    }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":[")
+    TH_EMITTED = 0
+    if TH_NAME_LEN > 0 {
+        if extract_doc_uri() >= 0 {
+            let s = slot_find_by_uri()
+            if s >= 0 {
+                slot_activate(s)
+                th_scan_impls(mode)
+            }
+        }
+    }
+    tx_puts("]}")
+    write_frame()
+}
+
+fn respond_type_hierarchy_supertypes() with IO, Mut, Panic, Div {
+    respond_type_hierarchy_related(1)
+}
+
+fn respond_type_hierarchy_subtypes() with IO, Mut, Panic, Div {
+    respond_type_hierarchy_related(2)
 }
 
 // ============================================================================
@@ -3455,10 +3954,16 @@ fn respond_inlay_hint() with IO, Mut, Panic, Div {
 
         if state == 1 {
             if c == 92 && i + 1 < DOC_TEXT_LEN { i = i + 2 }
-            else { if c == 34 { state = 0 } i = i + 1 }
+            else {
+                if c == 34 { state = 0 }
+                i = i + 1
+            }
         } else if state == 2 {
             if c == 92 && i + 1 < DOC_TEXT_LEN { i = i + 2 }
-            else { if c == 39 { state = 0 } i = i + 1 }
+            else {
+                if c == 39 { state = 0 }
+                i = i + 1
+            }
         } else if state == 3 {
             if c == 10 { state = 0 }
             i = i + 1
@@ -3861,10 +4366,16 @@ fn respond_code_action() with IO, Mut, Panic, Div {
         let c = DOC_TEXT[k as usize] as i64
         if state == 1 {
             if c == 92 && k + 1 < eb { k = k + 2 }
-            else { if c == 34 { state = 0 } k = k + 1 }
+            else {
+                if c == 34 { state = 0 }
+                k = k + 1
+            }
         } else if state == 2 {
             if c == 92 && k + 1 < eb { k = k + 2 }
-            else { if c == 39 { state = 0 } k = k + 1 }
+            else {
+                if c == 39 { state = 0 }
+                k = k + 1
+            }
         } else if state == 3 {
             if c == 10 { state = 0 }
             k = k + 1
@@ -4814,10 +5325,16 @@ fn otf_count_brace_depth(end: i64) -> i64 with Mut, Panic {
         let c = DOC_TEXT[i as usize] as i64
         if state == 1 {
             if c == 92 && i + 1 < end { i = i + 2 }
-            else { if c == 34 { state = 0 } i = i + 1 }
+            else {
+                if c == 34 { state = 0 }
+                i = i + 1
+            }
         } else if state == 2 {
             if c == 92 && i + 1 < end { i = i + 2 }
-            else { if c == 39 { state = 0 } i = i + 1 }
+            else {
+                if c == 39 { state = 0 }
+                i = i + 1
+            }
         } else if state == 3 {
             if c == 10 { state = 0 }
             i = i + 1
@@ -5005,6 +5522,19 @@ var ST_RANGE_S_CHAR: i64 = 0
 var ST_RANGE_E_LINE: i64 = 0
 var ST_RANGE_E_CHAR: i64 = 0
 
+// Collect mode for /full and /full/delta (Sprint-2 #5). When
+// ST_COLLECT == 1, st_emit appends the encoded 5-tuple to ST_BUF (as
+// raw i64 words) instead of streaming JSON into tx. The buffered form
+// is what delta diffs against the cached previous result.
+var ST_COLLECT: i64 = 0
+var ST_BUF: [i64; 262144] = [0; 262144]
+var ST_BUF_LEN: i64 = 0
+// Cached last /full-or-delta result for delta diffs.
+var ST_CACHE: [i64; 262144] = [0; 262144]
+var ST_CACHE_LEN: i64 = 0
+var ST_CACHE_RID: i64 = 0
+var ST_RID_COUNTER: i64 = 0
+
 fn st_emit(line: i64, col: i64, length: i64, ttype: i64) with Mut, Panic, Div {
     if length <= 0 { return }
     if ST_RANGE_ACTIVE == 1 {
@@ -5013,8 +5543,6 @@ fn st_emit(line: i64, col: i64, length: i64, ttype: i64) with Mut, Panic, Div {
         if line > ST_RANGE_E_LINE { return }
         if line == ST_RANGE_E_LINE && col >= ST_RANGE_E_CHAR { return }
     }
-    if ST_EMITTED == 1 { tx_putc(44) }
-    ST_EMITTED = 1
     var dline: i64 = 0
     var dchar: i64 = 0
     if line == ST_PREV_LINE {
@@ -5024,6 +5552,21 @@ fn st_emit(line: i64, col: i64, length: i64, ttype: i64) with Mut, Panic, Div {
         dline = line - ST_PREV_LINE
         dchar = col
     }
+    if ST_COLLECT == 1 {
+        if ST_BUF_LEN + 5 <= 262144 {
+            ST_BUF[ST_BUF_LEN as usize] = dline
+            ST_BUF[(ST_BUF_LEN + 1) as usize] = dchar
+            ST_BUF[(ST_BUF_LEN + 2) as usize] = length
+            ST_BUF[(ST_BUF_LEN + 3) as usize] = ttype
+            ST_BUF[(ST_BUF_LEN + 4) as usize] = 0
+            ST_BUF_LEN = ST_BUF_LEN + 5
+        }
+        ST_PREV_LINE = line
+        ST_PREV_CHAR = col
+        return
+    }
+    if ST_EMITTED == 1 { tx_putc(44) }
+    ST_EMITTED = 1
     tx_put_i64(dline); tx_putc(44)
     tx_put_i64(dchar); tx_putc(44)
     tx_put_i64(length); tx_putc(44)
@@ -5086,20 +5629,9 @@ fn st_classify_ident(s: i64, e: i64) -> i64 with Mut, Panic {
     return 0 - 1
 }
 
-fn respond_semantic_tokens() with IO, Mut, Panic, Div {
-    if LAST_ID_PRESENT == 0 { return }
-    if activate_uri_slot() < 0 {
-        respond_empty_result()
-        return
-    }
-    tx_reset()
-    tx_puts("{\"jsonrpc\":\"2.0\",")
-    tx_emit_id()
-    tx_puts(",\"result\":{\"data\":[")
-    ST_EMITTED = 0
-    ST_PREV_LINE = 0
-    ST_PREV_CHAR = 0
-
+// Scan DOC_TEXT and emit semantic tokens via st_emit. Shared by
+// /full (collect mode), /range (tx mode) and /full/delta (collect).
+fn st_scan_document() with Mut, Panic, Div {
     var i: i64 = 0
     var line: i64 = 0
     var col: i64 = 0
@@ -5248,9 +5780,176 @@ fn respond_semantic_tokens() with IO, Mut, Panic, Div {
         col = col + 1
         i = i + 1
     }
+}
 
+// Serialize ST_BUF[0..ST_BUF_LEN] into tx as a comma-separated int list.
+fn st_serialize_buf() with Mut, Panic, Div {
+    var j: i64 = 0
+    while j < ST_BUF_LEN {
+        if j > 0 { tx_putc(44) }
+        tx_put_i64(ST_BUF[j as usize])
+        j = j + 1
+    }
+}
+
+// Copy ST_BUF into ST_CACHE and record the resultId it was served under.
+fn st_cache_save() with Mut {
+    var j: i64 = 0
+    while j < ST_BUF_LEN {
+        ST_CACHE[j as usize] = ST_BUF[j as usize]
+        j = j + 1
+    }
+    ST_CACHE_LEN = ST_BUF_LEN
+    ST_CACHE_RID = ST_RID_COUNTER
+}
+
+// Reset collect-mode cursor state, scan the active document into
+// ST_BUF, and leave collect mode. Shared by /full and /full/delta.
+fn st_collect_document() with Mut, Panic, Div {
+    ST_COLLECT = 1
+    ST_BUF_LEN = 0
+    ST_EMITTED = 0
+    ST_PREV_LINE = 0
+    ST_PREV_CHAR = 0
+    st_scan_document()
+    ST_COLLECT = 0
+}
+
+// textDocument/semanticTokens/full — collect scan, then serve
+// {"data":[...],"resultId":"st<N>"} and cache the buffer for /delta.
+fn respond_semantic_tokens() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        respond_empty_result()
+        return
+    }
+    st_collect_document()
+    ST_RID_COUNTER = ST_RID_COUNTER + 1
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":{\"data\":[")
+    st_serialize_buf()
+    tx_puts("],\"resultId\":\"st")
+    tx_put_i64(ST_RID_COUNTER)
+    tx_puts("\"}}")
+    write_frame()
+    st_cache_save()
+}
+
+// textDocument/semanticTokens/full as a tx-streaming variant used by
+// /range (kept byte-identical to the pre-delta /full output shape:
+// no resultId wrapper).
+fn respond_semantic_tokens_tx() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        respond_empty_result()
+        return
+    }
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":{\"data\":[")
+    ST_EMITTED = 0
+    ST_PREV_LINE = 0
+    ST_PREV_CHAR = 0
+    st_scan_document()
     tx_puts("]}}")
     write_frame()
+}
+
+// Parse params.previousResultId ("st<N>") -> N, or -1 when absent.
+fn st_parse_previous_result_id() -> i64 with Mut, Panic, Div {
+    let kp = body_find("\"previousResultId\"", 0)
+    if kp < 0 { return 0 - 1 }
+    let sp = body_find("\"st", kp)
+    if sp < 0 { return 0 - 1 }
+    // Digits start right after the `"st` prefix (quoted value — no colon
+    // walk, unlike body_read_int_after).
+    var i = sp + 3
+    if i >= RX_BODY_LEN { return 0 - 1 }
+    let first = RX_BODY[i as usize] as i64
+    if first < 48 || first > 57 { return 0 - 1 }
+    var v: i64 = 0
+    while i < RX_BODY_LEN {
+        let c = RX_BODY[i as usize] as i64
+        if c < 48 || c > 57 { break }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+// textDocument/semanticTokens/full/delta — rescan the document and
+// diff against the cached buffer from the matching resultId. Emits a
+// single-edit SemanticTokensEdits (common prefix/suffix); falls back
+// to a full result when previousResultId is missing or stale.
+fn respond_semantic_tokens_delta() with IO, Mut, Panic, Div {
+    if LAST_ID_PRESENT == 0 { return }
+    if activate_uri_slot() < 0 {
+        respond_empty_result()
+        return
+    }
+    let prev_rid = st_parse_previous_result_id()
+    st_collect_document()
+    if prev_rid < 0 || prev_rid != ST_CACHE_RID || ST_CACHE_LEN == 0 {
+        // Stale or missing previousResultId — full result fallback.
+        ST_RID_COUNTER = ST_RID_COUNTER + 1
+        tx_reset()
+        tx_puts("{\"jsonrpc\":\"2.0\",")
+        tx_emit_id()
+        tx_puts(",\"result\":{\"data\":[")
+        st_serialize_buf()
+        tx_puts("],\"resultId\":\"st")
+        tx_put_i64(ST_RID_COUNTER)
+        tx_puts("\"}}")
+        write_frame()
+        st_cache_save()
+        return
+    }
+    // Common prefix (rounded down to a 5-tuple boundary).
+    var p: i64 = 0
+    var minlen = ST_BUF_LEN
+    if ST_CACHE_LEN < minlen {
+        minlen = ST_CACHE_LEN
+    }
+    while p < minlen && (ST_BUF[p as usize] == ST_CACHE[p as usize]) {
+        p = p + 1
+    }
+    p = (p / 5) * 5
+    // Common suffix beyond the prefix (also tuple-aligned).
+    var s: i64 = 0
+    while s < (minlen - p) && (ST_BUF[(ST_BUF_LEN - 1 - s) as usize] == ST_CACHE[(ST_CACHE_LEN - 1 - s) as usize]) {
+        s = s + 1
+    }
+    s = (s / 5) * 5
+    let delete_count = ST_CACHE_LEN - p - s
+    let new_count = ST_BUF_LEN - p - s
+    ST_RID_COUNTER = ST_RID_COUNTER + 1
+    tx_reset()
+    tx_puts("{\"jsonrpc\":\"2.0\",")
+    tx_emit_id()
+    tx_puts(",\"result\":{\"resultId\":\"st")
+    tx_put_i64(ST_RID_COUNTER)
+    tx_puts("\"")
+    if delete_count == 0 && new_count == 0 {
+        tx_puts(",\"edits\":[]}}")
+    } else {
+        tx_puts(",\"edits\":[{\"start\":")
+        tx_put_i64(p)
+        tx_puts(",\"deleteCount\":")
+        tx_put_i64(delete_count)
+        tx_puts(",\"data\":[")
+        var j: i64 = 0
+        while j < new_count {
+            if j > 0 { tx_putc(44) }
+            tx_put_i64(ST_BUF[(p + j) as usize])
+            j = j + 1
+        }
+        tx_puts("]}]}}")
+    }
+    write_frame()
+    st_cache_save()
 }
 
 // Parse params.range as (line, character) pairs into ST_RANGE_*.
@@ -5287,7 +5986,7 @@ fn respond_semantic_tokens_range() with IO, Mut, Panic, Div {
     } else {
         ST_RANGE_ACTIVE = 0
     }
-    respond_semantic_tokens()
+    respond_semantic_tokens_tx()
     ST_RANGE_ACTIVE = 0
 }
 
@@ -5763,6 +6462,215 @@ fn respond_rename() with IO, Mut, Panic, Div {
     write_frame()
 }
 
+// ============================================================================
+// Sprint-2 #8 — incremental textDocumentSync (kind=2)
+// ============================================================================
+//
+// didChange payloads carry contentChanges[]; each entry is either a
+// full-document replacement (no "range") or a ranged edit. Entries are
+// applied in order against the stored slot text, then diagnostics rerun.
+// Positions are interpreted with the same byte-based line/character math
+// the rest of the server uses.
+
+var CHANGE_TEXT: [i8; 262144] = [0; 262144]
+var CHANGE_TEXT_LEN: i64 = 0
+var CH_SL: i64 = 0
+var CH_SC: i64 = 0
+var CH_EL: i64 = 0
+var CH_EC: i64 = 0
+
+// Decode the JSON string value of the "text" key at key_pos into
+// CHANGE_TEXT (same escape set as extract_doc_text). Returns the body
+// index just past the closing quote, or -1 on malformed input.
+fn extract_change_text(key_pos: i64) -> i64 with Mut, Panic, Div {
+    CHANGE_TEXT_LEN = 0
+    var i = key_pos + 6
+    var saw_quote: i64 = 0
+    while i < RX_BODY_LEN && saw_quote == 0 {
+        let c = RX_BODY[i as usize] as i64
+        if c == 34 {
+            saw_quote = 1
+        }
+        i = i + 1
+    }
+    if saw_quote == 0 { return 0 - 1 }
+    while i < RX_BODY_LEN && CHANGE_TEXT_LEN < 262144 {
+        let c = RX_BODY[i as usize] as i64
+        if c == 34 { return i + 1 }
+        if c == 92 && i + 1 < RX_BODY_LEN {
+            let n = RX_BODY[(i + 1) as usize] as i64
+            if n == 110 {
+                CHANGE_TEXT[CHANGE_TEXT_LEN as usize] = 10 as i8
+                CHANGE_TEXT_LEN = CHANGE_TEXT_LEN + 1
+                i = i + 2
+            } else if n == 114 {
+                CHANGE_TEXT[CHANGE_TEXT_LEN as usize] = 13 as i8
+                CHANGE_TEXT_LEN = CHANGE_TEXT_LEN + 1
+                i = i + 2
+            } else if n == 116 {
+                CHANGE_TEXT[CHANGE_TEXT_LEN as usize] = 9 as i8
+                CHANGE_TEXT_LEN = CHANGE_TEXT_LEN + 1
+                i = i + 2
+            } else if n == 34 {
+                CHANGE_TEXT[CHANGE_TEXT_LEN as usize] = 34 as i8
+                CHANGE_TEXT_LEN = CHANGE_TEXT_LEN + 1
+                i = i + 2
+            } else if n == 92 {
+                CHANGE_TEXT[CHANGE_TEXT_LEN as usize] = 92 as i8
+                CHANGE_TEXT_LEN = CHANGE_TEXT_LEN + 1
+                i = i + 2
+            } else if n == 47 {
+                CHANGE_TEXT[CHANGE_TEXT_LEN as usize] = 47 as i8
+                CHANGE_TEXT_LEN = CHANGE_TEXT_LEN + 1
+                i = i + 2
+            } else if n == 117 {
+                if i + 5 >= RX_BODY_LEN { return i + 1 }
+                var v: i64 = 0
+                var k: i64 = 0
+                while k < 4 {
+                    let h = RX_BODY[(i + 2 + k) as usize] as i64
+                    var d: i64 = 0
+                    if h >= 48 && h <= 57 {
+                        d = h - 48
+                    } else if h >= 97 && h <= 102 {
+                        d = h - 87
+                    } else if h >= 65 && h <= 70 {
+                        d = h - 55
+                    }
+                    v = v * 16 + d
+                    k = k + 1
+                }
+                CHANGE_TEXT[CHANGE_TEXT_LEN as usize] = (v % 256) as i8
+                CHANGE_TEXT_LEN = CHANGE_TEXT_LEN + 1
+                i = i + 6
+            } else {
+                CHANGE_TEXT[CHANGE_TEXT_LEN as usize] = n as i8
+                CHANGE_TEXT_LEN = CHANGE_TEXT_LEN + 1
+                i = i + 2
+            }
+        } else {
+            CHANGE_TEXT[CHANGE_TEXT_LEN as usize] = c as i8
+            CHANGE_TEXT_LEN = CHANGE_TEXT_LEN + 1
+            i = i + 1
+        }
+    }
+    return i
+}
+
+// Parse the range object whose "range" key is at rpos. Fills
+// CH_SL/CH_SC/CH_EL/CH_EC. Returns true on success.
+fn parse_change_range(rpos: i64) -> bool with Mut, Panic, Div {
+    let lp1 = body_find("\"line\"", rpos)
+    if lp1 < 0 { return false }
+    let cp1 = body_find("\"character\"", lp1)
+    if cp1 < 0 { return false }
+    let lp2 = body_find("\"line\"", cp1 + 11)
+    if lp2 < 0 { return false }
+    let cp2 = body_find("\"character\"", lp2)
+    if cp2 < 0 { return false }
+    CH_SL = body_read_int_after(lp1 + 6)
+    CH_SC = body_read_int_after(cp1 + 11)
+    CH_EL = body_read_int_after(lp2 + 6)
+    CH_EC = body_read_int_after(cp2 + 11)
+    if CH_SL < 0 || CH_SC < 0 || CH_EL < 0 || CH_EC < 0 { return false }
+    return true
+}
+
+// Splice CHANGE_TEXT into DOC_TEXT replacing [soff, eoff). Returns false
+// (leaving DOC_TEXT untouched) on out-of-range offsets or capacity
+// overflow.
+fn apply_change(soff: i64, eoff: i64) -> bool with Mut {
+    if soff < 0 || eoff < soff || eoff > DOC_TEXT_LEN { return false }
+    let delta = CHANGE_TEXT_LEN - (eoff - soff)
+    let new_len = DOC_TEXT_LEN + delta
+    if new_len < 0 || new_len > 262144 { return false }
+    if delta > 0 {
+        var i = DOC_TEXT_LEN - 1
+        while i >= eoff {
+            DOC_TEXT[(i + delta) as usize] = DOC_TEXT[i as usize]
+            i = i - 1
+        }
+    } else if delta < 0 {
+        var i = eoff
+        while i < DOC_TEXT_LEN {
+            DOC_TEXT[(i + delta) as usize] = DOC_TEXT[i as usize]
+            i = i + 1
+        }
+    }
+    var k: i64 = 0
+    while k < CHANGE_TEXT_LEN {
+        DOC_TEXT[(soff + k) as usize] = CHANGE_TEXT[k as usize]
+        k = k + 1
+    }
+    DOC_TEXT_LEN = new_len
+    return true
+}
+
+// textDocument/didChange under kind=2: apply contentChanges[] in order.
+// Falls back to the full-sync handler when the payload carries no ranges
+// or the document was never opened.
+fn handle_did_change() with IO, Mut, Panic, Div {
+    if extract_doc_uri() < 0 { return }
+    let cc = body_find("\"contentChanges\"", 0)
+    if cc < 0 {
+        handle_did_open_or_change()
+        return
+    }
+    let s = slot_find_by_uri()
+    let r0 = body_find("\"range\"", cc)
+    if s < 0 || r0 < 0 {
+        handle_did_open_or_change()
+        return
+    }
+    slot_activate(s)
+    var p = cc
+    var scanning: i64 = 1
+    while scanning == 1 {
+        let tpos = body_find("\"text\"", p)
+        if tpos < 0 {
+            scanning = 0
+        } else {
+            let rpos = body_find("\"range\"", p)
+            if rpos >= 0 && rpos < tpos {
+                if parse_change_range(rpos) == true {
+                    let after = extract_change_text(tpos)
+                    if after < 0 {
+                        scanning = 0
+                    } else {
+                        let soff = sr_pos_to_offset(CH_SL, CH_SC)
+                        let eoff = sr_pos_to_offset(CH_EL, CH_EC)
+                        apply_change(soff, eoff)
+                        p = after
+                    }
+                } else {
+                    scanning = 0
+                }
+            } else {
+                // Full-replacement change object (no "range" before its
+                // "text" key).
+                let after = extract_change_text(tpos)
+                if after < 0 {
+                    scanning = 0
+                } else {
+                    var k: i64 = 0
+                    while k < CHANGE_TEXT_LEN {
+                        DOC_TEXT[k as usize] = CHANGE_TEXT[k as usize]
+                        k = k + 1
+                    }
+                    DOC_TEXT_LEN = CHANGE_TEXT_LEN
+                    p = after
+                }
+            }
+        }
+    }
+    slot_set_text(s)
+    if write_doc_to_disk() == false { return }
+    if run_souc_check() < 0 { return }
+    slurp_diag_file()
+    parse_diagnostics()
+    publish_diagnostics()
+}
+
 // Pull document text + URI from current message, store in slot, run
 // check, publish diagnostics.
 fn handle_did_open_or_change() with IO, Mut, Panic, Div {
@@ -5791,12 +6699,15 @@ fn handle_did_close() with IO, Mut, Panic, Div {
 }
 
 fn respond_initialize() with IO, Mut, Panic, Div {
+    // Sprint-2 #7: remember params.rootUri so workspace/symbol can scan
+    // *.sio files on disk in addition to open document slots.
+    capture_root_uri()
     tx_reset()
     tx_puts("{\"jsonrpc\":\"2.0\",")
     tx_emit_id()
     tx_puts(",\"result\":{")
     tx_puts("\"capabilities\":{")
-    tx_puts("\"textDocumentSync\":1,")
+    tx_puts("\"textDocumentSync\":2,")
     tx_puts("\"hoverProvider\":true,")
     tx_puts("\"definitionProvider\":true,")
     tx_puts("\"referencesProvider\":true,")
@@ -5813,7 +6724,7 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"tokenTypes\":[\"keyword\",\"type\",\"variable\",\"function\",\"string\",\"number\",\"comment\",\"operator\"],")
     tx_puts("\"tokenModifiers\":[]")
     tx_puts("},")
-    tx_puts("\"full\":true,")
+    tx_puts("\"full\":{\"delta\":true},")
     tx_puts("\"range\":true")
     tx_puts("},")
     tx_puts("\"completionProvider\":{")
@@ -5831,6 +6742,7 @@ fn respond_initialize() with IO, Mut, Panic, Div {
     tx_puts("\"typeDefinitionProvider\":true,")
     tx_puts("\"implementationProvider\":true,")
     tx_puts("\"callHierarchyProvider\":true,")
+    tx_puts("\"typeHierarchyProvider\":true,")
     tx_puts("\"documentLinkProvider\":{\"resolveProvider\":false},")
     tx_puts("\"documentOnTypeFormattingProvider\":{\"firstTriggerCharacter\":\"\\n\",\"moreTriggerCharacter\":[\"}\"]},")
     tx_puts("\"diagnosticProvider\":{\"interFileDependencies\":false,\"workspaceDiagnostics\":false},")
@@ -5887,7 +6799,7 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_SHUTDOWN    { SAW_SHUTDOWN = 1; respond_shutdown(); return }
     if method == M_EXIT        { return }                              // handled in main loop
     if method == M_DID_OPEN    { handle_did_open_or_change(); return }
-    if method == M_DID_CHANGE  { handle_did_open_or_change(); return }
+    if method == M_DID_CHANGE  { handle_did_change(); return }
     if method == M_DID_CLOSE   { handle_did_close(); return }
     if method == M_DID_SAVE    { return }
     if method == M_HOVER       { respond_hover();             return }
@@ -5897,6 +6809,10 @@ fn dispatch(method: i64) with IO, Mut, Panic, Div {
     if method == M_RENAME      { respond_rename();            return }
     if method == M_CODE_ACTION { respond_code_action();       return }
     if method == M_SEM_TOKENS  { respond_semantic_tokens();   return }
+    if method == M_SEM_TOKENS_DELTA { respond_semantic_tokens_delta(); return }
+    if method == M_PREPARE_TYPE_HIERARCHY { respond_prepare_type_hierarchy(); return }
+    if method == M_TYPE_H_SUPERTYPES { respond_type_hierarchy_supertypes(); return }
+    if method == M_TYPE_H_SUBTYPES { respond_type_hierarchy_subtypes(); return }
     if method == M_SEM_TOKENS_RANGE { respond_semantic_tokens_range(); return }
     if method == M_FORMATTING  { respond_formatting();        return }
     if method == M_DOC_SYMBOL  { respond_document_symbol();   return }

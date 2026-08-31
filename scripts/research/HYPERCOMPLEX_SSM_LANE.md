@@ -20,7 +20,7 @@ Write-Set:
   scripts/research/ossm_recover.sio
   scripts/research/ossm_separation.sio
   scripts/research/HYPERCOMPLEX_SSM_LANE.md
-  scripts/octonion_probes_gate.sh
+  scripts/ci/octonion_probes_gate.sh
   examples/epistemic/rk4_correlated_uncertainty.sio   (bundled epistemic/GUM example)
   (future: examples/*ossm*.sio, examples/*octonion*.sio, stdlib/ssm/*, stdlib/{algebra,math}/octonion.sio, docs/briefings/OSSM_*.md)
 Read-Set:
@@ -30,7 +30,7 @@ Not-Touched:
   examples/associativity_probe_benchmark.sio — main already carries the gated
   run-pass version (//@ expect-stdout: ALL PASS); this lane defers to it and does
   NOT revert it. The provable separation lives in ossm_separation.sio.
-Required-Gates: scripts/octonion_probes_gate.sh green (compile+run every probe
+Required-Gates: scripts/ci/octonion_probes_gate.sh green (compile+run every probe
   under lean_single, assert invariants in stdout) -> OCTONION_PROBES_GATE_OK.
 Merge-Target: main
 Known-Blockers:
@@ -56,7 +56,7 @@ Note: `ossm_separation.sio` carries `with Mut` on `oct_class`/`left_class`/`righ
 ## Run everything
 
 ```bash
-bash scripts/octonion_probes_gate.sh          # asserts every invariant above
+bash scripts/ci/octonion_probes_gate.sh          # asserts every invariant above
 # or individually:
 for f in oct_truth oct_algebra ossm_recover ossm_separation; do
   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile scripts/research/$f.sio -o /tmp/x.elf && /tmp/x.elf

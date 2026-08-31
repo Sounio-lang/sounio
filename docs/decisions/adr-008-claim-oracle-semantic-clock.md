@@ -128,14 +128,14 @@ Migrations to the ADR default:
 |---|---|---|
 | `scripts/special_scipy_parity_gate.sh` | Sounio `tests/parity/special_parity_*.sio` emit | mpmath report-only unless `SOUNIO_FOREIGN_ORACLE_HARD=1` |
 | `scripts/bigrat_gate.sh` | Sounio `eq_or_fail` + `BIGRAT_STDLIB_OK` | Python print-diff report-only unless HARD |
-| `scripts/ci/sedenion_*.sh` (16 gates) | Sounio sentinels / OK tokens / constants | Python/diff via `lib_sounio_claim_oracle.sh` soft unless HARD |
+| `scripts/ci/sedenion_*.sh` (16 gates) | Sounio sentinels / OK tokens / constants | Python/diff via `scripts/lib/lib_sounio_claim_oracle.sh` soft unless HARD |
 | `bigrat_col` / `bigrat_ext` / `interval_rat` | Sounio OK tokens + eq paths | Python print-diff soft unless HARD |
 | `linalg_parity` / `stats_dist_parity` | Sounio emitters | mpmath soft unless HARD |
 | `furey_*` / `gresnigt_*` / `cd_tower_seam` | Sounio OK tokens | Python/diff soft unless HARD |
 | `l8` / `l9` ZD census C contracts | C contract VERDICT PASS + hash emit | numpy FNV cross-hash soft unless HARD |
 | `clinical_midazolam_ddi_e2e` | Sounio compile/run sentinels | optional Python AUCR band soft unless HARD |
 
-Shared helper: `scripts/ci/lib_sounio_claim_oracle.sh`.
+Shared helper: `scripts/lib/lib_sounio_claim_oracle.sh`.
 
 Legacy hard-fail: export `SOUNIO_FOREIGN_ORACLE_HARD=1`.
 

@@ -70,7 +70,7 @@ Each module lane should be interpreted with one of three levels:
 From repository root:
 
 ```bash
-bash scripts/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
+bash scripts/stdlib/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
 OMEGA_GPU_RUNTIME_GATE_MODE=required bash scripts/omega/omega_gpu_runtime_attest_gate.sh
 bash scripts/stdlib_hyper_execution_gate.sh
 STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh

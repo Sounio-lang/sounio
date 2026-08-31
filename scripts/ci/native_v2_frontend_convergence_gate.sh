@@ -624,7 +624,7 @@ run_case "lean_frontend_imported_ir_summary" "$LOG_DIR/lean_frontend.imported_ir
 run_case "lean_modular_imported_ir_summary" "$LOG_DIR/lean_modular.imported_ir_summary.log" \
   "$SOUC_BIN" run self-hosted/compiler/lean.sio -- --ir-summary tests/selfhost/native_runtime/import_nested_main_42.sio
 run_case "lean_modular_probe_load_ir" "$LOG_DIR/lean_modular.probe_load_ir.log" \
-  bash -c 'set -o pipefail; "$1" run self-hosted/compiler/lean.sio -- --probe-load-ir examples/hello.sio | grep -q "probe_load_ir: ok"' \
+  bash -c 'out="$("$1" run self-hosted/compiler/lean.sio -- --probe-load-ir examples/hello.sio 2>&1)"; printf "%s\n" "$out"; grep -q "probe_load_ir: ok" <<<"$out"' \
   bash "$SOUC_BIN"
 run_case "lean_modular_probe_load_ir_trace" "$LOG_DIR/lean_modular.probe_load_ir_trace.log" \
   bash -c 'out="$("$1" run self-hosted/compiler/lean.sio -- --probe-load-ir-trace tests/selfhost/native_runtime/import_nested_main_42.sio 2>&1)"; printf "%s\n" "$out"; grep -q "body_lowered=3" <<<"$out" && grep -q "probe_load_ir_trace: ok" <<<"$out"' \

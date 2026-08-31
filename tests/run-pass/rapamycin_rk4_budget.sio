@@ -1,4 +1,7 @@
 //@ run-pass
+//@ expect-stdout: PASS
+//@ expect-stdout: inf
+//@ expect-stdout: FAMILY_A_VAR_LIVE
 // ============================================================================
 // RAPAMYCIN 3-COMPARTMENT PBPK — RK4 + ISO UNCERTAINTY BUDGET (JCGM 100:2008 §8)
 // ============================================================================
@@ -111,7 +114,7 @@ fn sim20_rk4_plain(cl: f64, kp_brain: f64, fu: f64) -> Concs with Mut, Div {
 
 // ── Main ──
 
-fn main() with IO, Mut, Div, Epistemic {
+fn main() -> i64 with IO, Mut, Div, Epistemic {
     // ── Uncertain parameters via measure() → seed budget channels ──
     let k_cl: Knowledge<f64> = measure(12.4, uncertainty: 1.24)
     let k_kp: Knowledge<f64> = measure(0.08, uncertainty: 0.008)
@@ -140,38 +143,39 @@ fn main() with IO, Mut, Div, Epistemic {
     var c_brain = 0.0
     var c_periph = 0.0
 
-    // ── RK4 integration: 20 steps × 0.1 h = 2 h ──
+    // Family A contour (2026-08-18): Madaros FO does not cross user fn calls; RHS inlined here.
+// ── RK4 integration: 20 steps × 0.1 h = 2 h ──
     let dt = 0.1
     var step: i64 = 0
     while step < 20 {
         // ── k1: evaluate at current state ──
-        let k1b = rhs_blood(c_blood, c_brain, c_periph, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
-        let k1r = rhs_brain(c_blood, c_brain, kp_brain, qb_vbr)
-        let k1p = rhs_periph(c_blood, c_periph, kp_periph, qp_vpe)
+        let k1b = (((qb_vbl) * (c_brain) / (kp_brain)) + ((qp_vbl) * (c_periph) / (kp_periph)) - ((qsum_vbl) * (c_blood)) - ((cl) * (fu) / (v_blood) * (c_blood)))
+        let k1r = ((qb_vbr) * ((c_blood) - (c_brain) / (kp_brain)))
+        let k1p = ((qp_vpe) * ((c_blood) - (c_periph) / (kp_periph)))
 
         // ── k2: evaluate at midpoint using k1 slopes ──
         let b2 = c_blood + 0.5 * dt * k1b
         let r2 = c_brain + 0.5 * dt * k1r
         let p2 = c_periph + 0.5 * dt * k1p
-        let k2b = rhs_blood(b2, r2, p2, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
-        let k2r = rhs_brain(b2, r2, kp_brain, qb_vbr)
-        let k2p = rhs_periph(b2, p2, kp_periph, qp_vpe)
+        let k2b = (((qb_vbl) * (r2) / (kp_brain)) + ((qp_vbl) * (p2) / (kp_periph)) - ((qsum_vbl) * (b2)) - ((cl) * (fu) / (v_blood) * (b2)))
+        let k2r = ((qb_vbr) * ((b2) - (r2) / (kp_brain)))
+        let k2p = ((qp_vpe) * ((b2) - (p2) / (kp_periph)))
 
         // ── k3: evaluate at midpoint using k2 slopes ──
         let b3 = c_blood + 0.5 * dt * k2b
         let r3 = c_brain + 0.5 * dt * k2r
         let p3 = c_periph + 0.5 * dt * k2p
-        let k3b = rhs_blood(b3, r3, p3, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
-        let k3r = rhs_brain(b3, r3, kp_brain, qb_vbr)
-        let k3p = rhs_periph(b3, p3, kp_periph, qp_vpe)
+        let k3b = (((qb_vbl) * (r3) / (kp_brain)) + ((qp_vbl) * (p3) / (kp_periph)) - ((qsum_vbl) * (b3)) - ((cl) * (fu) / (v_blood) * (b3)))
+        let k3r = ((qb_vbr) * ((b3) - (r3) / (kp_brain)))
+        let k3p = ((qp_vpe) * ((b3) - (p3) / (kp_periph)))
 
         // ── k4: evaluate at endpoint using k3 slopes ──
         let b4 = c_blood + dt * k3b
         let r4 = c_brain + dt * k3r
         let p4 = c_periph + dt * k3p
-        let k4b = rhs_blood(b4, r4, p4, cl, kp_brain, fu, qb_vbl, qp_vbl, qsum_vbl, kp_periph, v_blood)
-        let k4r = rhs_brain(b4, r4, kp_brain, qb_vbr)
-        let k4p = rhs_periph(b4, p4, kp_periph, qp_vpe)
+        let k4b = (((qb_vbl) * (r4) / (kp_brain)) + ((qp_vbl) * (p4) / (kp_periph)) - ((qsum_vbl) * (b4)) - ((cl) * (fu) / (v_blood) * (b4)))
+        let k4r = ((qb_vbr) * ((b4) - (r4) / (kp_brain)))
+        let k4p = ((qp_vpe) * ((b4) - (p4) / (kp_periph)))
 
         // ── Update: y_{n+1} = y_n + (dt/6)(k1 + 2k2 + 2k3 + k4) ──
         let w = dt / 6.0
@@ -285,5 +289,15 @@ fn main() with IO, Mut, Div, Epistemic {
         print("periph: Knowledge inactive (.value strips Knowledge); Budget64 stands alone\n")
     }
 
+    // Family A is CALCULATION, not print: a live var is ~1e-4 (visible at 6dp).
+    // Collapse to exact 0 must fail, not print PASS and exit 0.
+    let ok_var = var_blood_k > 1.0e-18 && var_brain_k > 0.0 && var_periph_k >= 0.0
+    if !ok_var {
+        print("FABRICATED_ZERO\n")
+        print("EPISTEMIC_FABRICATION: variance_of collapsed to ~0 under this engine\n")
+        return 1
+    }
+    println("FAMILY_A_VAR_LIVE")
     print("PASS\n")
+    0
 }

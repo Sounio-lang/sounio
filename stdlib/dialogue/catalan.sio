@@ -1,0 +1,140 @@
+// stdlib/dialogue/catalan.sio
+//
+// The Catalan spectrum of a dialogue segment: all C(n−1) bracketings of an
+// n-turn trajectory evaluated through the octonion functor, as a measurable
+// object. For n = 4 there are exactly 5 bracketings:
+//
+//   B0 = (((u1∘u2)∘u3)∘u4)     B1 = ((u1∘u2)∘(u3∘u4))
+//   B2 = ((u1∘(u2∘u3))∘u4)     B3 = (u1∘((u2∘u3)∘u4))
+//   B4 = (u1∘(u2∘(u3∘u4)))
+//
+// The spectrum {F_B(t)} is the set of composite meanings the segment can
+// take; its diameter (max pairwise distance) measures *how much grouping
+// matters* for the whole segment, and its distinct count measures how many
+// genuinely different meanings coexist. In any associative composition the
+// spectrum collapses to a single point (diameter 0, distinct 1) — the
+// collapse is therefore the exact algebraic signature of bracket-blindness,
+// and its absence here is what the SBMP battery failed to find in LLMs.
+//
+// Layout follows the flat-array convention (stdlib/CONVENTIONS.md /
+// trajectory.sio SHAPE NOTE): the spectrum is written into out[40] as five
+// consecutive 8-component octonions.
+
+use algebra::octonion::{oct_mul}
+use dialogue::trajectory::{Trajectory}
+use dialogue::bracket::{traj_turn_oct}
+
+// Evaluate bracketing B_id ∈ 0..4 over four octonions.
+pub fn catalan_eval4(
+    a: &[f64; 8], b: &[f64; 8], c: &[f64; 8], d: &[f64; 8],
+    b_id: i64, out: &![f64; 8]
+) with Mut, Div, NonAssoc {
+    var t1: [f64; 8] = [0.0; 8]
+    var t2: [f64; 8] = [0.0; 8]
+    if b_id == 0 {            // (((a b) c) d)
+        oct_mul(a, b, &!t1)
+        oct_mul(&t1, c, &!t2)
+        oct_mul(&t2, d, out)
+    } else if b_id == 1 {     // ((a b) (c d))
+        oct_mul(a, b, &!t1)
+        oct_mul(c, d, &!t2)
+        oct_mul(&t1, &t2, out)
+    } else if b_id == 2 {     // ((a (b c)) d)
+        oct_mul(b, c, &!t1)
+        oct_mul(a, &t1, &!t2)
+        oct_mul(&t2, d, out)
+    } else if b_id == 3 {     // (a ((b c) d))
+        oct_mul(b, c, &!t1)
+        oct_mul(&t1, d, &!t2)
+        oct_mul(a, &t2, out)
+    } else {                  // (a (b (c d)))
+        oct_mul(c, d, &!t1)
+        oct_mul(b, &t1, &!t2)
+        oct_mul(a, &t2, out)
+    }
+}
+
+// Full 5-point spectrum over the first four turns of a trajectory.
+// out: [f64; 40] — five octonions, bracketing-major.
+pub fn catalan_spectrum4(t: &Trajectory, out: &![f64; 40]) with Mut, Div, NonAssoc {
+    var u1: [f64; 8] = [0.0; 8]
+    var u2: [f64; 8] = [0.0; 8]
+    var u3: [f64; 8] = [0.0; 8]
+    var u4: [f64; 8] = [0.0; 8]
+    traj_turn_oct(t, 0, &!u1)
+    traj_turn_oct(t, 1, &!u2)
+    traj_turn_oct(t, 2, &!u3)
+    traj_turn_oct(t, 3, &!u4)
+    var v: [f64; 8] = [0.0; 8]
+    var b: i64 = 0
+    while b < 5 {
+        catalan_eval4(&u1, &u2, &u3, &u4, b, &!v)
+        var k: i64 = 0
+        while k < 8 {
+            out[(b * 8 + k) as usize] = v[k]
+            k = k + 1
+        }
+        b = b + 1
+    }
+}
+
+// Diameter of the spectrum: max pairwise L2 distance between composites.
+pub fn catalan_diameter4(t: &Trajectory) -> f64 with Mut, Div, NonAssoc {
+    var spec: [f64; 40] = [0.0; 40]
+    catalan_spectrum4(t, &!spec)
+    var best: f64 = 0.0
+    var i: i64 = 0
+    while i < 5 {
+        var j: i64 = i + 1
+        while j < 5 {
+            var dsq: f64 = 0.0
+            var k: i64 = 0
+            while k < 8 {
+                let d: f64 = spec[(i * 8 + k) as usize] - spec[(j * 8 + k) as usize]
+                dsq = dsq + d * d
+                k = k + 1
+            }
+            if dsq > best { best = dsq }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return sqrt_f64(best)
+}
+
+// Number of distinct composites in the spectrum (pairwise distance > tol).
+pub fn catalan_distinct4(t: &Trajectory, tol: f64) -> i64 with Mut, Div, NonAssoc {
+    var spec: [f64; 40] = [0.0; 40]
+    catalan_spectrum4(t, &!spec)
+    var distinct: i64 = 1
+    var i: i64 = 1
+    while i < 5 {
+        var seen: bool = false
+        var j: i64 = 0
+        while j < i {
+            var dsq: f64 = 0.0
+            var k: i64 = 0
+            while k < 8 {
+                let d: f64 = spec[(i * 8 + k) as usize] - spec[(j * 8 + k) as usize]
+                dsq = dsq + d * d
+                k = k + 1
+            }
+            if dsq <= tol * tol { seen = true }
+            j = j + 1
+        }
+        if !seen { distinct = distinct + 1 }
+        i = i + 1
+    }
+    return distinct
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var g: f64 = x
+    var i: i64 = 0
+    while i < 60 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    return g
+}

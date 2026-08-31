@@ -12,9 +12,6 @@
 # such in the verdict line.
 
 set -euo pipefail
-SCRIPT_DIR0="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$(cd "${SCRIPT_DIR0}/../.." && pwd)/scripts/ci/lib_sounio_claim_oracle.sh"
-HARD="${SOUNIO_FOREIGN_ORACLE_HARD:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -79,16 +76,9 @@ EOF
 )"
 
 echo "Sign-table cross-hash: C=${C_HASH} numpy=${PY_HASH}"
-if [[ -z "${C_HASH}" ]]; then
-    echo "CLAIM FAIL: missing C hash"
+if [[ -z "${C_HASH}" || "${C_HASH}" != "${PY_HASH}" ]]; then
+    echo "L9_ZD_CENSUS_GATE_FAIL: sign-table hash mismatch"
     exit 1
-fi
-if [[ -z "${PY_HASH}" || "${C_HASH}" != "${PY_HASH}" ]]; then
-    sounio_foreign_mismatch "sign-table hash C!=numpy" || true
-    if [ "${HARD:-0}" = "1" ] || [ "${SOUNIO_FOREIGN_ORACLE_HARD:-0}" = "1" ]; then
-      echo "GATE_FAIL foreign_hard"
-      exit 1
-    fi
 fi
 
 echo "L9_ZD_CENSUS_GATE_OK"

@@ -151,6 +151,7 @@ pub enum TokenKind {
     Derived,
     Computed,
     Measured,
+    Input,
     Super,
     Crate,
 
@@ -458,6 +459,7 @@ pub fn tk_is_keyword(kind: TokenKind) -> bool {
         TokenKind::Derived => true,
         TokenKind::Computed => true,
         TokenKind::Measured => true,
+        TokenKind::Input => true,
         TokenKind::Super => true,
         TokenKind::Crate => true,
         TokenKind::Model => true,
@@ -606,6 +608,99 @@ fn tk_is_punctuation(kind: TokenKind) -> bool {
         TokenKind::At => true,
         TokenKind::Hash => true,
         TokenKind::Underscore => true,
+        _ => false,
+    }
+}
+
+// Contextual keywords: reserved words that must still be usable as ordinary
+// identifiers in expression and pattern position.
+//
+// `policy`, `models`, `audit`, `validation`, `contest` and the `*_policy`
+// family name domain concepts, so they collide with perfectly reasonable
+// variable and parameter names. `expect_ident` already tolerates keywords (so
+// parameter *declarations* parse), but the expression and pattern parsers each
+// carried their own ad-hoc allow-list
+// (`Ident || Knowledge || Close || Unit || Kernel || Var` and
+// `Ident || Handle || Unit || Kernel`) which had grown one token at a time and
+// never included this family. The result: `fn f(policy: P)` parsed, but
+// `policy.x` and `let policy = ...` did not — see issue #1454.
+//
+// Every token listed here is an ITEM introducer only: items.sio dispatches on
+// them at item position, and `parse_stmt` never dispatches items, so there is
+// no ambiguity in expression or pattern position.
+//
+// `contest` is deliberately NOT in this list, even though it is lexed as
+// `ContestLower` alongside the rest of the family: it has a genuine expression
+// form (`contest { ... }`, exprs.sio) and appears in `at_expr_start`, so
+// admitting it as an identifier would make `contest` in operand position
+// ambiguous. It stays a hard keyword.
+//
+// `audit` is excluded for the same reason by a different mechanism: it is an
+// INFIX operator (`expr audit name`, exprs.sio) inside the Pratt loop, which
+// has no newline guard before its branch. Admitting it in primary position
+// would not break that, but it would leave `audit` half-usable, so it stays a
+// hard keyword until the operator itself is newline-guarded.
+//
+// Centralised here so the next contextual keyword is added in one place.
+pub fn tk_is_contextual_ident(kind: TokenKind) -> bool {
+    match kind {
+        // `effect` and `handler` join for the same reason `study` and `scope`
+        // did, and the evidence is the same shape: a sweep of every source under
+        // self-hosted/ found 6 files the compiler could not read, each stopping
+        // on an ordinary parameter named after a keyword —
+        //     fn has_effect(a: &TypeArena, type_id: i64, effect: string)
+        //     fn sigh_set_action(table: &! SighTable, ..., handler: i64)
+        // Effect does have an item branch (items.sio:1146) and Handler has none;
+        // neither is reachable from expression position, because items are parsed
+        // only at top level.
+        TokenKind::Effect => true,
+        TokenKind::Handler => true,
+        TokenKind::PolicyLower => true,
+        TokenKind::AcquisitionPolicyLower => true,
+        TokenKind::RecoursePolicyLower => true,
+        TokenKind::TransitionPolicyLower => true,
+        TokenKind::TransitionProtocolLower => true,
+        TokenKind::MonitoringPolicyLower => true,
+        TokenKind::AlternativePolicyLower => true,
+        TokenKind::AlternativeFrontierLower => true,
+        TokenKind::DecisionPolicyLower => true,
+        TokenKind::DeferralPolicyLower => true,
+        TokenKind::ModelsLower => true,
+        TokenKind::ValidationLower => true,
+        // `on` reads as a keyword in exactly one place -- the Contest form
+        // `contest [ m1, m2 ] on subject` -- and as an ordinary word everywhere
+        // else. It is here because the two engines disagreed about it:
+        // parser.sio lexes the byte pair ('o','n') into TokenKind::On and
+        // lean_single has no such class at all, so
+        //
+        //     fn f(on: i32) -> i32 { on }
+        //
+        // parse-failed under Madaros and compiled clean under lean_single.
+        // Four stdlib files use it as a name -- graphics/surface.sio,
+        // graphics/text.sio, viz/ir.sio, theorem/cdcl.sio -- and one of them
+        // blocks a chain: surface.sio is imported by canvas_ext, which is
+        // imported by renderer3d, which is imported by viz/ir, so EVERY viz_*
+        // test sat behind a single file that would not parse.
+        //
+        // Renaming those four was the other option and was rejected: it makes
+        // the symptom go away while leaving the two engines disagreeing about
+        // what a valid identifier is. This makes them agree.
+        //
+        // The Contest form is untouched. parse_contest_expr is entered on the
+        // `contest` keyword and then does expect(RBracket) followed by
+        // expect(TokenKind::On): the token kind is unchanged, the position is
+        // deterministic, and nothing reachable from expression position can
+        // consume it first.
+        TokenKind::On => true,
+        // Epistemic vocabulary that reads as ordinary nouns and appears in real
+        // code as variable and parameter names. `level` in particular produced
+        // 13 parse errors in stdlib/plot/line.sio, which made every importer of
+        // that module look broken — including a clinical validation test that
+        // was blamed for them.
+        TokenKind::Level => true,
+        TokenKind::Scope => true,
+        TokenKind::Is => true,
+        TokenKind::Study => true,
         _ => false,
     }
 }

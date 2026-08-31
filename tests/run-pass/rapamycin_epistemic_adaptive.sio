@@ -1,4 +1,6 @@
 //@ run-pass
+//@ expect-stdout: PASS
+//@ expect-stdout: FAMILY_A_VAR_LIVE
 // β⁵ inter-procedural variance propagation enabled: mutable f64 vars use fixed runtime
 // variance slots so variance_of() tracks across loop iterations and function call boundaries.
 // ============================================================================
@@ -76,38 +78,16 @@ fn cube_root(x: f64) -> f64 with Mut, Div {
 }
 
 // ─── 3-compartment rapamycin PBPK ODE system ───
+// Family A contour (2026-08-18): Madaros FO variance does not cross user fn
+// calls (CALL3 discriminant). RHS inlined at sites in main (iso pattern).
+// Compiler follow-up: interprocedural FO. See fabrication sweep audit.
 
-fn rhs_blood(cb: f64, cbr: f64, cp: f64, cl: f64, kp: f64, fu: f64) -> f64 with Div {
-    let v_blood = 5.0
-    let q_brain = 0.7
-    let q_periph = 3.9
-    let kp_periph = 3.0
-    let cl_eff = cl * fu
-    let inflow_brain = (q_brain / v_blood) * cbr / kp
-    let inflow_periph = (q_periph / v_blood) * cp / kp_periph
-    let outflow = ((q_brain + q_periph) / v_blood) * cb
-    let clearance = (cl_eff / v_blood) * cb
-    return inflow_brain + inflow_periph - outflow - clearance
-}
-
-fn rhs_brain(cb: f64, cbr: f64, kp: f64) -> f64 with Div {
-    let q_brain = 0.7
-    let v_brain = 1.4
-    return (q_brain / v_brain) * (cb - cbr / kp)
-}
-
-fn rhs_periph(cb: f64, cp: f64) -> f64 with Div {
-    let q_periph = 3.9
-    let v_periph = 40.0
-    let kp_periph = 3.0
-    return (q_periph / v_periph) * (cb - cp / kp_periph)
-}
 
 // ============================================================================
 // MAIN — Epistemic Adaptive Integration with Lookbehind Step Control
 // ============================================================================
 
-fn main() with IO, Mut, Div, Epistemic {
+fn main() -> i64 with IO, Mut, Div, Epistemic {
     print("======================================================================\n")
     print("  Epistemic Adaptive ODE — Bogacki-Shampine 3(2) + Metrological Control\n")
     print("  Rapamycin 3-Compartment PBPK\n")
@@ -151,25 +131,25 @@ fn main() with IO, Mut, Div, Epistemic {
         // ═══ Bogacki-Shampine 3(2) stages ═══
 
         // Stage 1: k1 = f(t_n, y_n)
-        let k1b = rhs_blood(c_blood, c_brain, c_periph, cl, kp, fu)
-        let k1br = rhs_brain(c_blood, c_brain, kp)
-        let k1p = rhs_periph(c_blood, c_periph)
+        let k1b = ((0.7 / 5.0) * (c_brain) / (kp) + (3.9 / 5.0) * (c_periph) / 3.0 - ((0.7 + 3.9) / 5.0) * (c_blood) - ((cl) * (fu) / 5.0) * (c_blood))
+        let k1br = ((0.7 / 1.4) * ((c_blood) - (c_brain) / (kp)))
+        let k1p = ((3.9 / 40.0) * ((c_blood) - (c_periph) / 3.0))
 
         // Stage 2: y + dt/2 · k1
         let s2b = c_blood + 0.5 * dt_use * k1b
         let s2br = c_brain + 0.5 * dt_use * k1br
         let s2p = c_periph + 0.5 * dt_use * k1p
-        let k2b = rhs_blood(s2b, s2br, s2p, cl, kp, fu)
-        let k2br = rhs_brain(s2b, s2br, kp)
-        let k2p = rhs_periph(s2b, s2p)
+        let k2b = ((0.7 / 5.0) * (s2br) / (kp) + (3.9 / 5.0) * (s2p) / 3.0 - ((0.7 + 3.9) / 5.0) * (s2b) - ((cl) * (fu) / 5.0) * (s2b))
+        let k2br = ((0.7 / 1.4) * ((s2b) - (s2br) / (kp)))
+        let k2p = ((3.9 / 40.0) * ((s2b) - (s2p) / 3.0))
 
         // Stage 3: y + 3dt/4 · k2
         let s3b = c_blood + 0.75 * dt_use * k2b
         let s3br = c_brain + 0.75 * dt_use * k2br
         let s3p = c_periph + 0.75 * dt_use * k2p
-        let k3b = rhs_blood(s3b, s3br, s3p, cl, kp, fu)
-        let k3br = rhs_brain(s3b, s3br, kp)
-        let k3p = rhs_periph(s3b, s3p)
+        let k3b = ((0.7 / 5.0) * (s3br) / (kp) + (3.9 / 5.0) * (s3p) / 3.0 - ((0.7 + 3.9) / 5.0) * (s3b) - ((cl) * (fu) / 5.0) * (s3b))
+        let k3br = ((0.7 / 1.4) * ((s3b) - (s3br) / (kp)))
+        let k3p = ((3.9 / 40.0) * ((s3b) - (s3p) / 3.0))
 
         // ═══ IN-PLACE commit (preserves GUM variance in slot) ═══
         let dt9 = dt_use / 9.0
@@ -255,24 +235,40 @@ fn main() with IO, Mut, Div, Epistemic {
     //   1. Integration reaches t_end (correct numerical method)
     //   2. Concentrations physically plausible (clearance + distribution)
     //   3. Epistemic step-size mechanism fired at least once (epist_active > 0)
-    //      (shrinks/grows track extremes; active tracks any epistemic influence)
+    //   4. GUM variance is non-zero on blood (refuse silent fabrication of 0.0)
+    //      Madaros has been measured collapsing variance_of to exactly 0 while
+    //      lean_single reports ~1e-5 — that must FAIL, not print FAIL and exit 0.
     let ok_completed = t >= t_end - 1.0e-4
     let ok_blood = c_blood > 0.0 && c_blood < 1.5
     let ok_mech = epist_active > 0
+    let v_blood = variance_of(c_blood)
+    let v_brain = variance_of(c_brain)
+    let v_periph = variance_of(c_periph)
+    let ok_var = v_blood > 1.0e-18 && v_brain > 0.0 && v_periph >= 0.0
 
-    if ok_completed && ok_blood && ok_mech {
+    if ok_completed && ok_blood && ok_mech && ok_var {
         print("======================================================================\n")
         print("  PASS — Epistemic adaptive integration completed\n")
         print("  ** Lookbehind metrological step control ACTIVE:\n")
         print("     variance-growth signals fired and informed step sizing **\n")
         print("======================================================================\n")
+        // Value pin, not print: v_blood is ~1e-4 (visible at 6dp). Collapse to
+        // exact 0 is Family A CALC, not Family B emitter.
+        println("FAMILY_A_VAR_LIVE")
         print("PASS\n")
+        return 0
     } else {
         print("FAIL: completion=")
         if ok_completed { print("ok ") } else { print("no ") }
         print("blood=")
         if ok_blood { print("ok ") } else { print("no ") }
         print("mech=")
-        if ok_mech { print("ok\n") } else { print("no\n") }
+        if ok_mech { print("ok ") } else { print("no ") }
+        print("var=")
+        if ok_var { print("ok\n") } else {
+            print("FABRICATED_ZERO\n")
+            print("EPISTEMIC_FABRICATION: variance_of collapsed to ~0 under this engine\n")
+        }
+        return 1
     }
 }

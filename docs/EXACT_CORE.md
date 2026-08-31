@@ -53,11 +53,40 @@ enum Verdict { Proved, MeasuredF64 { eps }, MeasuredF256 { eps256 } }
 ```
 
 `Proved` (exact ℤ equality), `MeasuredF64` (f64 tolerance), `MeasuredF256` (future high-precision
-witness shape — **no f256 arithmetic is implemented**). The load-bearing rule is enforced by
+witness shape — **no f256 arithmetic is implemented under Madaros, this project's default engine**).
+The load-bearing rule is enforced by
 `requires_proof(v)`, which accepts **only** `Proved` — **a measurement can never be laundered into
 a proof.** There is no function that converts one variant to another. (Operator's `Knowledge<Verdict>`
 wrapping lands once the generic-struct-return compiler gap is fixed; until then gates return the
 plain `Verdict` enum, which compiles and runs today.)
+
+**Engine split (verified 2026-08-17).** Sounio ships two compiler engines — default Madaros
+(`bin/souc`) and the bootstrap seed (`SOUNIO_SOUC_ENGINE=lean_single` / `bin/souc-lean-single-x86_64`).
+The "no f256 arithmetic is implemented" claim above holds only for Madaros:
+
+| Engine | `fn add(a: f256, b: f256) -> f256 { a + b }` |
+|---|---|
+| **Madaros** (default `bin/souc`) | Rejects with **`error[E249]`**: *"f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A"*. |
+| **lean_single** (bootstrap seed) | **Compiles and executes.** No E249, no diagnostic; the emitted ELF runs to completion (`rc=0`). |
+
+So `MeasuredF256` is unreachable under the engine this document otherwise treats as authoritative
+(Madaros), but f256 arithmetic is not, in fact, unimplemented in this codebase — it exists,
+unverified and undocumented as a witness shape, under lean_single. Same class of gap as V0-A in
+`docs/architecture/F128_F256_LADDER.md`, which carries the equivalent table for f128. Do not read
+lean_single's acceptance as license to treat f256 as available: it has no `MeasuredF256` witness
+construction, no epistemic surface, and no gate — it simply fails to refuse.
+
+The dual-engine split is **not** limited to the tilde / f128–f256 parser boundary. Two further
+measured cases (2026-08-17), recorded so this document does not leave the reader thinking
+“engine divergence = only E249”:
+
+| Case | Madaros (default) | lean_single | Status |
+|---|---|---|---|
+| Forward ontology `inverse_of` (#1798) | **Accepted** a role whose inverse target was declared later | **E158** reject | **CLOSED** — Madaros aligned to declaration-order; gate `scripts/ci/madaros_ontology_enforcement_gate.sh` |
+| GUM variance on dissertation surfaces (#1792) | Prints `var(...)=0.000000` (and related ep28 confidence bit-pattern fabrication) | Non-zero variance ~1e-5 / ~1e-9 on the same adaptive witness | **OPEN** — fail-closed detect gate `scripts/ci/epistemic_fabrication_detect_gate.sh`; not a full ABI fix |
+
+#1792 is thesis-critical: silent zero variance under the default engine is fabricated science, not a
+docs nit. See also `CLAUDE.md` §13 and `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`.
 
 ## What is proved, executed, and verified (souc v0.80.0)
 

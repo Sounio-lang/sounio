@@ -31,7 +31,7 @@ fn parser_reject_reserved_wide_float_path(mut_p: Parser, path: &AstPath, span: S
     var p = mut_p
     p.had_error = true
     p.error_count = p.error_count + 1
-    print("error[E218]")
+    print("error[E249]")
     if span.start > 0 || span.end > 0 {
         print(" at ")
         print_int(span.start)
@@ -40,6 +40,23 @@ fn parser_reject_reserved_wide_float_path(mut_p: Parser, path: &AstPath, span: S
     }
     print(": f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A\n")
     print("   = note: parser marks this source invalid before checker, IR, SOIR, ABI, or native lowering\n")
+    p
+}
+
+fn report_unknown_knowledge_component(mut_p: Parser, span: Span) -> Parser with Mut, IO {
+    var p = mut_p
+    p.had_error = true
+    p.error_count = p.error_count + 1
+    print("error[E241]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": unknown Knowledge annotation component\n")
+    print("   = note: an identifier here is an epsilon bound and needs a comparison (e.g. eps < 0.05)\n")
+    print("   = note: provenance words are Derived, Computed, Measured; validity words are Valid, ValidUntil, ValidWhile\n")
     p
 }
 
@@ -787,10 +804,12 @@ impl Parser {
     fn parse_effect_list(self) -> (Parser, EffectList) with Mut, IO, Panic, Div, Alloc {
         var p = self.advance()  // skip 'with'
         let first_name = p.current_name()
-        let first_eff = EffectRef { name_buf: [0; 64], name_len: first_name.len }
+        let first_eff = EffectRef { name_buf: [0; 64], name_len: first_name.len, payload: 0 - 1 }
         var first = copy_name_to_effect(first_name, first_eff)
         p = p.advance()  // skip effect name
-        p = p.parse_effect_payload()
+        let fpay = p.parse_effect_payload()
+        p = fpay.0
+        first.payload = fpay.1
 
         var rev_list = EffectList { head: first, tail: None }
 
@@ -802,20 +821,36 @@ impl Parser {
             }
             p = p.advance()  // skip ,
             let eff_name = p.current_name()
-            let eff = EffectRef { name_buf: [0; 64], name_len: eff_name.len }
+            let eff = EffectRef { name_buf: [0; 64], name_len: eff_name.len, payload: 0 - 1 }
             var e = copy_name_to_effect(eff_name, eff)
-            rev_list = EffectList { head: e, tail: Some(Box::new(rev_list)) }
             p = p.advance()  // skip effect name
-            p = p.parse_effect_payload()
+            let npay = p.parse_effect_payload()
+            p = npay.0
+            e.payload = npay.1
+            rev_list = EffectList { head: e, tail: Some(Box::new(rev_list)) }
         }
 
         (p, reverse_effect_list(rev_list))
     }
 
-    fn parse_effect_payload(self) -> Parser with Mut, IO, Panic, Div, Alloc {
+    // Returns the parser and the payload of a parameterised effect, or -1 when the
+    // effect carries none. Balanced-paren skipping is kept for payload shapes this
+    // does not yet model; what is new is that a single integer literal is now
+    // RETAINED. It used to be counted and thrown away, which made Epistemic(950)
+    // and Epistemic(400) the same effect.
+    fn parse_effect_payload(self) -> (Parser, i64) with Mut, IO, Panic, Div, Alloc {
         var p = self
+        var value: i64 = 0 - 1
         if parser_peek(p) != TokenKind::LParen {
-            return p
+            return (p, value)
+        }
+        if parser_peek_ahead(p, 1) == TokenKind::IntLit && parser_peek_ahead(p, 2) == TokenKind::RParen {
+            p = p.advance()
+            let tok = p.current()
+            value = tok.int_value
+            p = p.advance()
+            p = p.advance()
+            return (p, value)
         }
 
         var depth: i64 = 0
@@ -828,14 +863,14 @@ impl Parser {
                 depth = depth - 1
                 p = p.advance()
                 if depth == 0 {
-                    return p
+                    return (p, value)
                 }
             } else {
                 p = p.advance()
             }
         }
 
-        p
+        (p, value)
     }
 
     // ============================================================
@@ -1005,38 +1040,50 @@ impl Parser {
 
             let ck = parser_peek(p)
 
-            // Check for epsilon bound: identifier followed by comparison op
+            // Epsilon bound: identifier FOLLOWED BY a comparison op.
+            // A bare identifier (Source, a typo, …) is not an epsilon bound —
+            // it used to become CmpLt 0.0 silently (E241 closes that sink).
             if ck == TokenKind::Ident {
-                // Assume epsilon identifier: parse op + value
+                let ident_span = p.current_span()
                 p = p.advance()  // skip epsilon identifier
                 var cmp_op = CompareOp::CmpLt
+                var saw_cmp = false
                 if parser_peek(p) == TokenKind::Lt {
                     cmp_op = CompareOp::CmpLt
+                    saw_cmp = true
                     p = p.advance()
                 } else if parser_peek(p) == TokenKind::LtEq {
                     cmp_op = CompareOp::CmpLe
+                    saw_cmp = true
                     p = p.advance()
                 } else if parser_peek(p) == TokenKind::Gt {
                     cmp_op = CompareOp::CmpGt
+                    saw_cmp = true
                     p = p.advance()
                 } else if parser_peek(p) == TokenKind::GtEq {
                     cmp_op = CompareOp::CmpGe
+                    saw_cmp = true
                     p = p.advance()
                 } else if parser_peek(p) == TokenKind::EqEq || parser_peek(p) == TokenKind::Eq {
                     cmp_op = CompareOp::CmpEq
+                    saw_cmp = true
                     p = p.advance()
                 }
-                var eps_val = 0.0
-                if parser_peek(p) == TokenKind::FloatLit {
-                    eps_val = p.current().float_value
-                    p = p.advance()
-                } else if parser_peek(p) == TokenKind::IntLit {
-                    eps_val = p.current().int_value as f64
-                    p = p.advance()
-                } else if parser_peek(p) == TokenKind::Ident {
-                    p = p.advance()
+                if saw_cmp {
+                    var eps_val = 0.0
+                    if parser_peek(p) == TokenKind::FloatLit {
+                        eps_val = p.current().float_value
+                        p = p.advance()
+                    } else if parser_peek(p) == TokenKind::IntLit {
+                        eps_val = p.current().int_value as f64
+                        p = p.advance()
+                    } else if parser_peek(p) == TokenKind::Ident {
+                        p = p.advance()
+                    }
+                    epsilon_opt = Some(Box::new(EpsilonBound { op: cmp_op, value: eps_val }))
+                } else {
+                    p = report_unknown_knowledge_component(p, ident_span)
                 }
-                epsilon_opt = Some(Box::new(EpsilonBound { op: cmp_op, value: eps_val }))
             } else if ck == TokenKind::Error {
                 p = p.advance()
                 while parser_peek(p) == TokenKind::Error {
@@ -1116,8 +1163,12 @@ impl Parser {
             } else if ck == TokenKind::Measured {
                 p = p.advance()
                 provenance_opt = Some(Box::new(AstProvenanceKind::AstProvMeasured))
+            } else if ck == TokenKind::Input {
+                p = p.advance()
+                provenance_opt = Some(Box::new(AstProvenanceKind::AstProvInput))
             } else {
-                // Unknown component — skip
+                let unk_span = p.current_span()
+                p = report_unknown_knowledge_component(p, unk_span)
                 p = p.advance()
             }
         }
@@ -1186,13 +1237,24 @@ impl Parser {
         let pair = p.parse_type()
         p = pair.0
         let inner_ty = pair.1
+        // Optional second parameter: the ZD locus this privacy claim is made at.
+        // ExactlyPrivate<T, e3e10> names the zero-divisor element whose kernel the
+        // contribution is claimed to be algebraically inside. It is a compile-time
+        // locus, not a runtime value; the *mut spine interrogates well-formedness.
+        var locus_args: Option<Box<TypeExprList> > = None
+        if parser_peek(p) == TokenKind::Comma {
+            p = p.advance()
+            let pair2 = p.parse_type()
+            p = pair2.0
+            locus_args = Some(Box::new(TypeExprList { head: pair2.1, tail: None }))
+        }
         p = p.expect(TokenKind::Gt)
         let span = p.span_from(start)
         (p, TypeExpr {
             kind: TypeExprKind::TypeExactlyPrivate,
             span: span,
             path: empty_path(),
-            type_args: None,
+            type_args: locus_args,
             inner: Some(Box::new(inner_ty)),
             array_size: None,
             effects: None,
@@ -1387,7 +1449,12 @@ impl Parser {
                 } else if component_tok == TokenKind::Measured {
                     p = p.advance()
                     provenance_opt = Some(Box::new(AstProvenanceKind::AstProvMeasured))
+                } else if component_tok == TokenKind::Input {
+                    p = p.advance()
+                    provenance_opt = Some(Box::new(AstProvenanceKind::AstProvInput))
                 } else {
+                    let unk_span = p.current_span()
+                    p = report_unknown_knowledge_component(p, unk_span)
                     p = p.advance()
                 }
             }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Madaros-native qd128_core import smoke (zero-event residual, stdlib leaf).
-# Does NOT claim full math::qd128 arithmetic (qd_mul still rc=12).
+# Full math::qd128 arithmetic is covered by madaros_qd128_mul_native_v2_gate.sh.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"

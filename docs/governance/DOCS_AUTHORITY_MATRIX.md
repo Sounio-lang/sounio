@@ -134,6 +134,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.gpu-pipeline-sota-assessment-2026-05-30 | repo_only | docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.hypercomplex-651-rootcause-2026-07-14 | repo_only | docs/audit/HYPERCOMPLEX_651_ROOTCAUSE_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.hypercomplex-algebra-audit-2026-07-14 | repo_only | docs/audit/HYPERCOMPLEX_ALGEBRA_AUDIT_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.issue-2143-fo-channel-leak-2026-08-26 | repo_only | docs/audit/ISSUE_2143_FO_CHANNEL_LEAK_2026-08-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.kaxi-ptx-target-sm-audit-2026-06-17 | repo_only | docs/audit/KAXI_PTX_TARGET_SM_AUDIT_2026-06-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-a64-knowledge-arithmetic-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_A64_KNOWLEDGE_ARITHMETIC_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-a64-struct-field-aggregate-copy-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_A64_STRUCT_FIELD_AGGREGATE_COPY_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -915,6 +916,20 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.octonion-validation-report | historical | docs/research/OCTONION_VALIDATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.onn-benchmark-analysis | historical | docs/research/ONN_BENCHMARK_ANALYSIS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ontology-elplus-complete-universe-open-question-2026-08-03 | historical | docs/research/ontology_elplus_complete_universe_open_question_2026-08-03.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-antigarbling-skeleton-2026-08-25 | historical | docs/research/paper_A_antigarbling_skeleton_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-merged-2026-08-25 | historical | docs/research/paper_A_MERGED_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-ns-metatheory-mechanized-2026-08-30 | historical | docs/research/paper_A_ns_metatheory_mechanized_2026-08-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-ns-metatheory-xai-review-2026-08-30 | historical | docs/research/paper_A_ns_metatheory_xai_review_2026-08-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-priorart-gate-signoff-2026-08-25 | historical | docs/research/paper_A_priorart_gate_signoff_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-readme | historical | docs/research/paper_A_README.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-section1-draft-2026-08-25 | historical | docs/research/paper_A_section1_draft_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-section2-draft-2026-08-25 | historical | docs/research/paper_A_section2_draft_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-section6-draft-2026-08-25 | historical | docs/research/paper_A_section6_draft_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-section8-draft-2026-08-25 | historical | docs/research/paper_A_section8_draft_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-sections3-10-11-draft-2026-08-25 | historical | docs/research/paper_A_sections3_10_11_draft_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-sections4-5-draft-2026-08-25 | historical | docs/research/paper_A_sections4_5_draft_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-sections7-9-draft-2026-08-25 | historical | docs/research/paper_A_sections7_9_draft_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-wire-n1-prep-2026-08-25 | historical | docs/research/paper_A_wire_N1_prep_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-exp123-vertical-2026-07-25 | historical | docs/research/particle_exp123_vertical_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-physics-epistemic-audit | historical | docs/research/particle_physics_epistemic_audit.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pb-highwidth-microkernel-2026-06-23 | historical | docs/research/pb-highwidth-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -935,6 +950,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.program-registry-mercyful-learning | historical | docs/research/PROGRAM-REGISTRY-mercyful-learning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-family-matrix-2026-06-23 | historical | docs/research/proof-checker-family-matrix-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-microkernel-suite-2026-06-23 | historical | docs/research/proof-checker-microkernel-suite-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.publishable-novelty-assessment-2026-08-25 | historical | docs/research/publishable_novelty_assessment_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.quaternion-neural-networks | historical | docs/research/QUATERNION_NEURAL_NETWORKS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.r2-continuous-law-theorem-falsifiers-2026-07-25 | historical | docs/research/r2_continuous_law_theorem_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.r2-continuous-law-theorem-spec-2026-07-25 | historical | docs/research/r2_continuous_law_theorem_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

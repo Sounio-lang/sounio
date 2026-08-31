@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, type KeyboardEvent } from 'react';
 import { publicContract } from '../../data/artifactStatus';
+import { claimEscape } from '../../lib/measurementClaim';
 
 interface PlaygroundEditorProps {
   initialCode?: string;
@@ -448,7 +449,12 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
       </div>
 
       <div className="flex items-center justify-between px-4 py-2 bg-[var(--color-navy-900)] text-white/60 text-xs font-mono border-t border-white/10">
-        <span>Sounio v{publicContract.versions.checkedArtifact}</span>
+        <span>Sounio v{claimEscape({
+          id: 'checked-artifact-version',
+          class: 'version',
+          reason: 'Compiler launcher version string from the public contract. Identity, not a green-count.',
+          text: publicContract.versions.checkedArtifact,
+        })}</span>
         <span>{wasmApi?.version ? wasmApi.version() : 'WASM'}</span>
       </div>
     </div>

@@ -1,0 +1,75 @@
+// #1649 instruction arena: allocation, round-trip, and fail-closed capacity.
+//
+// The point of the arena is that a region costs what a function actually uses
+// instead of a fixed 4096-slot reservation. This witness pins that regions are
+// variable-sized, that element access round-trips, and -- the part that matters
+// most -- that running out of arena or region table is REFUSED with a distinct
+// code rather than silently dropping instructions, which is the failure this
+// whole line of work exists to remove.
+
+use ir::ir::*
+use ir::instr_arena::*
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    if ir_instr_arena_init() != IR_ARENA_OK { return 10 }
+
+    // A zero-initialised handle must NOT address real data. Slot 0 is quarantine
+    // and its generation has already moved past 0, so a zeroed handle is stale.
+    var zeroed = IrInstrRegion { slot: 0, generation: 0 }
+    if ir_region_status(&zeroed) != IR_ARENA_ERR_STALE { return 11 }
+
+    var r = ir_region_invalid()
+    if ir_region_status(&r) != IR_ARENA_ERR_INVALID { return 12 }
+    if ir_instr_arena_alloc(4, &! r) != IR_ARENA_OK { return 13 }
+    if !ir_region_is_valid(&r) { return 14 }
+    if ir_region_cap(&r) != 4 { return 15 }
+    if ir_region_len(&r) != 0 { return 16 }
+
+    // Round-trip four instructions.
+    var i: i64 = 0
+    while i < 4 {
+        if ir_region_push(&! r, ir_load_imm(i, i * 100)) != IR_ARENA_OK { return 20 }
+        i = i + 1
+    }
+    if ir_region_len(&r) != 4 { return 21 }
+    var got = ir_nop()
+    i = 0
+    while i < 4 {
+        if ir_region_get(&r, i, &! got) != IR_ARENA_OK { return 22 }
+        if got.dst != i { return 23 }
+        if got.imm_i64 != i * 100 { return 24 }
+        i = i + 1
+    }
+
+    // Out-of-range access is refused, not clamped.
+    if ir_region_get(&r, 4, &! got) != IR_ARENA_ERR_RANGE { return 25 }
+    if ir_region_get(&r, 0 - 1, &! got) != IR_ARENA_ERR_RANGE { return 26 }
+    if ir_region_set(&r, 4, ir_nop()) != IR_ARENA_ERR_RANGE { return 27 }
+
+    // Regions are variable-sized: a second region of a different size, and the
+    // arena consumes exactly what was asked for.
+    let used_before = ir_instr_arena_used()
+    var small = ir_region_invalid()
+    if ir_instr_arena_alloc(7, &! small) != IR_ARENA_OK { return 30 }
+    if ir_instr_arena_used() != used_before + 7 { return 31 }
+    if ir_region_cap(&small) != 7 { return 32 }
+
+    // Negative sizes are refused rather than wrapping.
+    var bad = ir_region_invalid()
+    if ir_instr_arena_alloc(0 - 1, &! bad) != IR_ARENA_ERR_NEGATIVE { return 33 }
+
+    // FAIL-CLOSED: asking for more than the arena holds must return a distinct
+    // code. A silent truncation here would be the #1586 defect, rebuilt.
+    var huge = ir_region_invalid()
+    if ir_instr_arena_alloc(ir_instr_arena_capacity(), &! huge) != IR_ARENA_ERR_CAPACITY { return 40 }
+    // and the failed allocation must not have consumed anything
+    if ir_instr_arena_used() != used_before + 7 { return 41 }
+    if !ir_region_is_valid(&r) { return 42 }
+
+    // No violation should have been raised by any of the above: these are all
+    // refusals through the checked API, not contract breaches.
+    if ir_instr_arena_violation() { return 43 }
+
+    print("IR_INSTR_ARENA_WITNESS_PASS\n")
+    0
+}

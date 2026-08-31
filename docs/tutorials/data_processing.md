@@ -15,9 +15,13 @@ The production implementation lives in [`stdlib/csv/parser.sio`](../../stdlib/cs
 
 ## Prerequisites
 
+The programs below are built up inside this tutorial; there is no ready-made
+example file to run. Paste a snippet into a file of your own and run it with the
+prebuilt compiler:
+
 ```bash
 SOUC=./bin/souc
-$SOUC run examples/my_csv_analysis.sio
+$SOUC run my_csv_analysis.sio      # a file you create from the snippets below
 ```
 
 ## 1. The CsvTable Data Structure

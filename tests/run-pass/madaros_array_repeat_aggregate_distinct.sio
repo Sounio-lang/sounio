@@ -1,0 +1,111 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: ARRAY_REPEAT_DISTINCT OK
+// Gated behind `requires: madaros`: CI's full-test-suite runs souc-stage2
+// (lean_single), which has its OWN, separate defect on the nested-array cases
+// exercised here -- it returns `999` for [[9;2];3] and `0` for the 3-level
+// case, dropping the writes entirely. That is not what this test is about, and
+// letting it fail there would pin an unrelated bug. This test asserts the
+// modular Madaros contract and runs on the madaros gate.
+// Regression: `[Aggregate; N]` repeat literals must allocate N DISTINCT objects.
+//
+// Array slots are 8-byte boxed pointers (ir/lower.sio `aggregate_storage_bytes`
+// = elem_count * 8), so an aggregate element is a POINTER. Before the fix,
+// `lower_array_repeat_literal_ref` lowered the element expression once and
+// `lower_array_repeat_fill` stored that single pointer into every slot: all N
+// elements aliased ONE object, and a write through element i was observable
+// through every other element. Explicit-list literals were unaffected
+// (`lower_array_elems_ref` lowers per element), as were scalars.
+//
+// `lower_array_repeat_fill_distinct` now lowers the element expression inside
+// the fill loop, so the IrAlloc re-executes per iteration (runtime heap bump)
+// and each slot receives its own object, with IR size still O(1) in N.
+//
+// Covered: flat struct repeat, nested array repeat, struct-in-struct repeat,
+// three-level repeat, float element repeat. Controls: explicit-list literals
+// and scalar repeat, which must remain correct.
+
+struct P { x: i64 }
+struct Inner { flags: [bool; 2] }
+struct Outer { items: [Inner; 4] }
+struct Pt { v: f64 }
+
+fn flat_struct_repeat() -> i64 with Mut, Alloc, Panic, Div {
+    var a = [P { x: 0 }; 4]
+    a[0].x = 5
+    a[1].x = 6
+    a[0].x * 1000 + a[1].x * 100 + a[2].x * 10 + a[3].x
+}
+
+fn nested_array_repeat() -> i64 with Mut, Alloc, Panic, Div {
+    var a = [[9; 2]; 3]
+    a[0][0] = 5
+    a[1][0] = 6
+    a[0][0] * 100 + a[1][0] * 10 + a[2][0]
+}
+
+fn struct_in_struct_repeat() -> i64 with Mut, Alloc, Panic, Div {
+    var o = Outer { items: [Inner { flags: [false; 2] }; 4] }
+    o.items[3].flags[1] = true
+    var n = 0
+    var i = 0
+    while i < 4 {
+        if o.items[i as usize].flags[1] { n = n + 1 }
+        i = i + 1
+    }
+    n
+}
+
+fn three_level_repeat() -> i64 with Mut, Alloc, Panic, Div {
+    var g = [[[0; 2]; 2]; 2]
+    g[1][1][1] = 7
+    g[0][0][1] * 1000 + g[0][1][1] * 100 + g[1][0][1] * 10 + g[1][1][1]
+}
+
+// Float coverage uses a struct field, NOT a nested float array: reading
+// `a[i][j]` out of a nested f64 array is broken independently of this fix
+// (verified identical on the unpatched compiler), so it cannot be asserted here.
+fn float_elem_repeat() -> i64 with Mut, Alloc, Panic, Div {
+    var a = [Pt { v: 0.5 }; 3]
+    a[0].v = 1.5
+    var n = 0
+    var i = 0
+    while i < 3 {
+        if a[i as usize].v == 0.5 { n = n + 1 }
+        i = i + 1
+    }
+    n
+}
+
+fn list_literal_control() -> i64 with Mut, Alloc, Panic, Div {
+    var a = [P { x: 1 }, P { x: 1 }, P { x: 1 }, P { x: 1 }]
+    a[1].x = 2
+    a[2].x = 3
+    a[3].x = 9
+    a[0].x * 1000 + a[1].x * 100 + a[2].x * 10 + a[3].x
+}
+
+fn scalar_repeat_control() -> i64 with Mut, Alloc, Panic, Div {
+    var s = [7; 4]
+    s[0] = 5
+    s[0] * 1000 + s[1] * 100 + s[2] * 10 + s[3]
+}
+
+fn main() -> i64 with IO, Mut, Alloc, Panic, Div {
+    var ok = true
+    if flat_struct_repeat() != 5600 { ok = false }
+    if nested_array_repeat() != 569 { ok = false }
+    if struct_in_struct_repeat() != 1 { ok = false }
+    if three_level_repeat() != 7 { ok = false }
+    if float_elem_repeat() != 2 { ok = false }
+    if list_literal_control() != 1239 { ok = false }
+    if scalar_repeat_control() != 5777 { ok = false }
+
+    if ok {
+        print("ARRAY_REPEAT_DISTINCT OK\n")
+        0
+    } else {
+        print("ARRAY_REPEAT_DISTINCT FAIL\n")
+        1
+    }
+}

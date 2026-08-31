@@ -97,7 +97,7 @@ _detect_raw_mode() {
   fi
   local ident
   ident="$("$RAW_SOUC" /dev/null /dev/null 2>/dev/null | head -n 1 || true)"
-  if grep -q "Madares v" <<<"$ident"; then
+  if grep -q "Madaros v" <<<"$ident"; then
     echo "modular"
     return 0
   fi

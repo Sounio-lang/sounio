@@ -1,5 +1,71 @@
 # sounio-lsp changelog
 
+## v0.4.0 — 2026-07-25 — Sprint 2: items #5–#8
+
+Lands all four deferred Sprint-2 items on the pure-Sounio server
+(`self-hosted/lsp/server.sio`). Verification: `tools/lsp/test_protocol.sh`
+tally 115 pass / 1 fail (the one failure is the pre-existing T2
+diagnostic-message format drift, unchanged by this sprint). Probes:
+T9a–d (#5), T10a–c (#7), T11a–d (#8), T12a–f (#6).
+
+### #5 — `semanticTokens/full` resultId + `semanticTokens/full/delta`
+
+`/full` now collects tokens into a per-document cache and returns
+`{data, resultId: "st<N>"}`. `/full/delta` diffs against the cached
+`previousResultId`: single-edit prefix/suffix tuple-aligned diff emitting
+`SemanticTokensEdit[]`, empty `edits` on no change, full-result fallback
+on a stale or unknown `previousResultId`. Capability advertises
+`"full":{"delta":true}`.
+
+### #6 — `typeHierarchyProvider`
+
+`textDocument/prepareTypeHierarchy` resolves the identifier under the
+cursor to a `struct`/`enum`/`trait`/`algebra` declaration in the active
+document (null when it is not a declared type).
+`typeHierarchy/supertypes` of a type S = traits A with `impl A for S`;
+`typeHierarchy/subtypes` of a trait T = implementors B with
+`impl T for B`. Sounio has no struct/enum inheritance, so structs have no
+subtypes and traits no supertypes. Single-document scope.
+
+### #7 — cross-file `workspace/symbol`
+
+`initialize` captures `params.rootUri`; `workspace/symbol` now also walks
+one directory level of `*.sio` files under that root (getdents64 via
+`syscall6`), loading each unopened file into a transient slot and running
+the same declaration scanner used for open documents. Files already open
+as slots are deduped by URI.
+
+### #8 — incremental `textDocumentSync` (kind=2)
+
+`textDocument/didChange` accepts ranged `contentChanges[]` and applies
+them in order against the stored slot text, then re-runs diagnostics.
+Full-replacement change objects (no `range`) still work. Capability now
+advertises `"textDocumentSync":2`.
+
+### Compiler enabler
+
+This sprint also fixed two pre-existing Madaros bugs that kept the pure
+server from running correctly under Madaros:
+
+1. **Zero-init scalar/array globals.** `var G: i64 = 0` was miscompiled
+   into a pointer-to-empty-string store: `BSS_INIT_STRING_MAGIC`
+   (`0 - 800001`, `ir.sio`) folds to 0 cross-module in the seed-built
+   compiler, so the string-literal BSS guard in
+   `emit_global_var_inits_into` matched *every* zero fill. The guard now
+   also requires a non-empty payload Name
+   (`self-hosted/native/codegen_x86_linux.sio`).
+2. **8192-byte .rodata cap.** `flat_rodata_bytes` lived inside the
+   `NativeCompiler` struct capped at 8192 bytes; every string literal
+   past the cap was silently truncated, garbling any program with more
+   than ~8KB of literal data (the server has ~40KB). The payload moved
+   off-struct to a new `NC_BIG_RODATA` global (256KB) in
+   `self-hosted/native/frame.sio`, same pattern as the existing
+   `NC_FLAT_RELOC_*` globals.
+
+With both fixes the pure server compiles and runs correctly under
+Madaros, and `scripts/ci/sounio_editor_tooling_support_gate.sh` treats
+the pure-Sounio LSP rebuild as a required (pass/fail) step.
+
 ## v0.3.0 — 2026-05-17 — Parity patches
 
 Closes four items flagged by the 2026-05-17 adversarial parity audit.

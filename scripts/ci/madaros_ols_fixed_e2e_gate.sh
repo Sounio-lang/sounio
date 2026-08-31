@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Madaros-native OLS diagnostics E2E (fixed-array surface).
-# Closes the D3 "OLS multi-mod E019" attention item for the cooks+OLS+shapiro
-# path without claiming stats::validation slice methods are green.
+# cooks + ols_fixed + shapiro; validation fixed-buffer API is gated separately
+# by scripts/ci/madaros_validation_import_gate.sh.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
-export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
+# Always pin this worktree's stdlib (never inherit a foreign SOUNIO_STDLIB_PATH).
+export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
 # Force default Madaros (do not inherit lean_single from caller)
 unset SOUNIO_SOUC_ENGINE || true
 SOUC="${SOUC:-$ROOT/bin/souc}"
@@ -47,26 +48,38 @@ grep -E 'ols_slope=0\.6' "$LOG" >/dev/null || {
   exit 1
 }
 
-# Negative control: validation slice path must still be the E019 residual
-NEG="$OUT/neg.sio"
-cat >"$NEG" <<'EOF'
+# Positive control: stats::validation fixed-buffer API under Madaros
+POS="$OUT/pos.sio"
+cat >"$POS" <<'EOF'
 use stats::validation::{linear_regression}
 fn main() -> i32 with IO, Mut, Div, Panic {
-    var xt: [f64; 5] = [1.0, 2.0, 3.0, 4.0, 5.0]
-    var yt: [f64; 5] = [2.0, 4.0, 5.0, 4.0, 5.0]
-    let _fit = linear_regression(&xt, &yt)
-    print("UNEXPECTED_VALIDATION_GREEN\n")
-    return 0
+    var xt: [f64; 256] = [0.0; 256]
+    var yt: [f64; 256] = [0.0; 256]
+    xt[0] = 1.0; xt[1] = 2.0; xt[2] = 3.0; xt[3] = 4.0; xt[4] = 5.0
+    yt[0] = 2.0; yt[1] = 4.0; yt[2] = 5.0; yt[3] = 4.0; yt[4] = 5.0
+    let fit = linear_regression(&xt, &yt, 5)
+    if fit.slope > 0.59 && fit.slope < 0.61 {
+        print("VALIDATION_POS_OK\n")
+        return 0
+    }
+    1
 }
 EOF
-if "$SOUC" compile "$NEG" -o "$OUT/neg.elf" >"$OUT/neg.log" 2>&1; then
-  echo "FAIL: validation slice path unexpectedly compiled under Madaros"
+if ! "$SOUC" compile "$POS" -o "$OUT/pos.elf" >"$OUT/pos.log" 2>&1; then
+  echo "FAIL: validation fixed-buffer path should compile under Madaros"
+  tail -40 "$OUT/pos.log" || true
   exit 1
 fi
-if ! grep -E 'E019|method calls are not supported' "$OUT/neg.log" >/dev/null; then
-  echo "FAIL: expected E019 on validation import; got:"
-  tail -30 "$OUT/neg.log" || true
+chmod +x "$OUT/pos.elf"
+if ! "$OUT/pos.elf" >"$OUT/pos_run.log" 2>&1; then
+  echo "FAIL: validation positive control run"
+  cat "$OUT/pos_run.log" || true
   exit 1
 fi
+grep -q 'VALIDATION_POS_OK' "$OUT/pos_run.log" || {
+  echo "FAIL: missing VALIDATION_POS_OK"
+  cat "$OUT/pos_run.log" || true
+  exit 1
+}
 
 echo "MADAROS_OLS_FIXED_E2E_GATE_OK"

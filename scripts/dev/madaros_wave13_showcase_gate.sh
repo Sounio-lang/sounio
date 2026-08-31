@@ -22,7 +22,8 @@
 #
 # Prebuilt lag note: #1392 ships bin/madaros-linux-x86_64. If a checkout still
 # has an older stock ELF and cd_exact is RED, rebuild before claiming green:
-#   scripts/dev/souc-build-lock.sh make build-madaros
+#   make build-madaros   # bare: it locks internally; wrapping it in
+#                        # souc-build-lock.sh deadlocks (see CLAUDE.md §4)
 #   MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash "$0"
 #
 # Exit 0 when every REQUIRED sub-gate is green. Writes:
@@ -377,7 +378,7 @@ if [[ $fail_required -eq 0 ]]; then
 fi
 if [[ ( "$cd_exact_status" != "pass" || "$cd_exact_e2e_status" != "pass" ) && "$REQUIRE_CD_EXACT" == "1" ]]; then
   echo "NOTE: cd_exact family RED while required — rebuild Madaros if stock prebuilt lags #1392:" >&2
-  echo "  scripts/dev/souc-build-lock.sh make build-madaros" >&2
+  echo "  make build-madaros   # bare; wrapping it in souc-build-lock.sh deadlocks" >&2
   echo "  MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash $0" >&2
 fi
 echo "MADAROS_WAVE13_SHOWCASE_GATE_FAIL" >&2

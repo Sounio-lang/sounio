@@ -6,6 +6,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 KEEP_WORK="${SOUNIO_MADAROS_GLOBAL_CAPACITY_GATE_KEEP:-0}"
 SOURCE="$ROOT_DIR/tests/compile-fail/door1_too_many_globals_1025.sio"
 
+# READ THE CAP, DO NOT PIN IT. This gate hardcoded 2047/2048/2049 and went red
+# the moment BSS_MAX_GLOBALS moved (2047 -> 8191, sharing storage with
+# IR_MAX_FUNCS). A boundary gate whose boundary is a literal tests the literal,
+# not the compiler. Derived here so it tracks the constant.
+BSS_MAX_GLOBALS="$(grep -E '^pub let BSS_MAX_GLOBALS: i64 = [0-9]+' \
+    "$ROOT_DIR/self-hosted/ir/ir.sio" | grep -oE '[0-9]+$' | head -1)"
+[[ -n "$BSS_MAX_GLOBALS" ]] || fail "BSS_MAX_GLOBALS is no longer declared where this gate looks"
+AT_CAP="$BSS_MAX_GLOBALS"
+OVER_CAP="$((BSS_MAX_GLOBALS + 1))"
+
 fail() {
   echo "[madaros-global-capacity] FAIL: $*" >&2
   exit 1
@@ -42,7 +52,7 @@ if [[ -z "${SOUNIO_MADAROS_GLOBAL_CAPACITY_GATE_BIN:-}" ]]; then
 fi
 [[ -x "$MADAROS_ELF" ]] || fail "rebuilt Madaros is missing or not executable: $MADAROS_ELF"
 
-for i in $(seq 0 2046); do
+for i in $(seq 0 "$((AT_CAP - 1))"); do
   printf 'var g%s: i64 = 0\n' "$i" >>"$BOUNDARY_SOURCE"
 done
 cat >>"$BOUNDARY_SOURCE" <<'SOUNIO'
@@ -58,9 +68,9 @@ set -e
 
 if [[ "$boundary_compile_rc" -ne 0 ]]; then
   cat "$BOUNDARY_LOG" >&2
-  fail "2047-global boundary witness did not compile rc=$boundary_compile_rc"
+  fail "${AT_CAP}-global boundary witness did not compile rc=$boundary_compile_rc"
 fi
-[[ -e "$BOUNDARY_OUT" ]] || fail "2047-global boundary witness did not produce an output artifact"
+[[ -e "$BOUNDARY_OUT" ]] || fail "${AT_CAP}-global boundary witness did not produce an output artifact"
 chmod +x "$BOUNDARY_OUT"
 set +e
 "$BOUNDARY_OUT" >"$BOUNDARY_RUN_LOG" 2>&1
@@ -68,10 +78,10 @@ boundary_run_rc=$?
 set -e
 if [[ "$boundary_run_rc" -ne 0 ]]; then
   cat "$BOUNDARY_RUN_LOG" >&2
-  fail "2047-global boundary witness did not execute cleanly rc=$boundary_run_rc"
+  fail "${AT_CAP}-global boundary witness did not execute cleanly rc=$boundary_run_rc"
 fi
 
-for i in $(seq 0 2047); do
+for i in $(seq 0 "$((OVER_CAP - 1))"); do
   printf 'var g%s: i64 = 0\n' "$i" >>"$OVERFLOW_SOURCE"
 done
 cat >>"$OVERFLOW_SOURCE" <<'SOUNIO'
@@ -87,41 +97,26 @@ set -e
 
 if [[ "$overflow_compile_rc" -eq 0 ]]; then
   cat "$OVERFLOW_LOG" >&2
-  fail "2048-global boundary witness unexpectedly compiled"
+  fail "${OVER_CAP}-global boundary witness unexpectedly compiled"
 fi
 if [[ "$overflow_compile_rc" -ge 128 ]]; then
   cat "$OVERFLOW_LOG" >&2
-  fail "2048-global boundary witness terminated by signal rc=$overflow_compile_rc"
+  fail "${OVER_CAP}-global boundary witness terminated by signal rc=$overflow_compile_rc"
 fi
 if [[ -e "$OVERFLOW_OUT" ]]; then
   cat "$OVERFLOW_LOG" >&2
-  fail "2048-global capacity rejection left an output artifact: $OVERFLOW_OUT"
+  fail "${OVER_CAP}-global capacity rejection left an output artifact: $OVERFLOW_OUT"
 fi
-grep -Fq 'too many globals: shared IR module capacity exceeded (max 2047 slots)' "$OVERFLOW_LOG" || {
+grep -Fq "too many globals: shared IR module capacity exceeded (max ${AT_CAP} slots)" "$OVERFLOW_LOG" || {
   cat "$OVERFLOW_LOG" >&2
-  fail "2048-global capacity diagnostic was missing or changed"
+  fail "${OVER_CAP}-global capacity diagnostic was missing or changed"
 }
 
-set +e
-MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$SOURCE" -o "$OUT" >"$LOG" 2>&1
-compile_rc=$?
-set -e
-
-if [[ "$compile_rc" -eq 0 ]]; then
-  cat "$LOG" >&2
-  fail "capacity witness unexpectedly compiled"
-fi
-if [[ "$compile_rc" -ge 128 ]]; then
-  cat "$LOG" >&2
-  fail "capacity witness terminated by signal rc=$compile_rc"
-fi
-if [[ -e "$OUT" ]]; then
-  cat "$LOG" >&2
-  fail "capacity rejection left an output artifact: $OUT"
-fi
-grep -Fq 'too many globals: shared IR module capacity exceeded (max 2047 slots)' "$LOG" || {
-  cat "$LOG" >&2
-  fail "capacity diagnostic was missing or changed"
-}
-
-echo "[madaros-global-capacity] PASS: 2047 globals execute; exact 2048 boundary and canonical 2049 fixture reject before IR slot overflow"
+# The canonical fixture arm was REMOVED, not silenced. Its file header says
+# "Keep this above lean_single global_cap() == 2048", so its 2049 globals are
+# pinned to LEAN_SINGLE's limit — and under a Madaros whose cap is larger it is
+# simply a valid program, which is what it now is. Asserting that Madaros
+# rejects it would be asserting a number that belongs to the other engine. The
+# fixture still carries //@ compile-fail and is still exercised by the full test
+# suite, which runs lean_single.
+echo "[madaros-global-capacity] PASS: ${AT_CAP} globals execute; ${OVER_CAP} rejects with the cap named, before IR slot overflow"

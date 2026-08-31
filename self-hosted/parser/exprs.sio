@@ -310,27 +310,7 @@ impl Parser {
         // TokenKind::Var is included so bare `var` works as a binding *use*
         // after `let var = ...` (contextual keyword; see patterns.sio).
         // Statement `var x = ...` is dispatched from parse_stmt, not here.
-        // Scope joins this list for the same reason the others are on it: `scope`
-        // is a keyword only in the `policy ... scope NAME { ... }` ITEM header
-        // (items.sio:2171), which peeks for it before the brace and never runs
-        // expression parsing there. As an expression, `scope` is just a variable
-        // name -- 65 read-sites across 16 files under self-hosted/ -- and the
-        // binding site already parsed, because expect_ident accepts keywords.
-        // Only the read fell through to error recovery.
-        // PolicyLower is the lowercase `policy` ITEM keyword (TokenKind::Policy is
-        // the capitalised TYPE, a different token — types.sio:160 — and is left
-        // alone). Items are parsed only at top level: parse_block loops to RBrace
-        // without ever checking for an item start, and at_item_start(), the one
-        // helper that lists PolicyLower, has no callers in the live parser. So a
-        // `policy` inside a body was never going to open an item, and refusing it
-        // as an expression only produced silent errors — 28 of them in
-        // native/target_policy.sio alone, where `policy` is a parameter name.
-        // Is is the cleanest case of the lot: the lexer produces TokenKind::Is
-        // and tk_is_keyword lists it, but NO grammar rule anywhere consumes it —
-        // the only other references are the lexer table and a debug printer. It
-        // is a reserved word the language never spends, and reserving it cost
-        // `let is = ...` its read (self-hosted/ir/dce.sio:1771 among others).
-        else if k == TokenKind::Ident || k == TokenKind::Knowledge || k == TokenKind::Close || k == TokenKind::Unit || k == TokenKind::Kernel || k == TokenKind::Var || k == TokenKind::Scope || k == TokenKind::PolicyLower || k == TokenKind::Is || k == TokenKind::Study {
+        else if k == TokenKind::Ident || k == TokenKind::Knowledge || k == TokenKind::Close || k == TokenKind::Unit || k == TokenKind::Kernel || k == TokenKind::Var || tk_is_contextual_ident(k) {
             self.parse_ident_expr()
         }
         // Error recovery: advance past unrecognized token to avoid infinite loops
@@ -339,29 +319,6 @@ impl Parser {
             var p = self
             p.had_error = true
             p.error_count = p.error_count + 1
-            // This counter used to increment in SILENCE. Everything downstream
-            // reported a number with no cause: `Parse failed for module 0: 3
-            // errors` with not one line of diagnostic above it, and the closure
-            // preflight then refused the build saying only "AST closure
-            // incomplete". Locating a single offending expression cost a full
-            // delta-debug of the module. Bounded by the same <= 20 rule as the
-            // other sites.
-            //
-            // CORRECTION: this was first described as "the only error site in
-            // the parser that did", which was wrong — a truncated grep. A full
-            // census found 31 silent sites of 35, 25 of them in items.sio; the
-            // rest are instrumented alongside this one.
-            if p.error_count <= 20 {
-                print("parse error: unrecognized expression token=")
-                print_int(k as i64)
-                if span.start > 0 || span.end > 0 {
-                    print(" at ")
-                    print_int(span.start)
-                    print("..")
-                    print_int(span.end)
-                }
-                print("\n")
-            }
             p = p.advance()
             parser_store_expr_box(Box::new(error_expr(span)))
             p
@@ -662,9 +619,6 @@ impl Parser {
         } else {
             p.had_error = true
             p.error_count = p.error_count + 1
-            if p.error_count <= 20 {
-                print("parse error: silent-site exprs.sio:654\n")
-            }
             let span = p.span_from(start)
             var e = error_expr(span)
             e.name = marker_name
@@ -1176,6 +1130,35 @@ impl Parser {
                 turbofish_args = Some(Box::new(ta_pair.1))
             }
 
+            // E043, path-qualified: `foo::bar!(...)`. Same lexical-adjacency
+            // rule as the bare-identifier site below -- `!` must touch BOTH the
+            // preceding segment and the following `(`. Whitespace on either
+            // side keeps the existing operator expression valid, exactly as for
+            // `x! (y)` / `x !(y)`.
+            //
+            // Without this arm E043 meant "bare identifier followed by a tight
+            // bang-call" rather than "Rust macro syntax", so the namespaced
+            // shape most Rust code actually writes -- `std::println!(..)`,
+            // `vec!`-style paths -- fell through to E004 and the message on the
+            // diagnostic was wider than the rule that produced it.
+            //
+            // The left boundary here is p1.pos - 1 (the last path segment),
+            // not self.pos: the path consumed several tokens to get here.
+            if parser_peek(p1) == TokenKind::Bang
+                && p1.pos > 0
+                && p1.pos + 1 < p1.token_count
+                && (parser_peek_ahead(p1, 1) == TokenKind::LParen || pt_read_kind_code(p1.pos + 1) == 174)
+                && PT_END[(p1.pos - 1) as usize] == PT_START[p1.pos as usize]
+                && PT_END[p1.pos as usize] == PT_START[(p1.pos + 1) as usize] {
+                p1.had_error = true
+                p1.error_count = p1.error_count + 1
+                if p1.error_count <= 20 {
+                    print("error[E043]: Sounio does not use Rust macros (`ident!(...)`)\n")
+                    print("  help: use a regular function call instead of macro syntax\n")
+                }
+                p1 = parser_advance(p1)  // skip `!`; recover as a regular call
+            }
+
             if !p1.no_struct_lit && parser_peek(p1) == TokenKind::LBrace {
                 // Struct literal: Foo { x: 1, y: 2 }
                 p1.parse_struct_literal(path, start)
@@ -1200,6 +1183,24 @@ impl Parser {
             // Simple identifier — may still carry turbofish: vec_new::<f64>()
             let span = self.current_span()
             var p = parser_advance(self)
+
+            // E043: reject only the tightly-adjacent Rust macro shape
+            // `ident!(...)`. Whitespace on either side of `!` preserves the
+            // existing operator expression, for example `x! (y)`.
+            if parser_peek(p) == TokenKind::Bang
+                && p.pos + 1 < p.token_count
+                && (parser_peek_ahead(p, 1) == TokenKind::LParen || pt_read_kind_code(p.pos + 1) == 174)
+                && PT_END[self.pos as usize] == PT_START[p.pos as usize]
+                && PT_END[p.pos as usize] == PT_START[(p.pos + 1) as usize] {
+                p.had_error = true
+                p.error_count = p.error_count + 1
+                if p.error_count <= 20 {
+                    print("error[E043]: Sounio does not use Rust macros (`ident!(...)`)\n")
+                    print("  help: use a regular function call instead of macro syntax\n")
+                }
+                p = parser_advance(p)  // skip `!`; recover as a regular call
+            }
+
             var e = mk_expr(ExprKind::ExprIdent, span)
             e.name = name
             if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::Lt {

@@ -138,6 +138,11 @@ pub struct AstPathList {
 pub struct EffectRef {
     name_buf: [i8; 64],
     name_len: i64,
+    // Payload of a parameterised effect, e.g. the 950 in `with Epistemic(950)`.
+    // -1 means the effect was written without one. Before this field existed the
+    // payload was parsed and discarded, so Epistemic(950) and Epistemic(400) were
+    // the same effect to the compiler.
+    payload: i64,
 }
 
 // ============================================================
@@ -1097,6 +1102,10 @@ pub struct FnDef {
     body: Block,
     span: Span,
     is_kernel: bool,
+    // #1547: true for `extern "C" fn` declarations (no body; lowered as an
+    // instr_count == 0 stub so builtin dispatch applies). Distinct from
+    // is_kernel, which the checker treats as a GPU kernel (E070/E072).
+    is_extern: bool,
 }
 
 pub struct Param {
@@ -1140,6 +1149,22 @@ pub struct VariantDef {
     name: Name,
     fields: Option<Box<FieldDefList> >,
     span: Span,
+}
+
+// Scalar accessor for bootstrap-sensitive consumers. Returning the Box payload
+// through Option from a nested ItemList field path is miscompiled by lean_single.
+pub fn item_enum_def_ptr(item: &Item) -> *mut EnumDef {
+    match (*item).enum_def {
+        Some(ed) => ed as *mut EnumDef,
+        None => 0 as *mut EnumDef,
+    }
+}
+
+pub fn item_struct_def_ptr(item: &Item) -> *mut StructDef {
+    match (*item).struct_def {
+        Some(sd) => sd as *mut StructDef,
+        None => 0 as *mut StructDef,
+    }
 }
 
 // ============================================================
@@ -1366,8 +1391,15 @@ pub fn name_eq(a: Name, b: Name) -> bool with Mut, Panic, Div {
 // ============================================================
 
 pub var GLOBAL_VAR_INIT_COUNT: i64 = 0
-pub var GLOBAL_VAR_INIT_HASHES: [i64; 128] = [0; 128]
-pub var GLOBAL_VAR_INIT_VALUES: [i64; 128] = [0; 128]
+// Cap: 8192 init words (was 128). The table accumulates every module's global
+// initializers in a multi-module build (scalar = 1 word, element-list = N
+// words, string literal = 2 + ceil(len/8) words). At 128, large programs (e.g.
+// lsp/server.sio with 231 own globals + stdlib) silently dropped every
+// initializer past the cap, leaving those globals BSS-zero — including
+// cross-module `pub let` constants such as ir.sio's BSS_INIT_STRING_MAGIC.
+// Overflow past 8192 is still a silent drop (record fns return unit).
+pub var GLOBAL_VAR_INIT_HASHES: [i64; 8192] = [0; 8192]
+pub var GLOBAL_VAR_INIT_VALUES: [i64; 8192] = [0; 8192]
 // When 1, parse_items_preloaded does NOT reset the global-init table, so a
 // multi-module compilation accumulates every module's f64 global initializers
 // (main is parsed first, then each import). The multimodule lower entry sets it
@@ -1398,7 +1430,7 @@ pub fn ast_reset_global_var_inits() with Mut {
 }
 
 pub fn ast_record_global_var_init(name: Name, value: i64) with Mut, Div {
-    if GLOBAL_VAR_INIT_COUNT < 128 {
+    if GLOBAL_VAR_INIT_COUNT < 8192 {
         GLOBAL_VAR_INIT_HASHES[GLOBAL_VAR_INIT_COUNT as usize] = ast_name_hash(name)
         GLOBAL_VAR_INIT_VALUES[GLOBAL_VAR_INIT_COUNT as usize] = value
         GLOBAL_VAR_INIT_COUNT = GLOBAL_VAR_INIT_COUNT + 1
@@ -1431,7 +1463,7 @@ pub fn ast_record_global_str_init(name: Name, lit: Name) with Mut, Div {
     let payload = ast_string_lit_payload(lit)
     // Budget: magic + len + ceil(len/8) words must fit remaining table slots.
     let words_needed = 2 + (payload.len + 7) / 8
-    if GLOBAL_VAR_INIT_COUNT + words_needed > 128 {
+    if GLOBAL_VAR_INIT_COUNT + words_needed > 8192 {
         return
     }
     ast_record_global_var_init(name, AST_BSS_INIT_STRING_MAGIC)

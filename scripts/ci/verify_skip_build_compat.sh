@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# scripts/verify_skip_build_compat.sh -- verify that all gate scripts work with SKIP_BUILD=1.
+# scripts/ci/verify_skip_build_compat.sh -- verify that all gate scripts work with SKIP_BUILD=1.
 #
 # Usage:
-#   bash scripts/verify_skip_build_compat.sh
+#   bash scripts/ci/verify_skip_build_compat.sh
 #
 # Prerequisite: souc must already be built (cargo build -p souc && cargo build -p souc --release).
 set -euo pipefail

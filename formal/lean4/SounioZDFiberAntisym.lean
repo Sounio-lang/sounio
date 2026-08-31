@@ -25398,16 +25398,23 @@ theorem s3_recursion_pow2 (p j : Nat) :
     (from `2β = 8β + 264A`) and a CONSTANT that is not an integer — `γ = 8γ − 464` gives
     `γ = 464/7`.  That is why the theorem below is stated as `7 · s3 = …` rather than `s3 = …`:
     the honest closed form carries the geometric sum `(8^j − 1)/7`, and clearing the denominator
-    is cheaper than introducing a `Σ 8^i` definition.  Everything is integral — `8^j ≡ 1 mod 7`
-    makes `464 − 576·8^j` divisible by `7` at every `j`.
+    is cheaper than introducing a `Σ 8^i` definition.  Everything is integral, and the reason
+    takes TWO facts, not one: `8 ≡ 1 (mod 7)` so `8^j ≡ 1`, AND `464 ≡ 576 ≡ 2 (mod 7)`.
+    Together they give `464 − 576·8^j ≡ 2 − 2 ≡ 0 (mod 7)` at every `j`.  (Stating only the
+    `8^j ≡ 1` half, as an earlier draft of this docstring did, does not establish it: the
+    congruence of the two coefficients to each other is what makes the difference vanish.)
 
     Numeric checks against the E5 table (`X = 2^j`, `A = 2^(p+1)`):
       `p = 3, j = 0` (level 3, `H = 16`):  `s3 = 1456`   — the value Tier 136's docstring cites
       `p = 3, j = 1` (level 4):            `s3 = 9264`   — closed form and one recursion step agree
 
-    ⚠ SCOPE.  `p ≥ 1` (the theorem is indexed by `k` with `p = k+1`), because `s3_maximal_seam`
-    is stated at `W = 2^(k+1)`.  The remaining label is the REFERENCE `W = 1`, which is the
-    concurrent lane's base case, not this one's. -/
+    ⚠ SCOPE, and what KIND of bound it is.  `p ≥ 1` (the theorem is indexed by `k` with
+    `p = k+1`).  This is a DEPENDENCY bound, not a property of the formula: it is inherited from
+    `s3_maximal_seam` being stated at `W = 2^(k+1)`, and the closed form itself remains
+    meaningful at `p = 0` (`A = 2`, giving `S(0) = 8 − 48 + 56 − 16 = 0`).  So `p = 0` is not
+    excluded because the algebra breaks there — it is excluded because this tier's base case is
+    not stated there.  That remaining label is the REFERENCE `W = 1`, which is the concurrent
+    lane's base case (Tier 166), not this one's. -/
 
 /-- **`s3` IN CLOSED FORM** at `W = 2^(k+1)`, every level above it.  With `A = 2^(k+2)` and
     `X = 2^j`:  `7·s3 = (7A³ − 126A² + 504A − 576)·X³ + 42A²·X² − 308A·X + 464`.
@@ -28828,5 +28835,656 @@ theorem s3_deviation_scales (j i W V : Nat) (hW : W < 2^(j+1)) (hW0 : W ≠ 0)
           * (tri3 (2^(j+1)) (fun x y => P3 x y W j) - tri3 (2^(j+1)) (fun x y => P3 x y V j))
       rw [hpow, hstep, ihc, hX]
       grind
+
+/-! ### Tier 163 — the deviation law at **every** `j ≥ 1`
+
+    Tier 161 proved the law for `j ≥ 3`, the bound inherited from Tier 166's
+    `s3_reference_closed7` (stated at level `k+3`).  The two missing labels cost nothing:
+
+    **The statement needs no change.**  `[j,3]₂ = 0` for `j < 3` — there is no 3-dimensional
+    subspace of an `F₂`-space of dimension below 3 — and the `7`-cleared right-hand side already
+    says so on its own, since `(H−2)(H−4)(H−8)` vanishes at `H = 4` (`j = 1`) and `H = 8`
+    (`j = 2`).  So the law predicts `D = 0` there, and the only thing to supply is the base case.
+
+    **The base case at `j = 1, 2` is closed arithmetic.**  Bounds `4` and `8`, so `decide`
+    evaluates both sides from the definition of `P3` in under a second — `[propext]` alone on the
+    two finite equalities.  Measured first: `s3(2,1) = s3(1,1) = −32` and
+    `s3(4,2) = s3(1,2) = −48`, so `D = 0` at `j = 1, 2` as the law requires, and `D = 0` persists
+    at levels 2 and 3 for `j = 1`.
+
+    The induction step is Tier 161's, unchanged: it is generic in `j`, which is all that is
+    needed here.  (It is NOT generic in an arbitrary label — it invokes `cp2_ref_eq`, which
+    compares `W = 2^j` against the reference `W = 1`.  The deviation law is a statement about
+    reference pairs by construction; only the `s3` recursion underneath it is label-generic.) -/
+
+set_option maxRecDepth 400000 in
+/-- **THE BASE CASE, EVERY `j ≥ 1`.**  `j ≥ 3` is Tier 161's `dev_base`; `j = 1` and `j = 2` are
+    closed arithmetic and fall to `decide` (bounds `4` and `8`, sub-second).  No case is special:
+    the SAME right-hand side serves, because `(H−2)(H−4)(H−8)` vanishes at `H = 4` and `H = 8`. -/
+theorem dev_base_all (j : Nat) (hj : 1 ≤ j) :
+    7 * (tri3 (2^(j+1)) (fun x y => P3 x y (2^j) j)
+          - tri3 (2^(j+1)) (fun x y => P3 x y 1 j))
+      = 9 * ((((2^(j+1) : Nat) : Int) - 2) * ((((2^(j+1) : Nat) : Int) - 4)
+          * (((2^(j+1) : Nat) : Int) - 8))) := by
+  by_cases h1 : j = 1
+  · subst h1; decide
+  by_cases h2 : j = 2
+  · subst h2; decide
+  obtain ⟨k, hk⟩ : ∃ k, j = k + 3 := ⟨j - 3, by omega⟩
+  subst hk
+  exact dev_base k
+
+
+/-- **★ THE DEVIATION LAW, EVERY `j ≥ 1`.**  `7·D = 8^(m−j)·9(H_j−2)(H_j−4)(H_j−8)` with
+    `H_j = 2^(j+1)`, for reference labels `W = 2^j` against `W = 1`, every level `m = j+i ≥ j`.
+    Generalises Tier 161's `deviation_law`, which is this at `j = k+3`. -/
+theorem deviation_law_all (j i : Nat) (hj : 1 ≤ j) :
+    7 * (tri3 (2^(j+i+1)) (fun x y => P3 x y (2^j) (j+i))
+          - tri3 (2^(j+i+1)) (fun x y => P3 x y 1 (j+i)))
+      = (((2^i : Nat) : Int) * ((2^i : Nat) : Int) * ((2^i : Nat) : Int))
+        * (9 * ((((2^(j+1) : Nat) : Int) - 2) * ((((2^(j+1) : Nat) : Int) - 4)
+            * (((2^(j+1) : Nat) : Int) - 8)))) := by
+  induction i with
+  | zero =>
+      have h0 : ((2^0 : Nat) : Int) = 1 := by decide
+      rw [h0]
+      have hb := dev_base_all j hj
+      grind
+  | succ i ih =>
+      have hWlt : (2:Nat)^j < 2^(j+i+1) := Nat.pow_lt_pow_right (by omega) (by omega)
+      have hW0 : (2:Nat)^j ≠ 0 := Nat.ne_of_gt (Nat.two_pow_pos j)
+      have h1lt : (1:Nat) < 2^(j+i+1) := by
+        have h2 : (2:Nat)^(j+i+1) = 2^(j+i) * 2 := Nat.pow_succ _ _
+        have := Nat.two_pow_pos (j+i)
+        omega
+      have hrs := s3_level_recursion (j+i) (2^j) hWlt hW0
+      have hrr := s3_level_recursion (j+i) 1 h1lt (by omega)
+      have hcp := cp2_ref_eq j i
+      have hpow : (2:Nat)^(j+(i+1)+1) = 2^(j+i+1) + 2^(j+i+1) := by
+        rw [show j+(i+1)+1 = (j+i+1)+1 from by omega, Nat.pow_succ]; omega
+      have hX : ((2^(i+1) : Nat) : Int) = 2 * ((2^i : Nat) : Int) := by
+        rw [Nat.pow_succ]; push_cast; grind
+      rw [hpow]
+      show 7 * (tri3 (2^(j+i+1) + 2^(j+i+1)) (fun x y => P3 x y (2^j) (j+i+1))
+            - tri3 (2^(j+i+1) + 2^(j+i+1)) (fun x y => P3 x y 1 (j+i+1))) = _
+      rw [hrs, hrr, hX, hcp]
+      grind
+
+/-! ### Tier 165 — the `cp2` LEVEL TRANSFER: the `[0,4]` row's machinery
+
+    §57.49's transfer matrix has a second row, `cp2(m+1) = 4·cp2(m) + 36 − 16H`, which Tier 157
+    did not need — the deviation law rides the `s3` row alone.  This tier builds the level
+    transfer that row requires.  It is NOT the row yet; see OPEN below.
+
+    MEASURED FIRST (`#eval` of the raw sums, from `P3`'s definition):
+
+      * the row holds at EVERY valid label, not only the powers of two: residual
+        `cp2(m+1) − (4·cp2(m) + 36 − 16H)` is `0` for all `W = 1..7` at `m = 2` and all
+        `W = 1..15` at `m = 3`.  (A nonzero at `W = 8`, `m = 2` is out of domain — that level's
+        window is `W < 2^3 = 8`.)
+      * the four blocks are NOT individually label-independent.  At `m = 3` the off-diagonal and
+        high blocks read `(−224, −224, −192)` for `W = 1,2,3,8` but `(−32, −32, 0)` at `W = 15`.
+        Only their COMBINATION is label-free.
+      * ⚠ and the reason is worth recording on its own: **`cp2 = −(H−2)(H−6)` FAILS at
+        `W = 15`, level 3** — measured `+52` against the closed form's `−140`, while
+        `W = 1,2,3,7,8` all give `−140`.  Tier 95's `cp2_count` is conditional on the four-sign
+        law, discharged (Tier 108) only for `W = 2^p`; `W = 15` is outside that, and this is a
+        concrete witness that the closed form does not extend to every label.  Any statement that
+        `cp2` is label-constant must be scoped accordingly.
+
+    WHAT THIS TIER PROVES.
+
+    `cp2Split`: the four-block decomposition, the `cp2` twin of Tier 90's `tri3_level_transfer`.
+    The low-low block is level-stable and IS `cp2(m)`; the other three carry the `E01`/`E10`/`E11`
+    carriers exactly as the `tri3` orthants do.  The one new step over `quadSplit` is the coset
+    index: for a HIGH outer index, `(2^(m+1) + a) ⊕ W = 2^(m+1) + (a ⊕ W)` because `W < 2^(m+1)`
+    (`seam_add_xor` twice, then `Nat.xor_assoc`).
+
+    `cp2_block_weights`: the three carriers collapse, using `σ(a⊕W) = ε(a)` and `ε(a⊕W) = σ(a)`
+    (`epsZero_xor_eq_sigRow`), to
+
+      `E01(a,b)·E10(b,a⊕W) = ε(b)·τ(a,b)·τ(b,a⊕W)`
+      `E10(a,b)·E01(b,a⊕W) = ε(a)·τ(a,b)·τ(b,a⊕W)`
+      `E11(a,b)·E11(b,a⊕W) = ε(a)·ε(b)`
+
+    so the three blocks are `Σ (ε(a)+ε(b))·τ(a,b)τ(b,a⊕W)·P + Σ ε(a)ε(b)·P`, `P = P3(a,b)P3(b,a⊕W)`.
+    Since `ε(a)+ε(b) = 2 − 2[a=0] − 2[b=0]` and `ε(a)ε(b) = 1 − 2[a=0] − 2[b=0] + 4[a=0][b=0]`,
+    the leading term is `2·cp2 + cp2 = 3·cp2` — which is exactly what the row needs, `4 = 1 + 3`.
+
+    OPEN (this is the honest boundary).  What remains is the PIN ARITHMETIC: showing the
+    corrections total `36 − 16H`.  `τ(a,b)·τ(b,a⊕W) = 1 − 2[b=a] − 2[b=a⊕W]` (the two loci are
+    disjoint because `W ≠ 0`), so the residue is a fixed list of single sums — the two diagonals
+    `Σ_a P3(a,a)P3(a,a⊕W)` and `Σ_a P3(a,a⊕W)P3(a⊕W,a⊕W)`, the row/column pins at `0`, and their
+    `ε`-weighted variants.  Each is a Tier 125-style evaluation; none is new mathematics, and none
+    is done here. -/
+
+theorem cp2Split (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1) + 2^(m+1)) (fun a => sumLtI (2^(m+1) + 2^(m+1)) (fun b =>
+        P3 a b W (m+1) * P3 b (a ^^^ W) W (m+1)))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a b W m * P3 b (a ^^^ W) W m))
+        + sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            (E01 a b W * P3 a b W m) * (E10 b (a ^^^ W) W * P3 b (a ^^^ W) W m)))
+        + sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            (E10 a b W * P3 a b W m) * (E01 b (a ^^^ W) W * P3 b (a ^^^ W) W m)))
+        + sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            (E11 a b W * P3 a b W m) * (E11 b (a ^^^ W) W * P3 b (a ^^^ W) W m))) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  -- inner split for a LOW outer index
+  have hlow : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1) + 2^(m+1)) (fun b => P3 a b W (m+1) * P3 b (a ^^^ W) W (m+1))
+      = sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 b (a ^^^ W) W m)
+        + sumLtI (2^(m+1)) (fun b =>
+            (E01 a b W * P3 a b W m) * (E10 b (a ^^^ W) W * P3 b (a ^^^ W) W m)) := by
+    intro a ha
+    have haW : a ^^^ W < 2^(m+1) := Nat.xor_lt_two_pow ha hW
+    rw [sumLtI_shift (2^(m+1)) (2^(m+1))]
+    congr 1
+    · exact sumLtI_congr _ _ _ (fun b hb => by
+        rw [P3_level_stable m a b W ha hb hW,
+            P3_level_stable m b (a ^^^ W) W hb haW hW])
+    · refine sumLtI_congr _ _ _ (fun b hb => ?_)
+      rw [Nat.add_comm (2^(m+1)) b,
+          P3_block01_total m a b W ha hb hW hW0,
+          P3_block10_total m b (a ^^^ W) W hb haW hW hW0]
+  -- inner split for a HIGH outer index
+  have hhigh : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1) + 2^(m+1)) (fun b =>
+        P3 (2^(m+1) + a) b W (m+1) * P3 b ((2^(m+1) + a) ^^^ W) W (m+1))
+      = sumLtI (2^(m+1)) (fun b =>
+            (E10 a b W * P3 a b W m) * (E01 b (a ^^^ W) W * P3 b (a ^^^ W) W m))
+        + sumLtI (2^(m+1)) (fun b =>
+            (E11 a b W * P3 a b W m) * (E11 b (a ^^^ W) W * P3 b (a ^^^ W) W m)) := by
+    intro a ha
+    have haW : a ^^^ W < 2^(m+1) := Nat.xor_lt_two_pow ha hW
+    have hxor : (2^(m+1) + a) ^^^ W = 2^(m+1) + (a ^^^ W) := by
+      rw [Nat.add_comm (2^(m+1)) a, seam_add_xor a m ha,
+          Nat.add_comm (2^(m+1)) (a ^^^ W), seam_add_xor (a ^^^ W) m haW,
+          Nat.xor_assoc, Nat.xor_assoc, Nat.xor_comm (2^(m+1)) W]
+    rw [hxor, sumLtI_shift (2^(m+1)) (2^(m+1))]
+    congr 1
+    · refine sumLtI_congr _ _ _ (fun b hb => ?_)
+      rw [Nat.add_comm (2^(m+1)) a, Nat.add_comm (2^(m+1)) (a ^^^ W),
+          P3_block10_total m a b W ha hb hW hW0,
+          P3_block01_total m b (a ^^^ W) W hb haW hW hW0]
+    · refine sumLtI_congr _ _ _ (fun b hb => ?_)
+      rw [Nat.add_comm (2^(m+1)) a, Nat.add_comm (2^(m+1)) b,
+          Nat.add_comm (2^(m+1)) (a ^^^ W),
+          P3_block11_total m a b W ha hb hW hW0,
+          P3_block11_total m b (a ^^^ W) W hb haW hW hW0]
+  rw [sumLtI_shift (2^(m+1)) (2^(m+1))]
+  rw [sumLtI_congr _ _ _ hlow, sumLtI_congr _ _ _ hhigh, sumLtI_add, sumLtI_add]
+  grind
+
+/-- The three off-diagonal blocks' weights, factored. -/
+theorem cp2_block_weights (a b W : Nat) (hW0 : W ≠ 0) :
+    E01 a b W * E10 b (a ^^^ W) W = epsZero b * (tauW a b W * tauW b (a ^^^ W) W)
+    ∧ E10 a b W * E01 b (a ^^^ W) W = epsZero a * (tauW a b W * tauW b (a ^^^ W) W)
+    ∧ E11 a b W * E11 b (a ^^^ W) W = epsZero a * epsZero b := by
+  have hs : sigRow (a ^^^ W) W = epsZero a := by
+    unfold sigRow epsZero
+    have h : (a ^^^ W) ^^^ W = a := by rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+    rw [h]
+  have he : epsZero (a ^^^ W) = sigRow a W := (epsZero_xor_eq_sigRow a W)
+  refine ⟨?_, ?_, ?_⟩
+  · rw [E01_split a b W hW0, E10_split b (a ^^^ W) W hW0, hs, he]
+    unfold epsZero sigRow tauW; grind
+  · rw [E10_split a b W hW0, E01_split b (a ^^^ W) W hW0]
+    unfold epsZero sigRow tauW; grind
+  · rw [E11_split a b W hW0, E11_split b (a ^^^ W) W hW0, hs, he]
+    unfold epsZero sigRow; grind
+
+/-! ### Tier 167 — **THE `[0,4]` ROW**: the transfer matrix is now a theorem in both rows
+
+    Tier 165 built the `cp2` level transfer and left the pin arithmetic open.  This closes it:
+
+      `cp2(m+1) = 4·cp2(m) + 36 − 16H`      (`cp2_level_recursion`)
+
+    every level, every label with `W ≠ 0` — no restriction to the powers of two, which matters
+    because Tier 165 recorded a measured counterexample to `cp2`'s closed VALUE off that class
+    (`W = 15` at level 3).  The row is about the recursion, not the value, and the recursion is
+    label-free.
+
+    With Tier 157's `s3_level_recursion` this makes §57.49's `[[8, 24], [0, 4]]` a theorem in both
+    rows.  It was fitted on 75 transitions and checked out of sample on 92; it is now proved.
+
+    THE PIN ARITHMETIC, which was the open part.  Tier 165 reduced the three carrier blocks to
+    `Σ (ε(a)+ε(b))·τ(a,b)τ(b,a⊕W)·P + Σ ε(a)ε(b)·P` with `P = P3(a,b)·P3(b,a⊕W)`.  Two steps:
+
+    1. `cp2_tau_prod`: `τ(a,b)·τ(b,a⊕W) = 1 − 2[b=a] − 2[b=a⊕W]`.  The two loci are disjoint
+       exactly because `W ≠ 0` (`b = a` and `b = a⊕W` together force `W = 0`), so the product of
+       the two `±1` flips truncates with no cross term.
+
+    2. The five pins, all label-independent and all `H`-linear:
+
+         `R₀ = Σ_b P3(0,b)·P3(b,W)          = H − 2`    Tier 117's `sum_row0_colW`, unchanged
+         `C₀ = Σ_a P3(a,0)·P3(0,a⊕W)        = H − 2`    `cp2_pin_C0`
+         `κ  = P3(0,0)·P3(0,W)              = 1`
+         `D₁ = Σ_a ε(a)·P3(a,a)·P3(a,a⊕W)   = H − 2`    `cp2_pin_D1`
+         `D₂ = Σ_a (ε(a)+σ(a))·P3(a,a⊕W)·P3(a⊕W,a⊕W) = 2H − 4`   `cp2_pin_D2`
+
+       `C₀` needs Tier 117's row-`0` coset law plus `P3_col0_eq_neg_row0`; `D₁` and `D₂` are
+       `P3_diag` and `P3_coset_value` pointwise, with the two exceptional points `a = 0` and
+       `a = W` carrying the corrections.  `D₂`'s summand VANISHES at both of them, because
+       `ε + σ = 0` there — that is why its value is exactly twice `H − 2` and not `2H − 8`.
+
+    The three blocks then evaluate (`cp2_bl01`, `cp2_bl10`, `cp2_bl11`) to
+
+      `(cp2 − 2C₀) − 2D₁ − 2Σσ`,   `(cp2 − 2R₀) − 2D₁ − 2Σε`,   `cp2 − 2C₀ − 2R₀ + 4κ`
+
+    with `Σε + Σσ = D₂`, so the total is `3·cp2 − 4C₀ − 4R₀ + 4κ − 4D₁ − 2D₂ = 3·cp2 + 36 − 16H`,
+    and `cp2Split`'s low-low block supplies the remaining `1` of the `4`.
+
+    Measured before proving (Tier 165's sweep): residual `0` at every valid label,
+    `W = 1..7` at `m = 2` and `W = 1..15` at `m = 3`. -/
+
+/-- The coset-flip product is a pair of point flips, disjoint because `W ≠ 0`. -/
+theorem cp2_tau_prod (a b W : Nat) (hW0 : W ≠ 0) :
+    tauW a b W * tauW b (a ^^^ W) W
+      = 1 + (if b = a then -2 else 0) + (if b = a ^^^ W then -2 else 0) := by
+  have hz : ∀ x y : Nat, x ^^^ y = 0 ↔ x = y := by
+    intro x y
+    exact ⟨fun h => xor_zero_eq x y h, fun h => by rw [h, Nat.xor_self]⟩
+  have hxor : ∀ x y z : Nat, x ^^^ y = z ↔ y = x ^^^ z := by
+    intro x y z
+    constructor
+    · intro h; rw [← h, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+    · intro h; rw [h, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+  have hcancel : (a ^^^ W) ^^^ W = a := by
+    rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  have h1 : (a ^^^ b) ^^^ W = 0 ↔ b = a ^^^ W := (hz _ _).trans (hxor a b W)
+  have hrw : (b ^^^ (a ^^^ W)) ^^^ W = b ^^^ a := by rw [Nat.xor_assoc, hcancel]
+  have h2 : (b ^^^ (a ^^^ W)) ^^^ W = 0 ↔ b = a := by rw [hrw]; exact hz b a
+  have hdisj : ¬(b = a ∧ b = a ^^^ W) := by
+    rintro ⟨hba, hbc⟩
+    apply hW0
+    have haa : a = a ^^^ W := hba.symm.trans hbc
+    have := (hxor a a W).mpr haa
+    rw [Nat.xor_self] at this
+    omega
+  unfold tauW
+  by_cases hba : b = a
+  · have hnc : ¬(b = a ^^^ W) := fun h => hdisj ⟨hba, h⟩
+    rw [if_neg (fun h => hnc (h1.mp h)), if_pos (h2.mpr hba), if_pos hba, if_neg hnc]
+    grind
+  · by_cases hbc : b = a ^^^ W
+    · rw [if_pos (h1.mpr hbc), if_neg (fun h => hba (h2.mp h)), if_neg hba, if_pos hbc]
+      grind
+    · rw [if_neg (fun h => hbc (h1.mp h)), if_neg (fun h => hba (h2.mp h)),
+          if_neg hba, if_neg hbc]
+      grind
+
+/-- `C0`: the `b = 0` column pin. `Σ_a P3(a,0)·P3(0,a⊕W) = H − 2`. -/
+theorem cp2_pin_C0 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => P3 a 0 W m * P3 0 (a ^^^ W) W m)
+      = ((2^(m+1) : Nat) : Int) - 2 := by
+  have hcong : ∀ a, a < 2^(m+1) →
+      P3 a 0 W m * P3 0 (a ^^^ W) W m = 1 + (if a = W then -2 else 0) := by
+    intro a ha
+    have haW : a ^^^ W < 2^(m+1) := Nat.xor_lt_two_pow ha hW
+    by_cases ha0 : a = 0
+    · subst ha0
+      have hnW : ¬((0:Nat) = W) := fun h => hW0 h.symm
+      rw [Nat.zero_xor, if_neg hnW, P3_zero_zero m W, P3_zero_seam m W hW hW0]
+      grind
+    · by_cases haWeq : a = W
+      · rw [haWeq, Nat.xor_self, if_pos rfl, P3_seam_zero m W hW hW0, P3_zero_zero m W]
+        grind
+      · rw [if_neg haWeq]
+        have hw := P3_row0_coset_weighted m a W ha hW hW0
+        have hs : sigRow (a ^^^ W) W = epsZero a := by
+          unfold sigRow epsZero
+          have h : (a ^^^ W) ^^^ W = a := by rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+          rw [h]
+        rw [hs] at hw
+        have hcol := P3_col0_eq_neg_row0 m a W ha hW
+        rw [if_neg ha0] at hcol
+        have he : epsZero a = 1 := by unfold epsZero; rw [if_neg ha0]
+        have hsg : sigRow a W = 1 := by
+          unfold sigRow
+          have : a ^^^ W ≠ 0 := fun h => haWeq (xor_zero_eq a W h)
+          rw [if_neg this]
+        rw [he, hsg] at hw
+        rw [if_neg ha0] at hw
+        rw [hcol]
+        grind
+  rw [sumLtI_congr _ _ _ hcong, sumLtI_add, sumLtI_one,
+      sumLtI_single (2^(m+1)) W (-2) hW]
+  grind
+
+/-- `D1`: the `b = a` diagonal pin.  `Σ_a ε(a)·P3(a,a)·P3(a,a⊕W) = H − 2`. -/
+theorem cp2_pin_D1 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => epsZero a * (P3 a a W m * P3 a (a ^^^ W) W m))
+      = ((2^(m+1) : Nat) : Int) - 2 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hcong : ∀ a, a < 2^(m+1) →
+      epsZero a * (P3 a a W m * P3 a (a ^^^ W) W m) = 1 + (if a = 0 then -2 else 0) := by
+    intro a ha
+    by_cases ha0 : a = 0
+    · subst ha0
+      rw [if_pos rfl, Nat.zero_xor, P3_zero_zero m W, P3_zero_seam m W hW hW0]
+      unfold epsZero; grind
+    · rw [if_neg ha0]
+      have he : epsZero a = 1 := by unfold epsZero; rw [if_neg ha0]
+      by_cases haW : a = W
+      · rw [he, haW, Nat.xor_self, P3_diag W W m hW hW hW0, P3_seam_zero m W hW hW0]
+        grind
+      · have hne : a ^^^ W ≠ 0 := fun h => haW (xor_zero_eq a W h)
+        rw [he, P3_diag a W m ha hW ha0, P3_coset_value m a W ha hW ha0 hne]
+        grind
+  rw [sumLtI_congr _ _ _ hcong, sumLtI_add, sumLtI_one,
+      sumLtI_single (2^(m+1)) 0 (-2) hp]
+  grind
+
+/-- `D2`: the `b = a⊕W` coset pin.  `Σ_a (ε(a)+σ(a))·P3(a,a⊕W)·P3(a⊕W,a⊕W) = 2H − 4`. -/
+theorem cp2_pin_D2 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a =>
+        (epsZero a + sigRow a W) * (P3 a (a ^^^ W) W m * P3 (a ^^^ W) (a ^^^ W) W m))
+      = 2 * ((2^(m+1) : Nat) : Int) - 4 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hcong : ∀ a, a < 2^(m+1) →
+      (epsZero a + sigRow a W) * (P3 a (a ^^^ W) W m * P3 (a ^^^ W) (a ^^^ W) W m)
+        = 2 + (if a = 0 then -2 else 0) + (if a = W then -2 else 0) := by
+    intro a ha
+    have haWlt : a ^^^ W < 2^(m+1) := Nat.xor_lt_two_pow ha hW
+    by_cases ha0 : a = 0
+    · subst ha0
+      have hnW : ¬((0:Nat) = W) := fun h => hW0 h.symm
+      have he : epsZero 0 = -1 := by unfold epsZero; rw [if_pos rfl]
+      have hs : sigRow 0 W = 1 := by unfold sigRow; rw [Nat.zero_xor, if_neg hW0]
+      rw [if_pos rfl, if_neg hnW, he, hs]
+      grind
+    · have he : epsZero a = 1 := by unfold epsZero; rw [if_neg ha0]
+      by_cases haW : a = W
+      · have hs : sigRow a W = -1 := by
+          unfold sigRow; rw [haW, Nat.xor_self, if_pos rfl]
+        rw [if_neg ha0, if_pos haW, he, hs]
+        grind
+      · have hne : a ^^^ W ≠ 0 := fun h => haW (xor_zero_eq a W h)
+        have hs : sigRow a W = 1 := by unfold sigRow; rw [if_neg hne]
+        rw [if_neg ha0, if_neg haW, he, hs,
+            P3_coset_value m a W ha hW ha0 hne,
+            P3_diag (a ^^^ W) W m haWlt hW hne]
+        grind
+  have h2 : sumLtI (2^(m+1)) (fun _ : Nat => (2:Int)) = 2 * ((2^(m+1) : Nat) : Int) := by
+    rw [sumLtI_congr (2^(m+1)) _ (fun _ => 2 * (1:Int)) (fun i _ => by grind),
+        sumLtI_mul, sumLtI_one]
+  rw [sumLtI_congr _ _ _ hcong, sumLtI_add, sumLtI_add, h2,
+      sumLtI_single (2^(m+1)) 0 (-2) hp, sumLtI_single (2^(m+1)) W (-2) hW]
+  grind
+
+/-- BL11, the high-high block: `Σ ε(a)ε(b)·P = cp2 − 2C0 − 2R0 + 4κ`. -/
+theorem cp2_bl11 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+        (E11 a b W * P3 a b W m) * (E11 b (a ^^^ W) W * P3 b (a ^^^ W) W m)))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a b W m * P3 b (a ^^^ W) W m))
+        - 2 * sumLtI (2^(m+1)) (fun a => P3 a 0 W m * P3 0 (a ^^^ W) W m)
+        - 2 * sumLtI (2^(m+1)) (fun b => P3 0 b W m * P3 b W W m)
+        + 4 * (P3 0 0 W m * P3 0 W W m) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hstep : ∀ a, sumLtI (2^(m+1)) (fun b =>
+        (E11 a b W * P3 a b W m) * (E11 b (a ^^^ W) W * P3 b (a ^^^ W) W m))
+      = epsZero a * (sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 b (a ^^^ W) W m)
+          - 2 * (P3 a 0 W m * P3 0 (a ^^^ W) W m)) := by
+    intro a
+    have h1 : sumLtI (2^(m+1)) (fun b =>
+          (E11 a b W * P3 a b W m) * (E11 b (a ^^^ W) W * P3 b (a ^^^ W) W m))
+        = sumLtI (2^(m+1)) (fun b =>
+            epsZero a * (epsZero b * (P3 a b W m * P3 b (a ^^^ W) W m))) :=
+      sumLtI_congr _ _ _ (fun b _ => by
+        have := (cp2_block_weights a b W hW0).2.2
+        grind)
+    rw [h1, sumLtI_mul, sumLtI_epsZero _ hp]
+  rw [sumLtI_congr _ _ _ (fun a _ => hstep a), sumLtI_epsZero _ hp,
+      sumLtI_sub, sumLtI_mul, Nat.zero_xor]
+  grind
+
+theorem cp2_bl01 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+        (E01 a b W * P3 a b W m) * (E10 b (a ^^^ W) W * P3 b (a ^^^ W) W m)))
+      = (sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+              P3 a b W m * P3 b (a ^^^ W) W m))
+          - 2 * sumLtI (2^(m+1)) (fun a => P3 a 0 W m * P3 0 (a ^^^ W) W m))
+        - 2 * sumLtI (2^(m+1)) (fun a => epsZero a * (P3 a a W m * P3 a (a ^^^ W) W m))
+        - 2 * sumLtI (2^(m+1)) (fun a =>
+            sigRow a W * (P3 a (a ^^^ W) W m * P3 (a ^^^ W) (a ^^^ W) W m)) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hstep : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun b =>
+        (E01 a b W * P3 a b W m) * (E10 b (a ^^^ W) W * P3 b (a ^^^ W) W m))
+      = (sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 b (a ^^^ W) W m)
+          - 2 * (P3 a 0 W m * P3 0 (a ^^^ W) W m))
+        + (-2 * (epsZero a * (P3 a a W m * P3 a (a ^^^ W) W m)))
+        + (-2 * (sigRow a W * (P3 a (a ^^^ W) W m * P3 (a ^^^ W) (a ^^^ W) W m))) := by
+    intro a ha
+    have haW : a ^^^ W < 2^(m+1) := Nat.xor_lt_two_pow ha hW
+    have hcong : ∀ b, b < 2^(m+1) →
+        (E01 a b W * P3 a b W m) * (E10 b (a ^^^ W) W * P3 b (a ^^^ W) W m)
+        = epsZero b * (P3 a b W m * P3 b (a ^^^ W) W m)
+          + (if b = a then -2 * (epsZero a * (P3 a a W m * P3 a (a ^^^ W) W m)) else 0)
+          + (if b = a ^^^ W then
+              -2 * (sigRow a W * (P3 a (a ^^^ W) W m * P3 (a ^^^ W) (a ^^^ W) W m)) else 0) := by
+      intro b hb
+      have hre : (E01 a b W * P3 a b W m) * (E10 b (a ^^^ W) W * P3 b (a ^^^ W) W m)
+          = (E01 a b W * E10 b (a ^^^ W) W) * (P3 a b W m * P3 b (a ^^^ W) W m) := by grind
+      have hw := (cp2_block_weights a b W hW0).1
+      have ht := cp2_tau_prod a b W hW0
+      have hes : epsZero (a ^^^ W) = sigRow a W := epsZero_xor_eq_sigRow a W
+      rw [hre, hw, ht]
+      by_cases hba : b = a
+      · have hnc : ¬(b = a ^^^ W) := by
+          intro h
+          apply hW0
+          have hbb : a = a ^^^ W := hba.symm.trans h
+          have h2 : a ^^^ a = a ^^^ (a ^^^ W) := congrArg (fun x => a ^^^ x) hbb
+          rw [Nat.xor_self, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h2
+          omega
+        rw [if_pos hba, if_neg hnc, hba]
+        grind
+      · by_cases hbc : b = a ^^^ W
+        · rw [if_neg hba, if_pos hbc, hbc, hes]
+          grind
+        · rw [if_neg hba, if_neg hbc]
+          grind
+    rw [sumLtI_congr _ _ _ hcong, sumLtI_add, sumLtI_add,
+        sumLtI_epsZero _ hp, sumLtI_single (2^(m+1)) a _ ha,
+        sumLtI_single (2^(m+1)) (a ^^^ W) _ haW]
+  rw [sumLtI_congr _ _ _ hstep, sumLtI_add, sumLtI_add, sumLtI_sub, sumLtI_mul,
+      sumLtI_mul, sumLtI_mul]
+  grind
+
+
+theorem cp2_bl10 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+        (E10 a b W * P3 a b W m) * (E01 b (a ^^^ W) W * P3 b (a ^^^ W) W m)))
+      = (sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+              P3 a b W m * P3 b (a ^^^ W) W m))
+          - 2 * sumLtI (2^(m+1)) (fun b => P3 0 b W m * P3 b W W m))
+        - 2 * sumLtI (2^(m+1)) (fun a => epsZero a * (P3 a a W m * P3 a (a ^^^ W) W m))
+        - 2 * sumLtI (2^(m+1)) (fun a =>
+            epsZero a * (P3 a (a ^^^ W) W m * P3 (a ^^^ W) (a ^^^ W) W m)) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hstep : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun b =>
+        (E10 a b W * P3 a b W m) * (E01 b (a ^^^ W) W * P3 b (a ^^^ W) W m))
+      = epsZero a * sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 b (a ^^^ W) W m)
+        + (-2 * (epsZero a * (P3 a a W m * P3 a (a ^^^ W) W m)))
+        + (-2 * (epsZero a * (P3 a (a ^^^ W) W m * P3 (a ^^^ W) (a ^^^ W) W m))) := by
+    intro a ha
+    have haW : a ^^^ W < 2^(m+1) := Nat.xor_lt_two_pow ha hW
+    have hcong : ∀ b, b < 2^(m+1) →
+        (E10 a b W * P3 a b W m) * (E01 b (a ^^^ W) W * P3 b (a ^^^ W) W m)
+        = epsZero a * (P3 a b W m * P3 b (a ^^^ W) W m)
+          + (if b = a then -2 * (epsZero a * (P3 a a W m * P3 a (a ^^^ W) W m)) else 0)
+          + (if b = a ^^^ W then
+              -2 * (epsZero a * (P3 a (a ^^^ W) W m * P3 (a ^^^ W) (a ^^^ W) W m)) else 0) := by
+      intro b hb
+      have hre : (E10 a b W * P3 a b W m) * (E01 b (a ^^^ W) W * P3 b (a ^^^ W) W m)
+          = (E10 a b W * E01 b (a ^^^ W) W) * (P3 a b W m * P3 b (a ^^^ W) W m) := by grind
+      have hw := (cp2_block_weights a b W hW0).2.1
+      have ht := cp2_tau_prod a b W hW0
+      rw [hre, hw, ht]
+      by_cases hba : b = a
+      · have hnc : ¬(b = a ^^^ W) := by
+          intro h
+          apply hW0
+          have hbb : a = a ^^^ W := hba.symm.trans h
+          have h2 : a ^^^ a = a ^^^ (a ^^^ W) := congrArg (fun x => a ^^^ x) hbb
+          rw [Nat.xor_self, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h2
+          omega
+        rw [if_pos hba, if_neg hnc, hba]
+        grind
+      · by_cases hbc : b = a ^^^ W
+        · rw [if_neg hba, if_pos hbc, hbc]
+          grind
+        · rw [if_neg hba, if_neg hbc]
+          grind
+    rw [sumLtI_congr _ _ _ hcong, sumLtI_add, sumLtI_add,
+        sumLtI_mul, sumLtI_single (2^(m+1)) a _ ha,
+        sumLtI_single (2^(m+1)) (a ^^^ W) _ haW]
+  rw [sumLtI_congr _ _ _ hstep, sumLtI_add, sumLtI_add, sumLtI_epsZero _ hp,
+      sumLtI_mul, sumLtI_mul, Nat.zero_xor]
+  grind
+
+/-- **THE `[0,4]` ROW.**  `cp2(m+1) = 4·cp2(m) + 36 − 16H`, every level, every label `W ≠ 0`. -/
+theorem cp2_level_recursion (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1) + 2^(m+1)) (fun a => sumLtI (2^(m+1) + 2^(m+1)) (fun b =>
+        P3 a b W (m+1) * P3 b (a ^^^ W) W (m+1)))
+      = 4 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a b W m * P3 b (a ^^^ W) W m))
+        + 36 - 16 * ((2^(m+1) : Nat) : Int) := by
+  have hsplit := cp2Split m W hW hW0
+  have h01 := cp2_bl01 m W hW hW0
+  have h10 := cp2_bl10 m W hW hW0
+  have h11 := cp2_bl11 m W hW hW0
+  have hC0 := cp2_pin_C0 m W hW hW0
+  have hR0 := sum_row0_colW m W hW hW0
+  have hD1 := cp2_pin_D1 m W hW hW0
+  have hD2 := cp2_pin_D2 m W hW hW0
+  have hkappa : P3 0 0 W m * P3 0 W W m = 1 := by
+    rw [P3_zero_zero m W, P3_zero_seam m W hW hW0]; grind
+  have hD2split : sumLtI (2^(m+1)) (fun a =>
+        (epsZero a + sigRow a W) * (P3 a (a ^^^ W) W m * P3 (a ^^^ W) (a ^^^ W) W m))
+      = sumLtI (2^(m+1)) (fun a =>
+            epsZero a * (P3 a (a ^^^ W) W m * P3 (a ^^^ W) (a ^^^ W) W m))
+        + sumLtI (2^(m+1)) (fun a =>
+            sigRow a W * (P3 a (a ^^^ W) W m * P3 (a ^^^ W) (a ^^^ W) W m)) := by
+    rw [← sumLtI_add]
+    exact sumLtI_congr _ _ _ (fun a _ => by grind)
+  rw [hD2split] at hD2
+  rw [hsplit, h01, h10, h11, hC0, hR0, hD1, hkappa]
+  grind
+
+/-! ### Tier 163 — the deviation law CROSS-CHECKED against the raw definition
+
+    Tier 161 proves the law through a chain: Tier 90's decomposition, Tiers 155/157's legs,
+    Tier 159's iteration, Tier 136's seam value and — for half the base case — the concurrent
+    lane's Tier 166.  A chain that long deserves a check that does not use any of it.
+
+    Each point below is stated TWICE with the same statement: once by `decide`, which evaluates
+    `tri3` straight from the `P3` definition in the kernel, and once from `deviation_law`.  If
+    either side ever drifts, one of the two proofs stops compiling.
+
+      `j = 3, m = 3`   `D = 1728`    `= 1728 · 8⁰ · [3,3]₂`,  `[3,3]₂ = 1`
+      `j = 3, m = 4`   `D = 13824`   `= 1728 · 8¹ · [3,3]₂`
+      `j = 4, m = 4`   `D = 25920`   `= 1728 · 8⁰ · [4,3]₂`,  `[4,3]₂ = 15`
+
+    The third is the one that matters: a DIFFERENT base `j`, so it exercises the q-binomial
+    factor — the part that fails first if the base case or the `8^(m−j)` channel is wrong.
+
+    **A NEGATIVE CONTROL** (`dev_control_W12_m4`).  The law is stated only for `W = 2^j`, and
+    that restriction is NOT vacuous: at level 4, `W = 12` gives `D = 4608`, which is not of the
+    form `1728·8^i·[j,3]₂` for any `i, j` — it would need `8^i·[j,3]₂ = 8/3`.  So the law really
+    does fail off the power-of-two labels, rather than holding there for uninteresting reasons.
+
+    Measured alongside it (`#eval`, MEASUREMENT not proof): at level 4, `W = 3` and `W = 5` give
+    `D = 0`, while `W = 24` gives `D = 13824` — the same value as `W = 8`.  `24 = 11000₂` and
+    `8 = 1000₂` share their lowest set bit; `12 = 1100₂` has lowest set bit `4` and does NOT
+    reproduce `W = 4`'s value (`D = 0`).  So the deviation is not a function of `lsb(W)` alone,
+    and no claim of that shape is made here.
+
+    Kernel cost: `2^4` runs in ~3 s, each `2^5` in ~16 s; this tier adds ~50 s to a full build.
+    Level 5 (`2^6`) is MEASUREMENT only — `#eval` gives `−53072` at the reference and `57520` at
+    `W = 8`, so `D = 110592 = 1728·8²` — and is deliberately NOT reproduced as a kernel `decide`:
+    it is not evidence of the same strength as the three checked points, and the build time is
+    not worth it.
+
+    The `decide` proofs depend on `[propext]` alone. -/
+
+set_option maxRecDepth 100000 in
+/-- `j = 3, m = 3`: `D = 1728`, by kernel evaluation of `P3`. -/
+theorem dev_check_j3_m3 :
+    tri3 (2^4) (fun x y => P3 x y 8 3) - tri3 (2^4) (fun x y => P3 x y 1 3) = 1728 := by
+  decide
+
+/-- The same value, from `deviation_law`. -/
+theorem dev_from_law_j3_m3 :
+    tri3 (2^4) (fun x y => P3 x y 8 3) - tri3 (2^4) (fun x y => P3 x y 1 3) = 1728 := by
+  have h := deviation_law 0 0
+  simp only [Nat.zero_add, Nat.add_zero, show 3+1 = 4 from rfl,
+    show (2:Nat)^3 = 8 from rfl] at h
+  have e0 : ((2^0 : Nat) : Int) = 1 := by decide
+  have e4 : ((2^4 : Nat) : Int) = 16 := by decide
+  rw [e0, e4] at h
+  omega
+
+set_option maxRecDepth 1000000 in
+/-- `j = 3, m = 4`: `D = 13824`, by kernel evaluation of `P3`. -/
+theorem dev_check_j3_m4 :
+    tri3 (2^5) (fun x y => P3 x y 8 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 13824 := by
+  decide
+
+/-- The same value, from `deviation_law` — the `8^(m−j)` channel at one step. -/
+theorem dev_from_law_j3_m4 :
+    tri3 (2^5) (fun x y => P3 x y 8 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 13824 := by
+  have h := deviation_law 0 1
+  simp only [Nat.zero_add, show 3+1+1 = 5 from rfl, show 3+1 = 4 from rfl,
+    show (2:Nat)^3 = 8 from rfl] at h
+  have e1 : ((2^1 : Nat) : Int) = 2 := by decide
+  have e4 : ((2^4 : Nat) : Int) = 16 := by decide
+  rw [e1, e4] at h
+  omega
+
+set_option maxRecDepth 1000000 in
+/-- `j = 4, m = 4`: `D = 25920 = 1728·15`, by kernel evaluation of `P3`.  **The q-binomial
+    check** — a different base `j`, so `[4,3]₂ = 15` has to come out right. -/
+theorem dev_check_j4_m4 :
+    tri3 (2^5) (fun x y => P3 x y 16 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 25920 := by
+  decide
+
+/-- The same value, from `deviation_law`. -/
+theorem dev_from_law_j4_m4 :
+    tri3 (2^5) (fun x y => P3 x y 16 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 25920 := by
+  have h := deviation_law 1 0
+  simp only [show 1+3 = 4 from rfl, show 4+1 = 5 from rfl,
+    show (2:Nat)^4 = 16 from rfl] at h
+  have e0 : ((2^0 : Nat) : Int) = 1 := by decide
+  have e5 : ((2^5 : Nat) : Int) = 32 := by decide
+  rw [e0, e5] at h
+  omega
+
+set_option maxRecDepth 100000 in
+/-- `j = 1, m = 3` — two steps of the `8^(m−j)` channel in the VANISHING branch: `[1,3]₂ = 0`,
+    so the law predicts `D = 0`, and it is. -/
+theorem dev_check_j1_m3 :
+    tri3 (2^4) (fun x y => P3 x y 2 3) - tri3 (2^4) (fun x y => P3 x y 1 3) = 0 := by
+  decide
+
+set_option maxRecDepth 1000000 in
+/-- **NEGATIVE CONTROL.**  Off the power-of-two labels the law fails: at level 4, `W = 12` gives
+    `D = 4608`, and `4608 = 1728·8^i·[j,3]₂` has no solution (it needs `8^i·[j,3]₂ = 8/3`).
+    The restriction to `W = 2^j` in `deviation_law` is therefore doing real work.
+
+    **`W = 2^j` means EXACTLY `2^j` — not a multiple of one, and not a divisor.**  The two
+    measurements in the section header are what force that reading, and they pull in opposite
+    directions: `W = 24` is a multiple of `8` and DOES reproduce `W = 8`'s deviation (13824),
+    while `W = 12` is a multiple of `4` and does NOT reproduce `W = 4`'s (which is `0`, since
+    `[2,3]₂ = 0`) — it gives `4608`.  So neither "multiples of a power of two inherit its
+    deviation" nor "they do not" is true in general, and this theorem is the second half of that
+    pair.  Read the hypothesis as an equality on `W`, never as a divisibility condition. -/
+theorem dev_control_W12_m4 :
+    tri3 (2^5) (fun x y => P3 x y 12 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 4608 := by
+  decide
 
 end SounioZDFiberAntisym

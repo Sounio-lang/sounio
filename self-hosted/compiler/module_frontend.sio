@@ -7,16 +7,16 @@ use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList
 use parser::mod::{count_items}
 use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
-use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace}
+use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace, OCP_SKIP_MASK}
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
-use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, fo_preregister_program_items_multipass, fo_xfer_global_reset}
+use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_hard_error_pending, ir_instr_census_report, fo_preregister_program_items_multipass, fo_xfer_global_reset}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
-use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns}
+use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
 // entries so imported f64/i64 BSS constants survive to lower time. Without
@@ -26,14 +26,36 @@ use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_
 fn module_frontend_global_init_compile_begin() with Mut {
     ast_reset_global_var_inits()
     GLOBAL_VAR_INIT_SUPPRESS_RESET = 1
+    // #1645: arm the durable lowering-error channel for THIS compile. It is
+    // deliberately not reset per lowering pass -- a compile runs several and an
+    // intermediate one may be discarded, which is precisely how the flag used to
+    // get lost.
+    lower_hard_error_reset()
+    // #1649: the arena is NOT reset here. This barrier runs more than once per
+    // compile (once per module load path), and resetting mid-compile wiped every
+    // region that lowering had already filled -- the functions still had valid
+    // handles, and read back nops. The arena self-arms once from
+    // ir_instr_arena_alloc instead.
 }
 
 fn module_frontend_global_init_compile_end() with Mut {
     GLOBAL_VAR_INIT_SUPPRESS_RESET = 0
 }
 
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var MODULE_FRONTEND_LOWER_TRACE_ENABLED_ON: i64 = 0
+var MODULE_FRONTEND_LOWER_TRACE_ENABLED_CHECKED: i64 = 0
+
 fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1")
+    if MODULE_FRONTEND_LOWER_TRACE_ENABLED_CHECKED == 0 {
+        MODULE_FRONTEND_LOWER_TRACE_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1") {
+            MODULE_FRONTEND_LOWER_TRACE_ENABLED_ON = 1
+        }
+    }
+    MODULE_FRONTEND_LOWER_TRACE_ENABLED_ON == 1
 }
 
 // Wave13 into-acc multi-mod dep lower (default ON). Avoids concurrent
@@ -52,8 +74,8 @@ fn module_frontend_find_user_main_idx(module: &IrModule) -> i64 with Mut, Div, P
     var mfi: i64 = 0
     let main_nm = make_name("main")
     while mfi < (*module).fn_count {
-        if ir_name_eq((*module).functions[mfi as usize].name, main_nm) {
-            let mic = (*module).functions[mfi as usize].instr_count
+        if ir_name_eq(ir_function_name_at(module, mfi as usize), main_nm) {
+            let mic = ir_fn_instr_count(module, mfi as usize)
             if mic > 0 && mic < user_main_ic {
                 user_main = mfi
                 user_main_ic = mic
@@ -64,16 +86,158 @@ fn module_frontend_find_user_main_idx(module: &IrModule) -> i64 with Mut, Div, P
     user_main
 }
 
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var MODULE_FRONTEND_DUMP_MERGED_CALLS_ENABLED_ON: i64 = 0
+var MODULE_FRONTEND_DUMP_MERGED_CALLS_ENABLED_CHECKED: i64 = 0
+
 fn module_frontend_dump_merged_calls_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_DUMP_MERGED_CALLS"), "1")
+    if MODULE_FRONTEND_DUMP_MERGED_CALLS_ENABLED_CHECKED == 0 {
+        MODULE_FRONTEND_DUMP_MERGED_CALLS_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_DUMP_MERGED_CALLS"), "1") {
+            MODULE_FRONTEND_DUMP_MERGED_CALLS_ENABLED_ON = 1
+        }
+    }
+    MODULE_FRONTEND_DUMP_MERGED_CALLS_ENABLED_ON == 1
 }
 
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var MODULE_FRONTEND_REBRACKET_TRACE_ENABLED_ON: i64 = 0
+var MODULE_FRONTEND_REBRACKET_TRACE_ENABLED_CHECKED: i64 = 0
+
 fn module_frontend_rebracket_trace_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_REBRACKET_TRACE"), "1")
+    if MODULE_FRONTEND_REBRACKET_TRACE_ENABLED_CHECKED == 0 {
+        MODULE_FRONTEND_REBRACKET_TRACE_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_REBRACKET_TRACE"), "1") {
+            MODULE_FRONTEND_REBRACKET_TRACE_ENABLED_ON = 1
+        }
+    }
+    MODULE_FRONTEND_REBRACKET_TRACE_ENABLED_ON == 1
+}
+
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var MODULE_FRONTEND_ORDERED_PATH_TRACE_ENABLED_ON: i64 = 0
+var MODULE_FRONTEND_ORDERED_PATH_TRACE_ENABLED_CHECKED: i64 = 0
+// #1649: how many function regions were sealed at publication. A count below
+// fn_count is not an error -- an empty function is never given a region -- but a
+// count of ZERO on a module with functions means sealing silently did nothing,
+// which is the way this guard would rot.
+fn module_frontend_print_seal_receipt(phase: string, sealed: i64, fn_count: i64) with IO, Mut, Panic, Div {
+    if !module_frontend_rebracket_trace_enabled() { return }
+    print("[ir-seal] phase=")
+    print(phase)
+    print(" sealed=")
+    print(io_trace_i64_string(sealed))
+    print(" of=")
+    print(io_trace_i64_string(fn_count))
+    print("\n")
+}
+
+// #1669 probe. Prints the three numbers that separate the failure modes:
+// never written / written and lost in transit / written, live, and the consumers
+// still not using them. Off unless SOUNIO_FLOAT_BITS_PROBE=1.
+fn module_frontend_print_float_bits_probe(phase: string, module: &IrModule) with Alloc, IO, Mut, Panic, Div {
+    if !str_eq(read_env("SOUNIO_FLOAT_BITS_PROBE"), "1") { return }
+    print("[float-bits] phase=")
+    print(phase)
+    print(" writes=")
+    print(io_trace_i64_string(IR_FLOAT_BITS_WRITES))
+    print(" gets_true=")
+    print(io_trace_i64_string(IR_FLOAT_BITS_GETS))
+    print(" live_at_codegen=")
+    print(io_trace_i64_string(ir_module_count_float_bits(module)))
+    print(" over_cap=")
+    print(io_trace_i64_string(IR_FLOAT_BITS_OVER_CAP))
+    // Total bits found already set in a slot at the moment it was allocated,
+    // BEFORE lowering wrote anything to it. Nonzero proves the slot is recycled
+    // memory and that the clear at the allocation site is load-bearing; zero on
+    // a run that lowers several functions would mean the clear is dead code and
+    // this whole diagnosis is wrong.
+    print(" inherited_at_alloc=")
+    print(io_trace_i64_string(IR_FLOAT_BITS_INHERITED))
+    // #1655 test on THIS field, with a known pattern instead of an inference.
+    // inherited_at_alloc came back 0 while the live count (which reads by
+    // REFERENCE) came back in the thousands. Either the copy drops the array
+    // field or the reference reads memory the copy never sees. Set 8 bits by
+    // hand, then read them back three ways:
+    //   direct  -- same variable, no copy at all
+    //   copied  -- through one by-value struct assignment
+    // 8/8 means copies are fine and the diagnosis is elsewhere; 8/0 means a
+    // by-value IrFunction silently loses the bitset, and a struct field is the
+    // wrong home for it no matter where it is cleared.
+    var pat = ir_empty_function()
+    var b: i64 = 0
+    while b < 8 {
+        let _s = ir_float_bits_set(&! pat, b)
+        b = b + 1
+    }
+    print(" pattern_direct=")
+    print(io_trace_i64_string(ir_function_count_float_bits(&pat)))
+    var pat_copy = pat
+    print(" pattern_copied=")
+    print(io_trace_i64_string(ir_function_count_float_bits(&pat_copy)))
+    // The two numbers that separate "the initialiser does not zero" from "the
+    // field is lost on the way into the module array". A fresh IrFunction is
+    // ~2 KB; deliberately NOT building an ir_empty_module() here, which would put
+    // a 4.2 MB frame on the stack just to ask a question.
+    var fresh = ir_empty_function()
+    print(" fresh=")
+    print(io_trace_i64_string(ir_function_count_float_bits(&fresh)))
+    if (*module).fn_count > 0 {
+        // The last unhoisted reader, kept deliberately until it was explained.
+        // Hoisted it reports 8; in place it reported ~1000 and varied per run.
+        var f0 = ir_fn_get(&(*module), 0 as usize)
+        print(" live_fn0=")
+        print(io_trace_i64_string(ir_function_count_float_bits(&f0)))
+    }
+    // Slots lowering never touched. Dirty here means the array was born dirty.
+    print(" untouched8=")
+    print(io_trace_i64_string(ir_module_count_float_bits_untouched(module, 8)))
+    print(" fn_count=")
+    print(io_trace_i64_string((*module).fn_count))
+    print("\n")
+}
+
+fn module_frontend_load_float_marker_switch() with IO, Mut, Panic, Div {
+    if str_eq(read_env("SOUNIO_FLOAT_NO_MARKERS"), "1") { IR_FLOAT_NO_MARKERS = 1 }
+}
+
+fn module_frontend_load_ocp_skip_mask() with IO, Mut, Panic, Div {
+    module_frontend_load_float_marker_switch()
+    var mask: i64 = 0
+    if str_eq(read_env("SOUNIO_OCP_SKIP_REDUNDANT_JUMP"), "1") { mask = mask + 1 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_JUMP_TO_RETURN"), "1") { mask = mask + 2 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DEAD_AFTER_JUMP"), "1") { mask = mask + 4 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DEAD_LABEL"), "1") { mask = mask + 8 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DEDUP_IMM"), "1") { mask = mask + 16 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_CONST_FOLD"), "1") { mask = mask + 32 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_COPY_PROP"), "1") { mask = mask + 64 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DSE"), "1") { mask = mask + 128 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_CSE"), "1") { mask = mask + 256 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DCE"), "1") { mask = mask + 512 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_SCCP"), "1") { mask = mask + 1024 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_COMPACT_NOPS"), "1") { mask = mask + 2048 }
+    OCP_SKIP_MASK = mask
+    if mask != 0 {
+        print("[ocp-skip] mask=")
+        print(io_trace_i64_string(mask))
+        print("\n")
+    }
 }
 
 fn module_frontend_ordered_path_trace_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_ORDERED_PATH_TRACE"), "1")
+    if MODULE_FRONTEND_ORDERED_PATH_TRACE_ENABLED_CHECKED == 0 {
+        MODULE_FRONTEND_ORDERED_PATH_TRACE_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_ORDERED_PATH_TRACE"), "1") {
+            MODULE_FRONTEND_ORDERED_PATH_TRACE_ENABLED_ON = 1
+        }
+    }
+    MODULE_FRONTEND_ORDERED_PATH_TRACE_ENABLED_ON == 1
 }
 
 fn module_frontend_items_have_ontology(items: &Option<Box<ItemList>>) -> bool with Alloc {
@@ -331,6 +495,18 @@ fn module_frontend_resolve_import_relpath(rel_path: string, cur_dir: string) -> 
             anc_depth = anc_depth + 1
         }
     }
+    // Repo-root relative. The ancestor walk stops when `parent` of a top-level
+    // directory (e.g. `tests` from `tests/run-pass`) is empty, so it never
+    // tries the bare rel_path at the repository root. That left every
+    // `use scripts::…` / `use tools::…` import from under tests/ permanently
+    // unresolved even when the file existed (dossier_smoke →
+    // scripts/dissertation/dossier_generator.sio). Not an import-cap drop:
+    // the path was never a candidate. Same honesty class as silent token
+    // truncation — absence must not look like "module missing" when the
+    // resolver simply did not look.
+    if file_exists(rel_path) {
+        return rel_path
+    }
     let stdlib_env_root = read_env("SOUNIO_STDLIB_PATH")
     if str_len(stdlib_env_root) > 0 {
         let stdlib_env_path = str_concat(str_concat(stdlib_env_root, "/"), rel_path)
@@ -466,7 +642,7 @@ fn module_frontend_source_contains_pattern(path: string, pattern: string) -> boo
     module_frontend_loaded_contains_pattern(size, pattern)
 }
 
-fn module_frontend_check_items_with_source_context(items: Option<Box<ItemList>>, source_path: string) -> i64 with IO, Mut, Div, Panic, Alloc {
+pub(crate) fn module_frontend_check_items_with_source_context(items: Option<Box<ItemList>>, source_path: string) -> i64 with IO, Mut, Div, Panic, Alloc {
     let module_path = file_path_to_module_path(source_path)
     if module_frontend_source_contains_pattern(source_path, "//@ ontology-side-table-cache:") {
         let cache_verdict = check_items_verdict_boot4_with_ontocache_sidecar(items, source_path, module_path)
@@ -1231,7 +1407,7 @@ fn ir_merge_sections_into_module(dst: &! IrModule, src: &IrModule) with Mut, Pan
 // Memory wall P1 (post-#1319 finalize-byref residual).
 //
 // Index-bind idiom: bind `dst_idx` to a local before the whole-element store —
-// inline `(*dst).functions[(*dst).fn_count] = func` miscompiles under lean_single
+// inline `ir_fn_set(&! (*dst), (*dst).fn_count, func` miscompiles under lean_single)
 // (64KB element store can overshoot onto fn_count). Same proven pattern as
 // ir_merge_append_function_into_box / find_or_add_fn_id.
 fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div {
@@ -1252,8 +1428,8 @@ fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div 
 
     var fi: i64 = 0
     while fi < (*src).fn_count && (*dst).fn_count < IR_MAX_FUNCS {
-        var func = (*src).functions[fi]
-        func.compile_strategy = (*src).functions[fi].compile_strategy
+        var func = ir_fn_get(&(*src), fi)
+        func.compile_strategy = ir_fn_get(&(*src), fi).compile_strategy
         if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
             if bss_offset_delta != 0 {
                 func.param_count = func.param_count + bss_offset_delta
@@ -1261,25 +1437,25 @@ fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div 
         }
         var ii: i64 = 0
         while ii < func.instr_count {
-            if func.instrs[ii].op == IrOpcode::IrCall {
-                if func.instrs[ii].fn_id >= 0 {
-                    func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
+            if (IR_A_OP[(ir_region_slot_r(func.region, (ii))) as usize] as IrOpcode) == IrOpcode::IrCall {
+                if IR_A_FN_ID[(ir_region_slot_r(func.region, (ii))) as usize] >= 0 {
+                    IR_A_FN_ID[(ir_region_slot_w(func.region, (ii))) as usize] = IR_A_FN_ID[(ir_region_slot_r(func.region, (ii))) as usize] + fn_offset
                 }
             }
             if bss_offset_delta != 0 {
-                if func.instrs[ii].op == IrOpcode::IrLoadGlobal || func.instrs[ii].op == IrOpcode::IrStoreGlobal {
-                    func.instrs[ii].imm_i64 = func.instrs[ii].imm_i64 + bss_offset_delta
+                if (IR_A_OP[(ir_region_slot_r(func.region, (ii))) as usize] as IrOpcode) == IrOpcode::IrLoadGlobal || (IR_A_OP[(ir_region_slot_r(func.region, (ii))) as usize] as IrOpcode) == IrOpcode::IrStoreGlobal {
+                    IR_A_IMM_I64[(ir_region_slot_w(func.region, (ii))) as usize] = IR_A_IMM_I64[(ir_region_slot_r(func.region, (ii))) as usize] + bss_offset_delta
                 }
-                if func.instrs[ii].op == IrOpcode::IrLoadImm {
-                    let imm = func.instrs[ii].imm_i64
+                if (IR_A_OP[(ir_region_slot_r(func.region, (ii))) as usize] as IrOpcode) == IrOpcode::IrLoadImm {
+                    let imm = IR_A_IMM_I64[(ir_region_slot_r(func.region, (ii))) as usize]
                     if imm >= BSS_BASE_LINUX && imm < BSS_BASE_LINUX + 268435456 {
-                        func.instrs[ii].imm_i64 = imm + bss_offset_delta
+                        IR_A_IMM_I64[(ir_region_slot_w(func.region, (ii))) as usize] = imm + bss_offset_delta
                     }
                 }
             }
             let _epi_lid = ir_merge_adjusted_label_id(
-                func.instrs[ii].op,
-                func.instrs[ii].label_id,
+                (IR_A_OP[(ir_region_slot_r(func.region, (ii))) as usize] as IrOpcode),
+                IR_A_LABEL_ID[(ir_region_slot_r(func.region, (ii))) as usize],
                 contest_offset,
                 robust_offset,
                 decision_offset,
@@ -1292,20 +1468,20 @@ fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div 
                 observed_transition_offset,
                 rollback_certificate_offset
             )
-            if _epi_lid != func.instrs[ii].label_id {
-                func.instrs[ii].label_id = _epi_lid
+            if _epi_lid != IR_A_LABEL_ID[(ir_region_slot_r(func.region, (ii))) as usize] {
+                IR_A_LABEL_ID[(ir_region_slot_w(func.region, (ii))) as usize] = _epi_lid
             }
             ii = ii + 1
         }
-        func.compile_strategy = (*src).functions[fi].compile_strategy
+        func.compile_strategy = ir_fn_get(&(*src), fi).compile_strategy
         if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
             // strategy re-copy may have clobbered param_count; re-apply delta from src base.
             if bss_offset_delta != 0 {
-                func.param_count = (*src).functions[fi].param_count + bss_offset_delta
+                func.param_count = ir_fn_get(&(*src), fi).param_count + bss_offset_delta
             }
         }
         let dst_idx = (*dst).fn_count
-        (*dst).functions[dst_idx as usize] = func
+        ir_fn_set(&! (*dst), dst_idx as usize, func)
         (*dst).fn_count = dst_idx + 1
         fi = fi + 1
     }
@@ -1343,7 +1519,7 @@ fn ir_merge_is_direct_fn_ref_opcode(op: IrOpcode) -> bool {
 
 fn ir_merge_function_name_at(module: &IrModule, fn_id: i64) -> Name with Mut, Div, Panic {
     if fn_id >= 0 && fn_id < (*module).fn_count {
-        return (*module).functions[fn_id as usize].name
+        return ir_fn_get(&(*module), fn_id as usize).name
     }
     ir_empty_name()
 }
@@ -1366,25 +1542,25 @@ fn ir_merge_prepare_function_with_remap_from_func(
     observed_transition_offset: i64,
     rollback_certificate_offset: i64
 ) -> IrFunction with Mut, Panic, Div {
-    var func = func_in
+    var func = ir_function_clone(&func_in)
     var ii: i64 = 0
     while ii < func.instr_count {
-        if ir_merge_is_direct_fn_ref_opcode(func.instrs[ii as usize].op) {
-            let old_id = func.instrs[ii as usize].fn_id
+        if ir_merge_is_direct_fn_ref_opcode((IR_A_OP[(ir_region_slot_r(func.region, (ii))) as usize] as IrOpcode)) {
+            let old_id = IR_A_FN_ID[(ir_region_slot_r(func.region, (ii))) as usize]
             if old_id >= 0 && old_id < dep_fn_count {
                 let mapped_id = fn_remap[old_id as usize]
                 if mapped_id >= 0 {
-                    let dep_name = (*src).functions[old_id as usize].name
+                    let dep_name = ir_fn_get(&(*src), old_id as usize).name
                     let current_name = ir_merge_function_name_at(dst, old_id)
                     if ir_name_eq(dep_name, current_name) || ir_merge_find_function_name_index(dst, dep_name) < 0 {
-                        func.instrs[ii as usize].fn_id = mapped_id
+                        IR_A_FN_ID[(ir_region_slot_w(func.region, (ii))) as usize] = mapped_id
                     }
                 }
             }
         }
         let _epi_lid = ir_merge_adjusted_label_id(
-            func.instrs[ii as usize].op,
-            func.instrs[ii as usize].label_id,
+            (IR_A_OP[(ir_region_slot_r(func.region, (ii))) as usize] as IrOpcode),
+            IR_A_LABEL_ID[(ir_region_slot_r(func.region, (ii))) as usize],
             contest_offset,
             robust_offset,
             decision_offset,
@@ -1397,8 +1573,8 @@ fn ir_merge_prepare_function_with_remap_from_func(
             observed_transition_offset,
             rollback_certificate_offset
         )
-        if _epi_lid != func.instrs[ii as usize].label_id {
-            func.instrs[ii as usize].label_id = _epi_lid
+        if _epi_lid != IR_A_LABEL_ID[(ir_region_slot_r(func.region, (ii))) as usize] {
+            IR_A_LABEL_ID[(ir_region_slot_w(func.region, (ii))) as usize] = _epi_lid
         }
         ii = ii + 1
     }
@@ -1423,7 +1599,7 @@ fn ir_merge_prepare_function_with_remap(
     rollback_certificate_offset: i64
 ) -> IrFunction with Mut, Panic, Div {
     ir_merge_prepare_function_with_remap_from_func(
-        (*src).functions[src_fi as usize],
+        ir_fn_get(&(*src), src_fi as usize),
         src,
         src,
         dep_fn_count,
@@ -1449,8 +1625,8 @@ fn ir_merge_find_function_name_index(module: &IrModule, name: Name) -> i64 with 
     var found: i64 = 0 - 1
     var found_stub: i64 = 0 - 1
     while fi < (*module).fn_count {
-        if ir_name_eq((*module).functions[fi as usize].name, name) {
-            if (*module).functions[fi as usize].instr_count > 0 {
+        if ir_name_eq(ir_function_name_at(module, fi as usize), name) {
+            if ir_fn_instr_count(module, fi as usize) > 0 {
                 found = fi
             } else if found_stub < 0 {
                 found_stub = fi
@@ -1464,16 +1640,16 @@ fn ir_merge_find_function_name_index(module: &IrModule, name: Name) -> i64 with 
 // After stub replacement, remap in-function IrCall/IrCallSret targets from the
 // dependency module's local fn_id space to the accumulated module by name.
 fn ir_merge_remap_existing_call_targets(func: IrFunction, src: &IrModule, dst: &IrModule) -> IrFunction with Mut, Panic, Div {
-    var out = func
+    var out = ir_function_clone(&func)
     var ii: i64 = 0
     while ii < out.instr_count {
-        if out.instrs[ii as usize].op == IrOpcode::IrCall || out.instrs[ii as usize].op == IrOpcode::IrCallSret {
-            let old_id = out.instrs[ii as usize].fn_id
+        if (IR_A_OP[(ir_region_slot_r(out.region, (ii))) as usize] as IrOpcode) == IrOpcode::IrCall || (IR_A_OP[(ir_region_slot_r(out.region, (ii))) as usize] as IrOpcode) == IrOpcode::IrCallSret {
+            let old_id = IR_A_FN_ID[(ir_region_slot_r(out.region, (ii))) as usize]
             if old_id >= 0 && old_id < (*src).fn_count {
-                let target_name = (*src).functions[old_id as usize].name
+                let target_name = ir_fn_get(&(*src), old_id as usize).name
                 let new_id = ir_merge_find_function_name_index(dst, target_name)
                 if new_id >= 0 {
-                    out.instrs[ii as usize].fn_id = new_id
+                    IR_A_FN_ID[(ir_region_slot_w(out.region, (ii))) as usize] = new_id
                 }
             }
         }
@@ -1484,10 +1660,10 @@ fn ir_merge_remap_existing_call_targets(func: IrFunction, src: &IrModule, dst: &
 
 // Memory wall Wave10: single IrFunction materialization for place+remap.
 // Old lower_array path did:
-//   dep_func = src.functions[mfi]                         // copy 1
+//   dep_func = ir_fn_get(&src, mfi)                         // copy 1
 //   dep_func = remap_existing_call_targets(dep_func, ...) // copy 2 in+out
 //   func = prepare_with_remap_from_func(dep_func, ...)    // copy 3 in+out
-//   dst.functions[dst_fi] = func                          // copy 4
+//   ir_fn_set(&! dst, dst_fi, func                          // copy 4)
 // Each IrFunction is ~[IrInstr;4096] (~1 MiB). Peak temps stacked.
 // New: one local + one slot write. Remap call targets + prepare map +
 // epistemic label shifts in a single instr pass. Scalar field stores only
@@ -1523,8 +1699,8 @@ fn ir_merge_place_and_remap_function(
         return
     }
     // One full-function materialization from the dependency module.
-    var func = (*src).functions[src_fi as usize]
-    func.compile_strategy = (*src).functions[src_fi as usize].compile_strategy
+    var func = ir_fn_get(&(*src), src_fi as usize)
+    func.compile_strategy = ir_fn_get(&(*src), src_fi as usize).compile_strategy
     // BSS slot: param_count holds the module-local BSS byte offset.
     if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
         if bss_offset_delta != 0 {
@@ -1533,24 +1709,24 @@ fn ir_merge_place_and_remap_function(
     }
     var ii: i64 = 0
     while ii < func.instr_count {
-        let op = func.instrs[ii as usize].op
+        let op = (IR_A_OP[(ir_region_slot_r(func.region, (ii))) as usize] as IrOpcode)
         // Combined remap_existing + prepare map for direct fn refs.
         if ir_merge_is_direct_fn_ref_opcode(op) {
-            let old_id = func.instrs[ii as usize].fn_id
+            let old_id = IR_A_FN_ID[(ir_region_slot_r(func.region, (ii))) as usize]
             if old_id >= 0 && old_id < dep_fn_count {
                 // Name-based remap to already-merged bodies in dst (remap_existing).
-                let target_name = (*src).functions[old_id as usize].name
+                let target_name = ir_fn_get(&(*src), old_id as usize).name
                 let named_id = ir_merge_find_function_name_index(dst, target_name)
                 if named_id >= 0 {
-                    func.instrs[ii as usize].fn_id = named_id
+                    IR_A_FN_ID[(ir_region_slot_w(func.region, (ii))) as usize] = named_id
                 } else {
                     // Planned append index from fn_remap (prepare path).
                     let mapped_id = fn_remap[old_id as usize]
                     if mapped_id >= 0 {
-                        let dep_name = (*src).functions[old_id as usize].name
+                        let dep_name = ir_fn_get(&(*src), old_id as usize).name
                         let current_name = ir_merge_function_name_at(dst, old_id)
                         if ir_name_eq(dep_name, current_name) || ir_merge_find_function_name_index(dst, dep_name) < 0 {
-                            func.instrs[ii as usize].fn_id = mapped_id
+                            IR_A_FN_ID[(ir_region_slot_w(func.region, (ii))) as usize] = mapped_id
                         }
                     }
                 }
@@ -1560,13 +1736,13 @@ fn ir_merge_place_and_remap_function(
         // Wave13: prefer name→existing BSS slot when seed preseeded (or prior
         // merge DEDUP'd) the global — plain +delta is wrong for those slots.
         if op == IrOpcode::IrLoadGlobal || op == IrOpcode::IrStoreGlobal {
-            let gname = func.instrs[ii as usize].name
+            let gname = ir_arena_name(ir_region_slot_r(func.region, (ii)))
             var named_bss: i64 = 0 - 1
             if gname.len > 0 {
                 var gi: i64 = 0
                 while gi < (*dst).fn_count {
-                    if ir_name_eq((*dst).functions[gi as usize].name, gname)
-                        && (*dst).functions[gi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL
+                    if ir_name_eq(ir_fn_get(&(*dst), gi as usize).name, gname)
+                        && ir_fn_get(&(*dst), gi as usize).compile_strategy == IR_STRATEGY_BSS_GLOBAL
                     {
                         named_bss = gi
                         gi = (*dst).fn_count
@@ -1576,25 +1752,25 @@ fn ir_merge_place_and_remap_function(
                 }
             }
             if named_bss >= 0 {
-                func.instrs[ii as usize].imm_i64 = (*dst).functions[named_bss as usize].param_count
+                IR_A_IMM_I64[(ir_region_slot_w(func.region, (ii))) as usize] = ir_fn_get(&(*dst), named_bss as usize).param_count
             } else if bss_offset_delta != 0 {
-                func.instrs[ii as usize].imm_i64 = func.instrs[ii as usize].imm_i64 + bss_offset_delta
+                IR_A_IMM_I64[(ir_region_slot_w(func.region, (ii))) as usize] = IR_A_IMM_I64[(ir_region_slot_r(func.region, (ii))) as usize] + bss_offset_delta
             }
         }
         // Aggregate path bakes BSS_BASE+local_off as IrLoadImm absolute.
         // Remap addresses in the BSS window; skip unrelated immediates.
         if bss_offset_delta != 0 {
             if op == IrOpcode::IrLoadImm {
-                let imm = func.instrs[ii as usize].imm_i64
+                let imm = IR_A_IMM_I64[(ir_region_slot_r(func.region, (ii))) as usize]
                 if imm >= BSS_BASE_LINUX && imm < BSS_BASE_LINUX + 268435456 {
-                    func.instrs[ii as usize].imm_i64 = imm + bss_offset_delta
+                    IR_A_IMM_I64[(ir_region_slot_w(func.region, (ii))) as usize] = imm + bss_offset_delta
                 }
             }
         }
         // Scalar-only epistemic label shift — never rebind IrInstr by value.
         let new_lid = ir_merge_adjusted_label_id(
             op,
-            func.instrs[ii as usize].label_id,
+            IR_A_LABEL_ID[(ir_region_slot_r(func.region, (ii))) as usize],
             contest_offset,
             robust_offset,
             decision_offset,
@@ -1607,17 +1783,17 @@ fn ir_merge_place_and_remap_function(
             observed_transition_offset,
             rollback_certificate_offset
         )
-        if new_lid != func.instrs[ii as usize].label_id {
-            func.instrs[ii as usize].label_id = new_lid
+        if new_lid != IR_A_LABEL_ID[(ir_region_slot_r(func.region, (ii))) as usize] {
+            IR_A_LABEL_ID[(ir_region_slot_w(func.region, (ii))) as usize] = new_lid
         }
         ii = ii + 1
     }
     // Index-bind before whole-element store (lean_single proven pattern).
     if dst_fi < (*dst).fn_count {
-        (*dst).functions[dst_fi as usize] = func
+        let _rc_existing = ir_fn_set(&! (*dst), dst_fi as usize, func)
     } else if dst_fi == (*dst).fn_count && (*dst).fn_count < IR_MAX_FUNCS {
         let idx = (*dst).fn_count
-        (*dst).functions[idx as usize] = func
+        let _rc_append = ir_fn_set(&! (*dst), idx as usize, func)
         (*dst).fn_count = idx + 1
     }
 }
@@ -1641,18 +1817,18 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
     let transition_plan_offset = (*dst).epistemic.transition_plan_count
     let observed_transition_offset = (*dst).epistemic.observed_transition_count
     let rollback_certificate_offset = (*dst).epistemic.rollback_certificate_count
-    var func = (*src).functions[src_fi as usize]
-    func.compile_strategy = (*src).functions[src_fi as usize].compile_strategy
+    var func = ir_fn_get(&(*src), src_fi as usize)
+    func.compile_strategy = ir_fn_get(&(*src), src_fi as usize).compile_strategy
     var ii: i64 = 0
     while ii < func.instr_count {
-        if ir_merge_is_direct_fn_ref_opcode(func.instrs[ii as usize].op) {
-            if func.instrs[ii as usize].fn_id >= 0 {
-                func.instrs[ii as usize].fn_id = func.instrs[ii as usize].fn_id + fn_offset
+        if ir_merge_is_direct_fn_ref_opcode((IR_A_OP[(ir_region_slot_r(func.region, (ii))) as usize] as IrOpcode)) {
+            if IR_A_FN_ID[(ir_region_slot_r(func.region, (ii))) as usize] >= 0 {
+                IR_A_FN_ID[(ir_region_slot_w(func.region, (ii))) as usize] = IR_A_FN_ID[(ir_region_slot_r(func.region, (ii))) as usize] + fn_offset
             }
         }
         let _epi_lid = ir_merge_adjusted_label_id(
-            func.instrs[ii as usize].op,
-            func.instrs[ii as usize].label_id,
+            (IR_A_OP[(ir_region_slot_r(func.region, (ii))) as usize] as IrOpcode),
+            IR_A_LABEL_ID[(ir_region_slot_r(func.region, (ii))) as usize],
             contest_offset,
             robust_offset,
             decision_offset,
@@ -1665,13 +1841,13 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
             observed_transition_offset,
             rollback_certificate_offset
         )
-        if _epi_lid != func.instrs[ii as usize].label_id {
-            func.instrs[ii as usize].label_id = _epi_lid
+        if _epi_lid != IR_A_LABEL_ID[(ir_region_slot_r(func.region, (ii))) as usize] {
+            IR_A_LABEL_ID[(ir_region_slot_w(func.region, (ii))) as usize] = _epi_lid
         }
         ii = ii + 1
     }
     let dst_idx = (*dst).fn_count
-    (*dst).functions[dst_idx as usize] = func
+    ir_fn_set(&! (*dst), dst_idx as usize, func)
     (*dst).fn_count = (*dst).fn_count + 1
 }
 
@@ -1689,21 +1865,21 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
 fn ir_module_resolve_call_target_fields(module: &IrModule, old_id: i64, instr_name: Name) -> i64 with Mut, Div, Panic {
     var resolve_name = instr_name
     if resolve_name.len == 0 && old_id >= 0 && old_id < (*module).fn_count {
-        resolve_name = (*module).functions[old_id as usize].name
+        resolve_name = ir_function_name_at(module, old_id as usize)
     }
     if resolve_name.len > 0 {
         let new_id = ir_merge_find_function_name_index(module, resolve_name)
-        if new_id >= 0 && (*module).functions[new_id as usize].instr_count > 0 {
+        if new_id >= 0 && ir_fn_instr_count(module, new_id as usize) > 0 {
             return new_id
         }
     }
     // Remap calls that still point at import stubs (ic=0) even when name-based
     // lookup above failed — duplicate symbols can leave stale low fn_ids.
     if old_id >= 0 && old_id < (*module).fn_count {
-        if (*module).functions[old_id as usize].instr_count == 0 {
-            let stub_name = (*module).functions[old_id as usize].name
+        if ir_fn_instr_count(module, old_id as usize) == 0 {
+            let stub_name = ir_function_name_at(module, old_id as usize)
             let new_id = ir_merge_find_function_name_index(module, stub_name)
-            if new_id >= 0 && new_id != old_id && (*module).functions[new_id as usize].instr_count > 0 {
+            if new_id >= 0 && new_id != old_id && ir_fn_instr_count(module, new_id as usize) > 0 {
                 return new_id
             }
         }
@@ -1716,14 +1892,14 @@ fn ir_module_resolve_call_target_fields(module: &IrModule, old_id: i64, instr_na
 fn ir_module_resolve_all_call_targets(module: &! IrModule) with Mut, Div, Panic {
     var fi: i64 = 0
     while fi < (*module).fn_count {
-        var f = (*module).functions[fi as usize]
+        var f = ir_fn_get(&(*module), fi as usize)
         var changed: bool = false
         var ii: i64 = 0
         while ii < f.instr_count {
-            let op = f.instrs[ii as usize].op
+            let op = (IR_A_OP[(ir_region_slot_r(f.region, (ii))) as usize] as IrOpcode)
             if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
-                let cur_fn = f.instrs[ii as usize].fn_id
-                let cur_nm = f.instrs[ii as usize].name
+                let cur_fn = IR_A_FN_ID[(ir_region_slot_r(f.region, (ii))) as usize]
+                let cur_nm = ir_arena_name(ir_region_slot_r(f.region, (ii)))
                 var new_fn = cur_fn
                 if cur_nm.len > 0 && native_v2_builtin_id_for_name(cur_nm) != 0 {
                     let builtin_fn = ir_merge_find_function_name_index(module, cur_nm)
@@ -1732,13 +1908,15 @@ fn ir_module_resolve_all_call_targets(module: &! IrModule) with Mut, Div, Panic 
                     new_fn = ir_module_resolve_call_target_fields(module, cur_fn, cur_nm)
                 }
                 if new_fn != cur_fn {
-                    f.instrs[ii as usize].fn_id = new_fn
+                    IR_A_FN_ID[(ir_region_slot_w(f.region, (ii))) as usize] = new_fn
                     changed = true
                 }
             }
             ii = ii + 1
         }
-        if changed { (*module).functions[fi as usize] = f }
+        if changed {
+            ir_fn_set(&! (*module), fi as usize, f)
+        }
         fi = fi + 1
     }
 }
@@ -1751,7 +1929,7 @@ fn ir_module_dump_find_name(module: &IrModule, label: Name, sym: Name) with IO, 
     print_int(idx)
     if idx >= 0 && idx < (*module).fn_count {
         print(" ic=")
-        print_int((*module).functions[idx as usize].instr_count)
+        print_int(ir_fn_get(&(*module), idx as usize).instr_count)
     }
     print("\n")
 }
@@ -1793,13 +1971,13 @@ fn ir_module_dump_fn_body(module: &IrModule, fn_index: i64, label: string) with 
     print(" fn=")
     print_int(fn_index)
     print(" name=")
-    print(str_from_bytes((*module).functions[fn_index as usize].name.buf, (*module).functions[fn_index as usize].name.len))
+    print(str_from_bytes(ir_fn_get(&(*module), fn_index as usize).name.buf, ir_fn_get(&(*module), fn_index as usize).name.len))
     print(" ic=")
-    print_int((*module).functions[fn_index as usize].instr_count)
+    print_int(ir_fn_get(&(*module), fn_index as usize).instr_count)
     print("\n")
     var ii: i64 = 0
-    while ii < (*module).functions[fn_index as usize].instr_count {
-        let ins = (*module).functions[fn_index as usize].instrs[ii as usize]
+    while ii < ir_fn_get(&(*module), fn_index as usize).instr_count {
+        let ins = ir_arena_load(ir_region_slot_r(ir_fn_get(&(*module), fn_index as usize).region, (ii)))
         let tag = ir_module_dump_instr_op_tag(ins.op)
         print("  ii=")
         print_int(ii)
@@ -1820,7 +1998,7 @@ fn ir_module_dump_fn_body(module: &IrModule, fn_index: i64, label: string) with 
             print_int(ins.fn_id)
             if ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret {
                 print(" name=")
-                print(str_from_bytes(ins.name.buf, ins.name.len))
+                print(str_from_bytes(ir_name_at(ins.name_id).buf, ir_name_at(ins.name_id).len))
             }
         }
         print("\n")
@@ -1850,19 +2028,19 @@ fn ir_module_dump_all_calls_diag(module: &IrModule) with IO, Mut, Div, Panic {
     print("\n")
     var fi: i64 = 0
     while fi < (*module).fn_count {
-        let fname = (*module).functions[fi as usize].name
+        let fname = ir_fn_get(&(*module), fi as usize).name
         print("DUMPFN idx ")
         print_int(fi)
         print(" ic ")
-        print_int((*module).functions[fi as usize].instr_count)
+        print_int(ir_fn_get(&(*module), fi as usize).instr_count)
         print(" NM=[")
         print(str_from_bytes(fname.buf, fname.len))
         print("]\n")
-        let ficnt = (*module).functions[fi as usize].instr_count
+        let ficnt = ir_fn_get(&(*module), fi as usize).instr_count
         if ficnt > 0 && ficnt < 40 {
             var ii: i64 = 0
             while ii < ficnt {
-                let ins = (*module).functions[fi as usize].instrs[ii as usize]
+                let ins = ir_arena_load(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (ii)))
                 // one print_int per line (compiler print_int appends \n).
                 print("Dq i=")
                 print_int(ii)
@@ -1916,7 +2094,7 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
     ir_module_dump_find_name(module, make_name("vp_default"), make_name("vp_default"))
     var fi: i64 = 0
     while fi < (*module).fn_count {
-        let fname = (*module).functions[fi as usize].name
+        let fname = ir_fn_get(&(*module), fi as usize).name
         if ir_name_eq(fname, watch_pb) || ir_name_eq(fname, watch_pred) || ir_name_eq(fname, watch_main)
             || ir_name_eq(fname, make_name("pb_new")) || ir_name_eq(fname, make_name("pb_lo_mean"))
             || ir_name_eq(fname, make_name("vp_vc_to_pbox")) || ir_name_eq(fname, make_name("vp_default")) {
@@ -1925,31 +2103,31 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
             print("] ")
             print(str_from_bytes(fname.buf, fname.len))
             print(" ic=")
-            print_int((*module).functions[fi as usize].instr_count)
+            print_int(ir_fn_get(&(*module), fi as usize).instr_count)
             print("\n")
         }
         fi = fi + 1
     }
     var vfi: i64 = 0
     while vfi < (*module).fn_count {
-        if ir_name_eq((*module).functions[vfi as usize].name, make_name("vp_vc_to_pbox")) {
-            if (*module).functions[vfi as usize].instr_count > 0 {
+        if ir_name_eq(ir_fn_get(&(*module), vfi as usize).name, make_name("vp_vc_to_pbox")) {
+            if ir_fn_get(&(*module), vfi as usize).instr_count > 0 {
                 print("MERGE_DUMP: vp_vc_to_pbox calls\n")
                 var ii: i64 = 0
-                while ii < (*module).functions[vfi as usize].instr_count {
-                    let ins = (*module).functions[vfi as usize].instrs[ii as usize]
+                while ii < ir_fn_get(&(*module), vfi as usize).instr_count {
+                    let ins = ir_arena_load(ir_region_slot_r(ir_fn_get(&(*module), vfi as usize).region, (ii)))
                     if ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret {
                         print("  call ii=")
                         print_int(ii)
                         print(" fn_id=")
                         print_int(ins.fn_id)
                         print(" name=")
-                        print(str_from_bytes(ins.name.buf, ins.name.len))
+                        print(str_from_bytes(ir_name_at(ins.name_id).buf, ir_name_at(ins.name_id).len))
                         if ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
                             print(" ->")
-                            print(str_from_bytes((*module).functions[ins.fn_id as usize].name.buf, (*module).functions[ins.fn_id as usize].name.len))
+                            print(str_from_bytes(ir_fn_get(&(*module), ins.fn_id as usize).name.buf, ir_fn_get(&(*module), ins.fn_id as usize).name.len))
                             print(" ic=")
-                            print_int((*module).functions[ins.fn_id as usize].instr_count)
+                            print_int(ir_fn_get(&(*module), ins.fn_id as usize).instr_count)
                         }
                         print("\n")
                     }
@@ -1961,23 +2139,23 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
     }
     var pfi: i64 = 0
     while pfi < (*module).fn_count {
-        if ir_name_eq((*module).functions[pfi as usize].name, watch_pred) {
+        if ir_name_eq(ir_fn_get(&(*module), pfi as usize).name, watch_pred) {
             print("MERGE_DUMP: predict calls/returns\n")
             var ii: i64 = 0
-            while ii < (*module).functions[pfi as usize].instr_count {
-                let ins = (*module).functions[pfi as usize].instrs[ii as usize]
+            while ii < ir_fn_get(&(*module), pfi as usize).instr_count {
+                let ins = ir_arena_load(ir_region_slot_r(ir_fn_get(&(*module), pfi as usize).region, (ii)))
                 if ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret {
                     print("  call ii=")
                     print_int(ii)
                     print(" fn_id=")
                     print_int(ins.fn_id)
                     print(" name=")
-                    print(str_from_bytes(ins.name.buf, ins.name.len))
+                    print(str_from_bytes(ir_name_at(ins.name_id).buf, ir_name_at(ins.name_id).len))
                     if ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
                         print(" ->")
-                        print(str_from_bytes((*module).functions[ins.fn_id as usize].name.buf, (*module).functions[ins.fn_id as usize].name.len))
+                        print(str_from_bytes(ir_fn_get(&(*module), ins.fn_id as usize).name.buf, ir_fn_get(&(*module), ins.fn_id as usize).name.len))
                         print(" ic=")
-                        print_int((*module).functions[ins.fn_id as usize].instr_count)
+                        print_int(ir_fn_get(&(*module), ins.fn_id as usize).instr_count)
                     }
                     print("\n")
                 } else if ins.op == IrOpcode::IrReturn {
@@ -1998,8 +2176,8 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
     var user_main_ic: i64 = 1000000000
     var mfi: i64 = 0
     while mfi < (*module).fn_count {
-        if ir_name_eq((*module).functions[mfi as usize].name, watch_main) {
-            let mic = (*module).functions[mfi as usize].instr_count
+        if ir_name_eq(ir_fn_get(&(*module), mfi as usize).name, watch_main) {
+            let mic = ir_fn_get(&(*module), mfi as usize).instr_count
             if mic > 0 && mic < user_main_ic {
                 user_main = mfi
                 user_main_ic = mic
@@ -2011,24 +2189,24 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
         print("MERGE_DUMP: user_main_idx=")
         print_int(user_main)
         print(" ic=")
-        print_int((*module).functions[user_main as usize].instr_count)
+        print_int(ir_fn_get(&(*module), user_main as usize).instr_count)
         print("\n")
         print("MERGE_DUMP: user_main calls\n")
         var ii: i64 = 0
-        while ii < (*module).functions[user_main as usize].instr_count {
-            let ins = (*module).functions[user_main as usize].instrs[ii as usize]
+        while ii < ir_fn_get(&(*module), user_main as usize).instr_count {
+            let ins = ir_arena_load(ir_region_slot_r(ir_fn_get(&(*module), user_main as usize).region, (ii)))
             if ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret {
                 print("  call ii=")
                 print_int(ii)
                 print(" fn_id=")
                 print_int(ins.fn_id)
                 print(" name=")
-                print(str_from_bytes(ins.name.buf, ins.name.len))
+                print(str_from_bytes(ir_name_at(ins.name_id).buf, ir_name_at(ins.name_id).len))
                 if ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
                     print(" ->")
-                    print(str_from_bytes((*module).functions[ins.fn_id as usize].name.buf, (*module).functions[ins.fn_id as usize].name.len))
+                    print(str_from_bytes(ir_fn_get(&(*module), ins.fn_id as usize).name.buf, ir_fn_get(&(*module), ins.fn_id as usize).name.len))
                     print(" ic=")
-                    print_int((*module).functions[ins.fn_id as usize].instr_count)
+                    print_int(ir_fn_get(&(*module), ins.fn_id as usize).instr_count)
                 }
                 print("\n")
             }
@@ -2052,7 +2230,7 @@ fn ir_module_canonical_fn_id_for_index(module: &IrModule, fn_id: i64) -> i64 wit
     if fn_id < 0 || fn_id >= (*module).fn_count {
         return fn_id
     }
-    let sym_name = (*module).functions[fn_id as usize].name
+    let sym_name = ir_fn_get(&(*module), fn_id as usize).name
     if sym_name.len == 0 {
         return fn_id
     }
@@ -2071,17 +2249,17 @@ fn ir_module_compact_duplicate_fn_refs(module: &! IrModule) with Mut, Div, Panic
         var fi: i64 = 0
         while fi < (*module).fn_count {
             // A14: whole-function copy/writeback — do not reintroduce IrInstr by-value.
-            var f = (*module).functions[fi as usize]
+            var f = ir_fn_get(&(*module), fi as usize)
             var changed: bool = false
             var ii: i64 = 0
             while ii < f.instr_count {
-                if ir_merge_is_direct_fn_ref_opcode(f.instrs[ii as usize].op) {
-                    let old_id = f.instrs[ii as usize].fn_id
-                    let nm = f.instrs[ii as usize].name
+                if ir_merge_is_direct_fn_ref_opcode((IR_A_OP[(ir_region_slot_r(f.region, (ii))) as usize] as IrOpcode)) {
+                    let old_id = IR_A_FN_ID[(ir_region_slot_r(f.region, (ii))) as usize]
+                    let nm = ir_arena_name(ir_region_slot_r(f.region, (ii)))
                     var canon: i64 = old_id
                     if nm.len > 0 {
                         let by_name = ir_merge_find_function_name_index(module, nm)
-                        if by_name >= 0 && (*module).functions[by_name as usize].instr_count > 0 {
+                        if by_name >= 0 && ir_fn_get(&(*module), by_name as usize).instr_count > 0 {
                             canon = by_name
                         }
                     } else if old_id >= 0 {
@@ -2089,16 +2267,16 @@ fn ir_module_compact_duplicate_fn_refs(module: &! IrModule) with Mut, Div, Panic
                     }
                     if canon >= 0
                         && canon < (*module).fn_count
-                        && (*module).functions[canon as usize].instr_count > 0
+                        && ir_fn_get(&(*module), canon as usize).instr_count > 0
                         && canon != old_id {
-                        f.instrs[ii as usize].fn_id = canon
+                        IR_A_FN_ID[(ir_region_slot_w(f.region, (ii))) as usize] = canon
                         changed = true
                     }
                 }
                 ii = ii + 1
             }
             if changed {
-                (*module).functions[fi as usize] = f
+                ir_fn_set(&! (*module), fi as usize, f)
             }
             fi = fi + 1
         }
@@ -2108,10 +2286,10 @@ fn ir_module_compact_duplicate_fn_refs(module: &! IrModule) with Mut, Div, Panic
 
 // Deep-copy an IrFunction so lean_single struct assignment does not alias instr slots.
 fn ir_function_deep_copy(func: IrFunction) -> IrFunction with Mut, Panic, Div {
-    var out = func
+    var out = ir_function_clone(&func)
     var ii: i64 = 0
     while ii < func.instr_count && ii < IR_MAX_INSTRS {
-        out.instrs[ii as usize] = func.instrs[ii as usize]
+        ir_arena_copy_slot(ir_region_slot_w(out.region, (ii)),ir_region_slot_r(func.region, (ii)))
         ii = ii + 1
     }
     out
@@ -2124,12 +2302,12 @@ fn ir_function_deep_copy(func: IrFunction) -> IrFunction with Mut, Panic, Div {
 fn ir_module_promote_canonical_into_stub_slots(module: &! IrModule) with Mut, Div, Panic {
     var fi: i64 = 0
     while fi < (*module).fn_count {
-        if (*module).functions[fi as usize].instr_count == 0 {
-            let sym_name = (*module).functions[fi as usize].name
+        if ir_fn_get(&(*module), fi as usize).instr_count == 0 {
+            let sym_name = ir_fn_get(&(*module), fi as usize).name
             if sym_name.len > 0 {
                 let canon = ir_merge_find_function_name_index(module, sym_name)
-                if canon >= 0 && canon != fi && (*module).functions[canon as usize].instr_count > 0 {
-                    (*module).functions[fi as usize] = ir_function_deep_copy((*module).functions[canon as usize])
+                if canon >= 0 && canon != fi && ir_fn_get(&(*module), canon as usize).instr_count > 0 {
+                    ir_fn_set(&! (*module), fi as usize, ir_function_deep_copy(ir_fn_get(&(*module), canon as usize)))
                 }
             }
         }
@@ -2155,19 +2333,49 @@ fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Pan
     var fi: i64 = 0
     while fi < (*module).fn_count {
         // A14: whole-function copy/writeback — do not reintroduce IrInstr by-value.
-        var f = (*module).functions[fi as usize]
+        var f = ir_fn_get(&(*module), fi as usize)
         var changed: bool = false
         var ii: i64 = 0
         while ii < f.instr_count {
-            let op = f.instrs[ii as usize].op
+            let op = (IR_A_OP[(ir_region_slot_r(f.region, (ii))) as usize] as IrOpcode)
             if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
-                let cn = f.instrs[ii as usize].name
-                let bid = if cn.len > 0 { native_v2_builtin_id_for_name(cn) } else { 0 }
+                var cn = ir_arena_name(ir_region_slot_r(f.region, (ii)))
+                var bid = if cn.len > 0 { native_v2_builtin_id_for_name(cn) } else { 0 }
+                // #2244: str_slice is arity-polymorphic at the source level --
+                // (s, start) is the suffix pointer, (s, start, end) is a copy of
+                // the half-open range. lean_single dispatches on arity while it
+                // parses; a native builtin is one stub with no view of its call
+                // site, so both spellings lowered to the suffix form and end was
+                // discarded at 102 call sites. Retag the 3-arg sites onto their
+                // own builtin name here, where the arity is still on the
+                // instruction, so each spelling gets its own stub. Making the one
+                // stub 3-arg instead would turn the specified 2-arg form into a
+                // range copy over an uninitialised end -- corruption, not a wrong
+                // string. Idempotent: a retagged call reads back as bid 51.
+                if bid == 8 {
+                    let slice_argc = IR_A_ARG_COUNT[(ir_region_slot_r(f.region, (ii))) as usize]
+                    // `== 3`, not `>= 3`. The retag decides an overload
+                    // IDENTITY, so it must name the arity it means. With `>=`
+                    // a 4-argument call is relabelled str_slice.3 and its
+                    // fourth argument disappears -- and that call is
+                    // reachable: `souc check` accepts str_slice(s,2,5,7)
+                    // today (measured 2026-08-28), so the checker does not
+                    // stand between source and this line. A 4-argument call
+                    // now keeps the 2-argument spelling, which is still
+                    // wrong for the caller but is wrong VISIBLY, rather than
+                    // being silently accepted as something it is not.
+                    if slice_argc == 3 {
+                        cn = make_name("str_slice.3")
+                        ir_arena_put_name(ir_region_slot_w(f.region, (ii)), cn)
+                        bid = native_v2_builtin_id_for_name(cn)
+                        changed = true
+                    }
+                }
                 if cn.len > 0 && bid != 0 {
-                    let cur = f.instrs[ii as usize].fn_id
+                    let cur = IR_A_FN_ID[(ir_region_slot_r(f.region, (ii))) as usize]
                     var ok: bool = false
                     if cur >= 0 && cur < (*module).fn_count {
-                        if ir_name_eq((*module).functions[cur as usize].name, cn) { ok = true }
+                        if ir_name_eq(ir_fn_get(&(*module), cur as usize).name, cn) { ok = true }
                     }
                     var target = cur
                     if !ok {
@@ -2178,34 +2386,34 @@ fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Pan
                             if native_v2_builtin_returns_float(bid) {
                                 stub.returns_float = 1
                             }
-                            (*module).functions[(*module).fn_count as usize] = stub
+                            ir_fn_set(&! (*module), (*module).fn_count as usize, stub)
                             target = (*module).fn_count
                             (*module).fn_count = (*module).fn_count + 1
                         }
                         if target >= 0 {
-                            f.instrs[ii as usize].fn_id = target
+                            IR_A_FN_ID[(ir_region_slot_w(f.region, (ii))) as usize] = target
                             changed = true
                         }
                     }
                     // Advertise f64 return on empty float-intrinsic stubs (new or pre-existing)
                     // and stamp the call site so native core does not mark the result INT.
                     if target >= 0 && target < (*module).fn_count && native_v2_builtin_returns_float(bid) {
-                        let stub_ic = (*module).functions[target as usize].instr_count
+                        let stub_ic = ir_fn_get(&(*module), target as usize).instr_count
                         if stub_ic == 0 {
-                            if (*module).functions[target as usize].returns_float != 1 {
-                                var tf = (*module).functions[target as usize]
+                            if ir_fn_get(&(*module), target as usize).returns_float != 1 {
+                                var tf = ir_fn_get(&(*module), target as usize)
                                 tf.returns_float = 1
-                                (*module).functions[target as usize] = tf
+                                ir_fn_set(&! (*module), target as usize, tf)
                             }
-                            if f.instrs[ii as usize].imm_flags != IR_FLOAT_REG_MARKER_FLAG {
-                                f.instrs[ii as usize].imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                            if IR_A_IMM_FLAGS[(ir_region_slot_r(f.region, (ii))) as usize] != IR_FLOAT_REG_MARKER_FLAG {
+                                IR_A_IMM_FLAGS[(ir_region_slot_w(f.region, (ii))) as usize] = IR_FLOAT_REG_MARKER_FLAG
                                 changed = true
                             }
                         } else {
                             // User/stdlib body shares the name: still honour declared returns_float.
-                            if (*module).functions[target as usize].returns_float == 1 {
-                                if f.instrs[ii as usize].imm_flags != IR_FLOAT_REG_MARKER_FLAG {
-                                    f.instrs[ii as usize].imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                            if ir_fn_get(&(*module), target as usize).returns_float == 1 {
+                                if IR_A_IMM_FLAGS[(ir_region_slot_r(f.region, (ii))) as usize] != IR_FLOAT_REG_MARKER_FLAG {
+                                    IR_A_IMM_FLAGS[(ir_region_slot_w(f.region, (ii))) as usize] = IR_FLOAT_REG_MARKER_FLAG
                                     changed = true
                                 }
                             }
@@ -2215,7 +2423,9 @@ fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Pan
             }
             ii = ii + 1
         }
-        if changed { (*module).functions[fi as usize] = f }
+        if changed {
+            ir_fn_set(&! (*module), fi as usize, f)
+        }
         fi = fi + 1
     }
 }
@@ -2237,25 +2447,25 @@ fn ir_module_finalize_merged_calls(module: &! IrModule) with Mut, Div, Panic {
         var fi: i64 = 0
         while fi < (*module).fn_count {
             // A14: whole-function copy/writeback (see ir_module_compact_duplicate_fn_refs)
-            // — nested `(*module).functions[fi].instrs[ii].fn_id=v` writes are dropped.
-            var f = (*module).functions[fi as usize]
+            // — nested `IR_A_FN_ID[(ir_region_slot_w(ir_fn_get(&(*module), fi).region, (ii))) as usize]=v` writes are dropped.
+            var f = ir_fn_get(&(*module), fi as usize)
             var changed: bool = false
             var ii: i64 = 0
             while ii < f.instr_count {
-                let op = f.instrs[ii as usize].op
+                let op = (IR_A_OP[(ir_region_slot_r(f.region, (ii))) as usize] as IrOpcode)
                 if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret || op == IrOpcode::IrLoadFnRef {
-                    let cur_fn = f.instrs[ii as usize].fn_id
-                    let cur_nm = f.instrs[ii as usize].name
+                    let cur_fn = IR_A_FN_ID[(ir_region_slot_r(f.region, (ii))) as usize]
+                    let cur_nm = ir_arena_name(ir_region_slot_r(f.region, (ii)))
                     let new_id = ir_module_resolve_call_target_fields(module, cur_fn, cur_nm)
                     if new_id != cur_fn {
-                        f.instrs[ii as usize].fn_id = new_id
+                        IR_A_FN_ID[(ir_region_slot_w(f.region, (ii))) as usize] = new_id
                         changed = true
                     }
                 }
                 ii = ii + 1
             }
             if changed {
-                (*module).functions[fi as usize] = f
+                ir_fn_set(&! (*module), fi as usize, f)
             }
             fi = fi + 1
         }
@@ -2271,7 +2481,7 @@ fn ir_module_restore_user_main_calls(module: &! IrModule, user_main: IrFunction)
     if (*module).fn_count <= 0 {
         return
     }
-    var slot = (*module).functions[0 as usize]
+    var slot = ir_fn_get(&(*module), 0 as usize)
     slot.name = user_main.name
     slot.instr_count = user_main.instr_count
     slot.reg_count = user_main.reg_count
@@ -2290,18 +2500,27 @@ fn ir_module_restore_user_main_calls(module: &! IrModule, user_main: IrFunction)
         slot.param_regs[pi as usize] = user_main.param_regs[pi as usize]
         pi = pi + 1
     }
+    // #1669: this rebuilds an IrFunction FIELD BY FIELD, so it is a drop hazard
+    // for every field that is not listed. float_reg_bits has to travel with
+    // param_regs -- both are per-function vreg facts, and losing either silently
+    // retypes registers. Wherever one is copied element-wise, so is the other.
+    var fw: i64 = 0
+    while fw < 64 {
+        slot.float_reg_bits[fw as usize] = user_main.float_reg_bits[fw as usize]
+        fw = fw + 1
+    }
     var ii: i64 = 0
     while ii < user_main.instr_count && ii < IR_MAX_INSTRS {
-        var ins = user_main.instrs[ii as usize]
+        var ins = ir_arena_load(ir_region_slot_r(user_main.region, (ii)))
         if (ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret) && ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
-            if (*module).functions[ins.fn_id as usize].returns_float == 1 {
+            if ir_fn_get(&(*module), ins.fn_id as usize).returns_float == 1 {
                 ins.imm_flags = IR_FLOAT_REG_MARKER_FLAG
             }
         }
-        slot.instrs[ii as usize] = ins
+        ir_arena_store_from(ir_region_slot_w(slot.region, (ii)), ins, ir_region_slot_r(user_main.region, (ii)))
         ii = ii + 1
     }
-    (*module).functions[0 as usize] = slot
+    ir_fn_set(&! (*module), 0 as usize, slot)
 }
 
 // Resolve fn_id=-1 named calls (cross-module calls emitted by module_frontend_ir_named_call)
@@ -2310,15 +2529,15 @@ fn ir_module_resolve_named_calls(module: &! IrModule) with Mut, Div, Panic {
     var fi: i64 = 0
     while fi < (*module).fn_count {
         var ii: i64 = 0
-        while ii < (*module).functions[fi as usize].instr_count {
-            let call_op = (*module).functions[fi as usize].instrs[ii as usize].op
+        while ii < ir_fn_get(&(*module), fi as usize).instr_count {
+            let call_op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (ii))) as usize] as IrOpcode)
             if (call_op == IrOpcode::IrCall || call_op == IrOpcode::IrCallSret)
-                && (*module).functions[fi as usize].instrs[ii as usize].fn_id < 0 {
-                let call_name = (*module).functions[fi as usize].instrs[ii as usize].name
+                && IR_A_FN_ID[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (ii))) as usize] < 0 {
+                let call_name = ir_arena_name(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (ii)))
                 if call_name.len > 0 {
                     let found_ji = ir_merge_find_function_name_index(module, call_name)
                     if found_ji >= 0 {
-                        (*module).functions[fi as usize].instrs[ii as usize].fn_id = found_ji
+                        IR_A_FN_ID[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (ii))) as usize] = found_ji
                     }
                 }
             }
@@ -2394,12 +2613,13 @@ pub struct ModuleClosure {
     pub unresolved_count: i64,
     pub saturated: bool,
     pub parse_failed: bool,
-    // Which module failed to parse, and how many errors it produced. Without
-    // these the preflight could only report node_count/unresolved/saturated —
-    // the three fields that are FINE when parse_failed is the one that is true —
-    // and the reader was left bisecting the closure by hand to find the file.
-    pub failed_path: string,
-    pub failed_error_count: i64,
+    // Path of the module whose parse failed. Empty when parse_failed is false.
+    //
+    // Without this a caller can report THAT the closure is incomplete but not
+    // WHY or WHERE: a dependency parse failure short-circuits the walk, leaving
+    // unresolved_count at 0 and saturated at false, so every field the diagnostic
+    // prints looks healthy while the one that explains the failure is absent.
+    pub parse_failed_path: string,
 }
 
 pub fn module_frontend_collect_ast_closure_into(
@@ -2411,15 +2631,13 @@ pub fn module_frontend_collect_ast_closure_into(
     (*out).unresolved_count = 0
     (*out).saturated = false
     (*out).parse_failed = false
-    (*out).failed_path = ""
-    (*out).failed_error_count = 0
+    (*out).parse_failed_path = ""
 
     parser_reset_last_errors()
     let main_prog = load_module_file(main_path)
     if parser_last_error_count() > 0 {
         (*out).parse_failed = true
-        (*out).failed_path = main_path
-        (*out).failed_error_count = parser_last_error_count()
+        (*out).parse_failed_path = main_path
         return false
     }
     (*out).paths[0] = main_path
@@ -2433,11 +2651,15 @@ pub fn module_frontend_collect_ast_closure_into(
         let work_prog = load_module_file(caller_path)
         if parser_last_error_count() > 0 {
             (*out).parse_failed = true
-            (*out).failed_path = caller_path
-            (*out).failed_error_count = parser_last_error_count()
+            (*out).parse_failed_path = caller_path
             work_front = (*out).node_count
         }
         let imports = extract_imports_from_ast(work_prog)
+        if imports.overflowed {
+            // More `use` statements than ImportList can hold. Reported through the same channel as
+            // the walker's own caps so the closure is never silently incomplete.
+            (*out).saturated = true
+        }
         var i: i64 = 0
         while i < imports.count && !(*out).parse_failed {
             let dependency_path = resolve_import_file_path(imports.paths[i], cur_dir)
@@ -2884,10 +3106,10 @@ fn module_frontend_name_is_print_int(name: Name) -> bool {
     name.buf[8] == (116 as i8)
 }
 
-fn module_frontend_ir_named_call(dst: i64, fn_name: Name) -> IrInstr {
+fn module_frontend_ir_named_call(dst: i64, fn_name: Name) -> IrInstr with Div, Mut, Panic {
     var instr = ir_call(dst, 0 - 1, fn_name, None, 0)
     instr.fn_id = 0 - 1
-    instr.name = fn_name
+    instr.name_id = ir_intern_name(fn_name)
     instr
 }
 
@@ -2927,10 +3149,10 @@ fn module_frontend_name_from_string(text: string) -> Name with Mut, Panic, Div {
 }
 
 fn module_frontend_force_i64_return(func_in: IrFunction, value: i64) -> IrFunction with Mut, Panic, Div {
-    var func = func_in
+    var func = ir_function_clone(&func_in)
     func.reg_count = 1
-    func.instrs[0] = ir_load_imm(0, value)
-    func.instrs[1] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, value))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
     func.instr_count = 2
     func
 }
@@ -4232,15 +4454,15 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
     func.reg_count = 1
     let body = module_frontend_source_body_start(data, fn_pos, size)
     if body < 0 {
-        func.instrs[0] = ir_load_imm(0, 0)
-        func.instrs[1] = ir_return(0)
+        ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 0))
+        ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
         func.instr_count = 2
         return func
     }
     let expr = module_frontend_source_skip_ws(data, body, size)
     if expr >= size {
-        func.instrs[0] = ir_load_imm(0, 0)
-        func.instrs[1] = ir_return(0)
+        ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 0))
+        ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
         func.instr_count = 2
         return func
     }
@@ -4252,8 +4474,8 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
 
     let literal = module_frontend_source_int_at(data, expr, size)
     if literal.0 {
-        func.instrs[0] = ir_load_imm(0, literal.1)
-        func.instrs[1] = ir_return(0)
+        ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, literal.1))
+        ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
         func.instr_count = 2
         return func
     }
@@ -4272,22 +4494,22 @@ fn module_frontend_lower_source_fn_body(path: string, data: string, fn_pos: i64,
         let printed = module_frontend_source_first_int_after(data, expr2 + callee.len, size)
         if printed.0 {
             func.reg_count = 2
-            func.instrs[0] = ir_load_imm(0, printed.1)
-            func.instrs[1] = ir_load_imm(1, 0 - 4242)
-            func.instrs[2] = ir_return(0)
+            ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, printed.1))
+            ir_arena_store(ir_region_slot_w(func.region, (1)), ir_load_imm(1, 0 - 4242))
+            ir_arena_store(ir_region_slot_w(func.region, (2)), ir_return(0))
             func.instr_count = 3
             return func
         }
     }
     if callee.len > 0 {
-        func.instrs[0] = module_frontend_ir_named_call(0, callee)
-        func.instrs[1] = ir_return(0)
+        ir_arena_store(ir_region_slot_w(func.region, (0)), module_frontend_ir_named_call(0, callee))
+        ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
         func.instr_count = 2
         return func
     }
 
-    func.instrs[0] = ir_load_imm(0, 0)
-    func.instrs[1] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 0))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
     func.instr_count = 2
     func
 }
@@ -4296,6 +4518,18 @@ fn module_frontend_lower_source_file_summary(path: string, module_index: i64, tr
     trace.last_stage = "lower_source_summary"
     trace.last_module_index = module_index
     var module = ir_empty_module()
+    // #1669 probe, at the literal moment of creation: are the function slots
+    // clean before ANYTHING touches them? untouched8 at codegen says they are
+    // dirty there; this says whether they were born that way. A standalone
+    // [Big; 2048] repeat initialiser with a [i64; 64] field zeroes correctly, so
+    // the repeat initialiser alone is NOT the explanation.
+    if str_eq(read_env("SOUNIO_FLOAT_BITS_PROBE"), "1") {
+        print("[float-bits] at_creation untouched8=")
+        print(io_trace_i64_string(ir_module_count_float_bits_untouched(&module, 8)))
+        print(" fn_count=")
+        print(io_trace_i64_string(module.fn_count))
+        print("\n")
+    }
     let size = file_size(path)
     if size <= 2 {
         return module
@@ -4307,7 +4541,7 @@ fn module_frontend_lower_source_file_summary(path: string, module_index: i64, tr
             var func = ir_empty_function()
             func.name = module_frontend_source_fn_name(data, module_frontend_source_fn_name_start(data, i, size), size)
             func = module_frontend_lower_source_fn_body(path, data, i, size, func)
-            module.functions[module.fn_count as usize] = func
+            ir_fn_set(&! module, module.fn_count as usize, func)
             module.fn_count = module.fn_count + 1
         }
         i = i + 1
@@ -4449,11 +4683,11 @@ fn multimodule_ir_ok(m: Box<IrModule>) -> MultiModuleIrResult {
     MultiModuleIrResult { ok: true, module: m, error_msg: "" }
 }
 
-fn multimodule_ir_error(msg: string) -> MultiModuleIrResult {
+fn multimodule_ir_error(msg: string) -> MultiModuleIrResult with Alloc, Panic, Div, Mut {
     MultiModuleIrResult { ok: false, module: Box::new(ir_empty_module()), error_msg: msg }
 }
 
-pub fn empty_multimodule_ir_result() -> MultiModuleIrResult {
+pub fn empty_multimodule_ir_result() -> MultiModuleIrResult with Panic, Div, Alloc, Mut {
     multimodule_ir_error("")
 }
 
@@ -4509,7 +4743,7 @@ fn module_frontend_lower_box_ok(module: Box<IrModule>, patch_stats: IrValidatedP
     }
 }
 
-fn module_frontend_lower_direct_box_error(msg: string) -> ModuleFrontendLowerDirectBoxResult {
+fn module_frontend_lower_direct_box_error(msg: string) -> ModuleFrontendLowerDirectBoxResult with Alloc, Panic, Div, Mut {
     ModuleFrontendLowerDirectBoxResult {
         ok: false,
         module: Box::new(ir_empty_module()),
@@ -4552,10 +4786,10 @@ fn module_frontend_lower_fn_item_into(item: Item, module: Box<IrModule>) -> Box<
         None => {}
     }
     func.reg_count = 1
-    func.instrs[0] = ir_load_imm(0, 0)
-    func.instrs[1] = ir_return(0)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 0))
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
     func.instr_count = 2
-    (*m).functions[idx as usize] = func
+    ir_fn_set(&! (*m), idx as usize, func)
     (*m).fn_count = idx + 1
     m
 }
@@ -4654,11 +4888,32 @@ fn module_frontend_count_bss_global_slots(items: &Option<Box<ItemList>>) -> i64 
     count
 }
 
-fn module_frontend_count_loaded_ir_slots(programs: &! [Program; 256], loaded: i64) -> i64 with Alloc {
+// Counts what will ACTUALLY be lowered. Before cross-module DCE ran on this
+// path the count was of everything parsed, which is why a 10705-declaration
+// closure failed a preflight that 5997 live declarations would have passed.
+var MF_DCE_TRACE_ON: i64 = 0
+var MF_DCE_TRACE_CHECKED: i64 = 0
+
+fn module_frontend_dce_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if MF_DCE_TRACE_CHECKED == 0 {
+        MF_DCE_TRACE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
+            MF_DCE_TRACE_ON = 1
+        }
+    }
+    MF_DCE_TRACE_ON == 1
+}
+
+fn module_frontend_count_loaded_ir_slots(programs: &! [Program; 256], loaded: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     var count: i64 = 0
     var i: i64 = 0
     while i < loaded && i < 256 {
-        let items = (*programs)[i as usize].items
+        // Filtered, not raw: the two lowering read sites below filter too, so
+        // counting the unfiltered list would reject a program that fits.
+        // spec_dce_filter_with_global_marks returns its input unchanged unless
+        // a COMPLETE mark set is ready, so this stays conservative when the DCE
+        // refused.
+        let items = spec_dce_filter_with_global_marks((*programs)[i as usize].items)
         count = count + module_frontend_count_lowered_ir_slots(&items)
         i = i + 1
     }
@@ -4676,6 +4931,19 @@ fn module_frontend_count_loaded_bss_global_slots(programs: &! [Program; 256], lo
     count
 }
 
+// EVERY ARM REPORTS THE CENSUS, not just the verdict. Both numbers are already
+// in hand here and were being discarded, which made the message name a wall
+// without saying how far over it the program is -- and the four ways past this
+// wall differ by an order of magnitude in cost, so choosing between them
+// without the number is guessing:
+//
+//   extract main.sio's test suite   ~1165 fns, no structural change
+//   raise IR_MAX_FUNCS              ~1 MB of BSS per function
+//   box IrFunction.instrs           the largest change in the backend
+//
+// "over by 12" and "over by 4000" call for different answers. Measured
+// 2026-08-06: gen2 on main.sio reported the combined arm with no counts, and
+// deciding what to do next required instrumenting this line first.
 fn module_frontend_ir_slot_capacity_error_from_counts(total_slots: i64, bss_slots: i64, slot_limit: i64) -> string with Mut, Panic, Div, Alloc {
     if bss_slots > BSS_MAX_GLOBALS {
         return "too many globals: shared IR module capacity exceeded (max " + io_trace_i64_string(BSS_MAX_GLOBALS) + " slots)"
@@ -4684,6 +4952,34 @@ fn module_frontend_ir_slot_capacity_error_from_counts(total_slots: i64, bss_slot
         return "too many functions: shared IR module capacity exceeded (max " + io_trace_i64_string(slot_limit) + " slots)"
     }
     "too many lowered items: combined globals and functions exceed shared IR module capacity (max " + io_trace_i64_string(slot_limit) + " slots)"
+}
+
+// The census, on its OWN line. Two constraints rule out appending it to the
+// message above.
+//
+// The message text is matched by nine consumers -- four gates
+// (madaros_fixed_point, madaros_global_capacity, madaros_ir_capacity_probe,
+// madaros_imported_capacity), two tests that assert on it
+// (door1_too_many_globals_1025.sio, ir_capacity/ir_capacity_main.sio), and
+// lean_single.sio itself. Rewording it to make room would break all of them to
+// carry a number that fits perfectly well elsewhere.
+//
+// And Madaros truncates a printed string at 128 bytes with no diagnostic. The
+// combined-arm message is already ~104 characters before any count is
+// appended, so the natural phrasing would have silently dropped exactly the
+// census it exists to carry.
+fn module_frontend_print_slot_census(total_slots: i64, bss_slots: i64, slot_limit: i64) with IO, Mut, Panic, Div, Alloc {
+    print("IR slot census: globals ")
+    print_int(bss_slots)
+    print(" + functions ")
+    print_int(total_slots - bss_slots)
+    print(" = ")
+    print_int(total_slots)
+    print(" (max ")
+    print_int(slot_limit)
+    print(", over by ")
+    print_int(total_slots - slot_limit)
+    print(")\n")
 }
 
 fn module_frontend_ir_slot_capacity_exceeded(items: &Option<Box<ItemList>>) -> bool with Alloc {
@@ -4709,18 +5005,20 @@ fn module_frontend_loaded_ir_slot_limit(loaded: i64) -> i64 {
     IR_MAX_FUNCS
 }
 
-fn module_frontend_loaded_ir_slot_capacity_exceeded(programs: &! [Program; 256], loaded: i64) -> bool with Alloc {
+fn module_frontend_loaded_ir_slot_capacity_exceeded(programs: &! [Program; 256], loaded: i64) -> bool with Alloc, Div, IO, Mut, Panic {
     let total_slots = module_frontend_count_loaded_ir_slots(programs, loaded)
     let bss_slots = module_frontend_count_loaded_bss_global_slots(programs, loaded)
     bss_slots > BSS_MAX_GLOBALS || total_slots > module_frontend_loaded_ir_slot_limit(loaded)
 }
 
-fn module_frontend_loaded_ir_slot_capacity_error(programs: &! [Program; 256], loaded: i64) -> string with Mut, Panic, Div, Alloc {
-    module_frontend_ir_slot_capacity_error_from_counts(
-        module_frontend_count_loaded_ir_slots(programs, loaded),
-        module_frontend_count_loaded_bss_global_slots(programs, loaded),
-        module_frontend_loaded_ir_slot_limit(loaded)
-    )
+fn module_frontend_loaded_ir_slot_capacity_error(programs: &! [Program; 256], loaded: i64) -> string with Mut, Panic, Div, Alloc, IO {
+    let total_slots = module_frontend_count_loaded_ir_slots(programs, loaded)
+    let bss_slots = module_frontend_count_loaded_bss_global_slots(programs, loaded)
+    let slot_limit = module_frontend_loaded_ir_slot_limit(loaded)
+    // This is the multi-module path -- the one self-hosted/compiler/main.sio
+    // takes -- so it is the one whose census anybody actually needs.
+    module_frontend_print_slot_census(total_slots, bss_slots, slot_limit)
+    module_frontend_ir_slot_capacity_error_from_counts(total_slots, bss_slots, slot_limit)
 }
 
 fn module_frontend_lower_program_counts_traced(
@@ -4765,9 +5063,18 @@ fn module_frontend_lower_program_box_traced_with_epistemic(
     }
     let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(program, epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+    // "ir_summary_failed" conflated TWO different failures — the lowering
+    // reported an error, or it produced an empty module — and said which
+    // neither. Separated, because the first thing anyone asks on seeing it
+    // is which one happened.
+    if summary_result.had_error {
         trace.last_stage = "lower_summary_error"
-        return module_frontend_lower_box_error("ir_summary_failed")
+        lower_hard_error_report()
+        return module_frontend_lower_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -4787,6 +5094,7 @@ fn module_frontend_lower_program_box_traced_with_epistemic(
     }
     if body_result.had_error {
         trace.last_stage = "lower_bodies_error"
+        lower_hard_error_report()
         return module_frontend_lower_box_error("ir_bodies_failed")
     }
 
@@ -4828,9 +5136,18 @@ fn module_frontend_lower_program_items_box_traced(
     let program = mf_program_from_items(items)
     let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&program, &epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+    // "ir_summary_failed" conflated TWO different failures — the lowering
+    // reported an error, or it produced an empty module — and said which
+    // neither. Separated, because the first thing anyone asks on seeing it
+    // is which one happened.
+    if summary_result.had_error {
         trace.last_stage = "lower_summary_error"
-        return module_frontend_lower_box_error("ir_summary_failed")
+        lower_hard_error_report()
+        return module_frontend_lower_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -4850,6 +5167,7 @@ fn module_frontend_lower_program_items_box_traced(
     }
     if body_result.had_error {
         trace.last_stage = "lower_bodies_error"
+        lower_hard_error_report()
         return module_frontend_lower_box_error("ir_bodies_failed")
     }
 
@@ -4879,9 +5197,18 @@ fn module_frontend_lower_program_box_traced_with_externs(
     var epistemic = ir_empty_epistemic_section()
     let summary_result = lower_program_to_ir_summary_box_with_externs_ref(program, programs, program_count, module_index, &epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+    // "ir_summary_failed" conflated TWO different failures — the lowering
+    // reported an error, or it produced an empty module — and said which
+    // neither. Separated, because the first thing anyone asks on seeing it
+    // is which one happened.
+    if summary_result.had_error {
         trace.last_stage = "lower_summary_error"
-        return module_frontend_lower_box_error("ir_summary_failed")
+        lower_hard_error_report()
+        return module_frontend_lower_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -4901,6 +5228,7 @@ fn module_frontend_lower_program_box_traced_with_externs(
     }
     if body_result.had_error {
         trace.last_stage = "lower_bodies_error"
+        lower_hard_error_report()
         return module_frontend_lower_box_error("ir_bodies_failed")
     }
 
@@ -4927,13 +5255,22 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
         trace.last_stage = "lower_summary_error"
         return module_frontend_lower_box_error(module_frontend_ir_slot_capacity_error(items))
     }
-    var epistemic = ir_empty_epistemic_section()
+    let epistemic = ir_empty_epistemic_section_boxed()
     let program = mf_program_from_items(items)
-    let summary_result = lower_program_to_ir_summary_box_with_externs_ref(&program, programs, program_count, module_index, &epistemic)
+    let summary_result = lower_program_to_ir_summary_box_with_externs_ref(&program, programs, program_count, module_index, &(*epistemic))
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+    // "ir_summary_failed" conflated TWO different failures — the lowering
+    // reported an error, or it produced an empty module — and said which
+    // neither. Separated, because the first thing anyone asks on seeing it
+    // is which one happened.
+    if summary_result.had_error {
         trace.last_stage = "lower_summary_error"
-        return module_frontend_lower_box_error("ir_summary_failed")
+        lower_hard_error_report()
+        return module_frontend_lower_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -4943,7 +5280,7 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         &program,
         *summary_result.summary,
-        &epistemic
+        &(*epistemic)
     )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
     if module_frontend_lower_trace_enabled() {
@@ -4953,6 +5290,7 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     }
     if body_result.had_error {
         trace.last_stage = "lower_bodies_error"
+        lower_hard_error_report()
         return module_frontend_lower_box_error("ir_bodies_failed")
     }
 
@@ -5036,11 +5374,13 @@ pub fn module_frontend_check_imported_modules_verdict(main_path: string) -> i64 
 // Re-box path (Wave9 / memory-wall residual):
 //   1. Scan newly-appended functions; snapshot every live call_args chain into
 //      BSS fixed arrays (NOT Box-arena) — reg heads only, max 8 args/site.
+//      Wider chains mark overflow and keep the module arena alive rather than
+//      silently rebuilding a truncated argument list.
 //   2. __arena_reset(dep mark) — reclaim the dep lowering window.
 //   3. Rebuild fresh Box<IrRegList> chains from BSS and write them back via the
 //      A14 whole-function idiom (by-value IrFunction, 2-level field store,
 //      1-level array writeback). Nested
-//      `(*module).functions[fi].instrs[ii].call_args = …` is a 3-level store
+//      `IR_INSTR_ARENA[ir_region_slot_w(ir_fn_get(&(*module), fi).region, (ii)) as usize].call_args = …` is a 3-level store
 //      through Box that lean_single silently DROPS — that was the residual
 //      that forced the post-#832 "skip when live call_args" retreat. Do NOT
 //      reintroduce A8 by-value IrInstr argument scramble.
@@ -5066,29 +5406,25 @@ fn mf_arebox_reset_scratch() with Mut {
 // Extract up to 8 reg heads from the call_args chain at (fi, ii) into
 // MF_AREBOX_ARGS[slot*8 ..]. Walks via module indices so we never pass a
 // Box-carrying Option into a helper by value (defense in depth vs A8-class
-// large-struct/Box by-value miscompiles). Extra args beyond 8 are truncated
-// (same convention as native_v2_collect_call_args / tco_extract_call_args).
+// large-struct/Box by-value miscompiles). A wider chain cannot be rebuilt from
+// this scratch slot, so mark overflow and let the caller skip the arena reset.
 fn mf_arebox_extract_at(module: &IrModule, fi: i64, ii: i64, slot: i64) -> i64 with Mut, Panic, Div {
+    // #1649: read the FLAT POOL, not the Box chain. ir_arena_load does not
+    // rebuild call_args -- rebuilding needs Alloc and it is called at ~431 sites
+    // -- so the chain walked here was ALWAYS None, this returned 0 for every
+    // instruction, and the reset proceeded believing no call had arguments to
+    // preserve. Silent argument loss on the dependency-merge path, not a crash.
+    // The pool needs no allocation, so this is also simpler than what it replaces.
+    let at = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (ii))
+    let total = IR_A_ARG_COUNT[at as usize]
+    if total <= 0 { return 0 }
     var n: i64 = 0
-    match (*module).functions[fi as usize].instrs[ii as usize].call_args {
-        Some(node0) => {
-            MF_AREBOX_ARGS[(slot * 8 + n) as usize] = (*node0).head
-            n = 1
-            var cur = (*node0).tail
-            while n < 8 {
-                match cur {
-                    Some(node) => {
-                        MF_AREBOX_ARGS[(slot * 8 + n) as usize] = (*node).head
-                        cur = (*node).tail
-                        n = n + 1
-                    }
-                    _ => { return n }
-                }
-            }
-            n
-        }
-        _ => 0
+    while n < 8 && n < total {
+        MF_AREBOX_ARGS[(slot * 8 + n) as usize] = ir_arena_arg_at(at, n)
+        n = n + 1
     }
+    if total > 8 { MF_AREBOX_OVERFLOW = true }
+    n
 }
 
 // Record one (fi, ii) call-arg site for post-reset re-boxing, extracting its
@@ -5128,12 +5464,13 @@ fn mf_arebox_scan(module: &IrModule, fn_lo: i64, fn_hi: i64) -> bool with Mut, P
     mf_arebox_reset_scratch()
     var fi = fn_lo
     while fi < fn_hi {
-        let ic = (*module).functions[fi as usize].instr_count
+        let ic = ir_fn_get(&(*module), fi as usize).instr_count
         var ii: i64 = 0
         while ii < ic {
-            match (*module).functions[fi as usize].instrs[ii as usize].call_args {
-                Some(_) => mf_arebox_record_at(module, fi, ii)
-                _ => {}
+            // #1649: same correction -- ask the pool whether this instruction has
+            // arguments. The call_args chain on a loaded instr is always empty.
+            if IR_A_ARG_COUNT[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (ii))) as usize] > 0 {
+                mf_arebox_record_at(module, fi, ii)
             }
             ii = ii + 1
         }
@@ -5146,7 +5483,8 @@ fn mf_arebox_scan(module: &IrModule, fn_lo: i64, fn_hi: i64) -> bool with Mut, P
 // called strictly after __arena_reset.
 //
 // A14 whole-function writeback: lean_single drops 3-level nested stores of the
-// form `(*module).functions[fi].instrs[ii].call_args = rebuilt`, leaving the
+// form `ir_fn_get(&(*module), fi).instrs[ii].call_args = rebuilt` (now
+// `ir_arena_put_args(ir_region_slot_w(...), rebuilt, ...)`), leaving the
 // shallow (now-dangling) Box pointer in place — that is the observed
 // "corrupts IrRegList heads" residual after arena reclaim. Copy the IrFunction
 // out, mutate call_args on the owned local (2-level field store, same proven
@@ -5159,17 +5497,85 @@ fn mf_arebox_apply(module: &! IrModule) with Alloc, Mut, Panic, Div {
         let ii = MF_AREBOX_II[s as usize]
         let rebuilt = mf_arebox_rebuild(s)
         if fi >= 0 && fi < (*module).fn_count {
-            var f = (*module).functions[fi as usize]
+            var f = ir_fn_get(&(*module), fi as usize)
             if ii >= 0 && ii < f.instr_count {
-                f.instrs[ii as usize].call_args = rebuilt
-                (*module).functions[fi as usize] = f
+                ir_arena_put_args(ir_region_slot_w(f.region, (ii)), rebuilt, ir_reg_list_len(rebuilt))
+                ir_fn_set(&! (*module), fi as usize, f)
             }
         }
         s = s + 1
     }
 }
 
-fn module_frontend_lower_programs_array_direct_box(
+fn module_frontend_lower_single_program_array_direct_box(
+    programs: &! [Program; 256],
+    trace: &! LoadMultimoduleIrTrace
+) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Panic, Div, Alloc {
+    trace.last_stage = "lower_summary"
+    trace.last_module_index = 0
+    let dce_marks = spec_dce_mark_across_programs(programs, 1)
+    if dce_marks > 0 && module_frontend_dce_trace_enabled() {
+        print("lower_array: dce marks=")
+        print_int(dce_marks)
+        print("\n")
+    }
+    if module_frontend_loaded_ir_slot_capacity_exceeded(programs, 1) {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_direct_box_error(module_frontend_loaded_ir_slot_capacity_error(programs, 1))
+    }
+
+    fo_xfer_global_reset()
+    let program = (*programs)[0]
+    fo_preregister_program_items_multipass(&program.items)
+    print("lower_array: seed_begin\n")
+    let seed_items = spec_dce_filter_with_global_marks(program.items)
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
+    if module_frontend_ir_slot_capacity_exceeded(&seed_items) {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_direct_box_error(module_frontend_ir_slot_capacity_error(&seed_items))
+    }
+    let epistemic = ir_empty_epistemic_section_boxed()
+    let seed_program = mf_program_from_items(&seed_items)
+    let summary_result = lower_program_to_ir_summary_box_with_externs_ref(&seed_program, programs, 1, 0, &(*epistemic))
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
+    if summary_result.had_error {
+        trace.last_stage = "lower_summary_error"
+        lower_hard_error_report()
+        return module_frontend_lower_direct_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_direct_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
+    }
+    trace.summary_seeded_modules = trace.summary_seeded_modules + 1
+    trace.last_stage = "lower_bodies"
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
+        &seed_program,
+        *summary_result.summary,
+        &(*epistemic)
+    )
+    if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
+    if body_result.had_error {
+        trace.last_stage = "lower_bodies_error"
+        lower_hard_error_report()
+        return module_frontend_lower_direct_box_error("ir_bodies_failed")
+    }
+    if module_frontend_items_have_ontology(&seed_items) {
+        checker_apply_ir_ontology_parameter_links_from_items(&seed_items, &! (*body_result.module))
+    }
+    trace.body_lowered_modules = trace.body_lowered_modules + 1
+    trace.lowered_modules = trace.lowered_modules + 1
+    trace.patched_functions = trace.patched_functions + body_result.patch_stats.patched_functions
+    trace.patched_calls = trace.patched_calls + body_result.patch_stats.patched_calls
+    trace.fallback_insertions = trace.fallback_insertions + body_result.patch_stats.fallback_insertions
+    print("lower_array: seed_done\n")
+    trace.last_stage = "done"
+    trace.merged_modules = 1
+    module_frontend_lower_direct_box_ok(body_result.module, body_result.patch_stats)
+}
+
+fn module_frontend_lower_programs_array_direct_box_multi(
     programs: &! [Program; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace
@@ -5180,6 +5586,20 @@ fn module_frontend_lower_programs_array_direct_box(
 
     trace.last_stage = "lower_summary"
     trace.last_module_index = 0
+    // Cross-module DCE BEFORE the capacity preflight, so the preflight counts
+    // what will be lowered rather than what was parsed. spec_dce_unreachable_item_fns
+    // only runs on the specialized-collapse path, so this path had no pruning at
+    // all: main.sio's 120-module closure declares 10705 functions against a
+    // limit of IR_MAX_FUNCS - 1, while only 5997 are reachable from `main`.
+    // Returns -1 when the mark set could not be completed, and the filter
+    // helpers then hand back their input unchanged — a refusal upstream cannot
+    // become a deletion downstream.
+    let dce_marks = spec_dce_mark_across_programs(programs, loaded)
+    if dce_marks > 0 && module_frontend_dce_trace_enabled() {
+        print("lower_array: dce marks=")
+        print_int(dce_marks)
+        print("\n")
+    }
     if module_frontend_loaded_ir_slot_capacity_exceeded(programs, loaded) {
         trace.last_stage = "lower_summary_error"
         return module_frontend_lower_direct_box_error(module_frontend_loaded_ir_slot_capacity_error(programs, loaded))
@@ -5198,7 +5618,7 @@ fn module_frontend_lower_programs_array_direct_box(
         fo_pi = fo_pi + 1
     }
     print("lower_array: seed_begin\n")
-    let seed_items = (*programs)[0].items
+    let seed_items = spec_dce_filter_with_global_marks((*programs)[0].items)
     let seed_lower = module_frontend_lower_program_items_box_traced_with_externs(&seed_items, programs, loaded, 0, trace)
     print("lower_array: seed_done\n")
     if !seed_lower.ok {
@@ -5220,7 +5640,7 @@ fn module_frontend_lower_programs_array_direct_box(
             if seed_main_idx < 0 {
                 seed_main_idx = 0
             }
-            var seed_user_main = ir_function_deep_copy((*acc_box).functions[seed_main_idx as usize])
+            var seed_user_main = ir_function_deep_copy(ir_fn_get(&(*acc_box), seed_main_idx as usize))
             let into_acc_default = module_frontend_into_acc_enabled()
             if into_acc_default {
                 print("lower_array: dep_mode into_acc\n")
@@ -5244,7 +5664,7 @@ fn module_frontend_lower_programs_array_direct_box(
                 // this mark and is untouched by the reset below -- only the
                 // per-module lowering scratch falls inside [mark, reset).
                 let dep_arena_mark = __arena_mark()
-                let dep_items = (*programs)[i as usize].items
+                let dep_items = spec_dce_filter_with_global_marks((*programs)[i as usize].items)
 
                 if into_acc_default {
                     // Wave13: body-lower dep directly into acc (no concurrent dep_box).
@@ -5262,6 +5682,17 @@ fn module_frontend_lower_programs_array_direct_box(
                     print_int(i)
                     print("\n")
                     if into_result.had_error {
+                        // Say WHICH module and WHAT was raised. This site used to
+                        // return the bare string, so a failure here named the
+                        // stage and nothing else -- and the lowering-error ledger
+                        // that knows the answer was already sitting in globals,
+                        // unread. The four *_ir_slot paths above already do this.
+                        print("  into_acc failed at module index ")
+                        print_int(i)
+                        print(" of ")
+                        print_int(loaded)
+                        print("\n")
+                        lower_hard_error_report()
                         return module_frontend_lower_direct_box_error("ir_into_acc_failed")
                     }
                     acc_box = into_result.module
@@ -5337,24 +5768,24 @@ fn module_frontend_lower_programs_array_direct_box(
                             var append_count: i64 = 0
                             var rfi: i64 = 0
                             while rfi < dep_fn_count {
-                                let dep_ic = (*dep_box).functions[rfi as usize].instr_count
-                                let dep_is_bss = (*dep_box).functions[rfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL
+                                let dep_ic = ir_fn_get(&(*dep_box), rfi as usize).instr_count
+                                let dep_is_bss = ir_fn_get(&(*dep_box), rfi as usize).compile_strategy == IR_STRATEGY_BSS_GLOBAL
                                 var stub_idx: i64 = 0 - 1
                                 var existing_body_idx: i64 = 0 - 1
                                 var sfi: i64 = 0
                                 while sfi < (*acc_box).fn_count {
                                     if ir_name_eq(
-                                        (*acc_box).functions[sfi as usize].name,
-                                        (*dep_box).functions[rfi as usize].name
+                                        ir_fn_get(&(*acc_box), sfi as usize).name,
+                                        ir_fn_get(&(*dep_box), rfi as usize).name
                                     ) {
                                         // Wave13: seed may have preseeded external BSS so bare
                                         // Ident from main resolves. DEDUP those slots by name
                                         // (instr_count is 0 for scalar BSS — do not treat as stub).
                                         if dep_is_bss
-                                            && (*acc_box).functions[sfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL
+                                            && ir_fn_get(&(*acc_box), sfi as usize).compile_strategy == IR_STRATEGY_BSS_GLOBAL
                                         {
                                             existing_body_idx = sfi
-                                        } else if (*acc_box).functions[sfi as usize].instr_count <= 0 {
+                                        } else if ir_fn_get(&(*acc_box), sfi as usize).instr_count <= 0 {
                                             stub_idx = sfi
                                         } else {
                                             existing_body_idx = sfi
@@ -5407,8 +5838,8 @@ fn module_frontend_lower_programs_array_direct_box(
                                         rollback_certificate_offset,
                                         bss_offset_delta
                                     )
-                                    if (*dep_box).functions[mfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
-                                        let bsz = (*dep_box).functions[mfi as usize].bss_size
+                                    if ir_fn_get(&(*dep_box), mfi as usize).compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                                        let bsz = ir_fn_get(&(*dep_box), mfi as usize).bss_size
                                         let aligned = ((bsz + 7) / 8) * 8
                                         bss_grow = bss_grow + aligned
                                     }
@@ -5428,7 +5859,7 @@ fn module_frontend_lower_programs_array_direct_box(
                                 var dep_bss_slots: i64 = 0
                                 var dbi: i64 = 0
                                 while dbi < dep_fn_count {
-                                    if (*dep_box).functions[dbi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                                    if ir_fn_get(&(*dep_box), dbi as usize).compile_strategy == IR_STRATEGY_BSS_GLOBAL {
                                         dep_bss_slots = dep_bss_slots + 1
                                     }
                                     dbi = dbi + 1
@@ -5479,7 +5910,7 @@ fn module_frontend_lower_programs_array_direct_box(
 
             // Restore user main at its seed index (not fn_id=0).
             if seed_main_idx >= 0 && seed_main_idx < (*acc_box).fn_count {
-                (*acc_box).functions[seed_main_idx as usize] = seed_user_main
+                ir_fn_set(&! (*acc_box), seed_main_idx as usize, seed_user_main)
             }
 
             trace.last_stage = "done"
@@ -5497,6 +5928,20 @@ fn module_frontend_lower_programs_array_direct_box(
         }
         None => module_frontend_lower_direct_box_error("ir_lowering_failed")
     }
+}
+
+fn module_frontend_lower_programs_array_direct_box(
+    programs: &! [Program; 256],
+    loaded: i64,
+    trace: &! LoadMultimoduleIrTrace
+) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Panic, Div, Alloc {
+    if loaded <= 0 {
+        return module_frontend_lower_direct_box_error("no_modules_loaded")
+    }
+    if loaded == 1 {
+        return module_frontend_lower_single_program_array_direct_box(programs, trace)
+    }
+    module_frontend_lower_programs_array_direct_box_multi(programs, loaded, trace)
 }
 
 fn module_frontend_lower_programs_array_boxed(
@@ -5608,6 +6053,7 @@ fn module_frontend_lower_program_full_traced(
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
     if body_result.had_error {
         trace.last_stage = "lower_bodies_error"
+        lower_hard_error_report()
         return IrLowerResult {
             module: ir_empty_module(),
             had_error: true,
@@ -5783,12 +6229,12 @@ fn module_frontend_specialized_prepare(
 // True when the lowered module has at least one `main` with a non-empty body.
 // Specialized collapse must not ship a hollow main (measured dual gum+knowledge:
 // specialized lower left main@53 ic=0 → silent rc=0 without DUAL_GUM_KNOWLEDGE_OK).
-fn module_frontend_module_has_main_body(module: &IrModule) -> bool {
+fn module_frontend_module_has_main_body(module: &IrModule) -> bool with Div, Mut, Panic {
     let watch_main = make_name("main")
     var fi: i64 = 0
     while fi < (*module).fn_count {
-        if ir_name_eq((*module).functions[fi as usize].name, watch_main) {
-            if (*module).functions[fi as usize].instr_count > 0 {
+        if ir_name_eq(ir_fn_get(&(*module), fi as usize).name, watch_main) {
+            if ir_fn_get(&(*module), fi as usize).instr_count > 0 {
                 return true
             }
         }
@@ -5921,11 +6367,20 @@ fn module_frontend_merge_imported_box(
     // Specialized freestanding path already resolve_all_call_targets; multi-mod
     // still needs finalize/restore of merged import stubs.
     if !used_specialized {
-        let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
+        let user_main_snapshot = ir_function_deep_copy(ir_fn_get(&(*module_box), 0 as usize))
         // Memory wall P0: finalize/restore in place on the boxed module — no full
         // IrModule by-value chain (promote/compact/ensure/resolve each used to copy).
         ir_module_finalize_merged_calls(&! (*module_box))
         ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
+        // #2244: the restore above replays a PRE-finalize snapshot over slot 0, so
+        // it undoes what ir_module_ensure_builtin_call_targets just did to that
+        // slot. It already re-applies the float-marker half of that pass by hand
+        // (see the IR_FLOAT_REG_MARKER_FLAG loop inside it); the name/fn_id half
+        // was missing, so a builtin call in the restored slot kept its pre-finalize
+        // binding. Measured: the first function of the first imported module was
+        // the only one in a merged compile whose 3-arg str_slice was not retagged.
+        // Re-running the pass is idempotent -- it rewrites only what is still stale.
+        ir_module_ensure_builtin_call_targets(&! (*module_box))
     }
     module_frontend_lower_direct_box_ok(module_box, ir_empty_validated_patch_stats())
 }
@@ -5964,11 +6419,33 @@ fn module_frontend_merge_imported_into_box(
     true
 }
 
+// Load the per-peel kill switch once, here: this compile entry already carries
+// IO, and the peels it gates do not. One env var per peel rather than an integer
+// mask, so the peel's name appears in the command line that reproduced a bug.
+fn module_frontend_load_ocp_skip_mask() with IO, Mut, Panic, Div {
+    var m: i64 = 0
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DEDUP_IMM"), "1")       { m = m + 1 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_CONST_FOLD"), "1")      { m = m + 2 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_COPY_PROP"), "1")       { m = m + 4 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DSE"), "1")             { m = m + 8 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_REDUNDANT_JUMP"), "1")  { m = m + 16 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_JUMP_TO_RETURN"), "1")  { m = m + 32 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DEAD_AFTER_JUMP"), "1") { m = m + 64 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DEAD_LABEL"), "1")      { m = m + 128 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_CSE"), "1")             { m = m + 256 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DCE_LOOP"), "1")        { m = m + 512 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_SCCP"), "1")            { m = m + 1024 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DCE_FINAL"), "1")       { m = m + 2048 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_COMPACT_NOPS"), "1")    { m = m + 4096 }
+    OCP_SKIP_MASK = m
+}
+
 pub fn module_frontend_compile_imported_to_file(
     main_path: string,
     output_path: string,
     optimize: bool,
 ) -> i32 with IO, Mut, Div, Panic, Alloc {
+    module_frontend_load_ocp_skip_mask()
     parser_reset_last_errors()
     // One reset + suppress for the full multi-mod load/typecheck/lower window so
     // imported module f64 constants (e.g. stats::densities::DE_LN_SQRT_2PI) remain
@@ -6136,6 +6613,7 @@ pub fn module_frontend_compile_imported_to_file(
         trace.last_stage = "done"
         trace.last_module_index = 0
         trace.merged_modules = 1
+        ir_instr_census_report()
         print("Merged IR: ")
         print_int(fn_count)
         print(" functions\n")
@@ -6145,6 +6623,7 @@ pub fn module_frontend_compile_imported_to_file(
             return 1
         }
         if optimize {
+            module_frontend_load_ocp_skip_mask()
             let cleanup_receipt = opt_cleanup_module_inplace(&! (*module_box))
             module_frontend_print_rebracket_receipt("single-post-resolve", cleanup_receipt)
         } else {
@@ -6152,8 +6631,26 @@ pub fn module_frontend_compile_imported_to_file(
         }
         // Cleanup is the final mutable IR pass on this route; codegen receives
         // only an immutable module reference after this audit snapshot.
+        //
+        // #1649: that sentence used to be a comment. Sealing makes it checked --
+        // any write past this point lands in quarantine and latches, and the
+        // barriers below refuse the binary.
+        let single_sealed = ir_module_seal_functions(&(*module_box))
+        module_frontend_print_seal_receipt("single", single_sealed, fn_count)
         module_frontend_print_ordered_path_receipt("single-final", optimize, &(*module_box))
         parser_reset_last_errors()
+        if ir_arena_report_violation() {
+            print("Error: refusing to write a binary built on a violated IR arena contract\n")
+            module_frontend_global_init_compile_end()
+            return 1
+        }
+        if lower_hard_error_pending() {
+            lower_hard_error_report()
+            print("Error: refusing to write a binary -- lowering hit a hard error (see the error above)\n")
+            module_frontend_global_init_compile_end()
+            return 1
+        }
+        module_frontend_print_float_bits_probe("single", &(*module_box))
         let single_target_spec = native_resolve_target("native", "auto", false)
         let single_write_rc = compile_native_v2_preview_to_file(&(*module_box), single_target_spec, output_path)
         if single_write_rc != 0 {
@@ -6162,6 +6659,14 @@ pub fn module_frontend_compile_imported_to_file(
             print(" rc=")
             print_int(single_write_rc)
             print("\n")
+            module_frontend_global_init_compile_end()
+            return 1
+        }
+        // #1649: sealing only means something if a write AFTER publication is caught,
+        // and the barrier above runs BEFORE codegen. Check again here, so a
+        // codegen-time write through a sealed region cannot latch unobserved.
+        if ir_arena_report_violation() {
+            print("Error: refusing to keep a binary -- the IR arena contract was violated during codegen\n")
             module_frontend_global_init_compile_end()
             return 1
         }
@@ -6175,7 +6680,7 @@ pub fn module_frontend_compile_imported_to_file(
         print("MERGE_DUMP: pre_finalize\n")
         ir_module_dump_merge_calls(&(*module_box))
     }
-    let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
+    let user_main_snapshot = ir_function_deep_copy(ir_fn_get(&(*module_box), 0 as usize))
     if str_eq(read_env("SOUNIO_DUMP_ALL_CALLS"), "1") {
         print("DUMPALL: pre_finalize\n")
         ir_module_dump_all_calls_diag(&(*module_box))
@@ -6183,6 +6688,15 @@ pub fn module_frontend_compile_imported_to_file(
     // Memory wall P0: finalize/restore in place — no full IrModule by-value locals.
     ir_module_finalize_merged_calls(&! (*module_box))
     ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
+    // #2244: the restore above replays a PRE-finalize snapshot over slot 0, so
+    // it undoes what ir_module_ensure_builtin_call_targets just did to that
+    // slot. It already re-applies the float-marker half of that pass by hand
+    // (see the IR_FLOAT_REG_MARKER_FLAG loop inside it); the name/fn_id half
+    // was missing, so a builtin call in the restored slot kept its pre-finalize
+    // binding. Measured: the first function of the first imported module was
+    // the only one in a merged compile whose 3-arg str_slice was not retagged.
+    // Re-running the pass is idempotent -- it rewrites only what is still stale.
+    ir_module_ensure_builtin_call_targets(&! (*module_box))
     if str_eq(read_env("SOUNIO_DUMP_ALL_CALLS"), "1") {
         print("DUMPALL: post_finalize\n")
         ir_module_dump_all_calls_diag(&(*module_box))
@@ -6191,6 +6705,7 @@ pub fn module_frontend_compile_imported_to_file(
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
     trace.merged_modules = loaded
+    ir_instr_census_report()
     print("Merged IR: ")
     print_int(fn_count)
     print(" functions\n")
@@ -6203,15 +6718,36 @@ pub fn module_frontend_compile_imported_to_file(
         ir_module_dump_merge_calls(&(*module_box))
     }
     if optimize {
+        module_frontend_load_ocp_skip_mask()
         let cleanup_receipt = opt_cleanup_module_inplace(&! (*module_box))
         module_frontend_print_rebracket_receipt("merged-post-finalize", cleanup_receipt)
     } else {
         module_frontend_print_rebracket_disabled("merged-disabled", fn_count)
     }
     // Finalization and cleanup are complete; codegen receives an immutable
-    // module reference after this audit snapshot.
+    // module reference after this audit snapshot. Sealed, so that claim is
+    // checked rather than asserted -- see the single route above.
+    let merged_sealed = ir_module_seal_functions(&(*module_box))
+    module_frontend_print_seal_receipt("merged", merged_sealed, fn_count)
     module_frontend_print_ordered_path_receipt("merged-final", optimize, &(*module_box))
     parser_reset_last_errors()
+    // Last barrier before the ELF is written. The OR into had_error at every
+    // IrLowerResult construction should already have stopped this compile, but a
+    // truncated binary that exits 0 is the failure mode this whole change exists
+    // to remove, so it is also checked at the one place every route passes
+    // through -- it must not depend on which of the six lowering wrappers ran.
+    if ir_arena_report_violation() {
+        print("Error: refusing to write a binary built on a violated IR arena contract\n")
+        module_frontend_global_init_compile_end()
+        return 1
+    }
+    if lower_hard_error_pending() {
+        lower_hard_error_report()
+        print("Error: refusing to write a binary -- lowering hit a hard error (see the error above)\n")
+        module_frontend_global_init_compile_end()
+        return 1
+    }
+    module_frontend_print_float_bits_probe("merged", &(*module_box))
     let target_spec = native_resolve_target("native", "auto", false)
     let write_rc = compile_native_v2_preview_to_file(&(*module_box), target_spec, output_path)
     if write_rc != 0 {
@@ -6220,6 +6756,14 @@ pub fn module_frontend_compile_imported_to_file(
         print(" rc=")
         print_int(write_rc)
         print("\n")
+        module_frontend_global_init_compile_end()
+        return 1
+    }
+    // #1649: sealing only means something if a write AFTER publication is caught,
+    // and the barrier above runs BEFORE codegen. Check again here, so a
+    // codegen-time write through a sealed region cannot latch unobserved.
+    if ir_arena_report_violation() {
+        print("Error: refusing to keep a binary -- the IR arena contract was violated during codegen\n")
         module_frontend_global_init_compile_end()
         return 1
     }
@@ -6257,6 +6801,7 @@ fn load_multimodule_lower_program_traced(
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
     if body_result.had_error {
         trace.last_stage = "lower_bodies_error"
+        lower_hard_error_report()
         return ir_empty_module()
     }
 
@@ -6933,6 +7478,7 @@ pub fn load_multimodule_imported_simple_ir_global(main_path: string) -> MultiMod
     }
     trace.last_stage = "done"
     trace.last_module_index = trace.loaded_modules - 1
+    ir_instr_census_report()
     print("Merged IR: ")
     print_int(MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT)
     print(" functions\n")
@@ -7124,6 +7670,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         }
         trace.merged_modules = 1
         trace.last_stage = "done"
+        ir_instr_census_report()
         print("Merged IR: ")
         print_int(single_lower_result_no_use.fn_count)
         print(" functions\n")
@@ -7162,6 +7709,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         }
         trace.merged_modules = 1
         trace.last_stage = "done"
+        ir_instr_census_report()
         print("Merged IR: ")
         print_int(single_lower_result.fn_count)
         print(" functions\n")
@@ -7237,6 +7785,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
 
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
+    ir_instr_census_report()
     print("Merged IR: ")
     print_int((*module_box).fn_count)
     print(" functions\n")
@@ -7290,6 +7839,7 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
 
         trace.last_stage = "done"
         trace.last_module_index = trace.loaded_modules - 1
+        ir_instr_census_report()
         print("Merged IR: ")
         print_int(total_fn_count)
         print(" functions\n")
@@ -7345,6 +7895,7 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
         }
         trace.merged_modules = 1
         trace.last_stage = "done"
+        ir_instr_census_report()
         print("Merged IR: ")
         print_int(single_fn_count)
         print(" functions\n")
@@ -7387,6 +7938,7 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
         }
         trace.merged_modules = 1
         trace.last_stage = "done"
+        ir_instr_census_report()
         print("Merged IR: ")
         print_int(single_fn_count2)
         print(" functions\n")
@@ -7482,6 +8034,7 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
 
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
+    ir_instr_census_report()
     print("Merged IR: ")
     print_int(total_fn_count)
     print(" functions\n")
@@ -7541,6 +8094,7 @@ pub fn load_multimodule_ir_fn_count_traced(main_path: string, trace: &! LoadMult
     trace.lowered_modules = 1
     trace.merged_modules = 1
     trace.last_stage = "done"
+    ir_instr_census_report()
     print("Merged IR: ")
     print_int(fn_count)
     print(" functions\n")
@@ -7698,6 +8252,7 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
 
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
+    ir_instr_census_report()
     print("Merged IR: ")
     print_int(merged_module.fn_count)
     print(" functions\n")

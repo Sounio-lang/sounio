@@ -1,0 +1,504 @@
+// MLI S2a — minimal interpreter (V-interp, design §6.2), refuse-first.
+//
+// BINDING CONSTRAINT (orchestrator, 2026-08-16; restated after #1788,
+// #1801, #1792): this interpreter must not become a second semantics.
+// A well-typed program produces a value or a detectable refuse — it
+// never fabricates a zero. #1801 found the compiler returning a declared
+// type after a refuse, and an empty stub exiting as prologue+ret with
+// the caller reading rax. #1792 found a fabricated zero variance in
+// print. Those are the same default. Two rules implement the opposite:
+//
+//   1. Where MLI behaviour is genuinely underspecified today, the interp
+//      REFUSES with a named code instead of picking — so the ambiguity fails
+//      loudly rather than getting frozen by accident. Refused today: shifts
+//      (width/mask semantics unpinned), memory ops (no MLI memory model yet:
+//      load/store/lea/alloca), calls (MLI_I_CALL_UNSPECIFIED — named, not
+//      the unknown-op catch-all), fcast, every k_* and cd_* op, f32/
+//      f128/f256/qd128/Knowledge/CD/vec/ptr VALUES, phys/stack/reloc
+//      operands, unclassified compare-codes (not "false"), i64 div-by-zero
+//      and INT_MIN/-1. Control flow is implemented (S2b) with a fuel cap.
+//      Argument kinds with no interp model (Knowledge/CD/ptr/vec/qd128,
+//      Int≠64, Float≠64) refuse at load with MLI_I_ARG_KIND. Skipping
+//      them and continuing was #1801: the checker returned the declared
+//      type after a refuse, and the caller read a fabricated inhabitant.
+//      They are not loaded as zero. Unwritten pool slots refuse with
+//      MLI_I_UNWIRED_SLOT — i_op zero-inits to NOP, which is #1830
+//      (a field returning 0 with nobody writing it).
+//   2. Where behaviour IS defined, the interp delegates to the host — and
+//      the host is the claim oracle itself (Sounio under Madaros, ADR-008
+//      single semantic clock). i64 two's-complement arithmetic, IEEE f64
+//      arithmetic and comparisons, and `as` conversions are computed with
+//      the host's own operators, so interp and eventual codegen share one
+//      definition by construction rather than by parallel implementation.
+//
+// IMPLEMENTATION SHAPE (measured constraints, 2026-08-16, this lane):
+//   - vreg state lives in a struct-wrapped register file (bare local arrays
+//     with computed indices are a documented miscompile surface);
+//   - every operand is HOISTED to a local (`let s1 = inst.src1`) before its
+//     fields are read: two-level nested field reads used directly in
+//     expressions (`vi[s1.id]`) MISREAD under native-v2 — measured
+//     returning the sibling `tag` field — while single-level reads on a
+//     hoisted local are correct (the same reason mli_dump prints correctly:
+//     it passes operands as call arguments);
+//   - enum values appear nowhere (see ir_to_mli.sio raw-column discipline);
+//   - the only struct-returning call is mli_inst_get, the S1-proven path.
+//
+// Precondition: run mli_verify_function first. The interp still refuses
+// structural surprises rather than trusting blindly.
+//
+// Argument convention: args.ai[k] / args.af[k] are indexed by ARGUMENT
+// POSITION k; the slot matching arg k's kind is read, the other ignored.
+
+module mli::interp
+
+use mli::ir::*
+
+pub let MLI_I_OK: i64 = 0
+pub let MLI_I_UNSUPPORTED_OP: i64 = 1
+pub let MLI_I_UNSUPPORTED_OPERAND: i64 = 2
+pub let MLI_I_DIV_ZERO: i64 = 3
+pub let MLI_I_DIV_OVERFLOW: i64 = 4
+pub let MLI_I_CONTROL_UNSUPPORTED: i64 = 5
+pub let MLI_I_ARG_KIND: i64 = 6
+pub let MLI_I_RET_KIND: i64 = 7
+pub let MLI_I_NO_TERM: i64 = 8
+pub let MLI_I_VREG_RANGE: i64 = 9
+pub let MLI_I_BAD_CC: i64 = 10
+pub let MLI_I_FUEL: i64 = 11
+pub let MLI_I_BAD_TARGET: i64 = 12
+pub let MLI_I_UNDEF_VREG: i64 = 13
+pub let MLI_I_CALL_UNSPECIFIED: i64 = 14
+pub let MLI_I_UNWIRED_SLOT: i64 = 15
+
+// Execution budget: control flow means loops, and a non-terminating program
+// must fail LOUDLY rather than hang (refuse-first applied to termination).
+pub let MLI_INTERP_FUEL: i64 = 65536
+
+pub struct MliInterpArgs {
+    pub ai: [i64; 8],
+    pub af: [f64; 8],
+}
+
+pub struct MliRegFile {
+    pub vi: [i64; 128],
+    pub vf: [f64; 128],
+    // Definedness is a SoA flag column, not an instruction-pool AoS.
+    // A never-written vreg must refuse, not return the file's zero
+    // initializer (#1801 rax-after-stub / #1788 fabricated zero).
+    pub def: [i64; 128],
+}
+
+pub fn mli_interp_args_empty() -> MliInterpArgs {
+    MliInterpArgs {
+        ai: [0; 8],
+        af: [0.0; 8],
+    }
+}
+
+pub struct MliInterpResult {
+    pub ok: bool,
+    pub code: i64,
+    pub block: i64,
+    pub index: i64,
+    pub has_value: bool,
+    pub ret_is_float: bool,
+    pub ret_i: i64,
+    pub ret_f: f64,
+}
+
+fn i_ok_int(v: i64) -> MliInterpResult {
+    MliInterpResult { ok: true, code: MLI_I_OK, block: 0 - 1, index: 0 - 1, has_value: true, ret_is_float: false, ret_i: v, ret_f: 0.0 }
+}
+
+fn i_ok_float(v: f64) -> MliInterpResult {
+    MliInterpResult { ok: true, code: MLI_I_OK, block: 0 - 1, index: 0 - 1, has_value: true, ret_is_float: true, ret_i: 0, ret_f: v }
+}
+
+fn i_ok_void() -> MliInterpResult {
+    // Success without a value. ret_i/ret_f stay 0 as padding — has_value
+    // is the load-bearing bit. Treating void as integer 0 is the #1801
+    // empty-stub/rax defect.
+    MliInterpResult { ok: true, code: MLI_I_OK, block: 0 - 1, index: 0 - 1, has_value: false, ret_is_float: false, ret_i: 0, ret_f: 0.0 }
+}
+
+fn i_err(code: i64, block: i64, index: i64) -> MliInterpResult {
+    MliInterpResult { ok: false, code: code, block: block, index: index, has_value: false, ret_is_float: false, ret_i: 0, ret_f: 0.0 }
+}
+
+// Kind predicates take scalar fields — scalar args are the proven call shape.
+fn krun_int(tag: i64, bits: i64) -> bool {
+    if tag == MLI_KIND_BOOL { return true }
+    tag == MLI_KIND_INT && bits == 64
+}
+
+fn krun_f64(tag: i64, bits: i64) -> bool {
+    tag == MLI_KIND_FLOAT && bits == 64
+}
+
+fn opd_runnable_tag(tag: i64) -> bool {
+    tag == MLI_OPD_VREG || tag == MLI_OPD_IMM
+}
+
+fn rf_defined(rf: &MliRegFile, id: i64) -> bool {
+    if id < 0 || id >= 128 { return false }
+    rf.def[id] == 1
+}
+
+fn rf_mark(rf: &!MliRegFile, id: i64) with Mut, Panic {
+    rf.def[id] = 1
+}
+
+// Execute one body instruction against the register file, reading through
+// the per-slot column accessors — the ONLY read path measured correct in
+// every module-closure tried (full-MliInst materialisation corrupts operand
+// fields in some closures; see the landing hazard in mli::ir). Returns
+// MLI_I_OK or an error code; NOP/KEEP_ALIVE are OK no-ops.
+fn mli_exec_slot(rf: &!MliRegFile, f: &MliFunction, slot: i64) -> i64 with Mut, Panic, Div {
+    // Opcode 0 is NOP. An unwritten slot also reads as 0. Executing that
+    // as a successful no-op is #1830 (pin_count returned 0 with nobody
+    // writing it). Presence is the i_live column, not the opcode.
+    if mli_slot_live(f, slot) != 1 { return MLI_I_UNWIRED_SLOT }
+    let op = mli_slot_opcode(f, slot)
+    let cc = mli_slot_cc(f, slot)
+    let d = mli_slot_dst(f, slot)
+    let s1 = mli_slot_src1(f, slot)
+    let s2 = mli_slot_src2(f, slot)
+
+    if op == MLI_OP_NOP || op == MLI_OP_KEEP_ALIVE { return MLI_I_OK }
+
+    if op == MLI_OP_MOV || op == MLI_OP_COPY {
+        if d.tag != MLI_OPD_VREG { return MLI_I_UNSUPPORTED_OPERAND }
+        if d.id < 0 || d.id >= 128 { return MLI_I_VREG_RANGE }
+        if !opd_runnable_tag(s1.tag) { return MLI_I_UNSUPPORTED_OPERAND }
+        if krun_int(d.kind.tag, d.kind.bits) {
+            var x: i64 = 0
+            if s1.tag == MLI_OPD_IMM {
+                x = s1.aux
+            } else {
+                if !rf_defined(rf, s1.id) { return MLI_I_UNDEF_VREG }
+                x = rf.vi[s1.id]
+            }
+            rf.vi[d.id] = x
+            rf_mark(rf, d.id)
+            return MLI_I_OK
+        }
+        if krun_f64(d.kind.tag, d.kind.bits) {
+            var xf: f64 = 0.0
+            if s1.tag == MLI_OPD_IMM {
+                xf = s1.fimm
+            } else {
+                if !rf_defined(rf, s1.id) { return MLI_I_UNDEF_VREG }
+                xf = rf.vf[s1.id]
+            }
+            rf.vf[d.id] = xf
+            rf_mark(rf, d.id)
+            return MLI_I_OK
+        }
+        // f32/f128/f256/qd128/Knowledge/CD/vec/ptr values have no model
+        // here — refuse, never guess a representation.
+        return MLI_I_UNSUPPORTED_OPERAND
+    }
+
+    if op >= MLI_OP_ADD && op <= MLI_OP_XOR {
+        if op == MLI_OP_SHL || op == MLI_OP_SHR {
+            // Shift semantics unpinned in MLI — refuse.
+            return MLI_I_UNSUPPORTED_OP
+        }
+        if d.tag != MLI_OPD_VREG { return MLI_I_UNSUPPORTED_OPERAND }
+        if d.id < 0 || d.id >= 128 { return MLI_I_VREG_RANGE }
+        if !krun_int(d.kind.tag, d.kind.bits) { return MLI_I_UNSUPPORTED_OPERAND }
+        if !opd_runnable_tag(s1.tag) || !opd_runnable_tag(s2.tag) { return MLI_I_UNSUPPORTED_OPERAND }
+        var x: i64 = 0
+        if s1.tag == MLI_OPD_IMM {
+            x = s1.aux
+        } else {
+            if !rf_defined(rf, s1.id) { return MLI_I_UNDEF_VREG }
+            x = rf.vi[s1.id]
+        }
+        var y: i64 = 0
+        if s2.tag == MLI_OPD_IMM {
+            y = s2.aux
+        } else {
+            if !rf_defined(rf, s2.id) { return MLI_I_UNDEF_VREG }
+            y = rf.vi[s2.id]
+        }
+        let min_i64 = (0 - 9223372036854775807) - 1
+        if op == MLI_OP_DIV || op == MLI_OP_REM {
+            if y == 0 { return MLI_I_DIV_ZERO }
+            if x == min_i64 && y == 0 - 1 { return MLI_I_DIV_OVERFLOW }
+        }
+        var r: i64 = 0
+        var matched = false
+        if op == MLI_OP_ADD { r = x + y; matched = true }
+        if op == MLI_OP_SUB { r = x - y; matched = true }
+        if op == MLI_OP_MUL { r = x * y; matched = true }
+        if op == MLI_OP_DIV { r = x / y; matched = true }
+        if op == MLI_OP_REM { r = x % y; matched = true }
+        if op == MLI_OP_AND { r = x & y; matched = true }
+        if op == MLI_OP_OR { r = x | y; matched = true }
+        if op == MLI_OP_XOR { r = x ^ y; matched = true }
+        if !matched { return MLI_I_UNSUPPORTED_OP }
+        rf.vi[d.id] = r
+        rf_mark(rf, d.id)
+        return MLI_I_OK
+    }
+
+    if op >= MLI_OP_FADD && op <= MLI_OP_FDIV {
+        if d.tag != MLI_OPD_VREG { return MLI_I_UNSUPPORTED_OPERAND }
+        if d.id < 0 || d.id >= 128 { return MLI_I_VREG_RANGE }
+        if !krun_f64(d.kind.tag, d.kind.bits) { return MLI_I_UNSUPPORTED_OPERAND }
+        if !opd_runnable_tag(s1.tag) || !opd_runnable_tag(s2.tag) { return MLI_I_UNSUPPORTED_OPERAND }
+        var x: f64 = 0.0
+        if s1.tag == MLI_OPD_IMM {
+            x = s1.fimm
+        } else {
+            if !rf_defined(rf, s1.id) { return MLI_I_UNDEF_VREG }
+            x = rf.vf[s1.id]
+        }
+        var y: f64 = 0.0
+        if s2.tag == MLI_OPD_IMM {
+            y = s2.fimm
+        } else {
+            if !rf_defined(rf, s2.id) { return MLI_I_UNDEF_VREG }
+            y = rf.vf[s2.id]
+        }
+        var r: f64 = 0.0
+        var matched = false
+        if op == MLI_OP_FADD { r = x + y; matched = true }
+        if op == MLI_OP_FSUB { r = x - y; matched = true }
+        if op == MLI_OP_FMUL { r = x * y; matched = true }
+        if op == MLI_OP_FDIV { r = x / y; matched = true }
+        if !matched { return MLI_I_UNSUPPORTED_OP }
+        rf.vf[d.id] = r
+        rf_mark(rf, d.id)
+        return MLI_I_OK
+    }
+
+    if op == MLI_OP_I2F {
+        if d.tag != MLI_OPD_VREG { return MLI_I_UNSUPPORTED_OPERAND }
+        if d.id < 0 || d.id >= 128 { return MLI_I_VREG_RANGE }
+        if !krun_f64(d.kind.tag, d.kind.bits) { return MLI_I_UNSUPPORTED_OPERAND }
+        if !opd_runnable_tag(s1.tag) { return MLI_I_UNSUPPORTED_OPERAND }
+        var x: i64 = 0
+        if s1.tag == MLI_OPD_IMM {
+            x = s1.aux
+        } else {
+            if !rf_defined(rf, s1.id) { return MLI_I_UNDEF_VREG }
+            x = rf.vi[s1.id]
+        }
+        rf.vf[d.id] = x as f64
+        rf_mark(rf, d.id)
+        return MLI_I_OK
+    }
+
+    if op == MLI_OP_F2I {
+        if d.tag != MLI_OPD_VREG { return MLI_I_UNSUPPORTED_OPERAND }
+        if d.id < 0 || d.id >= 128 { return MLI_I_VREG_RANGE }
+        if !krun_int(d.kind.tag, d.kind.bits) { return MLI_I_UNSUPPORTED_OPERAND }
+        if !opd_runnable_tag(s1.tag) { return MLI_I_UNSUPPORTED_OPERAND }
+        var x: f64 = 0.0
+        if s1.tag == MLI_OPD_IMM {
+            x = s1.fimm
+        } else {
+            if !rf_defined(rf, s1.id) { return MLI_I_UNDEF_VREG }
+            x = rf.vf[s1.id]
+        }
+        rf.vi[d.id] = x as i64
+        rf_mark(rf, d.id)
+        return MLI_I_OK
+    }
+
+    if op == MLI_OP_ICMP {
+        if !mli_cc_known(cc) { return MLI_I_BAD_CC }
+        if d.tag != MLI_OPD_VREG { return MLI_I_UNSUPPORTED_OPERAND }
+        if d.id < 0 || d.id >= 128 { return MLI_I_VREG_RANGE }
+        if !opd_runnable_tag(s1.tag) || !opd_runnable_tag(s2.tag) { return MLI_I_UNSUPPORTED_OPERAND }
+        var x: i64 = 0
+        if s1.tag == MLI_OPD_IMM {
+            x = s1.aux
+        } else {
+            if !rf_defined(rf, s1.id) { return MLI_I_UNDEF_VREG }
+            x = rf.vi[s1.id]
+        }
+        var y: i64 = 0
+        if s2.tag == MLI_OPD_IMM {
+            y = s2.aux
+        } else {
+            if !rf_defined(rf, s2.id) { return MLI_I_UNDEF_VREG }
+            y = rf.vi[s2.id]
+        }
+        var hold = false
+        var cc_hit = false
+        if cc == MLI_CC_EQ { hold = x == y; cc_hit = true }
+        if cc == MLI_CC_NE { hold = x != y; cc_hit = true }
+        if cc == MLI_CC_LT { hold = x < y; cc_hit = true }
+        if cc == MLI_CC_LE { hold = x <= y; cc_hit = true }
+        if cc == MLI_CC_GT { hold = x > y; cc_hit = true }
+        if cc == MLI_CC_GE { hold = x >= y; cc_hit = true }
+        if !cc_hit { return MLI_I_BAD_CC }
+        rf.vi[d.id] = if hold { 1 } else { 0 }
+        rf_mark(rf, d.id)
+        return MLI_I_OK
+    }
+
+    if op == MLI_OP_FCMP {
+        if !mli_cc_known(cc) { return MLI_I_BAD_CC }
+        if d.tag != MLI_OPD_VREG { return MLI_I_UNSUPPORTED_OPERAND }
+        if d.id < 0 || d.id >= 128 { return MLI_I_VREG_RANGE }
+        if !opd_runnable_tag(s1.tag) || !opd_runnable_tag(s2.tag) { return MLI_I_UNSUPPORTED_OPERAND }
+        var x: f64 = 0.0
+        if s1.tag == MLI_OPD_IMM {
+            x = s1.fimm
+        } else {
+            if !rf_defined(rf, s1.id) { return MLI_I_UNDEF_VREG }
+            x = rf.vf[s1.id]
+        }
+        var y: f64 = 0.0
+        if s2.tag == MLI_OPD_IMM {
+            y = s2.fimm
+        } else {
+            if !rf_defined(rf, s2.id) { return MLI_I_UNDEF_VREG }
+            y = rf.vf[s2.id]
+        }
+        var hold = false
+        var cc_hit = false
+        if cc == MLI_CC_EQ { hold = x == y; cc_hit = true }
+        if cc == MLI_CC_NE { hold = x != y; cc_hit = true }
+        if cc == MLI_CC_LT { hold = x < y; cc_hit = true }
+        if cc == MLI_CC_LE { hold = x <= y; cc_hit = true }
+        if cc == MLI_CC_GT { hold = x > y; cc_hit = true }
+        if cc == MLI_CC_GE { hold = x >= y; cc_hit = true }
+        if !cc_hit { return MLI_I_BAD_CC }
+        rf.vi[d.id] = if hold { 1 } else { 0 }
+        rf_mark(rf, d.id)
+        return MLI_I_OK
+    }
+
+    // CALL is a named hole (verify: MLI_VERR_CALL_UNSPECIFIED). Falling
+    // through to UNSUPPORTED_OP made a specified-but-unpinned ABI look
+    // like an unknown opcode — the empty-stub class (#1801): dest stays
+    // unread and a caller can treat "unknown" as "no dest".
+    if op == MLI_OP_CALL { return MLI_I_CALL_UNSPECIFIED }
+
+    // Everything else — memory ops, fcast, every k_* and cd_* — is
+    // refused loudly. See the header: refuse, don't pick.
+    MLI_I_UNSUPPORTED_OP
+}
+
+pub fn mli_interp_run(f: &MliFunction, args: &MliInterpArgs) -> MliInterpResult with Mut, Panic, Div {
+    if f.block_count < 1 { return i_err(MLI_I_CONTROL_UNSUPPORTED, 0 - 1, 0 - 1) }
+
+    var rf = MliRegFile {
+        vi: [0; 128],
+        vf: [0.0; 128],
+        def: [0; 128],
+    }
+
+    // Arguments: arg a is vreg a (MLI invariant).
+    // Runnable kinds only. A declared Knowledge/CD/i32/ptr/… with no
+    // model here must refuse — not skip, not write 0, not run the body
+    // as if the type were inhabited (#1801 declared-type-after-refuse).
+    var a: i64 = 0
+    while a < f.arg_count {
+        if a < 0 || a >= 8 { return i_err(MLI_I_ARG_KIND, 0 - 1, a) }
+        let ak = f.arg_kinds[a]
+        if krun_int(ak.tag, ak.bits) {
+            rf.vi[a] = args.ai[a]
+            rf_mark(&!rf, a)
+        } else {
+            if krun_f64(ak.tag, ak.bits) {
+                rf.vf[a] = args.af[a]
+                rf_mark(&!rf, a)
+            } else {
+                return i_err(MLI_I_ARG_KIND, 0 - 1, a)
+            }
+        }
+        a = a + 1
+    }
+
+    // CFG execution (S2b): fuel-bounded; jmp/br switch blocks, ret exits.
+    var cur: i64 = 0
+    var fuel: i64 = MLI_INTERP_FUEL
+    while fuel > 0 {
+        if cur < 0 || cur >= f.block_count { return i_err(MLI_I_BAD_TARGET, cur, 0 - 1) }
+        if f.blk_has_term[cur] != 1 { return i_err(MLI_I_NO_TERM, cur, 0 - 1) }
+
+        var j: i64 = 0
+        while j < f.blk_instr_count[cur] {
+            if fuel <= 0 { return i_err(MLI_I_FUEL, cur, j) }
+            fuel = fuel - 1
+            // Arg-forwarding read discipline (see mli::ir landing hazard).
+            let code = mli_exec_slot(&!rf, f, mli_slot(cur, j))
+            if code != MLI_I_OK {
+                return i_err(code, cur, j)
+            }
+            j = j + 1
+        }
+
+        fuel = fuel - 1
+        let ts = mli_term_slot(cur)
+        if mli_slot_live(f, ts) != 1 { return i_err(MLI_I_UNWIRED_SLOT, cur, 0 - 1) }
+        let top = mli_slot_opcode(f, ts)
+
+        if top == MLI_OP_RET {
+            let rk = f.ret
+            if rk.tag == MLI_KIND_VOID {
+                return i_ok_void()
+            }
+            let ts1 = mli_slot_src1(f, ts)
+            if !opd_runnable_tag(ts1.tag) {
+                return i_err(MLI_I_RET_KIND, cur, 0 - 1)
+            }
+            if krun_f64(rk.tag, rk.bits) {
+                var rfv: f64 = 0.0
+                if ts1.tag == MLI_OPD_IMM {
+                    rfv = ts1.fimm
+                } else {
+                    if !rf_defined(&rf, ts1.id) { return i_err(MLI_I_UNDEF_VREG, cur, 0 - 1) }
+                    rfv = rf.vf[ts1.id]
+                }
+                return i_ok_float(rfv)
+            }
+            if krun_int(rk.tag, rk.bits) {
+                var ri: i64 = 0
+                if ts1.tag == MLI_OPD_IMM {
+                    ri = ts1.aux
+                } else {
+                    if !rf_defined(&rf, ts1.id) { return i_err(MLI_I_UNDEF_VREG, cur, 0 - 1) }
+                    ri = rf.vi[ts1.id]
+                }
+                return i_ok_int(ri)
+            }
+            return i_err(MLI_I_RET_KIND, cur, 0 - 1)
+        }
+
+        if top == MLI_OP_JMP {
+            let tgt = mli_slot_src1(f, ts)
+            cur = tgt.id
+            continue
+        }
+
+        if top == MLI_OP_BR {
+            let c = mli_slot_src1(f, ts)
+            var cv: i64 = 0
+            if c.tag == MLI_OPD_IMM {
+                cv = c.aux
+            } else {
+                if c.tag != MLI_OPD_VREG { return i_err(MLI_I_UNSUPPORTED_OPERAND, cur, 0 - 1) }
+                if !rf_defined(&rf, c.id) { return i_err(MLI_I_UNDEF_VREG, cur, 0 - 1) }
+                cv = rf.vi[c.id]
+            }
+            if cv != 0 {
+                let t2 = mli_slot_src2(f, ts)
+                cur = t2.id
+            } else {
+                let t3 = mli_slot_src3(f, ts)
+                cur = t3.id
+            }
+            continue
+        }
+
+        return i_err(MLI_I_CONTROL_UNSUPPORTED, cur, 0 - 1)
+    }
+    i_err(MLI_I_FUEL, 0 - 1, 0 - 1)
+}

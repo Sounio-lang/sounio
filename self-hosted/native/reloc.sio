@@ -51,18 +51,57 @@ pub struct Relocation {
 pub struct RelocationTable {
     pub entries: [Relocation; 4096],
     pub count: i64,
+    // Set when an add_* was called with the table already full. Without it the
+    // drop is invisible: the entry vanishes, the function returns normally, the
+    // unpatched site keeps the displacement it was emitted with -- zero for
+    // every rip-relative load here -- and the program reads the start of
+    // .rodata instead of its constant. It assembles, it links, it runs.
+    //
+    // Mirrors NativeCompiler.reloc_overflow and code_overflow, which the ELF
+    // writer already refuses on with rc=20 and rc=19. Raising the guard from
+    // 256 to the declared 4096 moved the cliff; this makes falling off it
+    // detectable, which is the part that actually matters.
+    pub overflow: bool,
 }
+
+// Single source of truth for the RelocationTable bound, same contract as
+// nc_flat_reloc_capacity() in frame.sio: the DECLARATION above must stay a
+// literal (Sounio array sizes are not expressions); every bound CHECK calls
+// this instead of repeating the number.
+//
+// It has to exist because the two had already drifted. entries was declared
+// [Relocation; 4096] while all four add_* functions guarded with `count < 256`
+// -- so from the 257th relocation onward the entry was DROPPED and the function
+// returned normally. No flag, no error, no diagnostic anywhere downstream. The
+// unpatched site keeps the displacement it was emitted with, which for every
+// rip-relative load in this backend is zero, and the program reads whatever
+// sits at the start of .rodata. It assembles, it links, it runs.
+//
+// Measured 2026-08-23 while wiring the libm intrinsics: a single
+// emit_builtin_ffi_tgamma needs about 560 rip-relative relocations and
+// emit_builtin_ffi_pow about 162. Either one alone is over the old guard. But
+// the defect is not new and is not confined to them -- any program crossing 256
+// was already affected.
+//
+// 4096 is the declared array size, not a new guess. Raising the guard to it
+// does not make overflow impossible, only 16x further away; a relocation past
+// 4096 is still dropped silently, and fixing THAT needs an overflow flag on the
+// table, which means a field on a struct this backend passes by value with a
+// 4096-element array inside it. That is a change to make deliberately, not as a
+// side effect of an FFI branch.
+pub fn reloc_table_capacity() -> i64 { 4096 }
 
 pub fn reloc_table_new() -> RelocationTable with Mut {
     var out: RelocationTable
     out.count = 0
+    out.overflow = false
     out
 }
 
 // Add a call relocation (rel32)
 pub fn add_call_reloc(table: RelocationTable, offset: i64, target_func: i64) -> RelocationTable with Mut, Panic {
     var t = table
-    if t.count < 256 {
+    if t.count < reloc_table_capacity() {
         t.entries[t.count as usize] = Relocation {
             offset: offset,
             target: reloc_target_function(target_func),
@@ -72,6 +111,8 @@ pub fn add_call_reloc(table: RelocationTable, offset: i64, target_func: i64) -> 
             flat_target_index: target_func,
         }
         t.count = t.count + 1
+    } else {
+        t.overflow = true
     }
     t
 }
@@ -79,7 +120,7 @@ pub fn add_call_reloc(table: RelocationTable, offset: i64, target_func: i64) -> 
 // Add a data relocation (rip-relative)
 pub fn add_data_reloc(table: RelocationTable, offset: i64, data_offset: i64) -> RelocationTable with Mut, Panic {
     var t = table
-    if t.count < 256 {
+    if t.count < reloc_table_capacity() {
         t.entries[t.count as usize] = Relocation {
             offset: offset,
             target: reloc_target_data(data_offset),
@@ -89,6 +130,8 @@ pub fn add_data_reloc(table: RelocationTable, offset: i64, data_offset: i64) -> 
             flat_target_index: data_offset,
         }
         t.count = t.count + 1
+    } else {
+        t.overflow = true
     }
     t
 }
@@ -96,7 +139,7 @@ pub fn add_data_reloc(table: RelocationTable, offset: i64, data_offset: i64) -> 
 // Add RIP-relative relocation for string literals
 pub fn add_rip_reloc(table: RelocationTable, lea_disp_offset: i64, rodata_offset: i64) -> RelocationTable with Mut, Panic {
     var t = table
-    if t.count < 256 {
+    if t.count < reloc_table_capacity() {
         t.entries[t.count as usize] = Relocation {
             offset: lea_disp_offset,
             target: reloc_target_data(rodata_offset),
@@ -106,6 +149,8 @@ pub fn add_rip_reloc(table: RelocationTable, lea_disp_offset: i64, rodata_offset
             flat_target_index: rodata_offset,
         }
         t.count = t.count + 1
+    } else {
+        t.overflow = true
     }
     t
 }
@@ -113,7 +158,7 @@ pub fn add_rip_reloc(table: RelocationTable, lea_disp_offset: i64, rodata_offset
 // Add RIP-relative relocation targeting .data section (profiling counters)
 pub fn add_data_section_reloc(table: RelocationTable, disp_offset: i64, data_offset: i64) -> RelocationTable with Mut, Panic {
     var t = table
-    if t.count < 256 {
+    if t.count < reloc_table_capacity() {
         t.entries[t.count as usize] = Relocation {
             offset: disp_offset,
             target: reloc_target_data(data_offset),
@@ -123,6 +168,8 @@ pub fn add_data_section_reloc(table: RelocationTable, disp_offset: i64, data_off
             flat_target_index: data_offset,
         }
         t.count = t.count + 1
+    } else {
+        t.overflow = true
     }
     t
 }
@@ -131,7 +178,7 @@ pub fn add_data_section_reloc(table: RelocationTable, disp_offset: i64, data_off
 pub fn apply_relocations(
     table: RelocationTable,
     buf: CodeBuffer,
-    fn_offsets: [i64; 2048],
+    fn_offsets: [i64; 16384],
     fn_count: i64,
     rodata_file_offset: i64,
     data_file_offset: i64

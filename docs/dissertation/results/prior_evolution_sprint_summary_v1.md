@@ -28,6 +28,21 @@ All 4 deliverables landed. Gate suite entry: `pbpk28_mc_prior_family_sweep` adde
 `dissertation_pbpk_suite_gate.sh`. Note: E4's gate marker is `_OUTPUT` (no family met the
 ≤10% Hessian criterion); the gate regex accepts `_OUTPUT` as a valid honest-result marker.
 
+> **Engine dependency (verified 2026-08-17).** Three of the four deliverables above do not
+> reproduce under default Madaros (`bin/souc`) — only under `SOUNIO_SOUC_ENGINE=lean_single`:
+>
+> | # | File | Under default Madaros |
+> |---|---|---|
+> | E1 (MC cross-validation) | `pbpk28_mc_cross_validation.sio` | Compiles; **crashes `rc=182`** (`madaros: handles full`) mid-run |
+> | E2 (Sobol semaglutide) | `pbpk28_sobol_pce.sio` | **Fails to compile** (`error[E009]`, `error[E035]`) |
+> | E3 (Hessian dual-ρ) | `epistemic_pbpk28_hessian.sio` | **Runs clean** — `rc=0`, all 3 tests pass, `HESSIAN_PBPK28_DUAL_RHO_PASS`. No divergence found; this deliverable is fine under both engines. |
+> | E4 (prior-family sweep) | `pbpk28_mc_prior_family_sweep.sio` | Compiles; **crashes `rc=182`** (`madaros: handles full`) mid-run |
+>
+> Do not read "E3 is clean" as evidence the others are close to clean — E1/E4's crashes are a
+> resource ceiling during the N=2000 Monte Carlo loop, and E2's is a genuine type-check failure,
+> not related issues. Every number in this document besides §4.9/E3 was produced under
+> lean_single and has not been reproduced under the project's default engine.
+
 ---
 
 ## Headline Numbers by Dissertation Section

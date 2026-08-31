@@ -70,7 +70,10 @@ canonical setup story for this repo snapshot.
 ## 4) Troubleshooting
 
 ### `ImportError` / `Import not found`
-- Check `SOUNIO_STDLIB_PATH` and `souc sysroot stdlib-paths`.
+- Check `SOUNIO_STDLIB_PATH` and `souc sysroot stdlib-paths` on the checked
+  artifact `artifacts/omega/souc-bin/souc-linux-x86_64-gpu`. The default
+  `./bin/souc` (Madaros) has no `sysroot` subcommand; there, use the `stdlib:`
+  line printed by `souc info`.
 - Ensure imports are module-rooted correctly (`import stdlib.foo::bar;`).
 - Confirm workspace run path: relative imports are resolved from the source directory.
 
@@ -100,14 +103,20 @@ canonical setup story for this repo snapshot.
 3. Freeze dynamic config:
    - keep `SOUNIO_STDLIB_PATH` unchanged for deterministic imports.
 4. Re-run smoke matrix and compare:
-   - `tests/native_execution.rs`
-   - `tests/selfhost_native_e2e.rs`
-   - `tests/integration_cli.rs` self-hosted build contract checks
+   - the section 3 smoke checks (`souc info`, `souc check`, `souc run`,
+     `souc build --backend native`)
+   - the Rust suites this step used to name (`crates/souc/tests/native_execution.rs`,
+     `crates/souc/tests/selfhost_native_e2e.rs`, `crates/souc/tests/integration_cli.rs`)
+     were deleted with the Rust crates in `79acc192e1`; there is no file-level
+     successor, so add whichever repo-local gate scripts under `scripts/ci/`
+     cover the change being rolled back
 5. Document regression in postmortem notes and reopen risk register before restart.
 
 ## 6) CI gates for go/no-go
 
-- `cargo test -p souc --test native_execution`
-- `cargo test -p souc --test selfhost_native_e2e`
-- `cargo test -p souc --test integration_cli -- --nocapture`
+- `bash scripts/dev/full_gate.sh` (aggregate entrypoint; it runs the fast gate
+  and the e2e backend gate, and skips the retired `cargo test -p souc` lane
+  whenever `SOUNIO_REPO_HARD_NO_RUST=1`, which is the default)
+- the three `cargo test -p souc --test ...` gates previously listed here are
+  gone: the Rust `souc` crate and its test suites were removed in `79acc192e1`
 - no critical regression on CLI stable contract for two weeks before go-live

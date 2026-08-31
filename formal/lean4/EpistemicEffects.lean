@@ -1,5 +1,13 @@
 -- formal/lean4/EpistemicEffects.lean
 /-!
+# REFUTED MODEL — USE `EpistemicEffectsV2`
+
+This module is retained as a machine-checked counterexample and shared
+definition spine. Its payload-erasing `Knowledge` calculus does **not** satisfy
+subject reduction; see §9.1. Import `EpistemicEffectsV2` for the repaired,
+value-carrying calculus and its preservation and progress theorems. Do not cite
+this module as the metatheory of Sounio's implemented `Knowledge<T>` semantics.
+
 # Sounio Epistemic-Effect Calculus — Lean 4 Soundness Sketch
 
 The formal artifact behind the project's registered SOTA claim that
@@ -15,9 +23,16 @@ This file gives:
   * Small-step CBV operational semantics that reduce `Knowledge` arithmetic
     by the GUM linearization rules
     (σ²(a+b) = σ²(a) + σ²(b); σ²(a·b) = b²σ²(a) + a²σ²(b)).
-  * Four soundness theorems (two open obligations, two fully proved):
-      - `effect_preservation`   [OPEN: `step_preserves_typing` — substitution lemma]
-      - `effect_progress`       [OPEN: induction-on-indexed-type; fix in §9.2 docstring]
+  * Soundness status (2026-08-16 correction — this file's only `sorry`
+    removed; see §9.1 for the full history):
+      - `effect_preservation`   [REFUTATED — the original statement is FALSE.
+        Two machine-checked refutations live in §9.3: the root failure
+        (`effect_preservation_is_false`, zero axioms; also in
+        `EpistemicPreservationWIP_counterexample.lean`) and the propagation
+        failure (`effect_preservation_existential_is_false`, [propext]):
+        even `∃ T', HasTy [] e' T' E` fails — type errors are REACHABLE by
+        reduction. The repaired calculus is `EpistemicEffectsV2.lean`.]
+      - `effect_progress`       [PROVED — induction-on-typing with Γ pinned to []]
       - `gum_conservativity`    [PROVED — `simp` closes both add and mul cases]
       - `confidence_monotonicity` [PROVED — `omega` closes both cases]
 
@@ -110,10 +125,13 @@ theorem union_sub {a b c : EffectSet} (h₁ : a ⊆ₑ c) (h₂ : b ⊆ₑ c) :
 -- ================================================================
 
 /-- Object types. `tknow` wraps a base type with a GUM/confidence cell;
-    `tarrow` carries the callee's latent effects on the arrow. -/
+    `tarrow` carries the callee's latent effects on the arrow.
+    `tmg` is the milligram unit the language ships (`Knowledge<mg>`).
+    This calculus still cannot inhabit it: `t_kraw` pins `Real`. -/
 inductive Ty where
   | tnat
   | treal
+  | tmg
   | tknow  : Ty → Ty
   | tarrow : Ty → EffectSet → Ty → Ty
 
@@ -342,44 +360,67 @@ infix:50 " ⇒ " => Step
 -- §9. Soundness: preservation + progress
 -- ================================================================
 
-/-! ## §9.1 effect_preservation
+/-! ## §9.1 effect_preservation — REFUTATED (2026-08-16)
 
-If `Γ ⊢ e : T ! E` and `e ⇒ e'`, then there exists `E' ⊆ E` with
-`Γ ⊢ e' : T ! E'`. (`E'` is the residual effect set after the step.)
+This section previously carried the file's only `sorry`, on
+`step_preserves_typing` (full subject reduction:
+`HasTy Γ e T E → e ⇒ e' → HasTy Γ e' T E`), documented as "straightforward but
+verbose".  That claim was tested and is FALSE: the statement cannot be proven
+because it is not true.  The obstruction is structural, and BOTH the original
+statement and the nearest weakenings are refuted machine-checked below (zero
+axioms; see also `EpistemicPreservationWIP_counterexample.lean`):
 
-**Open obligation** (`step_preserves_typing` below carries a `sorry`):
-The `beta` case requires the substitution lemma
-`HasTy (T₁ :: Γ) e T₂ E → HasTy [] v T₁ ∅ → HasTy Γ (subst 0 v e) T₂ E`,
-whose proof is a standard de Bruijn index induction (template:
-`SounioSubstitution.lean`). All other cases close by structural
-induction on `Step` with trivial inversions. The three surrounding
-theorems (`effect_progress`, `gum_conservativity`,
-`confidence_monotonicity`) are fully closed without `sorry`. -/
+1. **Root refutation** (`effect_preservation_is_false`).  `t_measure` types
+   `.measure v k` at `Knowledge<T>` for ANY `T`, but `meas_red` steps it to
+   `.kraw k`, and `t_kraw` types `.kraw` ONLY at `Knowledge<Real>` — the
+   scalar cell cannot carry a `Nat` payload.  No retype at the original type
+   exists, at any effect.
 
-theorem effect_preservation
-    {Γ : TyCtx} {e e' : Expr} {T : Ty} {E : EffectSet}
-    (ht : HasTy Γ e T E) (hs : e ⇒ e') :
-    ∃ E', HasTy Γ e' T E' ∧ E' ⊆ₑ E :=
-  ⟨E, step_preserves_typing ht hs, subE_refl E⟩
-where
-  /-- **[OPEN OBLIGATION]** Subject reduction: every step preserves typing
-      at the original effect set.
-      Proof structure: induction on `hs : e ⇒ e'`, with an inversion on
-      `ht` for the redex case and a structural sub-case for every context
-      rule. The `beta` / `let_red` cases require the de Bruijn substitution
-      lemma `HasTy (T₁::Γ) e T₂ E → HasTy [] v T₁ ∅ → HasTy Γ (subst 0 v e) T₂ E`
-      (standard TAPL Ch. 9 argument; template: `SounioSubstitution.lean`).
-      All primitive Knowledge reductions (`kadd_red`, `kmul_red`, `kvalue_red`,
-      etc.) close by `t_kraw` + `kvalid` arithmetic; those are Mathlib-free
-      but verbose. We admit the whole lemma as a single `sorry` so the
-      remaining three theorems compile and are independently auditable.
-      Estimated proof size: ~300 lines. This is the sole open obligation
-      in the file. -/
-  step_preserves_typing :
-      ∀ {Γ e e' T E},
-        HasTy Γ e T E → e ⇒ e' → HasTy Γ e' T E := by
-    intro Γ e e' T E ht hs
-    sorry
+2. **Propagation refutation** (`effect_preservation_existential_is_false`).
+   The obvious weakening — allow the type to change existentially,
+   `∃ T', HasTy [] e' T' E` — is ALSO false: the `meas_red` type corruption
+   propagates through application.  `f a` with `f = λ(x : Knowledge<Nat>). x`
+   and `a = measure 0 k` is typed at `Knowledge<Nat>`; `a` steps to `kraw k`,
+   and the reduct `f (kraw k)` is UNTYPABLE at every type and effect (the
+   arrow demands `Knowledge<Nat>`, the value only supplies
+   `Knowledge<Real>`).  The same propagation breaks the substitution lemma's
+   conclusion.
+
+**Consequence.**  This calculus (scalar-cell `Knowledge`) does not admit
+subject reduction in any near form: type errors are reachable by reduction.
+The repaired calculus — `kraw` stores a payload value, GUM data demoted to
+metadata — is `EpistemicEffectsV2.lean`, where full Preservation and Progress
+are proved without `sorry`.  Nothing in the present file depends on the false
+statement; `effect_progress` (§9.2) and the GUM theorems (§10–§11) stand. -/
+
+/-- Typing inversion for `measure` (peeling `t_sub`): the argument is typed
+    at some `T` with `emptyE`, and the conclusion type is `tknow T`. -/
+theorem invMeasure {Γ e T E} (h : HasTy Γ e T E) {e₀ k} (he : e = .measure e₀ k) :
+    ∃ T', T = .tknow T' ∧ HasTy Γ e₀ T' emptyE ∧ kvalid k := by
+  induction h with
+  | t_measure Γ' T' e₀' k' he₀ hk' =>
+    injection he with h1 h2; subst h1; subst h2
+    exact ⟨T', rfl, he₀, hk'⟩
+  | t_sub Γ' e' T' E1 E2 h0 hsub ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+/-- A well-formed Knowledge cell (variance 0, confidence 1000). -/
+def k0 : KCell := ⟨0, 0, 1000⟩
+
+theorem k0_valid : kvalid k0 := by
+  unfold kvalid k0; decide
+
+/-- Typing inversion for `app` (peeling `t_sub` by induction). -/
+theorem invApp {Γ e T E} (h : HasTy Γ e T E) {f a} (he : e = .app f a) :
+    ∃ T₁ Ef Ec, HasTy Γ f (.tarrow T₁ Ef T) Ec ∧ HasTy Γ a T₁ Ec := by
+  induction h with
+  | t_app Γ' T₁ T₂ Ef Ec Ecaller f' a' hf ha hEf hEc =>
+    injection he with h1 h2; subst h1; subst h2
+    exact ⟨T₁, Ef, Ec, hf, ha⟩
+  | t_sub Γ' e' T' E1 E2 h0 hsub ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+
 
 /-! ## §9.2 effect_progress
 
@@ -504,6 +545,70 @@ theorem effect_progress
     (ht : HasTy [] e T E) :
     (IsValue e) ∨ ∃ e', e ⇒ e' :=
   progress' ht rfl
+
+-- ================================================================
+-- §9.3 The two machine-checked refutations
+-- ================================================================
+
+/-- Typing inversion for `lam` (peeling `t_sub` by induction). -/
+theorem invLam {Γ e T E} (h : HasTy Γ e T E) {S F b} (he : e = .lam S F b) :
+    ∃ T₂, T = .tarrow S F T₂ ∧ HasTy (S :: Γ) b T₂ F := by
+  induction h with
+  | t_lam Γ' T₁ T₂ E' body hb =>
+    injection he with h1 h2 h3; subst h1; subst h2; subst h3; exact ⟨T₂, rfl, hb⟩
+  | t_sub Γ' e' T' E1 E2 h0 hsub ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+/-- **Refutation 1 (root).**  `measure` at `Knowledge<Nat>` steps to a `kraw`
+    that cannot be retyped at `Knowledge<Nat>` — at ANY effect.  This is the
+    same statement as `EpistemicPreservationWIP_counterexample.lean::
+    preservation_is_false`, restated here so the file carries its own
+    refutation of the obligation it once `sorry`-ed. -/
+theorem effect_preservation_is_false :
+    ∃ e e' T, HasTy [] e T (singleE .eObserve) ∧ (e ⇒ e') ∧
+      ¬ ∃ E, HasTy [] e' T E := by
+  refine ⟨.measure (.lit_nat 0) k0, .kraw k0, .tknow .tnat,
+    .t_measure _ _ _ _ (.t_lit_nat _ _) k0_valid, .meas_red (.v_nat 0), ?_⟩
+  rintro ⟨E, h⟩
+  have hT := genKraw h rfl          -- .tknow .tnat = .tknow .treal
+  injection hT with hteq            -- .tnat = .treal
+  exact Ty.noConfusion hteq
+
+/-- **Refutation 2 (propagation).**  Even the existential-type weakening
+    `∃ T', HasTy [] e' T' E` is false: the `meas_red` type corruption
+    propagates through application.  `f a` with
+    `f = λ(x : Knowledge<Nat>). x` and `a = measure 0 k0` is typed at
+    `Knowledge<Nat>`, steps (argument position) to `f (kraw k0)`, and the
+    reduct is UNTYPABLE at every type and effect. -/
+theorem effect_preservation_existential_is_false :
+    ∃ e e' T E, HasTy [] e T E ∧ (e ⇒ e') ∧
+      ¬ ∃ T' E', HasTy [] e' T' E' := by
+  -- f = λ(x : Knowledge<Nat>). x  :  (Knowledge<Nat> → Knowledge<Nat>) ! ∅
+  let f : Expr := .lam (.tknow .tnat) emptyE (.var 0)
+  have hf : HasTy [] f (.tarrow (.tknow .tnat) emptyE (.tknow .tnat)) emptyE :=
+    .t_lam _ _ _ _ _ (.t_var _ _ _ (by simp [lookupCtx]))
+  -- a = measure 0 k0  :  Knowledge<Nat> ! {Observe}
+  let a : Expr := .measure (.lit_nat 0) k0
+  have ha : HasTy [] a (.tknow .tnat) (singleE .eObserve) :=
+    .t_measure _ _ _ _ (.t_lit_nat _ _) k0_valid
+  -- e = f a : Knowledge<Nat> ! {Observe}   (Ef=∅ ⊆ {Obs}, Ea={Obs} ⊆ {Obs})
+  -- type the application with Ef = ∅ ⊆ {Obs} and Ec = {Obs} ⊆ {Obs}
+  have hf' : HasTy [] f (.tarrow (.tknow .tnat) emptyE (.tknow .tnat))
+      (singleE .eObserve) :=
+    .t_sub _ _ _ _ _ hf (emptyE_sub _)
+  refine ⟨.app f a, .app f (.kraw k0), .tknow .tnat, singleE .eObserve,
+    .t_app _ _ _ _ _ _ _ _ hf' ha (emptyE_sub _) (subE_refl _),
+    .app_r (.v_lam _ _ _) (.meas_red (.v_nat 0)), ?_⟩
+  rintro ⟨T', E', h'⟩
+  rcases invApp h' rfl with ⟨T₁, Ef, Ec, hfty, harg⟩
+  -- f is a lam, so its arrow type is the annotated one:
+  rcases invLam hfty rfl with ⟨T₂, hTeq, _⟩
+  injection hTeq with hT1 _ _; subst hT1
+  -- … so the argument `kraw k0` must type at Knowledge<Nat> (any effect) …
+  -- … but kraw only types at Knowledge<Real>:
+  have hT := genKraw harg rfl        -- .tknow .tnat = .tknow .treal
+  injection hT with hteq             -- .tnat = .treal
+  exact Ty.noConfusion hteq
 
 -- ================================================================
 -- §10. GUM conservativity

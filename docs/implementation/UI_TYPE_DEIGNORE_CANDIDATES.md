@@ -18,7 +18,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation
 ## Scope and Method
 - Date: 2026-02-28
 - Sweep target: `tests/ui/type/*.sio` entries with `//@ ignore`
-- Systematic command: `bash scripts/ui_type_deignore_audit.sh` (reads pinned `SOUC_BIN` via `scripts/lib/resolve_souc.sh`)
+- Systematic command: `bash scripts/ci/ui_type_deignore_audit.sh` (reads pinned `SOUC_BIN` via `scripts/lib/resolve_souc.sh`)
 - Manual validation: reran pinned checks for epistemic candidates with `"$SOUC_BIN" check <file>`
 
 ## Findings

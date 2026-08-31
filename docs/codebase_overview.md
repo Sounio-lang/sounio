@@ -59,9 +59,11 @@ bin/souc
 On the current repository snapshot, `souc info` for that JIT artifact reports:
 
 - version `1.0.0-beta.4`
-- Cranelift JIT enabled
-- LLVM disabled in the checked artifact
-- GPU codegen disabled in the checked JIT artifact
+- **Cranelift JIT NOT compiled** — `info` prints `[-] Cranelift JIT - rebuild with
+  --features jit`. There is no JIT artifact and no build path enables the feature;
+  earlier revisions of this list claimed it was enabled (measured 2026-08-27)
+- LLVM not compiled, same shape
+- GPU codegen enabled on the `-gpu` artifact
 - LSP, SMT, distributed, and package-manager features disabled in the checked artifact
 - ontology resolution CLI enabled natively via `souc ontology <resolve|search|ancestors|is-subclass>`
 

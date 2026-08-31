@@ -197,9 +197,15 @@ fn run_epistemic_glycolysis_on_gpu(
 
 ### Compile to PTX
 
+> **Corrected 2026-08-26.** There is no `souc emit` subcommand. The real spelling
+> is `souc build <file> --backend gpu -o OUT` (see `souc --help`). Note that on the
+> current checkout that command does **not** succeed on this file: it stops with
+> `GPU: frontend errors: 1` (E137 on `f32`, `glycolysis_atom_new`, `epi_arena_delta_32`,
+> `str_substr`) and writes no PTX. The NVCC steps below are therefore unreachable today.
+
 ```bash
-# Generate PTX from Sounio
-souc emit --ptx --gpu self-hosted/gpu/epistemic_tensor_core.sio \
+# Generate PTX from Sounio (currently fails with frontend errors -- see note above)
+souc build self-hosted/gpu/epistemic_tensor_core.sio --backend gpu \
     -o /tmp/epistemic_tensor.ptx
 
 # Compile with NVCC
@@ -238,9 +244,19 @@ net = run_epistemic_glycolysis_on_gpu(net)
 
 ## Verification Tests
 
+> **Corrected 2026-08-26.** There is no `souc test` subcommand -- the compiler's
+> subcommands are `info check compile build run init format fmt repl lsp pkg`
+> (`souc --help`). No replacement runner for these three tests exists in the repo
+> either: `test_epistemic_tensor_core_basic`, `test_epistemic_tensor_glycolysis_full`
+> and `test_wmma_shared_memory_merge` are `fn test_*` definitions in
+> `self-hosted/gpu/epistemic_tensor_core.sio` (lines 494, 543, 564) that nothing
+> invokes, and no `scripts/ci/` gate references that file. The transcripts below
+> are a record of a capability that no longer has a way to be run; they are not
+> instructions you can follow.
+
 ### Test 1: Basic Tensor Core
 ```bash
-$ souc test --gpu epistemic_tensor_core.sio
+$ souc test --gpu epistemic_tensor_core.sio   # NOT RUNNABLE: no `souc test` subcommand
 ✅ test_epistemic_tensor_core_basic: PASSED
    - Data output: OK
    - Provenance merge: OK
@@ -249,7 +265,7 @@ $ souc test --gpu epistemic_tensor_core.sio
 
 ### Test 2: Glycolysis Full Stack
 ```bash
-$ souc test --gpu --full-stack glycolysis_10step_atom_level.sio
+$ souc test --gpu --full-stack glycolysis_10step_atom_level.sio   # NOT RUNNABLE: no `souc test` subcommand; this file does not exist in the repo
 ✅ test_epistemic_tensor_glycolysis_full: PASSED
    - Atom count: 10,240
    - Bond count: 20,480
@@ -260,7 +276,7 @@ $ souc test --gpu --full-stack glycolysis_10step_atom_level.sio
 
 ### Test 3: WMMA Shared Memory Merge
 ```bash
-$ souc test --gpu wmma_shared_merkle_merge
+$ souc test --gpu wmma_shared_merkle_merge   # NOT RUNNABLE: no `souc test` subcommand
 ✅ test_wmma_shared_memory_merge: PASSED
    - Root computation: OK
    - All elements valid: OK

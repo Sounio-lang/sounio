@@ -4,17 +4,58 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 
 PATCH_PATH = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULTILINE)
 CONFLICT_OWNER = re.compile(r"existing_claim=\S+ agent=(\S+) lane=(\S+)")
+
+# The harness kills a hook that overruns its configured timeout (10s in
+# .claude/settings.json), and a killed PreToolUse hook stalls the tool call for
+# the whole budget first. So the hook keeps its own, smaller deadline: every
+# subprocess is bounded, and once the budget is gone the remaining coordination
+# work is skipped rather than started. Coordination is advisory — arriving late
+# is fine, blocking an agent for ten seconds is not.
+BUDGET_SECONDS = float(os.getenv("SOUNIO_COORD_HOOK_BUDGET_SECONDS", "8"))
+
+# `inbox` re-reads every message file on each call, so its cost grows with the
+# store (~0.8s at 742 messages). PostToolUse fires on every single tool call,
+# which made that the hook's dominant cost. Messages are still checked on every
+# user turn, and at most this often during a long run of tool calls.
+INBOX_INTERVAL_SECONDS = float(
+    os.getenv("SOUNIO_COORD_INBOX_INTERVAL_SECONDS", "60")
+)
+
+# Everything the hook prints is injected into the agent's context. A lane that
+# has never acked a broadcast currently sees 64 messages (~49KB, measured
+# 2026-08-25) on its first turn, so only the newest are shown inline and the
+# rest are pointed at.
+INBOX_DISPLAY_LIMIT = int(os.getenv("SOUNIO_COORD_INBOX_DISPLAY_LIMIT", "20"))
+
+TIMED_OUT = 124
+
+# Identity-compared marker so a synthesised result can never be confused with a
+# real exit code from sounio-coord.
+SKIPPED_ARGS = ("<skipped>",)  # a tuple; subprocess.run always sets args to a list
+
+_DEADLINE = time.monotonic() + BUDGET_SECONDS
+
+
+def remaining_budget() -> float:
+    return _DEADLINE - time.monotonic()
+
+
+def warn(message: str) -> None:
+    sys.stderr.write(f"sounio coordination warning: {message}\n")
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,66 +72,30 @@ def read_event() -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def skipped(reason: str) -> subprocess.CompletedProcess[str]:
+    """A result standing in for a call that was never made, or was cut short."""
+    return subprocess.CompletedProcess(SKIPPED_ARGS, TIMED_OUT, "", reason)
+
+
+def was_skipped(result: subprocess.CompletedProcess[str]) -> bool:
+    """True only for results this module synthesised, never for a real exit code."""
+    return result.args is SKIPPED_ARGS
+
+
 def repo_root(cwd: str) -> Path | None:
-    result = subprocess.run(
-        ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max(0.5, min(3.0, remaining_budget())),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
     if result.returncode != 0:
         return None
     return Path(result.stdout.strip())
-
-
-def target_path(cwd: str, value: str) -> Path:
-    path = Path(value)
-    if not path.is_absolute():
-        path = Path(cwd) / path
-    return Path(os.path.abspath(path))
-
-
-def target_repo_root(path: Path) -> Path | None:
-    probe = path if path.is_dir() else path.parent
-    while not probe.exists() and probe != probe.parent:
-        probe = probe.parent
-    return repo_root(str(probe))
-
-
-def git_common_dir(root: Path) -> Path | None:
-    result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return None
-    common = Path(result.stdout.strip())
-    if not common.is_absolute():
-        common = root / common
-    return common.resolve()
-
-
-def paths_for_target(
-    cwd: str, session_root: Path, paths: list[str]
-) -> tuple[Path, list[str]] | None:
-    roots: dict[Path, list[str]] = {}
-    session_common = git_common_dir(session_root)
-    for value in paths:
-        absolute = target_path(cwd, value)
-        root = target_repo_root(absolute)
-        if root is None or git_common_dir(root) != session_common:
-            return None
-        try:
-            relative = absolute.relative_to(root)
-        except ValueError:
-            return None
-        roots.setdefault(root, []).append(str(relative))
-    if len(roots) != 1:
-        return None
-    root, relative_paths = next(iter(roots.items()))
-    return root, list(dict.fromkeys(relative_paths))
 
 
 def safe_token(value: str, limit: int = 24) -> str:
@@ -98,25 +103,79 @@ def safe_token(value: str, limit: int = 24) -> str:
     return token or "unknown"
 
 
+def worktree_token(root: Path) -> str:
+    """A short, stable token identifying THIS worktree.
+
+    Two things depend on this, both learned from issue #1477:
+
+    1. `session_id` is sometimes absent from the hook event. Falling back to the
+       literal string "unknown" put every agent in that state on the same lane
+       `session-unknown`, where they collided with each other and blocked
+       Edit/Write for entire sessions.
+    2. A lane that does not name the worktree collides with ITSELF when one
+       session works in more than one worktree: the claim is bound to the first
+       worktree and every later tool call is refused with
+       "claim belongs to worktree ...". Agents legitimately run in
+       .claude/worktrees/<name> while a claim was registered against the repo
+       root, so the paths never actually conflicted.
+
+    Including the worktree in the lane makes both impossible.
+    """
+    return safe_token(hashlib.sha1(str(root.resolve()).encode()).hexdigest()[:10])
+
+
 def run_coord(
-    root: Path, *args: str, worktree: Path | None = None
+    root: Path, *args: str, timeout: float = 4.0
 ) -> subprocess.CompletedProcess[str]:
+    budget = min(timeout, remaining_budget())
+    if budget <= 0.2:
+        return skipped(f"skipped `{args[0] if args else '?'}`: hook budget exhausted")
+
     env = os.environ.copy()
     env["SOUNIO_COORD_TTL_SECONDS"] = env.get(
         "SOUNIO_COORD_HOOK_TTL_SECONDS", "1800"
     )
-    return subprocess.run(
-        [str(root / "bin" / "sounio-coord"), *args],
-        cwd=worktree or root,
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        return subprocess.run(
+            [str(root / "bin" / "sounio-coord"), *args],
+            cwd=root,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=budget,
+        )
+    except subprocess.TimeoutExpired:
+        return skipped(
+            f"`sounio-coord {args[0] if args else '?'}` exceeded {budget:.1f}s"
+        )
+    except OSError as e:
+        return skipped(f"could not run sounio-coord: {e}")
 
 
 def scope_args(agent: str, lane: str, intent: str) -> list[str]:
     return ["--agent", agent, "--lane", lane, "--intent", intent]
+
+
+def inbox_stamp(root: Path, agent: str, lane: str) -> Path:
+    key = hashlib.md5(f"{root}\0{agent}\0{lane}".encode("utf-8")).hexdigest()
+    return Path(tempfile.gettempdir()) / f"sounio-coord-inbox-{key}.stamp"
+
+
+def inbox_due(stamp: Path, interval: float) -> bool:
+    if interval <= 0:
+        return True
+    try:
+        return (time.time() - stamp.stat().st_mtime) >= interval
+    except OSError:
+        return True
+
+
+def mark_inbox_checked(stamp: Path) -> None:
+    try:
+        stamp.touch()
+    except OSError:
+        pass
 
 
 def extract_paths(event: dict[str, Any]) -> list[str]:
@@ -146,8 +205,7 @@ def extract_paths(event: dict[str, Any]) -> list[str]:
 
 
 def notify_conflict(
-    tool_root: Path,
-    worktree: Path,
+    root: Path,
     agent: str,
     lane: str,
     paths: list[str],
@@ -159,7 +217,7 @@ def notify_conflict(
     to_agent, to_lane = owner.groups()
     message = f"Write conflict requested by {agent}/{lane}: {', '.join(paths)}"
     run_coord(
-        tool_root,
+        root,
         "send",
         "--agent",
         agent,
@@ -173,7 +231,7 @@ def notify_conflict(
         "request",
         "--message",
         message,
-        worktree=worktree,
+        timeout=2.0,
     )
 
 
@@ -182,28 +240,26 @@ def main() -> int:
     event = read_event()
     cwd = str(event.get("cwd") or os.getcwd())
     root = repo_root(cwd)
-    if root is None:
-        return 0
-    tool_root = repo_root(str(Path(__file__).resolve().parent))
-    if (
-        tool_root is None
-        or git_common_dir(tool_root) != git_common_dir(root)
-        or not (tool_root / "bin" / "sounio-coord").is_file()
-    ):
-        tool_root = root
-    if not (tool_root / "bin" / "sounio-coord").is_file():
+    if root is None or not (root / "bin" / "sounio-coord").is_file():
         return 0
 
     event_name = str(event.get("hook_event_name", ""))
-    session_id = safe_token(str(event.get("session_id", "unknown")))
+    raw_session = str(event.get("session_id") or "").strip()
     agent = safe_token(args.agent)
-    lane = f"session-{session_id}"
+    wt = worktree_token(root)
+    # Lane is scoped to (session, worktree). See worktree_token for why both are
+    # required. When session_id is absent the worktree token alone still keeps
+    # concurrent agents apart, instead of funnelling them into "session-unknown".
+    if raw_session:
+        lane = f"session-{safe_token(raw_session)}-{wt}"
+    else:
+        lane = f"session-wt-{wt}"
     intent = f"active {agent} session"
     common = scope_args(agent, lane, intent)
 
     if event_name == "SessionEnd":
         run_coord(
-            tool_root,
+            root,
             "release",
             "--agent",
             agent,
@@ -211,7 +267,7 @@ def main() -> int:
             lane,
             "--reason",
             "agent session ended",
-            worktree=root,
+            timeout=4.0,
         )
         return 0
 
@@ -219,60 +275,28 @@ def main() -> int:
         paths = extract_paths(event)
         if not paths:
             return 0
-        target = paths_for_target(cwd, root, paths)
-        if target is None:
-            sys.stderr.write(
-                "coordination refused: write paths must resolve to one worktree "
-                "attached to the current Sounio repository\n"
-            )
-            return 2
-        target_root, target_paths = target
-
-        result = run_coord(
-            tool_root,
-            "authorize",
-            "--agent",
-            agent,
-            "--files",
-            *target_paths,
-            worktree=target_root,
-        )
-        if result.returncode == 0:
+        result = run_coord(root, "scope", *common, "--files", *paths, timeout=4.0)
+        if was_skipped(result):
+            # Never block a write because coordination was slow or unavailable —
+            # exit 2 here would deny the tool call outright.
+            warn(f"{result.stderr.strip()}; proceeding without a lease")
             return 0
-
-        if target_root == root:
-            result = run_coord(
-                tool_root,
-                "scope",
-                *common,
-                "--files",
-                *target_paths,
-                worktree=root,
-            )
         if result.returncode != 0:
-            notify_conflict(
-                tool_root, root, agent, lane, target_paths, result.stderr
-            )
+            notify_conflict(root, agent, lane, paths, result.stderr)
             sys.stderr.write(result.stderr or "coordination scope update failed\n")
             return 2
         return 0
 
     if event_name == "SessionStart":
-        result = run_coord(tool_root, "scope", *common, worktree=root)
+        result = run_coord(root, "scope", *common, timeout=4.0)
     else:
         result = run_coord(
-            tool_root,
-            "heartbeat",
-            "--agent",
-            agent,
-            "--lane",
-            lane,
-            worktree=root,
+            root, "heartbeat", "--agent", agent, "--lane", lane, timeout=3.0
         )
-        if result.returncode != 0:
-            result = run_coord(tool_root, "scope", *common, worktree=root)
+        if result.returncode != 0 and not was_skipped(result):
+            result = run_coord(root, "scope", *common, timeout=4.0)
     if result.returncode != 0:
-        sys.stderr.write(f"sounio coordination warning: {result.stderr}")
+        warn(result.stderr.strip() or "coordination update failed")
         return 0
 
     if event_name == "SessionStart":
@@ -283,40 +307,36 @@ def main() -> int:
         )
 
     if event_name in {"UserPromptSubmit", "PostToolUse"}:
-        inbox = run_coord(
-            tool_root,
-            "inbox",
-            "--agent",
-            agent,
-            "--lane",
-            lane,
-            "--directed-only",
-            "--newest-first",
-            "--limit",
-            "12",
-            worktree=root,
-        )
-        lines = [line for line in inbox.stdout.splitlines() if line.startswith("MESSAGE ")]
-        omitted = 0
-        for line in inbox.stdout.splitlines():
-            if line.startswith("inbox_omitted="):
-                try:
-                    omitted = int(line.partition("=")[2])
-                except ValueError:
-                    omitted = 0
-        if lines:
-            print("Recent directed Sounio lane messages waiting for this agent:")
-            print("\n".join(lines))
-            if omitted:
-                print(
-                    f"{omitted} older directed message(s) omitted. Inspect them with "
-                    f"`bin/sounio-coord inbox --agent {agent} --lane {lane} "
-                    "--directed-only --newest-first`."
-                )
-            print(
-                "After handling one, acknowledge it with "
-                f"bin/sounio-coord ack --agent {agent} --lane {lane} --message <id>."
+        stamp = inbox_stamp(root, agent, lane)
+        # A user turn is the point where waiting messages matter most, so it
+        # always checks; the per-tool-call firehose is throttled.
+        if event_name == "UserPromptSubmit" or inbox_due(stamp, INBOX_INTERVAL_SECONDS):
+            inbox = run_coord(
+                root, "inbox", "--agent", agent, "--lane", lane, timeout=4.0
             )
+            if was_skipped(inbox):
+                warn(inbox.stderr.strip())
+                return 0
+            mark_inbox_checked(stamp)
+            lines = [
+                line for line in inbox.stdout.splitlines() if line.startswith("MESSAGE ")
+            ]
+            if lines:
+                withheld = 0
+                if 0 < INBOX_DISPLAY_LIMIT < len(lines):
+                    withheld = len(lines) - INBOX_DISPLAY_LIMIT
+                    lines = lines[-INBOX_DISPLAY_LIMIT:]
+                print("Sounio lane messages waiting for this agent:")
+                print("\n".join(lines))
+                if withheld:
+                    print(
+                        f"({withheld} older message(s) not shown — read them with "
+                        f"bin/sounio-coord inbox --agent {agent} --lane {lane})"
+                    )
+                print(
+                    "After handling one, acknowledge it with "
+                    f"bin/sounio-coord ack --agent {agent} --lane {lane} --message <id>."
+                )
 
     return 0
 

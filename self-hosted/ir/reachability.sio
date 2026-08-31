@@ -53,7 +53,7 @@ fn reach_name_is_main(n: Name) -> bool with Mut, Panic, Div {
 fn reach_find_main(module: &IrModule) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < module.fn_count {
-        if reach_name_is_main(module.functions[i as usize].name) {
+        if reach_name_is_main(ir_fn_get(&module, i as usize).name) {
             return i
         }
         i = i + 1
@@ -61,9 +61,10 @@ fn reach_find_main(module: &IrModule) -> i64 with Mut, Panic, Div {
     -1
 }
 
-fn reach_is_call(op: IrOpcode) -> bool {
+fn reach_is_fn_edge(op: IrOpcode) -> bool {
     match op {
         IrOpcode::IrCall => true,
+        IrOpcode::IrLoadFnRef => true,
         _ => false,
     }
 }
@@ -81,9 +82,9 @@ fn reach_mark_one_pass(mark: [bool; 1024], module: &IrModule) -> ([bool; 1024], 
     while fi < module.fn_count {
         if out[fi as usize] {
             var ii: i64 = 0
-            while ii < module.functions[fi as usize].instr_count {
-                let instr = module.functions[fi as usize].instrs[ii as usize]
-                if reach_is_call(instr.op) {
+            while ii < ir_fn_get(&module, fi as usize).instr_count {
+                let instr = ir_arena_load(ir_region_slot_r(ir_fn_get(&module, fi as usize).region, (ii)))
+                if reach_is_fn_edge(instr.op) {
                     let callee = instr.fn_id
                     if callee >= 0 && callee < 1024 && !out[callee as usize] {
                         out[callee as usize] = true
@@ -133,13 +134,13 @@ fn reach_build_remap(mark: [bool; 1024], fn_count: i64) -> [i64; 1024] with Mut,
 }
 
 // Copy only reachable functions into compacted positions.
-fn reach_compact_module(module: IrModule, mark: [bool; 1024], remap: [i64; 1024]) -> IrModule with Mut, Panic, Div {
+fn reach_compact_module(module: IrModule, mark: [bool; 1024], remap: [i64; 1024]) -> IrModule with Alloc, Mut, Panic, Div {
     var result = module
     var new_idx: i64 = 0
     var i: i64 = 0
     while i < module.fn_count {
         if mark[i as usize] {
-            result.functions[new_idx as usize] = module.functions[i as usize]
+            ir_fn_set(&! result, new_idx as usize, ir_fn_get(&module, i as usize))
             new_idx = new_idx + 1
         }
         i = i + 1
@@ -153,15 +154,16 @@ fn reach_patch_calls(module: &!IrModule, remap: &[i64; 1024]) with Mut, Panic, D
     var fi: i64 = 0
     while fi < module.fn_count {
         var ii: i64 = 0
-        while ii < module.functions[fi as usize].instr_count {
-            if reach_is_call(module.functions[fi as usize].instrs[ii as usize].op) {
-                let old_id = module.functions[fi as usize].instrs[ii as usize].fn_id
+        while ii < ir_fn_get(&module, fi as usize).instr_count {
+            let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&module, fi as usize).region, (ii))) as usize] as IrOpcode)
+            if reach_is_fn_edge(op) {
+                let old_id = IR_A_FN_ID[(ir_region_slot_r(ir_fn_get(&module, fi as usize).region, (ii))) as usize]
                 if old_id >= 0 && old_id < 1024 {
                     let new_id = remap[old_id as usize]
                     if new_id >= 0 {
-                        var instr = module.functions[fi as usize].instrs[ii as usize]
+                        var instr = ir_arena_load(ir_region_slot_r(ir_fn_get(&module, fi as usize).region, (ii)))
                         instr.fn_id = new_id
-                        module.functions[fi as usize].instrs[ii as usize] = instr
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&module, fi as usize).region, (ii)), instr)
                     }
                 }
             }
@@ -240,7 +242,7 @@ fn reach_self_test_build_remap() -> i64 with Mut, Panic, Div {
     0
 }
 
-fn reach_self_test_compact() -> i64 with Mut, Panic, Div {
+fn reach_self_test_compact() -> i64 with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var f0 = ir_empty_function()
     f0.name.buf[0] = 102 as i8  // 'f'
@@ -251,9 +253,9 @@ fn reach_self_test_compact() -> i64 with Mut, Panic, Div {
     var f2 = ir_empty_function()
     f2.name.buf[0] = 104 as i8  // 'h'
     f2.name.len = 1
-    module.functions[0] = f0
-    module.functions[1] = f1
-    module.functions[2] = f2
+    ir_fn_set(&! module, 0, f0)
+    ir_fn_set(&! module, 1, f1)
+    ir_fn_set(&! module, 2, f2)
     module.fn_count = 3
     var mark: [bool; 1024] = [false; 1024]
     mark[0] = true
@@ -263,8 +265,8 @@ fn reach_self_test_compact() -> i64 with Mut, Panic, Div {
     remap[2] = 1
     let result = reach_compact_module(module, mark, remap)
     if result.fn_count != 2 { return 1 }
-    if result.functions[0].name.buf[0] != 102 as i8 { return 2 }  // 'f'
-    if result.functions[1].name.buf[0] != 104 as i8 { return 3 }  // 'h'
+    if ir_fn_get(&result, 0).name.buf[0] != 102 as i8 { return 2 }  // 'f'
+    if ir_fn_get(&result, 1).name.buf[0] != 104 as i8 { return 3 }  // 'h'
     0
 }
 

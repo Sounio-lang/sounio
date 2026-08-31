@@ -1,0 +1,385 @@
+//@ run-pass
+// tests/run-pass/valley_chain_epistemic_selftest.sio
+//
+// Suite coverage for demos/hydrogen/valley_chain_epistemic.sio (the
+// composed subsurface -> compressor -> dispenser p-box twin). Pins:
+//   - the float arithmetic: delivered-cost corners [4.463184, 9.023636],
+//     nominal 6.415980, compressor log-margin 0.041964, and the f_s
+//     coupling values — with tolerances, because the two engines' f64
+//     PRINTERS disagree in the last digit (the values agree to ~1 ulp);
+//   - the deterministic Monte Carlo hit counts at n = 2000, seed
+//     (314159265, 271828182): integer decisions over the integer
+//     xorshift stream, so the counts are ENGINE-INDEPENDENT and pinned
+//     exactly (verified identical on lean_single and Madaros);
+//   - the monotonicity chain that makes the composed corner p-box exact
+//     (D decreasing in CF, f_s decreasing in L30) and the headline
+//     direction (composed hits << baseline hits).
+//
+// Chemistry-free by design (the UHS loss p-box is a pinned input), so
+// this selftest runs on BOTH engines.
+
+fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn mh_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn mh_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+fn mh_ln(x: f64) -> f64 with Mut, Div {
+    var m = x
+    var k: i64 = 0
+    while m >= 2.0 { m = m / 2.0; k = k + 1 }
+    while m < 1.0 { m = m * 2.0; k = k - 1 }
+    let y = (m - 1.0) / (m + 1.0)
+    let y2 = y * y
+    var term = y
+    var sum = 0.0
+    var i: i64 = 0
+    while i < 12 {
+        sum = sum + term / (2.0 * (i as f64) + 1.0)
+        term = term * y2
+        i = i + 1
+    }
+    2.0 * sum + (k as f64) * 0.6931471805599453
+}
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut {
+    RNG_A = a
+    RNG_B = b
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_u() -> f64 with Mut, Div {
+    (rng_next() % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_u(); j = j + 1 }
+    sum - 6.0
+}
+
+fn floor_i64(x: f64) -> i64 with Mut {
+    var n = x as i64
+    if (n as f64) > x { n = n - 1 }
+    return n
+}
+
+fn ceil_i64(x: f64) -> i64 with Mut {
+    var n = floor_i64(x)
+    if (n as f64) < x { n = n + 1 }
+    return n
+}
+
+fn crf(r: f64, n_yr: i64) -> f64 with Mut, Div {
+    let q = mh_exp((n_yr as f64) * mh_ln(1.0 + r))
+    r * q / (q - 1.0)
+}
+
+fn prod_cost(p_elec: f64, capex_m: f64, e_spec: f64, cf: f64) -> f64 with Mut, Div {
+    let a = 1500.0 * capex_m * crf(0.07, 25) + 20.0
+    e_spec * p_elec + a * e_spec / (cf * 8760.0)
+}
+
+fn compr_cost(e_th: f64, p_heat: f64) -> f64 {
+    e_th * p_heat
+}
+
+fn storage_cost(ncyc: f64) -> f64 with Mut, Div {
+    500.0 * crf(0.07, 25) / ncyc
+}
+
+fn delivered(p_elec: f64, capex_m: f64, e_spec: f64, cf: f64,
+             e_th: f64, p_heat: f64, ncyc: f64, disp: f64) -> f64 with Mut, Div {
+    prod_cost(p_elec, capex_m, e_spec, cf)
+        + compr_cost(e_th, p_heat) + storage_cost(ncyc) + disp
+}
+
+fn fs_of(l30_pct: f64, tau: f64) -> f64 {
+    1.0 - l30_pct * tau / 3000.0
+}
+
+var DH_NOM: [f64; 7] = [0.0; 7]
+var W_DH: [f64; 7] = [0.0; 7]
+
+fn stage_a(i: i64, t0: f64, step: f64, swing: f64) -> f64 with Div {
+    let tc = t0 + (i as f64) * step
+    let th = tc + swing
+    (1.0 / tc - 1.0 / th) / 8.314 * 1000.0
+}
+
+fn mc_hits(mode: i64, n: i64, t0: f64, step: f64, swing: f64,
+           margin: f64, sig_eta: f64, sum_aw: f64) -> i64 with Mut, Div {
+    var hits: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        var ad = 0.0
+        if mode == 0 {
+            var k: i64 = 0
+            while k < 7 {
+                // RNG call in its own statement (Madaros stream
+                // double-consumption workaround — see the demo).
+                let u = rand_u()
+                let d = W_DH[k] * (2.0 * u - 1.0)
+                ad = ad + stage_a(k, t0, step, swing) * d
+                k = k + 1
+            }
+        }
+        if mode == 1 {
+            let phi_u = 2.0 * rand_u() - 1.0
+            ad = phi_u * sum_aw
+        }
+        if mode == 3 { ad = 0.0 - sum_aw }
+        if mode == 4 { ad = sum_aw }
+        var sd: i64 = 0
+        var j: i64 = 0
+        while j < 84 { sd = sd + rng_next() % 10000; j = j + 1 }
+        let y = (42.0 - (margin + ad) / sig_eta) * 10000.0
+        if sd >= ceil_i64(y) { hits = hits + 1 }
+        i = i + 1
+    }
+    hits
+}
+
+var LO8: [f64; 8] = [0.0; 8]
+var HI8: [f64; 8] = [0.0; 8]
+
+fn mc_hits_pinned_c(fs: f64, fc: f64, p_elec: f64, capex_m: f64,
+                    e_spec: f64, cf: f64, e_th: f64, p_heat: f64,
+                    ncyc: f64, disp: f64, n: i64) -> i64 with Mut, Div {
+    var hits: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let e = p_elec + 0.002 * rand_normal()
+        let c = cf + 0.02 * rand_normal()
+        let t = e_th + 5.0 * rand_normal()
+        let d = delivered(e, capex_m, e_spec, fs * fc * c, t, p_heat, ncyc, disp)
+        let k6 = floor_i64(d * 1000000.0 + 0.5)
+        if k6 < 6000000 { hits = hits + 1 }
+        i = i + 1
+    }
+    hits
+}
+
+fn mc_indep_silent(n: i64) -> i64 with Mut, Div {
+    var hits: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        var v0 = 0.0
+        var v1 = 0.0
+        var v2 = 0.0
+        var v3 = 0.0
+        var v4 = 0.0
+        var c: i64 = 0
+        while c < 8 {
+            let u = rand_u()
+            let x = LO8[c] + (HI8[c] - LO8[c]) * u
+            if c == 0 { v0 = x }
+            if c == 1 { v1 = x }
+            if c == 2 { v2 = x }
+            if c == 3 { v3 = x }
+            if c == 4 { v4 = x }
+            c = c + 1
+        }
+        let e = v0 + 0.002 * rand_normal()
+        let cc = v3 + 0.02 * rand_normal()
+        let t = v4 + 5.0 * rand_normal()
+        let u5 = rand_u()
+        let ph = LO8[5] + (HI8[5] - LO8[5]) * u5
+        let u6 = rand_u()
+        let ny = LO8[6] + (HI8[6] - LO8[6]) * u6
+        let u7 = rand_u()
+        let dp = LO8[7] + (HI8[7] - LO8[7]) * u7
+        let d = delivered(e, v1, v2, cc, t, ph, ny, dp)
+        let k6 = floor_i64(d * 1000000.0 + 0.5)
+        if k6 < 6000000 { hits = hits + 1 }
+        i = i + 1
+    }
+    hits
+}
+
+fn mc_indep10_silent(l30_lo: f64, l30_hi: f64, r_lo: f64, r_hi: f64,
+                     tau: f64, n: i64) -> i64 with Mut, Div {
+    var hits: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        var v0 = 0.0
+        var v1 = 0.0
+        var v2 = 0.0
+        var v3 = 0.0
+        var v4 = 0.0
+        var c: i64 = 0
+        while c < 8 {
+            let u = rand_u()
+            let x = LO8[c] + (HI8[c] - LO8[c]) * u
+            if c == 0 { v0 = x }
+            if c == 1 { v1 = x }
+            if c == 2 { v2 = x }
+            if c == 3 { v3 = x }
+            if c == 4 { v4 = x }
+            c = c + 1
+        }
+        let e = v0 + 0.002 * rand_normal()
+        let cc = v3 + 0.02 * rand_normal()
+        let t = v4 + 5.0 * rand_normal()
+        let u5 = rand_u()
+        let ph = LO8[5] + (HI8[5] - LO8[5]) * u5
+        let u6 = rand_u()
+        let ny = LO8[6] + (HI8[6] - LO8[6]) * u6
+        let u7 = rand_u()
+        let dp = LO8[7] + (HI8[7] - LO8[7]) * u7
+        let u8 = rand_u()
+        let l30 = l30_lo + (l30_hi - l30_lo) * u8
+        let u9 = rand_u()
+        let rr = r_lo + (r_hi - r_lo) * u9
+        let d = delivered(e, v1, v2, fs_of(l30, tau) * rr * cc, t, ph, ny, dp)
+        let k6 = floor_i64(d * 1000000.0 + 0.5)
+        if k6 < 6000000 { hits = hits + 1 }
+        i = i + 1
+    }
+    hits
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    LO8[0] = 0.046; HI8[0] = 0.052
+    LO8[4] = 44.0; HI8[4] = 89.0
+    LO8[5] = 0.005; HI8[5] = 0.02
+    LO8[6] = 30.0; HI8[6] = 45.0
+    LO8[1] = 0.8; HI8[1] = 1.2
+    LO8[2] = 43.9; HI8[2] = 48.9
+    LO8[3] = 0.55; HI8[3] = 0.80
+    LO8[7] = 0.50; HI8[7] = 1.50
+    DH_NOM[0] = 24.0; DH_NOM[1] = 26.0; DH_NOM[2] = 28.0; DH_NOM[3] = 30.0
+    DH_NOM[4] = 32.0; DH_NOM[5] = 34.0; DH_NOM[6] = 36.0
+    W_DH[0] = 1.5; W_DH[1] = 1.5; W_DH[2] = 2.0; W_DH[3] = 2.0
+    W_DH[4] = 2.0; W_DH[5] = 2.5; W_DH[6] = 2.5
+    let l30_lo = 0.458073
+    let l30_hi = 2.630814
+    let tau = 1.0
+
+    // compressor setup (same float chain as the demo)
+    let t0 = 293.15
+    let s80 = 15.238957
+    let sig_eta = 0.035
+    let step80 = ((353.15 - s80) - t0) / 6.0
+    let ln_eta = mh_ln(0.90)
+    var p = 365.0 / 18.7
+    var k: i64 = 0
+    while k < 7 {
+        p = p * mh_exp(stage_a(k, t0, step80, s80) * DH_NOM[k] + ln_eta)
+        k = k + 1
+    }
+    let margin = mh_ln(p / 350.0)
+    var sum_aw = 0.0
+    k = 0
+    while k < 7 {
+        sum_aw = sum_aw + stage_a(k, t0, step80, s80) * W_DH[k]
+        k = k + 1
+    }
+
+    var fails = 0
+
+    // ── float pins (tolerance: engine f64 printers disagree in the
+    //    last digit; values agree to ~1 ulp) ──
+    let d_lo = delivered(0.046, 0.8, 43.9, 0.80, 44.0, 0.005, 45.0, 0.50)
+    let d_hi = delivered(0.052, 1.2, 48.9, 0.55, 89.0, 0.02, 30.0, 1.50)
+    let d_mid = delivered(0.049, 1.0, 46.4, 0.675, 66.5, 0.0125, 37.5, 1.0)
+    if absf(d_lo - 4.463184) > 5.0e-6 { fails = fails + 1 }
+    if absf(d_hi - 9.023636) > 5.0e-6 { fails = fails + 1 }
+    if absf(d_mid - 6.415980) > 5.0e-6 { fails = fails + 1 }
+    if absf(margin - 0.041964) > 5.0e-6 { fails = fails + 1 }
+    if absf(fs_of(l30_hi, tau) - 0.999123062) > 1.0e-9 { fails = fails + 1 }
+    if absf(fs_of(l30_lo, tau) - 0.999847309) > 1.0e-9 { fails = fails + 1 }
+
+    // ── monotonicity chain (makes the composed corner p-box exact) ──
+    if delivered(0.049, 1.0, 46.4, 0.80, 66.5, 0.0125, 37.5, 1.0)
+        >= delivered(0.049, 1.0, 46.4, 0.55, 66.5, 0.0125, 37.5, 1.0) {
+        fails = fails + 1
+    }
+    if fs_of(l30_hi, tau) >= fs_of(l30_lo, tau) { fails = fails + 1 }
+
+    // ── integer MC pins, n = 2000, seed (314159265, 271828182) ──
+    // Exact counts, engine-independent by construction (verified
+    // identical on lean_single and Madaros).
+    let n: i64 = 2000
+    rng_seed(314159265, 271828182)
+    let h_r_ind = mc_hits(0, n, t0, step80, s80, margin, sig_eta, sum_aw)
+    rng_seed(314159265, 271828182)
+    let h_r_lo = mc_hits(3, n, t0, step80, s80, margin, sig_eta, sum_aw)
+    rng_seed(314159265, 271828182)
+    let h_r_hi = mc_hits(4, n, t0, step80, s80, margin, sig_eta, sum_aw)
+    if h_r_ind != 1303 { fails = fails + 1 }
+    if h_r_lo != 19 { fails = fails + 1 }
+    if h_r_hi != 2000 { fails = fails + 1 }
+    let r_lo = (h_r_lo as f64) / (n as f64)
+    let r_hi = (h_r_hi as f64) / (n as f64)
+    rng_seed(314159265, 271828182)
+    let h_base = mc_indep_silent(n)
+    if h_base != 440 { fails = fails + 1 }
+    rng_seed(314159265, 271828182)
+    let h_comp = mc_indep10_silent(l30_lo, l30_hi, r_lo, r_hi, tau, n)
+    if h_comp != 70 { fails = fails + 1 }
+    // headline direction at small n: the coupling collapses the count
+    if h_comp >= h_base { fails = fails + 1 }
+    // composed distribution-free corners: still the full [0, 100]
+    rng_seed(314159265, 271828182)
+    let h_best1 = mc_hits_pinned_c(fs_of(l30_lo, tau), r_hi,
+                                   0.046, 0.8, 43.9, 0.80,
+                                   44.0, 0.005, 45.0, 0.50, n)
+    if h_best1 != 2000 { fails = fails + 1 }
+    rng_seed(314159265, 271828182)
+    let h_worst1 = mc_hits_pinned_c(fs_of(l30_hi, tau), r_lo,
+                                    0.052, 1.2, 48.9, 0.55,
+                                    89.0, 0.02, 30.0, 1.50, n)
+    if h_worst1 != 0 { fails = fails + 1 }
+
+    if fails == 0 {
+        println("VALLEY_CHAIN_EPISTEMIC_SELFTEST_OK")
+        return 0
+    }
+    print("valley_chain_epistemic failures: ")
+    println(fails)
+    1
+}

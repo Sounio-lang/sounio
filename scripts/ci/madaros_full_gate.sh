@@ -57,7 +57,13 @@ expect_elf_runs() {
   local expected="$1"
   local elf="$2"
   [[ -s "$elf" ]] || fail "missing ELF: $elf"
-  file "$elf" | grep -Fq "ELF 64-bit" || fail "not an ELF64 executable: $elf"
+  # Check the ELF64 magic directly instead of shelling out to file(1).
+  # SLURM compute nodes do not ship file(1), and this gate is now run there via
+  # scripts/dev/souc-build-remote.sh. Bytes 0-3 are \x7fELF and byte 4 is 2 for
+  # ELFCLASS64.
+  local magic
+  magic="$(od -An -tx1 -N5 "$elf" 2>/dev/null | tr -d ' \n')"
+  [[ "$magic" == "7f454c4602" ]] || fail "not an ELF64 executable: $elf (magic=$magic)"
   chmod +x "$elf"
   expect_exit "$expected" "$elf"
 }

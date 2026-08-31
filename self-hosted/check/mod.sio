@@ -66,7 +66,7 @@ fn check_mod_alloc_checker() -> *mut Checker with Alloc {
     heap_alloc(134217728) as *mut Checker
 }
 
-fn check_policy_requirements_to_ir(
+pub fn check_policy_requirements_to_ir(
     opt: Option<Box<PolicyRequirementInfoList>>,
     out: [IrPolicyRequirementInfo; 8],
     idx: i64
@@ -301,8 +301,10 @@ pub fn checker_apply_ir_metadata(checker: &Checker, module: &! IrModule) with Mu
     (*module).ontologies = checker_to_ir_ontologies(checker)
     var i: i64 = 0
     while i < (*module).fn_count {
-        let fn_name = (*module).functions[i].name
-        (*module).functions[i].hyper_algebra_kind = checker_infer_fn_hyper_algebra(checker, fn_name)
+        var fn_slot = ir_fn_get(&(*module), i)
+        let fn_name = fn_slot.name
+        fn_slot.hyper_algebra_kind = checker_infer_fn_hyper_algebra(checker, fn_name)
+        ir_fn_set(&! (*module), i, fn_slot)
         i = i + 1
     }
 }
@@ -371,7 +373,7 @@ fn cd_hyper_law_profile_fingerprint(algebra_tag: i64, op_kind: i64, reassoc_stra
     0
 }
 
-fn check_hyper_expr_law_profile_probe(
+pub(crate) fn check_hyper_expr_law_profile_probe(
     algebra_tag: i64,
     registry_reassoc_strategy: i64,
     registry_forbidden_law_mask: i64,
@@ -402,7 +404,7 @@ fn check_hyper_expr_law_profile_probe(
     }
 }
 
-fn check_hyper_expr_law_profile_audit_tag(info: IrHyperExprInfo) -> i64 with Mut, Panic, Div {
+pub(crate) fn check_hyper_expr_law_profile_audit_tag(info: IrHyperExprInfo) -> i64 with Mut, Panic, Div {
     let expected_fingerprint = cd_hyper_law_profile_fingerprint(
         info.algebra_tag,
         info.op_kind,
@@ -422,7 +424,7 @@ fn check_hyper_expr_law_profile_audit_tag(info: IrHyperExprInfo) -> i64 with Mut
 }
 
 
-fn check_program(prog: Program) -> CheckResult with Mut, Panic, Div, Alloc, IO {
+pub(crate) fn check_program(prog: Program) -> CheckResult with Mut, Panic, Div, Alloc, IO {
     let artifacts = check_program_with_artifacts(prog)
     CheckResult {
         error_count: artifacts.error_count,
@@ -558,7 +560,14 @@ pub fn check_items_verdict_boot4_with_module_path(items: Option<Box<ItemList>>, 
     (*checker_ptr).crate_root = module_path
     checker_collect_items_mut(checker_ptr, items)
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
-    if had_error == 1 {
+    // Collect lowers parameter types. A diagnostic recorded there (E201 on
+    // ExactlyPrivate without ZD, or the always-refuse control) used to be
+    // discarded: this verdict only inspected the check-pass had_error bit,
+    // so `check: OK` and rc=0 while the checker had already failed. Honour
+    // the recorded count before freeing the checker.
+    let recorded = (*checker_ptr).error_count
+    let noted = (*checker_ptr).had_error
+    if had_error == 1 || recorded > 0 || noted {
         heap_free(checker_ptr as i64)
         return 1
     }

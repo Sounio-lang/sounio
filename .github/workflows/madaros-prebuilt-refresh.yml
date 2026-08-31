@@ -69,10 +69,16 @@ jobs:
           # source and the checked-in prebuilt drift. The source-to-ELF gate
           # covers the raw --native-v2-compile bridge, so a prebuilt that
           # regresses the direct source -> native-v2 -> ELF path is not shipped.
+          # The self-parse gate is here because none of the five gates above ever
+          # asked the compiler to read its own source tree. On 2026-08-03 a
+          # Madaros that could not parse self-hosted/resolve/scope.sio would have
+          # passed every one of them and been committed as the shipped prebuilt.
+          # It reuses the ELF just built; it adds no build.
           if bash scripts/ci/madaros_full_gate.sh \
              && bash scripts/ci/madaros_enum_gate.sh \
              && bash scripts/ci/madaros_loop_gate.sh \
              && bash scripts/ci/madaros_multimodule_witness.sh \
+             && SOUNIO_MADAROS_SELF_PARSE_BIN=artifacts/self-hosted/madaros bash scripts/ci/madaros_self_parse_gate.sh \
              && bash scripts/ci/madaros_source_to_elf_gate.sh; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
           else
@@ -85,6 +91,13 @@ jobs:
         run: |
           cp artifacts/self-hosted/madaros bin/madaros-linux-x86_64
           chmod +x bin/madaros-linux-x86_64
+          # Emit the provenance receipt for the binary actually being shipped.
+          # The receipt was previously hand-written, had no producer and no
+          # consumer, and drifted until it described a file that no longer
+          # existed. madaros_receipt_gate.sh verifies what this writes.
+          bash scripts/ci/madaros_write_receipt.sh bin/madaros-linux-x86_64 \
+            madaros_full_gate.sh \
+            "full,enum,loop,multimodule_witness,self_parse,source_to_elf"
 
       - name: Commit and push if the prebuilt changed
         if: steps.gate.outputs.passed == 'true' && (github.event.inputs.ref || 'main') == 'main'
@@ -99,7 +112,9 @@ jobs:
 
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add bin/madaros-linux-x86_64
+          # The receipt goes with the binary it describes, in the same commit.
+          # Committing one without the other is how they drifted apart before.
+          git add bin/madaros-linux-x86_64 artifacts/self-hosted/madaros.gate-receipt
           git commit -m "build(madaros): refresh prebuilt bin/madaros-linux-x86_64 [skip ci]
 
           Auto-rebuilt from ${SRC_REF} (make build-madaros) and passed the

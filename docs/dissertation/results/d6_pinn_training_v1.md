@@ -24,6 +24,16 @@ docs:meta:
 `D6_PINN_TRAINING_LOOP_PASS` is emitted by
 `tests/stdlib/nn/test_pinn_training_d6.sio`.
 
+> **Engine dependency (verified 2026-08-17).** This is the one D-series (D1-D6) dissertation
+> results doc that omits the pinned-binary/sha256 disclosure its siblings (`d1_tensor_ops_v1.md`
+> through `d5_caputo_tensor_v1.md`) all carry, and it turns out that matters here: under default
+> Madaros (`bin/souc`), this test file **fails to compile** (`error: use of undeclared variable`,
+> `name read_f64`, `Compilation failed!`). Under `SOUNIO_SOUC_ENGINE=lean_single` it compiles
+> (tolerating several non-fatal warnings and one further diagnostic under lean_single's known
+> typecheck-tolerance behavior — `docs/compiler/KNOWN_LIMITATIONS.md` #1494) and runs to
+> completion: `D6_PINN_TRAINING_LOOP_PASS`, `rc=0`. This gate marker has only been produced
+> under lean_single.
+
 The v1 proof is an honest PoC rather than a full MLP PINN trainer. It
 exercises:
 

@@ -53,16 +53,106 @@ pub struct ModuleExport {
     kind: SymbolKind,
 }
 
+// ============================================================
+// Export pool (#1689)
+// ============================================================
+// Exports used to live INLINE in every ModuleEntry as `[ModuleExport; 1024]`.
+// ModuleExport embeds a Name (`[i8;128]` + len), so an entry was ~144 KB and a
+// 64-entry ModuleRegistry ~9 MB -- passed BY VALUE, since module_registry_put
+// takes the registry and returns it. That is why the module cap was 64, and 64
+// is below what real programs need: self-hosted/compiler/main.sio has 76 `use`
+// declarations, so imports #65..#76 were dropped and every symbol they export
+// reported E137 at the CALL SITE, blaming code that was correct.
+//
+// The 1024 was a second silent cap in the same struct: stdlib/theorem/portfolio.sio
+// declares 2160 pub items, so exports past 1024 were dropped too.
+//
+// Both caps are now affordable because the payload moved out of the entry into a
+// flat pool, leaving ModuleEntry at ~168 bytes. Same shape resolve/modules.sio
+// already uses for MgModuleGraph (a shared exports array plus per-entry base and
+// count), and the same shape ir.sio uses for IR_A_*.
+//
+// PARALLEL FLAT ARRAYS, NOT AN ARRAY OF STRUCTS. The bootstrap seed drops struct
+// stores into global ARRAYS silently -- a global `[ModuleExport; N]` would accept
+// the write, return zeros, and look exactly like a module that exports nothing.
+// i8/i64 arrays round-trip correctly.
+//
+// All-zero is the correct initial state: count 0, and this compiler BSS-zeroes
+// `var` initialisers.
+pub let MODREG_POOL_MAX: i64 = 65536
+pub let MODREG_MAX_MODULES: i64 = 512
+
+var MODREG_EXP_NAME_BUF: [i8; 8388608] = [0; 8388608]
+var MODREG_EXP_NAME_LEN: [i64; 65536] = [0; 65536]
+var MODREG_EXP_KIND: [i64; 65536] = [0; 65536]
+var MODREG_POOL_COUNT: i64 = 0
+var MODREG_POOL_DROPPED: i64 = 0
+
+// The pool is MONOTONIC and deliberately never reset. Resetting on
+// module_registry_new() would look tidier and be wrong: Resolver::new() also
+// calls it, so a reset there would invalidate the base/count of a registry that
+// is already populated and live.
+pub fn modreg_pool_count() -> i64 { MODREG_POOL_COUNT }
+pub fn modreg_pool_dropped() -> i64 { MODREG_POOL_DROPPED }
+
+fn modreg_pool_push(name: Name, kind: SymbolKind) with Mut, Panic, Div {
+    if name_is_empty(name) { return }
+    if MODREG_POOL_COUNT >= MODREG_POOL_MAX {
+        MODREG_POOL_DROPPED = MODREG_POOL_DROPPED + 1
+        return
+    }
+    let at = MODREG_POOL_COUNT
+    var i: i64 = 0
+    while i < name.len && i < 128 {
+        MODREG_EXP_NAME_BUF[(at * 128 + i) as usize] = name.buf[i as usize]
+        i = i + 1
+    }
+    MODREG_EXP_NAME_LEN[at as usize] = name.len
+    MODREG_EXP_KIND[at as usize] = kind as i64
+    MODREG_POOL_COUNT = at + 1
+}
+
+pub fn modreg_export_name_at(at: i64) -> Name with Mut, Panic, Div {
+    var out = Name { buf: [0; 128], len: 0 }
+    if at < 0 || at >= MODREG_POOL_COUNT { return out }
+    let n = MODREG_EXP_NAME_LEN[at as usize]
+    var i: i64 = 0
+    while i < n && i < 128 {
+        out.buf[i as usize] = MODREG_EXP_NAME_BUF[(at * 128 + i) as usize]
+        i = i + 1
+    }
+    out.len = n
+    out
+}
+
+pub fn modreg_export_kind_at(at: i64) -> SymbolKind with Mut, Panic, Div {
+    if at < 0 || at >= MODREG_POOL_COUNT { return SymbolKind::SymVariable }
+    MODREG_EXP_KIND[at as usize] as SymbolKind
+}
+
+// Byte compare against the pool without materialising a Name.
+fn modreg_export_name_eq_at(at: i64, name: Name) -> bool with Mut, Panic, Div {
+    if at < 0 || at >= MODREG_POOL_COUNT { return false }
+    if MODREG_EXP_NAME_LEN[at as usize] != name.len { return false }
+    var i: i64 = 0
+    while i < name.len && i < 128 {
+        if MODREG_EXP_NAME_BUF[(at * 128 + i) as usize] != name.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
 pub struct ModuleEntry {
     path: AstPath,
-    exports: [ModuleExport; 1024],
+    export_base: i64,
     export_count: i64,
 }
 
 pub struct ModuleRegistry {
-    modules: [ModuleEntry; 64],
+    modules: [ModuleEntry; 512],
     count: i64,
     overflow: bool,
+    dropped: i64,
 }
 
 fn empty_module_export() -> ModuleExport {
@@ -72,17 +162,46 @@ fn empty_module_export() -> ModuleExport {
 fn empty_module_entry() -> ModuleEntry {
     ModuleEntry {
         path: empty_path(),
-        exports: [empty_module_export(); 1024],
+        export_base: 0,
         export_count: 0,
     }
 }
 
 pub fn module_registry_new() -> ModuleRegistry {
     ModuleRegistry {
-        modules: [empty_module_entry(); 64],
+        modules: [empty_module_entry(); 512],
         count: 0,
         overflow: false,
+        dropped: 0,
     }
+}
+
+// #1689: the overflow flag used to be WRITTEN HERE AND READ NOWHERE, which is
+// what made the failure silent. Callers must ask. Reporting is split out because
+// module_registry_put has no IO effect and giving it one would cascade.
+pub fn module_registry_report_overflow(reg: ModuleRegistry) -> bool with IO, Mut, Panic, Div {
+    // print_int, not io_trace_i64_string: this module imports only parser::ast,
+    // and pulling in the io helper for a diagnostic would add a dependency edge
+    // from the resolver to it.
+    var bad = false
+    if reg.overflow {
+        print("error: module registry overflow: ")
+        print_int(reg.dropped)
+        print(" module(s) dropped past MODREG_MAX_MODULES = ")
+        print_int(MODREG_MAX_MODULES)
+        print("\n")
+        print("  note: symbols exported by a dropped module resolve as undeclared at the CALL SITE, so the reported errors name innocent code\n")
+        bad = true
+    }
+    if modreg_pool_dropped() > 0 {
+        print("error: module export pool overflow: ")
+        print_int(modreg_pool_dropped())
+        print(" export(s) dropped past MODREG_POOL_MAX = ")
+        print_int(MODREG_POOL_MAX)
+        print("\n")
+        bad = true
+    }
+    bad
 }
 
 // StringList equality (byte-by-byte + structural)
@@ -122,7 +241,7 @@ pub fn module_registry_find(reg: ModuleRegistry, path: AstPath) -> i64 with Mut,
 pub fn module_registry_put(
     reg: ModuleRegistry,
     path: AstPath,
-    exports: [ModuleExport; 1024],
+    export_base: i64,
     export_count: i64
 ) -> ModuleRegistry with Mut, Panic, Div, Alloc {
     var r = reg
@@ -130,29 +249,32 @@ pub fn module_registry_put(
     if idx >= 0 {
         r.modules[idx as usize] = ModuleEntry {
             path: path,
-            exports: exports,
+            export_base: export_base,
             export_count: export_count,
         }
         return r
     }
 
-    if r.count < 64 {
+    if r.count < MODREG_MAX_MODULES {
         r.modules[r.count as usize] = ModuleEntry {
             path: path,
-            exports: exports,
+            export_base: export_base,
             export_count: export_count,
         }
         r.count = r.count + 1
     } else {
+        // Counted, not just flagged: "how many" is the difference between a cap
+        // that is one short and a cap that is an order out.
         r.overflow = true
+        r.dropped = r.dropped + 1
     }
     r
 }
 
-fn module_entry_contains(entry: ModuleEntry, name: Name) -> bool with Mut, Panic, Div {
+pub fn module_entry_contains(entry: ModuleEntry, name: Name) -> bool with Mut, Panic, Div {
     var i: i64 = 0
-    while i < entry.export_count && i < 1024 {
-        if name_eq(entry.exports[i as usize].name, name) {
+    while i < entry.export_count {
+        if modreg_export_name_eq_at(entry.export_base + i, name) {
             return true
         }
         i = i + 1
@@ -160,152 +282,128 @@ fn module_entry_contains(entry: ModuleEntry, name: Name) -> bool with Mut, Panic
     false
 }
 
-fn exports_empty() -> [ModuleExport; 1024] {
-    [empty_module_export(); 1024]
+// Absolute pool index of an entry's k-th export, for callers that iterate.
+pub fn module_entry_export_at(entry: ModuleEntry, k: i64) -> i64 {
+    entry.export_base + k
 }
 
-fn exports_push(
-    exports: [ModuleExport; 1024],
-    count: i64,
-    name: Name,
-    kind: SymbolKind
-) -> ([ModuleExport; 1024], i64) with Mut, Panic, Div {
-    var ex = exports
-    var c = count
-    if c < 1024 && !name_is_empty(name) {
-        ex[c as usize] = ModuleExport { name: name, kind: kind }
-        c = c + 1
-    }
-    (ex, c)
+pub fn collect_module_exports(items: Option<Box<ItemList>>) -> (i64, i64) with Mut, Panic, Div, Alloc {
+    let base = modreg_pool_count()
+    collect_module_exports_loop(items)
+    (base, modreg_pool_count() - base)
 }
 
-pub fn collect_module_exports(items: Option<Box<ItemList>>) -> ([ModuleExport; 1024], i64) with Mut, Panic, Div, Alloc {
-    collect_module_exports_loop(items, exports_empty(), 0)
-}
-
-fn collect_module_exports_loop(
-    items: Option<Box<ItemList>>,
-    exports: [ModuleExport; 1024],
-    count: i64
-) -> ([ModuleExport; 1024], i64) with Mut, Panic, Div, Alloc {
+fn collect_module_exports_loop(items: Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
     match items {
-        None => (exports, count)
+        None => {}
         Some(list) => {
-            let item = (*list).head
-            let pair = collect_module_exports_item(item, exports, count)
-            collect_module_exports_loop((*list).tail, pair.0, pair.1)
+            collect_module_exports_item((*list).head)
+            collect_module_exports_loop((*list).tail)
         }
     }
 }
 
-fn collect_module_exports_item(
-    item: Item,
-    exports: [ModuleExport; 1024],
-    count: i64
-) -> ([ModuleExport; 1024], i64) with Mut, Panic, Div, Alloc {
+fn collect_module_exports_item(item: Item) with Mut, Panic, Div, Alloc {
     // For now: export pub top-level items, and for pub enums also export variant names
     match item.kind {
         ItemKind::ItemFn => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymFunction) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymFunction) }
         }
         ItemKind::ItemStruct => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymStruct) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymStruct) }
         }
         ItemKind::ItemEnum => {
             if visibility_to_bool(item.visibility) {
-                let pair = exports_push(exports, count, item.name, SymbolKind::SymEnum)
-                collect_module_exports_variants(item.enum_def, pair.0, pair.1)
-            } else {
-                (exports, count)
+                modreg_pool_push(item.name, SymbolKind::SymEnum)
+                collect_module_exports_variants(item.enum_def)
             }
         }
         ItemKind::ItemTypeAlias => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymTypeAlias) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymTypeAlias) }
         }
         ItemKind::ItemModels => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymTypeAlias) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymTypeAlias) }
         }
         ItemKind::ItemPolicy => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymPolicy) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymPolicy) }
         }
         ItemKind::ItemAcquisitionPolicy => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymAcquisitionPolicy) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymAcquisitionPolicy) }
         }
         ItemKind::ItemRecoursePolicy => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymRecoursePolicy) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymRecoursePolicy) }
         }
         ItemKind::ItemTransitionPolicy => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymTransitionPolicy) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymTransitionPolicy) }
         }
         ItemKind::ItemTransitionProtocol => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymTransitionProtocol) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymTransitionProtocol) }
         }
         ItemKind::ItemMonitoringPolicy => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymMonitoringPolicy) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymMonitoringPolicy) }
         }
         ItemKind::ItemAlternativePolicy => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymAlternativePolicy) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymAlternativePolicy) }
         }
         ItemKind::ItemAlternativeFrontier => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymAlternativeFrontier) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymAlternativeFrontier) }
         }
         ItemKind::ItemDecisionPolicy => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymDecisionPolicy) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymDecisionPolicy) }
         }
         ItemKind::ItemDeferralPolicy => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymDeferralPolicy) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymDeferralPolicy) }
         }
         ItemKind::ItemValidation => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymPolicy) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymPolicy) }
         }
         ItemKind::ItemAudit => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymAudit) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymAudit) }
         }
         ItemKind::ItemEffect => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymEffect) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymEffect) }
         }
         ItemKind::ItemSession => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymTypeAlias) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymTypeAlias) }
         }
         ItemKind::ItemTrait => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymTypeAlias) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymTypeAlias) }
         }
         ItemKind::ItemAlgebra => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymTypeAlias) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymTypeAlias) }
         }
         ItemKind::ItemStudy => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymTypeAlias) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymTypeAlias) }
         }
         ItemKind::ItemOntology => {
-            if visibility_to_bool(item.visibility) { exports_push(exports, count, item.name, SymbolKind::SymTypeAlias) } else { (exports, count) }
+            if visibility_to_bool(item.visibility) { modreg_pool_push(item.name, SymbolKind::SymTypeAlias) }
         }
-        ItemKind::ItemImpl => (exports, count)
-        ItemKind::ItemUse => (exports, count)
-        ItemKind::ItemUnit => (exports, count)
+        ItemKind::ItemClaim => {}  // Parse-only scientific claim metadata; never exported
+        ItemKind::ItemImpl => {}
+        ItemKind::ItemUse => {}
+        ItemKind::ItemUnit => {}
+        // Unreachable in practice, and required anyway. The parse driver drops
+        // ItemKind::ItemClaim from the item stream after parse_claim_item
+        // records it (parser/mod.sio:41), so resolve never observes one — but
+        // the match still has to name it, and without this arm the build prints
+        // `error: match must be exhaustive` and exits 0 regardless.
+        ItemKind::ItemClaim => {}
     }
 }
 
-fn collect_module_exports_variants(
-    opt: Option<Box<EnumDef>>,
-    exports: [ModuleExport; 1024],
-    count: i64
-) -> ([ModuleExport; 1024], i64) with Mut, Panic, Div, Alloc {
+fn collect_module_exports_variants(opt: Option<Box<EnumDef>>) with Mut, Panic, Div, Alloc {
     match opt {
-        None => (exports, count)
-        Some(ed) => collect_module_exports_variant_list((*ed).variants, exports, count)
+        None => {}
+        Some(ed) => collect_module_exports_variant_list((*ed).variants)
     }
 }
 
-fn collect_module_exports_variant_list(
-    opt: Option<Box<VariantDefList>>,
-    exports: [ModuleExport; 1024],
-    count: i64
-) -> ([ModuleExport; 1024], i64) with Mut, Panic, Div, Alloc {
+fn collect_module_exports_variant_list(opt: Option<Box<VariantDefList>>) with Mut, Panic, Div, Alloc {
     match opt {
-        None => (exports, count)
+        None => {}
         Some(list) => {
-            let pair = exports_push(exports, count, (*list).head.name, SymbolKind::SymEnumVariant)
-            collect_module_exports_variant_list((*list).tail, pair.0, pair.1)
+            modreg_pool_push((*list).head.name, SymbolKind::SymEnumVariant)
+            collect_module_exports_variant_list((*list).tail)
         }
     }
 }

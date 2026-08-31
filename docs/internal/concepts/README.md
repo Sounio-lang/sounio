@@ -32,6 +32,15 @@ without a package manager, and consumed by
 - `garden`: captured intuition, not yet a formal model.
 - `hypothesis`: explicit formal or scientific question.
 - `executable`: implemented with a focused witness.
+- `reserved-owed`: the name is taken, every surface **refuses** with a named
+  diagnostic, and **someone owes the landing**. Requires `Reserved-Owner`,
+  `Reserved-Since` (ISO date), and `Reserved-Blocked-On` (technical condition,
+  not a deadline). Age is visible, never expires. See `MATURITY_LADDER.md`.
+- `reserved-taken`: the name is taken so nobody else defines it. **Owes nothing**;
+  staying forever is correct. Requires `Reserved-Reason` (non-empty). Same refuse
+  evidence rule as `reserved-owed`.
+- Bare `reserved` is **invalid** (pick owed or taken). Zero contracts used it
+  when the split landed.
 - `integrated`: represented across every currently required layer.
 - `claim-ready`: evidence permits the scoped external claim.
 - `superseded`: retained for history; another concept is authoritative.

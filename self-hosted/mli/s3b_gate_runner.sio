@@ -1,0 +1,250 @@
+// MLI S3b research gate — Cayley-Dickson lowering and the named walls.
+//
+// Run: ./bin/souc run self-hosted/mli/s3b_gate_runner.sio
+//
+// What this gate proves:
+//   C1  complex cd_mul (1+2i)(3+4i) = −5+10i, real component through
+//       expand → verify → interp.
+//   C2  imag component == 10.0 (the three extra muls were not dropped).
+//   C3  expanded complex mul LEGALIZES with 4 mulsd + 1 addsd + 1 subsd.
+//       The first mulsd is a0*b0 — the named temptation. We kept the rest.
+//   C4  unexpanded CD at legalize is refused (erasure guard, same family
+//       as Knowledge).
+//   C5  octonion cd_mul REFUSES with OCTONION_WALL (16 args / ~120 ops).
+//   C6  complex associator is a VERIFY error (dim<8): the kind model
+//       refuses an identically-zero associator as an instruction.
+//   C7  octonion associator REFUSES with ASSOCIATOR_WALL — emitting zero
+//       here would be a semantic miscompile of a positive graded invariant.
+//   C8  quaternion i*j = k (component 3 == 1.0) through expand → interp.
+//       legalize then refuses 8 args (measured GPR convention is 6) — the
+//       next named wall, not a silent real-part multiply.
+
+use mli::ir::*
+use mli::builder::*
+use mli::verify::*
+use mli::interp::*
+use mli::expand_cd::*
+use mli::legalize_x86::*
+
+fn report_pass(name: string) -> i64 with IO {
+    print("PASS: ")
+    print(name)
+    print("\n")
+    0
+}
+
+fn report_fail(name: string, detail: string, got: i64, want: i64) -> i64 with IO {
+    print("FAIL: ")
+    print(name)
+    print(" [")
+    print(detail)
+    print("] got=")
+    print_int(got)
+    print(" want=")
+    print_int(want)
+    print("\n")
+    1
+}
+
+fn count_f64_op(cb: &MliCodeBuf, opbyte: i64) -> i64 with Panic {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i + 3 < cb.len {
+        if cb.bytes[i] == 242 && cb.bytes[i + 1] == 15 && cb.bytes[i + 2] == opbyte && cb.bytes[i + 3] == 193 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+// cd_mul of two dim-d values, extract `lane`.
+fn build_cd_mul(dim: i64, lane: i64) -> MliFunction with Mut, Panic {
+    let ck = mli_kind_cd(dim, 64)
+    var f = mli_func_new("cdmul", mli_kind_float(64))
+    let a = mli_add_arg(&!f, ck)
+    let b = mli_add_arg(&!f, ck)
+    let b0 = mli_new_block(&!f)
+    let p = mli_new_vreg(&!f, ck)
+    let d = mli_new_vreg(&!f, mli_kind_float(64))
+    if a < 0 || b < 0 || b0 < 0 || p < 0 || d < 0 { return f }
+    var ok = mli_emit(&!f, b0, mli_inst_cd_mul(mli_opd_vreg(p, ck), mli_opd_vreg(a, ck), mli_opd_vreg(b, ck), MLI_ASSOC_STRICT, MLI_ZD_FLAG))
+    ok = ok && mli_emit(&!f, b0, mli_inst_cd_extract(mli_opd_vreg(d, mli_kind_float(64)), mli_opd_vreg(p, ck), lane))
+    ok = ok && mli_set_term(&!f, b0, mli_term_ret(mli_opd_vreg(d, mli_kind_float(64))))
+    f
+}
+
+fn build_cd_associator(dim: i64) -> MliFunction with Mut, Panic {
+    let ck = mli_kind_cd(dim, 64)
+    var f = mli_func_new("cdassoc", mli_kind_float(64))
+    let a = mli_add_arg(&!f, ck)
+    let b = mli_add_arg(&!f, ck)
+    let c = mli_add_arg(&!f, ck)
+    let b0 = mli_new_block(&!f)
+    let p = mli_new_vreg(&!f, ck)
+    let d = mli_new_vreg(&!f, mli_kind_float(64))
+    if a < 0 || b < 0 || c < 0 || b0 < 0 || p < 0 || d < 0 { return f }
+    var ok = mli_emit(&!f, b0, mli_inst_cd_associator(mli_opd_vreg(p, ck), mli_opd_vreg(a, ck), mli_opd_vreg(b, ck), mli_opd_vreg(c, ck), MLI_ASSOC_STRICT, MLI_ZD_FLAG))
+    ok = ok && mli_emit(&!f, b0, mli_inst_cd_extract(mli_opd_vreg(d, mli_kind_float(64)), mli_opd_vreg(p, ck), 0))
+    ok = ok && mli_set_term(&!f, b0, mli_term_ret(mli_opd_vreg(d, mli_kind_float(64))))
+    f
+}
+
+fn run_cd_mul(dim: i64, lane: i64, args_f: &MliInterpArgs) -> MliInterpResult with Mut, Panic, Div {
+    var src = build_cd_mul(dim, lane)
+    let vs = mli_verify_function(&src)
+    if vs.code != MLI_VERR_OK {
+        return MliInterpResult { ok: false, code: 1000 + vs.code, block: 0 - 1, index: 0 - 1, has_value: false, ret_is_float: false, ret_i: 0, ret_f: 0.0 }
+    }
+    var ex = mli_func_empty()
+    let xs = mli_expand_cd(&src, &!ex)
+    if !xs.ok {
+        return MliInterpResult { ok: false, code: 2000 + xs.code, block: 0 - 1, index: 0 - 1, has_value: false, ret_is_float: false, ret_i: 0, ret_f: 0.0 }
+    }
+    let ve = mli_verify_function(&ex)
+    if ve.code != MLI_VERR_OK {
+        return MliInterpResult { ok: false, code: 3000 + ve.code, block: 0 - 1, index: 0 - 1, has_value: false, ret_is_float: false, ret_i: 0, ret_f: 0.0 }
+    }
+    mli_interp_run(&ex, args_f)
+}
+
+fn case_complex_real() -> i64 with IO, Mut, Panic, Div {
+    var args = mli_interp_args_empty()
+    args.af[0] = 1.0
+    args.af[1] = 2.0
+    args.af[2] = 3.0
+    args.af[3] = 4.0
+    let r = run_cd_mul(2, 0, &args)
+    if !r.ok { return report_fail("C1 complex real", "stage", r.code, 0) }
+    if !r.ret_is_float || r.ret_f != (0.0 - 5.0) { return report_fail("C1 complex real", "value", 0, 1) }
+    report_pass("C1 complex (1+2i)(3+4i) real == -5")
+}
+
+fn case_complex_imag() -> i64 with IO, Mut, Panic, Div {
+    var args = mli_interp_args_empty()
+    args.af[0] = 1.0
+    args.af[1] = 2.0
+    args.af[2] = 3.0
+    args.af[3] = 4.0
+    let r = run_cd_mul(2, 1, &args)
+    if !r.ok { return report_fail("C2 complex imag", "stage", r.code, 0) }
+    if !r.ret_is_float || r.ret_f != 10.0 { return report_fail("C2 complex imag", "value", 0, 1) }
+    report_pass("C2 complex (1+2i)(3+4i) imag == 10 — cross terms kept")
+}
+
+fn case_complex_bytes() -> i64 with IO, Mut, Panic, Div {
+    var src = build_cd_mul(2, 0)
+    var ex = mli_func_empty()
+    let xs = mli_expand_cd(&src, &!ex)
+    if !xs.ok { return report_fail("C3 complex bytes", "expand", xs.code, 0) }
+    var cb = mli_codebuf_empty()
+    if !mli_legalize_x86(&ex, &!cb) { return report_fail("C3 complex bytes", "legalize", cb.code, 0) }
+    let nmul = count_f64_op(&cb, 89)
+    let nadd = count_f64_op(&cb, 88)
+    let nsub = count_f64_op(&cb, 92)
+    if nmul < 4 { return report_fail("C3 complex bytes", "mulsd", nmul, 4) }
+    if nadd < 1 { return report_fail("C3 complex bytes", "addsd", nadd, 1) }
+    if nsub < 1 { return report_fail("C3 complex bytes", "subsd", nsub, 1) }
+    report_pass("C3 complex cd_mul LEGALIZES with 4 mulsd+1 addsd+1 subsd — first mulsd is a0*b0, the rest were kept")
+}
+
+fn case_unexpanded_cd_refused() -> i64 with IO, Mut, Panic, Div {
+    var src = build_cd_mul(2, 0)
+    let vs = mli_verify_function(&src)
+    if vs.code != MLI_VERR_OK { return report_fail("C4 cd erasure guard", "src-verify", vs.code, 0) }
+    var cb = mli_codebuf_empty()
+    let ok = mli_legalize_x86(&src, &!cb)
+    if ok { return report_fail("C4 cd erasure guard", "legalized-anyway", MLI_L_OK, MLI_L_KNOWLEDGE_UNEXPANDED) }
+    if cb.code != MLI_L_KNOWLEDGE_UNEXPANDED {
+        return report_fail("C4 cd erasure guard", "code", cb.code, MLI_L_KNOWLEDGE_UNEXPANDED)
+    }
+    report_pass("C4 unexpanded CD at codegen REFUSED with dedicated code")
+}
+
+fn case_octonion_wall() -> i64 with IO, Mut, Panic, Div {
+    var src = build_cd_mul(8, 0)
+    let vs = mli_verify_function(&src)
+    if vs.code != MLI_VERR_OK { return report_fail("C5 octonion wall", "src-verify", vs.code, 0) }
+    var ex = mli_func_empty()
+    let xs = mli_expand_cd(&src, &!ex)
+    if xs.ok { return report_fail("C5 octonion wall", "expanded-anyway", MLI_XC_OK, MLI_XC_OCTONION_WALL) }
+    if xs.code != MLI_XC_OCTONION_WALL {
+        return report_fail("C5 octonion wall", "code", xs.code, MLI_XC_OCTONION_WALL)
+    }
+    report_pass("C5 octonion cd_mul REFUSES with OCTONION_WALL (16 args / ~120 ops)")
+}
+
+fn case_complex_associator_illegal() -> i64 with IO, Mut, Panic, Div {
+    // S1 kind-model: associator is only an instruction where it can be
+    // nonzero (dim>=8). dim<8 is a verify error, not a zero-emitting op —
+    // that is the associator-aware fact for associative algebras.
+    var src = build_cd_associator(2)
+    let vs = mli_verify_function(&src)
+    if vs.code != MLI_VERR_OPERAND_RULE {
+        return report_fail("C6 assoc dim<8", "code", vs.code, MLI_VERR_OPERAND_RULE)
+    }
+    report_pass("C6 complex associator is a VERIFY error — identically-zero ops are not instructions")
+}
+
+fn case_octonion_associator_wall() -> i64 with IO, Mut, Panic, Div {
+    var src = build_cd_associator(8)
+    let vs = mli_verify_function(&src)
+    if vs.code != MLI_VERR_OK { return report_fail("C7 assoc wall", "src-verify", vs.code, 0) }
+    var ex = mli_func_empty()
+    let xs = mli_expand_cd(&src, &!ex)
+    if xs.ok { return report_fail("C7 assoc wall", "expanded-anyway", MLI_XC_OK, MLI_XC_ASSOCIATOR_WALL) }
+    if xs.code != MLI_XC_ASSOCIATOR_WALL {
+        return report_fail("C7 assoc wall", "code", xs.code, MLI_XC_ASSOCIATOR_WALL)
+    }
+    report_pass("C7 octonion associator REFUSES with ASSOCIATOR_WALL — zero would be a miscompile")
+}
+
+fn case_quat_ij_k() -> i64 with IO, Mut, Panic, Div {
+    // i*j = k. args: (0,1,0,0) * (0,0,1,0) → (0,0,0,1)
+    var args = mli_interp_args_empty()
+    args.af[0] = 0.0
+    args.af[1] = 1.0
+    args.af[2] = 0.0
+    args.af[3] = 0.0
+    args.af[4] = 0.0
+    args.af[5] = 0.0
+    args.af[6] = 1.0
+    args.af[7] = 0.0
+    let r = run_cd_mul(4, 3, &args)
+    if !r.ok { return report_fail("C8 quat i*j=k", "stage", r.code, 0) }
+    if !r.ret_is_float || r.ret_f != 1.0 { return report_fail("C8 quat i*j=k", "value", 0, 1) }
+
+    var src = build_cd_mul(4, 3)
+    var ex = mli_func_empty()
+    let xs = mli_expand_cd(&src, &!ex)
+    if !xs.ok { return report_fail("C8 quat i*j=k", "expand", xs.code, 0) }
+    var cb = mli_codebuf_empty()
+    let ok = mli_legalize_x86(&ex, &!cb)
+    if ok { return report_fail("C8 quat i*j=k", "legalized-8args", MLI_L_OK, MLI_L_UNSUPPORTED_SHAPE) }
+    if cb.code != MLI_L_UNSUPPORTED_SHAPE {
+        return report_fail("C8 quat i*j=k", "legalize-code", cb.code, MLI_L_UNSUPPORTED_SHAPE)
+    }
+    report_pass("C8 quaternion i*j=k interp-true; legalize refuses 8-arg ABI (named GPR wall)")
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    println("=== MLI S3b gate: CD lowering + named walls ===")
+    var failures: i64 = 0
+    failures = failures + case_complex_real()
+    failures = failures + case_complex_imag()
+    failures = failures + case_complex_bytes()
+    failures = failures + case_unexpanded_cd_refused()
+    failures = failures + case_octonion_wall()
+    failures = failures + case_complex_associator_illegal()
+    failures = failures + case_octonion_associator_wall()
+    failures = failures + case_quat_ij_k()
+    if failures == 0 {
+        println("=== MLI S3b: ALL CASES PASS ===")
+        return 0
+    }
+    print("=== MLI S3b: FAILURES = ")
+    print_int(failures)
+    print(" ===")
+    print("\n")
+    1
+}

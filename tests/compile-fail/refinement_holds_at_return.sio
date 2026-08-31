@@ -1,0 +1,47 @@
+//@ compile-fail
+//@ requires: madaros
+//@ error-pattern: E042
+//
+// A refinement must hold at the RETURN, not only at a binding.
+//
+// This is the Madaros half of a measured engine divergence. On main@88c2ab8ee8
+// the *mut checker spine calls checker_check_refinement_literal_inplace from
+// exactly two places (check.sio:9627, 9687), both in the let/var handlers, and
+// check/compat.sio never looks at refinement_id. So under Madaros a refinement
+// is enforced where a value is BOUND and nowhere else:
+//
+//     $ artifacts/madaros --check tests/compile-fail/refinement_f64_return_violation.sio
+//     check: OK
+//
+// lean_single rejects the same file. tests/known_failures/
+// hardened_diagnostics_full_suite.txt records the split in its own words
+// (2026-08-23): "default Madaros still answers `check: OK` on that file, so the
+// refinement is unenforced there; that is a compiler defect, not a manifest
+// one." This test is that defect, pinned for the integer case.
+//
+// SCOPE. checker_check_refinement_literal_inplace only fires when
+// last_literal_kind is 1 (int) or 2 (float), so this pins the LITERAL return.
+// The propagated case is a separate, still-open hole:
+//
+//     fn lift(x: i64) -> { n: i64 | n >= 0 } { x }        // still accepted
+//     fn f() -> { n: i64 | n >= 0 } { let b = 0 - 7  return b }  // still accepted
+//
+// Those need dataflow the checker does not have here; main's own
+// tests/compile-fail/refinement_return_var.sio pins that case for lean_single
+// and is untouched by this test. Closing the literal case is what the
+// known-failures manifest asks for, and is where the fix stops.
+//
+// The refinement is written INLINE, not through a `type` alias. A named alias
+// takes a different path on the *mut spine (checker_lower_named_type_mut does
+// not consult the refinement table) and fails with E008 "expected Fp, found
+// i64" long before the refinement is consulted -- a separate, unfixed defect
+// that this test deliberately does not depend on.
+
+fn escape() -> { n: i64 | n >= 0 && n < 1000000007 } {
+    return 2000000000
+}
+
+fn main() -> i64 with IO {
+    println("unreachable")
+    0
+}

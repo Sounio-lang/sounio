@@ -44,6 +44,16 @@ runproof "propagate: exp/product/MC" tests/epistemic_trust/propagate_trust.sio P
 # Historical "blocked" map row was an IO-missing driver, not a lowering defect.
 runproof "uncertain_eq: Bernoulli/EqField" tests/epistemic_trust/uncertain_eq_trust.sio UNCERTAIN_EQ_TRUST_OK
 
+# C1 (2026-08-06): imported Epistemic Var preserve under particle amp graph.
+# Dual-engine parity (lean_single ≡ Madaros scaled i64). Fail-closed.
+echo "== imported ep-var preserve (Madaros ≡ lean_single) =="
+if bash scripts/ci/madaros_imported_ep_var_preserve_gate.sh; then
+  echo "PASS: MADAROS_IMPORTED_EP_VAR_PRESERVE_GATE_OK"
+else
+  echo "FAIL: imported ep-var preserve gate"
+  fail=1
+fi
+
 # Finite-dof coverage factor (promoted from retired Section B trip-wire).
 # Expect k95*1000 = 2776 = t95(4) on Type-A-dominant budget (NOT 1960).
 echo "== gum k95 coverage factor (gating: expect 2776 = t95(4)) =="

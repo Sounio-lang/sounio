@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.paper-a-ns-metatheory-mechanized-2026-08-30
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.paper-a-ns-metatheory-mechanized-2026-08-30
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Paper A — the NS metatheory is mechanized (2026-08-30)
 
 **Closes** the two `◻` rows of §6.4's mechanization table (Lemma 2 "argued, not
@@ -9,7 +23,9 @@ the closed draft claimed "at paper level". Artifact: `formal/lean4/EpistemicEffe
 Nothing here touches the compiler; the wire (`4ac63da51f`) and this proof are independent
 artifacts about the same rule. The paper files were updated in place (§6.3, §6.4 table and
 closing paragraph, contribution 3, abstract, top note; `paper_A_MERGED_2026-08-25.md`,
-`paper_A_section6_draft_2026-08-25.md`, `paper_A.html`, `paper_A_README.md`).
+`paper_A_section6_draft_2026-08-25.md`, `paper_A.html`, `paper_A_README.md`). Those paper files
+live on the research lane `lane/fable-1/p0f-ffi-takeover`, not on `main`; this note is the
+`main`-side pointer.
 
 ---
 

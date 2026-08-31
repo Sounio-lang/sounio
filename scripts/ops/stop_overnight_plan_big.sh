@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 ART_DIR="${PLAN_BIG_OVERNIGHT_ART_DIR:-$ROOT_DIR/artifacts/omega/overnight_plan_big}"
@@ -12,7 +12,7 @@ WAIT_SEC="${PLAN_BIG_OVERNIGHT_STOP_WAIT_SEC:-15}"
 
 usage() {
   cat <<USAGE
-Usage: scripts/stop_overnight_plan_big.sh [--force] [--wait-sec N]
+Usage: scripts/ops/stop_overnight_plan_big.sh [--force] [--wait-sec N]
 
 Options:
   --force       Send SIGKILL if process does not stop after wait window

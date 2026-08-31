@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.extern-c-ffi-silent-noop-dispatch-2026-08-13
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: 2026-08-13
+validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.extern-c-ffi-silent-noop-dispatch-2026-08-13
 -->
 

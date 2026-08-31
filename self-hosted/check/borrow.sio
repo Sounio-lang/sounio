@@ -14,6 +14,13 @@
 // State values: 0 = Owned (unborrowed), 1 = SharedBorrow, 2 = ExclusiveBorrow
 // shared_count tracks number of active shared borrows
 
+// Two snapshot slots per nested `if` level; 16 levels of nesting are tracked.
+// Beyond that the merge degrades to the old sequential behaviour rather than
+// misreporting.
+pub const MAX_BRANCH_LEVELS: i64 = 16
+pub const MAX_BRANCH_SNAP: i64 = 32
+const BRANCH_SNAP_PLANE: i64 = 4096   // 128 entries * MAX_BRANCH_SNAP
+
 pub struct BorrowEntry {
     name: Name,
     state: i64,          // 0=Owned, 1=SharedBorrow, 2=ExclusiveBorrow
@@ -45,14 +52,35 @@ pub struct BorrowEnv {
     count: i64,
     scope_starts: [i64; 64],
     scope_depth: i64,
+    branch_depth: i64,   // nesting level of `if` currently being checked
+    // Snapshots of `consumed`, laid out FLAT as entry-major
+    // [entry * MAX_BRANCH_SNAP + 2*level (+1)], so the write is a single-level
+    // indexed store rather than the known-fragile `entries[i].snap[j]` shape.
+    //
+    // The length is spelled as a LITERAL, not as BRANCH_SNAP_PLANE. A named const
+    // in an array-type position is not resolved by the lean_single front end -- the
+    // seed that builds Madaros -- and the field is then dropped from the struct
+    // entirely: every BorrowEnv literal reports `missing field in struct literal`
+    // and stores through the field get no valid offset (issue #1471). A const in a
+    // repeat-literal LENGTH is NOT fine either (see borrow_env_new below); only
+    // index arithmetic, as in check.sio, resolves the const correctly.
+    branch_snap: [bool; 4096],
 }
 
-fn borrow_env_new() -> BorrowEnv {
+pub fn borrow_env_new() -> BorrowEnv {
     BorrowEnv {
         entries: [empty_borrow_entry(); 128],
         count: 0,
         scope_starts: [0; 64],
         scope_depth: 0,
+        branch_depth: 0,
+        // Literal length, matching the declaration above. The comment there said a
+        // named const was safe in a repeat-literal LENGTH and unsafe only in a TYPE
+        // position; measured against the self-compilation ratchet that is not true --
+        // `[false; BRANCH_SNAP_PLANE]` here produced E020 (array elements must all have
+        // the same type) + E016 (field initializer has wrong type) when Madaros
+        // typechecks its own source. Both spellings must be the literal 4096.
+        branch_snap: [false; 4096],
     }
 }
 

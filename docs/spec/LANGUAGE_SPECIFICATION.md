@@ -114,6 +114,24 @@ mut       unsafe
 with      handle    on        resume    perform
 ```
 
+> **Measured 2026-08-19 — two of these tables are wrong, and one entry is
+> reserved against itself.** Each word was tested as an identifier
+> (`let <word> = 1`); a reserved word cannot be one. Both engines agree.
+>
+> | word | listed as | measured |
+> |---|---|---|
+> | `own` | type keyword | **not reserved** — compiles as an identifier |
+> | `handle` | effect keyword | **not reserved** — compiles as an identifier; it is *contextual*, recognised in the `handle<IO> { … }` position §7.3 measures |
+> | `mut` | type keyword | reserved, but refused **by design**: `error[E040]: Sounio uses \`var\` for mutable bindings, not \`let mut\`` |
+>
+> `mut` is reserved to teach against, not to use, so listing it beside `linear`
+> and `where` reads as an endorsement of a form the compiler exists to refuse.
+> The remaining ten refuse as parse failures and are reserved as documented.
+> `perform` is reserved on Madaros but resolves as an ordinary identifier under
+> `lean_single`, which reports `error[E200]: undefined identifier` — see
+> §7.3.4 in `S07_EFFECT_HANDLERS.md`.
+
+
 **Literal keywords:**
 ```
 true      false
@@ -129,11 +147,46 @@ uint      u8        u16       u32       u64       u128
 f32       f64       bool      char      string
 ```
 
+> **Measured 2026-08-19 — `int` and `uint` are listed and do not work.**
+> `let x: i64 = 0` checks; `let x: int = 0` gives
+> `error[E001]: this binding expects a different type`, as does `uint`. The two
+> widths this document might have been expected to be aspirational about,
+> `i128` and `u128`, **do** check — that guess was tested and was wrong.
+>
+> **A test in parameter position proves nothing here.** `fn f(x: T) -> i32 { 0 }`
+> checks under Madaros for *every* `T`, including `naoexiste_zorble`. An
+> undeclared parameter type is refused only once the function has a caller
+> (`error[E009]`), so the declaration is never interrogated on its own — the use
+> is. lean_single emits an ELF **either way**, caller or not.
+>
+> This is `SOUNIO-TYPE-INTERROGATION` at the level of the type namespace: a name
+> in a declaration is not asked to exist until something forces the question.
+
 ### 2.4 Built-in Effect Names
 
 ```
 IO        Mut       Alloc     Panic     Async     GPU       Prob      Div
 ```
+
+> **Measured 2026-08-19 — this list is a quarter of the table.** The compiler's
+> closed effect-name list holds **30** names
+> (`scripts/ci/effect_name_closed_list_gate.sh`, frozen at 2,845 sites). All
+> eight above are in it, so nothing here is wrong; **22 are missing**:
+>
+> `Approx  Audit  Causal  Chaotic  Confidence  Deterministic  Epistemic
+> Hypothesis  Learn  MultiTest  NarrowWidthApproximation  NaturalityG2  Network
+> NonAssoc  NonUnitary  Observe  Perturbative  Render  Sensor  Temporal  Witness
+> ZD`
+>
+> The omissions are not marginal: `ZD`, `Witness`, `Learn`, `Temporal` and
+> `Epistemic` carry the surgical-unlearning and epistemic-typing claims, and
+> `Observe` is named as a core effect in `CLAUDE.md` §7.
+>
+> **The list cannot be checked by writing one.** `fn g() -> i32 with Zorblex { 0 }`
+> gives `check: OK` under Madaros and an ELF under lean_single. An unknown effect
+> name is dropped in silence on both engines — §6.1 measures the same on the
+> declaration side — so membership of this table is unfalsifiable from outside
+> the compiler, and the closed-list gate exists because of that.
 
 ### 2.5 Operators
 
@@ -962,13 +1015,61 @@ D features a complete algebraic effect system. Effects describe computational si
 | Effect | Description | Operations |
 |--------|-------------|------------|
 | `IO` | Input/output | File, network, console operations |
-| `Mut` | Mutable state | Reading/writing mutable variables |
+| `Mut` | Mutable state that escapes the callee | Writing through an exclusive reference (`&!T`), a raw `*mut T`, or an array/struct reached through one. See §7.2.1. |
 | `Alloc` | Memory allocation | Heap allocation |
 | `Panic` | Recoverable failure | Panic and recovery |
 | `Async` | Asynchronous computation | Await, spawn |
 | `GPU` | GPU operations | Kernel launch, device memory |
 | `Prob` | Probabilistic computation | Sample, observe |
 | `Div` | Divergence | Potential non-termination |
+
+#### 7.2.1 `Mut` and local mutation — the escape rule
+
+`Mut` describes mutation that is **observable by the caller**. Mutating a
+function-local `var` is not: the binding dies with the frame, so it is invisible
+outside and does **not** require `Mut` in the signature.
+
+```sio
+// No `with Mut` needed: `y` is local, the mutation cannot escape.
+// (Division is omitted deliberately -- it would additionally require
+//  `with Div, Panic`, which is a separate obligation from `Mut`.)
+fn accumulate(n: i64) -> i64 {
+    var y = 1
+    y = y + n
+    y
+}
+
+// `with Mut` IS needed: the write is through an exclusive reference,
+// so the caller observes it.
+fn zero_first(buf: &![i64; 4]) with Mut {
+    (*buf)[0] = 0
+}
+```
+
+A mutation escapes — and therefore requires `Mut` — when it is written through
+an exclusive reference (`&!T`), a raw `*mut T`, an array or struct reached
+through either, or when it is captured by a closure that outlives the frame.
+The checker is intended to **infer** this from the function body rather than
+require the author to reason about it; the annotation is a declaration of the
+inferred fact, not an independent obligation.
+
+> **Implementation status (measured 2026-07-27, not a statement of intent).**
+> Neither shipped engine implements the rule above. Under the default compiler
+> (Madaros, `self-hosted/check/`) `Mut` is **not required for either case** —
+> `check_callee_effects` (`self-hosted/check/check.sio:11688`) enforces effects
+> only at *call sites*, propagating a callee's declared effects to its caller;
+> nothing demands `Mut` at an assignment. Under the frozen `lean_single`
+> bootstrap seed, `Mut` is required for **both** cases, including the local
+> `var` above. A live consequence: `self-hosted/ir/egraph.sio` fails
+> `SOUNIO_SOUC_ENGINE=lean_single souc check` at line 1549 — inside `eg_isqrt`
+> (`egraph.sio:1511`), on the statement `y = (y + x / y) / 2`, a mutation of a
+> function-local `var` in an otherwise pure integer helper. Verified by
+> isolation that the missing effect there is `Mut` and not `Div`: the seed
+> rejects a local `var` mutation with no division at all, and accepts a bare
+> division with no mutation. Closing this gap in the default compiler is
+> scoped in
+> `docs/audit/MUT_EFFECT_ENFORCEMENT_DISPATCH_2026-07-27.md`; the seed is
+> deliberately left frozen (see `docs/compiler/KNOWN_LIMITATIONS.md`).
 
 ### 7.3 Effect Annotations
 

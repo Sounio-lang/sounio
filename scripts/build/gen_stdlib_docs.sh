@@ -12,7 +12,7 @@
 # Requirements: bash, awk — no external deps.
 #
 # Usage:
-#   bash scripts/gen_stdlib_docs.sh
+#   bash scripts/build/gen_stdlib_docs.sh
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

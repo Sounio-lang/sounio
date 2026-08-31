@@ -33,6 +33,7 @@ const ACTIVE_RESEARCH_DOCS = new Set([
   'docs/research/RESEARCH_VALIDATION_SUMMARY.md',
   'docs/research/epistemic_algebra_review.md',
   'docs/research/vancomycin-uncertainty.md',
+  'docs/research/rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md',
   'docs/research/cd-tower-automorphism-freeze.md',
 ]);
 
@@ -641,8 +642,8 @@ export function topicSourceOfTruth(topicId) {
   return `${REGISTRY_RELATIVE_PATH}#${topicId}`;
 }
 
-export function formatRepoMetadataBlock(topic) {
-  return [
+export function formatRepoMetadataBlock(topic, existingMeta = null) {
+  const lines = [
     '<!-- docs:meta',
     `topic_id: ${topic.topic_id}`,
     `authority: ${topic.authority}`,
@@ -651,7 +652,15 @@ export function formatRepoMetadataBlock(topic) {
     `validated_by: ${topic.owner_agent}`,
     `source_of_truth: ${topicSourceOfTruth(topic.topic_id)}`,
     '-->',
-  ].join('\n');
+  ];
+  const provenance = preservedProvenance(existingMeta);
+  if (provenance.last_validated) {
+    lines[4] = `last_validated: ${provenance.last_validated}`;
+  }
+  if (provenance.validated_by) {
+    lines[5] = `validated_by: ${provenance.validated_by}`;
+  }
+  return lines.join('\n');
 }
 
 export function parseRepoMetadata(content) {
@@ -675,6 +684,63 @@ export function parseRepoMetadata(content) {
     data[key] = value;
   }
   return data;
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+// Shape alone accepts impossible dates: '2026-13-45' matches ^\d{4}-\d{2}-\d{2}$
+// and is not a day anyone validated anything on. An impossible date carries no
+// more information than the placeholder literal did -- the failure R22
+// recorded, one size smaller -- so the record must name a REAL calendar date,
+// leap years included. Single source for the generator and the checker.
+export function isRealValidationDate(value) {
+  const s = String(value ?? '').trim();
+  if (!ISO_DATE.test(s)) {
+    return false;
+  }
+  const [year, month, day] = s.split('-').map(Number);
+  if (month < 1 || month > 12 || day < 1) {
+    return false;
+  }
+  let max = DAYS_IN_MONTH[month - 1];
+  if (month === 2 && ((year % 4 === 0 && year % 100 !== 0) || year % 400 === 0)) {
+    max = 29;
+  }
+  return day <= max;
+}
+
+// The provenance pair (last_validated, validated_by) is a RECORD of a real
+// validation event, and the only place that record lives is the document (or
+// its author's commit). The registry has no validation-event data, so it
+// cannot be authoritative for these two fields -- only for the structural
+// four (topic_id, authority, audience, source_of_truth).
+//
+// Preserve an existing record when it is well-formed: a real date and, when
+// present, a non-empty validator. When the document carries no record (or a
+// malformed one), the generator's defaults apply exactly as before -- a doc
+// genuinely missing a header still gets one, stamped with the placeholder.
+//
+// History: before 2026-08-16 the sync REPLACED the whole docs:meta block with
+// freshly generated fields, so any document outside the curated owner table
+// had a real, newer header (e.g. 2026-08-13/claude) regressed to the generic
+// placeholder on every mandatory sync. That regression also made byte-level
+// doc gates see phantom content changes. Recorded in
+// .claude/llm_offload_log.md 2026-08-16 WAIVED row.
+export function preservedProvenance(existingMeta) {
+  if (!existingMeta) {
+    return {};
+  }
+  const date = String(existingMeta.last_validated ?? '').trim();
+  if (!isRealValidationDate(date)) {
+    return {};
+  }
+  const fields = { last_validated: date };
+  const validator = String(existingMeta.validated_by ?? '').trim();
+  if (validator) {
+    fields.validated_by = validator;
+  }
+  return fields;
 }
 
 export function formatHistoricalStatusNote(topic, relPath) {
@@ -723,8 +789,8 @@ export function parseFrontmatter(content) {
   return data;
 }
 
-export function metadataFieldsForTopic(topic) {
-  return {
+export function metadataFieldsForTopic(topic, existingMeta = null) {
+  const fields = {
     topic_id: topic.topic_id,
     authority: topic.authority,
     audience: topic.audience,
@@ -732,6 +798,7 @@ export function metadataFieldsForTopic(topic) {
     validated_by: topic.owner_agent,
     source_of_truth: topicSourceOfTruth(topic.topic_id),
   };
+  return { ...fields, ...preservedProvenance(existingMeta) };
 }
 
 export function formatAuthorityMatrix(registry) {
@@ -777,6 +844,63 @@ function countBy(values, keyFn) {
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+// The committed, gated acceptance report. This is deliberately a CONSTANT, not
+// a function of the registry: it used to embed whole-corpus counts (total
+// governed topics, per-authority and per-owner breakdowns, evidence-bearing
+// topics, the validation-surface union), all derived by scanning every doc
+// file present at generation time. That made the committed snapshot a
+// function of the entire doc corpus rather than of the PR that touched it:
+// two PRs that each add an unrelated governed doc both pass their own CI
+// (each syncs cleanly against its own base), then the moment the second one
+// lands beside the first, the corpus-wide counts baked into whichever PR
+// hasn't merged yet are off by the topics the other one added -- and every
+// open PR inherits that failure and reads as broken, regardless of what it
+// actually touched. This recurred same-day (#1804, then #1839 eight hours
+// later) because resyncing the numbers again does not remove the race, it
+// just re-arms it for the next doc-adding merge.
+//
+// For the live corpus-wide numbers, generate them on demand instead of
+// trusting a committed snapshot: `node scripts/docs/report_acceptance.mjs`
+// (backed by formatAcceptanceReport below, which is unchanged and still a
+// pure function of the registry -- it is just no longer what gets committed
+// or gated).
+export function formatAcceptanceReportStub() {
+  return [
+    formatRepoMetadataBlock({
+      topic_id: 'repo.governance.acceptance-report',
+      authority: 'repo_only',
+      audience: 'maintainers',
+      owner_agent: 'A0',
+    }),
+    '',
+    '# Docs Acceptance Report',
+    '',
+    'This is the editor-in-chief acceptance snapshot for the documentation-governance wave.',
+    '',
+    '## Verdict',
+    '',
+    '- Status: accepted for the current documentation-governance wave when the listed validation surfaces pass.',
+    '- Dual-canon sync contract is active across repo docs, website docs, and localized docs metadata.',
+    '- Historical and archived repo docs are labeled and redirected back to the current canonical surface through the authority matrix.',
+    '',
+    '## Scope, ownership, locale and evidence numbers',
+    '',
+    'This file intentionally does not carry whole-corpus counts (total governed topics, per-authority',
+    'and per-owner breakdowns, evidence-bearing topics, the validation-surface list). Every one of',
+    'those numbers is a pure function of every governed doc present in the tree at scan time, so a',
+    'snapshot committed by one PR goes stale the instant any *other* PR adds or removes a governed doc',
+    "-- even though neither PR touched the other one's files. Get the live numbers on demand instead",
+    'of trusting a committed snapshot that races against concurrent merges:',
+    '',
+    '    node scripts/docs/report_acceptance.mjs',
+    '',
+    'Per-topic governance (metadata headers, locale coverage, evidence artifacts, broken links) stays',
+    `gated exactly as before, from \`${REGISTRY_RELATIVE_PATH}\`; only the aggregate corpus counters`,
+    'moved out of the committed, gated surface.',
+    '',
+  ].join('\n');
 }
 
 export function formatAcceptanceReport(registry) {

@@ -1,5 +1,24 @@
 # Round 15 — EL+ role-aware closure at ChEBI scale (+ PATO)
 
+> **These numbers cannot be reproduced from this repository, and the driver that
+> produced them is no longer in it.**
+>
+> ChEBI's `versionIRI` names release 254; `obo/chebi/254/chebi.owl` returns 404,
+> and the undated purl now serves a different, larger release (865,772,908
+> bytes, sha256 `4557df5b6683…`). Measured 2026-08-24 and recorded in
+> `fetch_downloads.sh`. So the committed `chebi_*` artifacts came from an older,
+> unrecorded release that is no longer retrievable. PATO is unaffected — it is
+> pinned at release 2025-05-14 with a sha256.
+>
+> `chebi_pato_elplus_driver.sio` was therefore dropped rather than carried as a
+> gate entry that skips: a driver in the list that cannot run is a check
+> reporting on nothing, and `ontology_multi_ontology_gate.sh` correctly exited 1
+> on it. The results stay here, labelled, because a measurement whose inputs are
+> gone is still a record — it is just not evidence anyone can re-derive.
+>
+> To make this line reproducible again, regenerate from the current purl and pin
+> that sha; the published figures below will change.
+
 **Date:** 2026-08-06 · **Lane:** `ontology-chebi-pato-scale`
 · **Compiler:** `bin/souc` (Madaros v0.80.0), branch
 `research/zd-fiber-antisymmetry-lemma-20260731`.

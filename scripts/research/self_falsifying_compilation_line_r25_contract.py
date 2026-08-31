@@ -12,17 +12,23 @@ For docs/research/, authority is not measured. It is:
 
     ACTIVE_RESEARCH_DOCS.has(relPath) ? 'repo_only' : 'historical'
 
-ACTIVE_RESEARCH_DOCS is a three-path Set in the generator. Everything else under
+ACTIVE_RESEARCH_DOCS is a hand-edited Set in the generator -- four paths as of
+2026-08-15 (rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md was
+whitelisted then, see docs/audit/BRANCH_AUDIT_2026-08-15.md; it was three
+paths from 2026-07-31 through 2026-08-15, which is why this rung's clause ID
+still says THREE -- see WHITELIST_SIZE below). Everything else under
 docs/research/ is stamped historical, and check_docs_registry.mjs enforces both
 the authority field and the auto-inserted "Docs status: historical" note that
 says the page is preserved for lineage.
 
 So a research finding written today as EXECUTABLE is green only when it claims
-to be historical lineage — unless someone hand-edits a three-item whitelist.
+to be historical lineage — unless someone hand-edits the whitelist.
 
 CLAUSES:
-  V1_WHITELIST_IS_THREE           ACTIVE_RESEARCH_DOCS is a Set of three path
-                                  literals in the generator.
+  V1_WHITELIST_IS_THREE           ACTIVE_RESEARCH_DOCS is a Set of
+                                  WHITELIST_SIZE path literals in the
+                                  generator (clause ID kept for rung
+                                  continuity even though the count grew).
   V2_DEFAULT_IS_HISTORICAL        the path rule is ternary on that Set; research
                                   not in the Set is historical.
   V3_CORPUS_IS_LINEAGE_DEFAULT    census of research authority + status notes:
@@ -52,6 +58,15 @@ GENERATOR = ROOT / "scripts/docs/governance_registry.mjs"
 CHECKER = ROOT / "scripts/docs/check_docs_registry.mjs"
 REGISTRY = ROOT / "docs/governance/topic-registry.v1.json"
 SYNC = "scripts/docs/sync_governance_metadata.mjs"
+# Fingerprint of ACTIVE_RESEARCH_DOCS's size. Was 3 from this rung's
+# writing (2026-07-31) through 2026-08-15; grew to 4 when
+# rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md was
+# whitelisted (docs/audit/BRANCH_AUDIT_2026-08-15.md); grew to 5 on
+# 2026-08-28 when cd-tower-automorphism-freeze.md was whitelisted in the
+# same change that added it. Bump this deliberately when the whitelist
+# legitimately changes size -- do not let this constant silently drift out
+# of sync with governance_registry.mjs.
+WHITELIST_SIZE = 5
 
 SUBJECT = "docs/research/self_falsifying_compilation_line_r24_2026-07-31.md"
 FARM_COPY = ["docs", "examples", "paper", "spec", "README.md"]
@@ -98,7 +113,7 @@ def clause_v1() -> tuple[bool, set[str]]:
     print(f"    governance_registry.mjs:{line_n}  Set size={len(paths)}")
     for p in sorted(paths):
         print(f"        {p}")
-    ok = len(paths) == 3 and all(p.startswith("docs/research/") for p in paths)
+    ok = len(paths) == WHITELIST_SIZE and all(p.startswith("docs/research/") for p in paths)
     print(f"V1_WHITELIST_IS_THREE {'PASS' if ok else 'FAIL'}")
     print()
     return ok, paths
@@ -173,7 +188,7 @@ def clause_v3(whitelist: set[str]) -> bool:
         and hist >= len(research) - 5  # allow dual/repo_only few
         and note_missing == 0
         and note_hist == hist
-        and len(whitelist) == 3
+        and len(whitelist) == WHITELIST_SIZE
         and non_whitelist_historical >= len(research) - 5
     )
     print(f"V3_CORPUS_IS_LINEAGE_DEFAULT {'PASS' if ok else 'FAIL'}")

@@ -28,6 +28,12 @@ def main() -> int:
         ),
         "native-selfhost-macos-arm64": truthy(impact.get("compiler")) or truthy(impact.get("full")),
         "full-test-suite": any(truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")),
+        "madaros-witness-gate": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
+        "gate-wave-0": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
         "sounio-lint": any(truthy(impact.get(key)) for key in ("compiler", "stdlib", "tests", "sio", "full")),
         "lean-proofs": truthy(impact.get("lean")) or truthy(impact.get("full")),
         "website": truthy(impact.get("website")) or truthy(impact.get("full")),

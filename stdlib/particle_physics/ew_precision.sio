@@ -11,12 +11,13 @@
 module particle_physics::ew_precision
 
 use particle_physics::sm_params::*;
-use epistemic::knowledge::{Epistemic, ep_gate};
+use epistemic::knowledge::{Epistemic, ep_gate, ep_sub, ep_add, ep_val, ep_std};
 
-extern "C" {
-    fn sqrt(x: f64) -> f64;
-}
-
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
 // ============================================================================
 // OBLIQUE PARAMETERS (Peskin-Takeuchi)
 // ============================================================================
@@ -157,6 +158,10 @@ pub fn sin2_theta_w_effective(m_z: f64, m_t: f64, m_h: f64) -> f64 with Mut, Div
 // MUON ANOMALOUS MAGNETIC MOMENT (g-2)
 // ============================================================================
 
+/// COLLAPSED f64 path — negative witness for the a_μ GUM split.
+/// Hadronic VP is a single exact 693e-10. That is the erasure: the open
+/// problem lives in that term. Prefer `a_mu_sm_wp20` / `a_mu_sm_wp25`.
+///
 /// Leading SM contributions to the muon anomalous magnetic moment a_μ.
 ///
 /// a_μ = a_μ^QED + a_μ^hadronic + a_μ^weak
@@ -387,7 +392,7 @@ pub fn delta_alpha_lep(mz: f64) -> f64 with Mut, Div, Panic {
 
 /// Hadronic five-flavour vacuum polarisation at M_Z (PDG central).
 /// Δα_had^(5)(M_Z) ≈ 0.02766 ± 0.00010 — not fitted to M_W.
-pub fn delta_alpha_had() -> Epistemic {
+pub fn delta_alpha_had() -> Epistemic with Mut, Div, Panic {
     Epistemic::measured(0.02766, 0.00010)
 }
 
@@ -541,6 +546,301 @@ pub fn g_minus_2_qed_schwinger_ep() -> Epistemic with Mut, Div, Panic {
     let pi = 3.141592653589793
     let alpha = alpha_em()
     alpha.scale(1.0 / (2.0 * pi))
+}
+
+// ============================================================================
+// a_μ CITATION SPLIT (units: 10⁻¹¹)
+// ============================================================================
+// Fermilab final (3 June 2025) and Muon g-2 Theory Initiative WP20 / WP25.
+// These are pinned published values, not a Sounio HVP computation.
+// Averaging WP20 with WP25 is forbidden: they are incompatible citations.
+//
+//   exp  : 116592070.5 ± 11.4 (stat) ± 9.1 (syst) ± 2.1 (ext)
+//   WP20 : 116591810 ± 43     (e⁺e⁻ HVP, 2020 white paper)
+//   WP25 : 116592033 ± 62     (lattice HVP, 2025 TI update)
+//
+// Combined experimental σ is formed in Sounio (quadrature of the three
+// quoted pieces). Pulls use GUM: Var(X−Y) = Var(X)+Var(Y) via ep_sub.
+
+/// Quoted Fermilab 2025 pieces (units 10⁻¹¹).
+pub fn a_mu_exp_stat_sigma() -> f64 { 11.4 }
+pub fn a_mu_exp_syst_sigma() -> f64 { 9.1 }
+pub fn a_mu_exp_ext_sigma() -> f64 { 2.1 }
+
+/// Quadrature of the three quoted experimental σ: 11.4²+9.1²+2.1².
+pub fn a_mu_exp_combined_var() -> f64 with Mut, Div, Panic {
+    let s = a_mu_exp_stat_sigma()
+    let y = a_mu_exp_syst_sigma()
+    let e = a_mu_exp_ext_sigma()
+    s * s + y * y + e * e
+}
+
+/// Fermilab Muon g-2 final result (June 2025), units 10⁻¹¹.
+/// Combined σ is formed in Sounio: sqrt(stat²+syst²+ext²) then `measured`.
+pub fn a_mu_exp_fermilab_2025() -> Epistemic with Mut, Div, Panic {
+    let std = sqrt_f64(a_mu_exp_combined_var())
+    Epistemic::measured(116592070.5, std)
+}
+
+/// Theory Initiative 2020 SM prediction (data-driven HVP), units 10⁻¹¹.
+pub fn a_mu_sm_wp20() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(116591810.0, 43.0)
+}
+
+/// Theory Initiative 2025 SM prediction (lattice HVP), units 10⁻¹¹.
+pub fn a_mu_sm_wp25() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(116592033.0, 62.0)
+}
+
+/// GUM pull (a − b) / σ_{a−b} with independent variances.
+/// Returns 0.0 if the combined σ is zero (should not happen for these pins).
+pub fn a_mu_pull(a: Epistemic, b: Epistemic) -> f64 with Mut, Div, Panic {
+    let d = ep_sub(&a, &b)
+    let s = ep_std(&d)
+    if s == 0.0 {
+        0.0
+    } else {
+        ep_val(&d) / s
+    }
+}
+
+/// k95 (normal, two-sided): |pull| > 1.96 is a disagreement at that coverage.
+pub fn a_mu_k95() -> f64 {
+    1.96
+}
+
+// ============================================================================
+// SECTOR BUDGET (units: 10⁻¹¹)
+// ============================================================================
+// Sounio does not compute HVP or HLbL. It *sums* published sectors and
+// refuses to hide which term moved between WP20 and WP25.
+//
+// WP25 (Aliberti et al., Phys. Rep. 1143 (2025) 1, summary table):
+//   QED 116584718.8(2); EW 154.4(4); HVP 7045(61); HLbL 115.5(9.9);
+//   total 116592033(62).
+// WP20 (Aoyama et al., Phys. Rep. 887 (2020) 1, Table 1):
+//   QED 116584718.931(104); EW 153.6(1.0);
+//   HVP LO 6931(40), NLO −98.3(0.7), NNLO 12.4(0.1); HLbL 92(18);
+//   total 116591810(43).
+// Independent GUM of the four sectors is not the TI's correlated total;
+// `a_mu_sm_wp20` / `a_mu_sm_wp25` remain the published totals.
+
+fn a_mu_ep_sum4(a: Epistemic, b: Epistemic, c: Epistemic, d: Epistemic) -> Epistemic {
+    ep_add(&ep_add(&ep_add(&a, &b), &c), &d)
+}
+
+pub fn a_mu_qed_wp25() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(116584718.8, 0.2)
+}
+pub fn a_mu_ew_wp25() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(154.4, 0.4)
+}
+pub fn a_mu_hvp_wp25() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(7045.0, 61.0)
+}
+pub fn a_mu_hlbl_wp25() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(115.5, 9.9)
+}
+
+pub fn a_mu_qed_wp20() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(116584718.931, 0.104)
+}
+pub fn a_mu_ew_wp20() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(153.6, 1.0)
+}
+pub fn a_mu_hvp_lo_wp20() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(6931.0, 40.0)
+}
+pub fn a_mu_hvp_nlo_wp20() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(0.0 - 98.3, 0.7)
+}
+pub fn a_mu_hvp_nnlo_wp20() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(12.4, 0.1)
+}
+pub fn a_mu_hlbl_wp20() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(92.0, 18.0)
+}
+
+pub fn a_mu_hvp_wp20() -> Epistemic with Mut, Div, Panic {
+    ep_add(
+        &ep_add(&a_mu_hvp_lo_wp20(), &a_mu_hvp_nlo_wp20()),
+        &a_mu_hvp_nnlo_wp20(),
+    )
+}
+
+/// Sounio sum of WP20 sectors. Not the TI correlated total.
+pub fn a_mu_sm_sum_wp20() -> Epistemic with Mut, Div, Panic {
+    a_mu_ep_sum4(a_mu_qed_wp20(), a_mu_ew_wp20(), a_mu_hvp_wp20(), a_mu_hlbl_wp20())
+}
+
+/// Sounio sum of WP25 sectors. Not the TI correlated total.
+pub fn a_mu_sm_sum_wp25() -> Epistemic with Mut, Div, Panic {
+    a_mu_ep_sum4(a_mu_qed_wp25(), a_mu_ew_wp25(), a_mu_hvp_wp25(), a_mu_hlbl_wp25())
+}
+
+// ============================================================================
+// WP25 HVP IS A HYBRID (units: 10⁻¹¹)
+// ============================================================================
+// WP25 Eq. (9.1): HVP total = lattice LO + e⁺e⁻ NLO + e⁺e⁻ NNLO.
+// LO is lattice (7132(61), Eq. 3.37). NLO/NNLO are still dispersive
+// (Eq. 2.47–2.48). There is no WP25 data-driven LO HVP: Table 5 says
+// "Estimates not provided at this point". Inventing one is fabrication.
+//
+// 7132 − 99.6 + 12.4 = 7044.8, published total 7045(61). The 0.2 residual
+// is printed; this lane does not unpack TI rounding or covariances.
+
+pub fn a_mu_hvp_lo_lattice_wp25() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(7132.0, 61.0)
+}
+pub fn a_mu_hvp_nlo_epem_wp25() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(0.0 - 99.6, 1.3)
+}
+pub fn a_mu_hvp_nnlo_epem_wp25() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(12.4, 1.0)
+}
+
+/// Sounio assembly of WP25 Eq. (9.1). Not a lattice computation.
+pub fn a_mu_hvp_wp25_assembled() -> Epistemic with Mut, Div, Panic {
+    ep_add(
+        &ep_add(&a_mu_hvp_lo_lattice_wp25(), &a_mu_hvp_nlo_epem_wp25()),
+        &a_mu_hvp_nnlo_epem_wp25(),
+    )
+}
+
+// ============================================================================
+// CMD-3 vs PRE-CMD-3 2π LO HVP (units: 10⁻¹¹)
+// ============================================================================
+// This is the open discrepancy WP25 cites as the reason it will not quote a
+// combined data-driven LO HVP. It is not that combination.
+//
+// Ignatov et al. (CMD-3), Phys. Rev. Lett. 132, 231903 (2024)
+// arXiv:2309.12910:
+//   a_μ^{had;LO}(2π; CMD-3) = 5260(42)×10⁻¹¹
+//     CMD-3 data for √s = 0.327–1.2 GeV; average of other measurements
+//     outside that window. The 42 is systematics-dominated.
+//   compared to 5060(34)×10⁻¹¹, "a value based on the average of all
+//     previous measurements with the χ² inflation of error to account
+//     for data inconsistencies" (Aoyama et al. 2020 / WP20).
+//
+// Same quantity, as defined in that Letter. Not full HVP LO (do not add
+// to lattice 7132). Not WP25 data-driven HVP LO. There is no
+// a_mu_hvp_lo_2pi_combined: averaging is a caller choice WP25 refused.
+// Independent GUM: the two pins share some out-of-window data, so
+// Var(X−Y)=Var(X)+Var(Y) overstates σ_diff and understates the pull.
+// If the split still exceeds k95, that is conservative.
+
+/// CMD-3 2π contribution to LO HVP. Citation, not a Sounio integral.
+pub fn a_mu_hvp_lo_2pi_cmd3() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(5260.0, 42.0)
+}
+
+/// Pre-CMD-3 2π average quoted in the same CMD-3 Letter (WP20 combination
+/// of previous measurements, χ²-inflated). Same quantity as the CMD-3 pin.
+pub fn a_mu_hvp_lo_2pi_pre_cmd3() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(5060.0, 34.0)
+}
+
+// ============================================================================
+// INTERMEDIATE WINDOW, LIGHT-QUARK CONNECTED (units: 10⁻¹¹)
+// ============================================================================
+// RBC/UKQCD window (t0=0.4 fm, t1=1.0 fm, Δ=0.15 fm). Same quantity on
+// both pins: isospin-limit ud-connected a_μ^W. Not full HVP LO. Not the
+// full-flavour window of Eq. (3.26). WP25 quotes lattice in 10⁻¹⁰;
+// this module stores 10⁻¹¹ (×10) to match the other a_μ pins.
+//
+// Lattice: WP25 Table 8 last row (isoQCD average)
+//   a_μ^W(ud) = 206.97(41)×10⁻¹⁰ = 2069.7(4.1)×10⁻¹¹
+// Data-driven: WP25 Eq. (2.43), pre-CMD-3 purely KNT-based
+//   (Benton et al. 2025), a_μ^W(ud) = 199.0(1.1)×10⁻¹⁰
+//   = 1990.0(11.0)×10⁻¹¹
+// The CMD-3 replacement in that paragraph is labelled exploratory
+// ("ignores all other π⁺π⁻ data"); this lane does not pin it.
+// Independent GUM: the two methods do not share a dataset.
+
+/// WP25 Table 8 last-row lattice average, isoQCD a_μ^W(ud). Citation.
+pub fn a_mu_hvp_window_ud_lattice_wp25() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(2069.7, 4.1)
+}
+
+/// WP25 Eq. (2.43) pre-CMD-3 KNT data-driven a_μ^W(ud). Citation.
+pub fn a_mu_hvp_window_ud_knt_pre_cmd3() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(1990.0, 11.0)
+}
+
+// ============================================================================
+// SHORT-DISTANCE WINDOW (full SD) — vanishing control (units: 10⁻¹¹)
+// ============================================================================
+// WP25 §3.4.2: lattice and R-ratio SD agree; the tension is not here.
+// Same conversion 10⁻¹⁰ → 10⁻¹¹ as the W(ud) pins. Not full HVP LO.
+//
+// Lattice: WP25 Eq. (3.22) a_μ^SD = 69.10(26)×10⁻¹⁰ = 691.0(2.6)×10⁻¹¹
+//   (isoQCD average plus SIB+QED).
+// Data-driven: Colangelo et al. 2022d via WP25, pre-CMD-3 R-ratio
+//   68.4(5)×10⁻¹⁰ = 684.0(5.0)×10⁻¹¹. Here (5) is ±0.5 in 10⁻¹⁰.
+// Independent GUM: |pull| ≤ k95 is the control. The W(ud) split must
+// remain larger.
+
+/// WP25 Eq. (3.22) lattice world average, total a_μ^SD. Citation.
+pub fn a_mu_hvp_sd_lattice_wp25() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(691.0, 2.6)
+}
+
+/// WP25-cited pre-CMD-3 R-ratio a_μ^SD (Colangelo et al. 2022d). Citation.
+pub fn a_mu_hvp_sd_rratio_pre_cmd3() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(684.0, 5.0)
+}
+
+// ============================================================================
+// LONG-DISTANCE WINDOW, LIGHT-QUARK CONNECTED (units: 10⁻¹¹)
+// ============================================================================
+// Same quantity on both pins: isoQCD ud-connected a_μ^LD (RBC/UKQCD window).
+// Same conversion 10⁻¹⁰ → 10⁻¹¹. Not full HVP LO. Not the full-flavour
+// LD sum.
+//
+// Lattice: WP25 Eq. (3.27) FLAG average with χ² rescaling 1.6 and an
+//   extra 3.1×10⁻¹⁰ systematic: a_μ^LD(ud) = 406.0(4.9)×10⁻¹⁰
+//   = 4060.0(49.0)×10⁻¹¹. The w0 scheme-definition uncertainty is
+//   not included in (4.9).
+// Data-driven: WP25 Eq. (2.43) pre-CMD-3 purely KNT-based
+//   a_μ^LD(ud) = 389.9(1.7)×10⁻¹⁰ = 3899.0(17.0)×10⁻¹¹.
+// Independent GUM. The CMD-3 replacement in that paragraph is
+// exploratory and is not pinned.
+
+/// WP25 Eq. (3.27) lattice FLAG average, isoQCD a_μ^LD(ud). Citation.
+pub fn a_mu_hvp_ld_ud_lattice_wp25() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(4060.0, 49.0)
+}
+
+/// WP25 Eq. (2.43) pre-CMD-3 KNT data-driven a_μ^LD(ud). Citation.
+pub fn a_mu_hvp_ld_ud_knt_pre_cmd3() -> Epistemic with Mut, Div, Panic {
+    Epistemic::measured(3899.0, 17.0)
+}
+
+// ============================================================================
+// WP25 DATA-DRIVEN HVP LO IS ABSENT (not a latent float)
+// ============================================================================
+// Table 5: "Estimates not provided at this point".
+// That is ignorance, not uncertainty. Madaros is the claim oracle (ADR-008).
+// Filling Unobserved<f64> with 6931, 7132, 7045, 5260, 5060, or 0.0 would
+// be fabrication, and Madaros does not inhabit Unobserved from a literal
+// here (E008). The 2π pins above are not a substitute for this slot.
+//
+// The slot is a distinct type with no HVP number field. Collapsing it to
+// f64 is E008. The Table 5 citation is the bool. This lane does not claim
+// Madaros rejects a cast of the slot to Epistemic.
+
+pub struct Wp25DdHvpLoAbsent {
+    provided: bool
+}
+
+/// Table 5 citation: a data-driven LO HVP is not provided in WP25.
+pub fn a_mu_wp25_datadriven_hvp_lo_provided() -> bool {
+    false
+}
+
+/// Typed absence. Not a measurement. Not an Epistemic pin.
+pub fn a_mu_hvp_lo_datadriven_wp25() -> Wp25DdHvpLoAbsent {
+    Wp25DdHvpLoAbsent { provided: false }
 }
 
 // ============================================================================

@@ -53,9 +53,11 @@ export SOUC_BIN="$(pwd)/bin/souc"
 
 The current `souc info` output shows:
 
-- Cranelift JIT enabled
-- LLVM disabled in the checked artifact
-- GPU codegen disabled in the checked JIT artifact
+- **Cranelift JIT NOT compiled** — the line is `[-] Cranelift JIT - rebuild with
+  --features jit`. This list previously read "Cranelift JIT enabled" — not compiled; measured
+  2026-08-27, no artifact enables it and none is built with `--features jit`
+- LLVM not compiled, same shape
+- GPU codegen enabled on the `-gpu` artifact
 
 For the separate checked GPU artifact:
 

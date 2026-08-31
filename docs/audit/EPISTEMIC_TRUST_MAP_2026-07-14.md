@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.epistemi
 
 # Epistemic trust map — which stdlib/epistemic results a real program can trust today
 
-**Date:** 2026-07-14 (Wave10 k95 closeout 2026-07-21; uncertain_eq P0=C 2026-08-04)
+**Date:** 2026-07-14 (Wave10 k95 closeout 2026-07-21; **C1 imported ep-var preserve 2026-08-06**)
 **Toolchain:** `./bin/souc` → Madaros v0.80.0 (default **native** engine)
 **Scope:** core uncertainty primitives (GUM, uncertainty propagation, Knowledge<T>,
 correlation/covariance, imprecise probability). Bounded, not exhaustive.
@@ -52,10 +52,10 @@ A result is usable under native import iff **both** hold:
 | `knowledge` (**method** form) | `Epistemic::measured` / `e.val()` / `e.add` / `e.mul` / `e.std` | **Wave9 residual closeout** — free vs method parity under multi-module Madaros. Gate: `scripts/madaros_knowledge_method_residual_gate.sh` + Section A `KNOWLEDGE_METHOD_PARITY_OK` / `KNOWLEDGE_METHOD_OK` |
 | `order_spread_exact` (`order_spread4`) | CPC N=4 exact spread ≈ `2.044226` (scaled µ-units `2044225`/`2044226`) | **stdlib leaf 2026-07-20** — algebra inlined via field-wise `OsOct` (no `algebra::` use). Gate: `scripts/madaros_order_spread_native_gate.sh` + Section A `ORDER_SPREAD_TRUST_OK`. `product4_exact` remains available (pulls free-function `knowledge`); method-form `Epistemic::measured` is also green (Wave9). |
 | `product_nonassoc` (structural variance) | Fano variance `0.25` / non-Fano `4.25` (κ=1, base σ²=0.25) | **stdlib leaf 2026-07-20** — algebra inlined via field-wise `PnOct` (no `algebra::` use). Gate: `scripts/madaros_product_nonassoc_native_gate.sh` + Section A `PRODUCT_NONASSOC_TRUST_OK`. Knowledge-free `product_nonassoc_augment` is the hard numeric witness; `product_nonassoc(Epistemic,…)` uses field-form `Epistemic` under Madaros (direct `ep_*` + leaf multi-import trips E035). Historic `epistemic::propagate::product_nonassoc` removed. |
-| `propagate` (delta-method + MC) | product `6`/`0.25`; `exp_delta(1,σ²=0.01)` → `e` / `e²·0.01`; MC identity mean≈`1` var≈`0.01`; MC square E[X²]≈`4.01` var≈`0.16` | **2026-07-20 multi-module green** for free-function `Epistemic` + `exp_delta`/`product`/`ln`/`sin`/`cos_delta` and value-style LCG MC kernels (`monte_carlo_identity`, `monte_carlo_square`). Gate: `scripts/madaros_propagate_native_gate.sh` + Section A `PROPAGATE_TRUST_OK`. Caveats (pre-Wave6-C): literal `exp`/`cos` SEGV — **fixed** (empty-stub builtins only); remaining: exclusive-ref xoshiro inside imported bodies untrustworthy (MC uses Knuth LCG+CLT); generic `monte_carlo(x,f,n)` fn-ptr still fragile. |
+| `propagate` (delta-method + MC) | product `6`/`0.25`; `exp_delta(1,σ²=0.01)` → `e` / `e²·0.01`; MC identity mean≈`1` var≈`0.01`; MC square E[X²]≈`4.01` var≈`0.16` | **2026-07-20 multi-module green** for free-function `Epistemic` + `exp_delta`/`product`/`ln`/`sin`/`cos_delta` and value-style LCG MC kernels (`monte_carlo_identity`, `monte_carlo_square`). Gate: `scripts/madaros_propagate_native_gate.sh` + Section A `PROPAGATE_TRUST_OK`. Caveats (pre-Wave6-C): literal `exp`/`cos` SEGV — **fixed**. ~~exclusive-ref xoshiro untrustworthy~~ **remeasured GREEN 2026-08-06** (`scripts/ci/madaros_xoshiro_imported_gate.sh`). Generic `monte_carlo(x,f,n)` fn-ptr **GREEN 2026-08-23** (`scripts/ci/madaros_propagate_monte_carlo_fnptr_gate.sh`). |
 | `algebra::associator_field` | non-Fano ‖α‖²=`4`, g2=`2`, aug var=`4.25`; pentagon (e1,e2,e4,e1) var=`0.96` | **2026-07-20 multi-module green** after #1274 oct_mul lo/hi split + pub API surface (`assoc_field_*`, `pentagon_*`, `af_*`). Gate: `scripts/madaros_associator_field_native_gate.sh`. L0: `associator_field_octonion` + `associator_field_pentagon`. |
 | `algebra::octonion` (`oct_mul`, `oct_associator`, …) | e1·e2→e3; non-Fano ‖[e1,e2,e4]‖²=`4` | **2026-07-20** lo/hi frame split. Gate: `scripts/madaros_algebra_octonion_import_gate.sh`. |
-| `uncertain_eq` | `ep_eq_prob` / `ep_decide` / `ep_eq_field` (Bernoulli P(|a−b|<ε), named threshold, EqField windows) | **2026-08-04 Attention P0=C** — multi-module Madaros native import green. Historical "blocked" row was an `IO`-missing run-pass driver (E035), not a lowering defect. Gate: `scripts/ci/madaros_uncertain_eq_trust_gate.sh` + Section A `UNCERTAIN_EQ_TRUST_OK`. |
+| `particle_physics::nonunitary_amp` + `sm_params::mass_bottom` | imported `Epistemic` **variance** bit-identical Madaros≡lean_single (scaled i64×1e18): `mass_bottom` → `900000000000000` (=0.0009×1e18); `h_bb_yukawa_amplitude_nu` amp → `1354` (~1.354e-15×1e18) | **C1 2026-08-06** — EXP `print_f64` `0.000000` was display rounding of ~1e-15, not Var corruption. Gate: `scripts/ci/madaros_imported_ep_var_preserve_gate.sh`. Audit: `docs/audit/MADAROS_IMPORTED_EP_VAR_PRESERVE_2026-08-06.md`. |
 
 Heuristic: **self-contained modules (no stdlib `use` deps) import cleanly and
 return correct numbers** under default Madaros. Method-call form on `Epistemic`
@@ -97,7 +97,8 @@ converge to k≈1.96).
 | Module / form | Failure | Consequence |
 |---|---|---|
 | `propagate` **export names** `exp` / `cos` (call site) | **FIXED Wave6 C** — empty-stub builtins only (`instr_count==0`); user-bodied `exp`/`cos` keep IR | call `exp`/`cos` freely under multi-module Madaros; `exp_delta`/`cos_delta` remain aliases |
-| `propagate::monte_carlo` (generic fn-ptr form) | fragile / NaN under multi-module when combined with exclusive-ref RNG | use `monte_carlo_identity` / `monte_carlo_square` (value-style LCG) |
+| `propagate::monte_carlo` (generic fn-ptr form) | **GREEN 2026-08-23** — DCE reachability + `IrCallIndirect` f64 return markers. Gate: `scripts/ci/madaros_propagate_monte_carlo_fnptr_gate.sh` | promoted; prefer value-style kernels when fn-ptr not needed |
+| `uncertain_eq` | method / multi-module path | equality-under-uncertainty native-import-blocked (check current residual gates before quoting) |
 
 Stdlib `Epistemic` method form is TRUSTWORTHY under multi-module Madaros (Wave9).
 Language generic `Knowledge<T>` method form is a separate surface — do not
@@ -109,10 +110,10 @@ need free-function rewrite, inlining into `main()`, or lean_single.
 What works under native import today includes the free-function **and method-form**
 `Epistemic` numeric core, **full GUM** (value + `u_c` + finite-dof `k95`/`U95`/`U99`),
 correlation/covariance, p-box dispersion, `order_spread4`, `product_nonassoc`,
-and **`propagate` delta-method + value-style MC kernels**. A real PBPK/GUM
+and **`propagate` delta-method + value-style MC kernels + generic fn-ptr MC**. A real PBPK/GUM
 pipeline can import `gum` + `knowledge` + `propagate` under default Madaros when
-it uses those surfaces. Residual traps: exclusive-ref xoshiro inside module
-bodies; generic `monte_carlo` fn-ptr form; language `Knowledge<T>` generics.
+it uses those surfaces. ~~Residual trap: generic `monte_carlo` fn-ptr~~ **closed 2026-08-23**.
+Language `Knowledge<T>` generics remain a separate surface.
 
 Historical failures reduce to filed compiler dispatches (status as of Wave10):
 
@@ -124,9 +125,10 @@ Historical failures reduce to filed compiler dispatches (status as of Wave10):
 ## Living boundary
 
 `scripts/epistemic_trust_gate.sh` gates the trustworthy set (Section A), including
-finite-dof gum k95 (`witness_gum_k95` → `2776`) and `uncertain_eq`
-(`UNCERTAIN_EQ_TRUST_OK`, 2026-08-04). Section B (k95 trip-wire) is
-**retired**. Update this map when a residual Section C / fragile form graduates.
+finite-dof gum k95 (`witness_gum_k95` → `2776`) and **C1 imported ep-var preserve**
+(`madaros_imported_ep_var_preserve_gate.sh` — Madaros≡lean_single scaled Var).
+Section B (k95 trip-wire) is **retired**. Update this map when a residual
+Section C / fragile form graduates.
 
 ## AI disclosure
 

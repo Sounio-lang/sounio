@@ -122,16 +122,16 @@ assert_structural_containment() {
     echo "FAIL unary operator containment guard missing" >&2
     exit 1
   fi
-  if [[ "$(grep -Fc 'checker_report_error_at_inplace(c, te.span, 218' self-hosted/check/check.sio)" -ne 1 ]]; then
-    echo "FAIL in-place TypeExpr boundary does not have exactly one E218 interceptor" >&2
+  if [[ "$(grep -Fc 'checker_report_error_at_inplace(c, te.span, 249' self-hosted/check/check.sio)" -ne 1 ]]; then
+    echo "FAIL in-place TypeExpr boundary does not have exactly one E249 interceptor" >&2
     exit 1
   fi
-  if [[ "$(grep -Fc 'c.report_error_at(te.span, 218' self-hosted/check/check.sio)" -ne 1 ]]; then
-    echo "FAIL by-value TypeExpr boundary does not have exactly one E218 interceptor" >&2
+  if [[ "$(grep -Fc 'c.report_error_at(te.span, 249' self-hosted/check/check.sio)" -ne 1 ]]; then
+    echo "FAIL by-value TypeExpr boundary does not have exactly one E249 interceptor" >&2
     exit 1
   fi
   if [[ "$(grep -Fc 'parser_reject_reserved_wide_float_path(' self-hosted/parser/types.sio)" -ne 3 ]]; then
-    echo "FAIL parser TypeNamed constructors do not both enforce E218" >&2
+    echo "FAIL parser TypeNamed constructors do not both enforce E249" >&2
     exit 1
   fi
   for exact in \
@@ -144,9 +144,13 @@ assert_structural_containment() {
       exit 1
     fi
   done
+  # Full-line comments may discuss the boundary without implementing a carrier.
+  # Score only source-bearing hits; otherwise a documentation improvement makes
+  # this gate claim the IR schema changed.
   if rg -n '\b(f128|f256)\b|TyF128|TyF256' \
       self-hosted/ir self-hosted/native self-hosted/main.sio self-hosted/compiler/main.sio \
-      >"$TMP_DIR/carrier-leak.log" 2>&1; then
+      2>&1 | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
+      >"$TMP_DIR/carrier-leak.log"; then
     echo "FAIL V0-A introduced a wide value carrier below the checker" >&2
     cat "$TMP_DIR/carrier-leak.log" >&2
     exit 1
@@ -157,7 +161,7 @@ assert_structural_containment() {
 assert_structural_containment
 if [[ "$STRUCTURAL_ONLY" -eq 1 ]]; then
   echo "PASS madaros_f128_f256_format_identity_gate structural-only"
-  echo "source_fresh_E218=not_run"
+  echo "source_fresh_E249=not_run"
   exit 0
 fi
 
@@ -176,12 +180,12 @@ assert_check_reserved() {
     cat "$log" >&2
     exit 1
   fi
-  if ! grep -Fq 'error[E218' "$log" || ! grep -Fq "$RESERVED_MESSAGE" "$log"; then
-    echo "FAIL $label did not emit stable E218" >&2
+  if ! grep -Fq 'error[E249' "$log" || ! grep -Fq "$RESERVED_MESSAGE" "$log"; then
+    echo "FAIL $label did not emit stable E249" >&2
     cat "$log" >&2
     exit 1
   fi
-  echo "PASS $label rejected as fresh source with E218"
+  echo "PASS $label rejected as fresh source with E249"
 }
 
 assert_check_reserved tests/compile-fail/f128_f256_source_signature_reserved.sio signature
@@ -219,17 +223,17 @@ assert_compile_reserved() {
     cat "$log" >&2
     exit 1
   fi
-  if ! grep -Fq 'error[E218' "$log" || ! grep -Fq "$RESERVED_MESSAGE" "$log"; then
-    echo "FAIL $label compilation did not stop at E218" >&2
+  if ! grep -Fq 'error[E249' "$log" || ! grep -Fq "$RESERVED_MESSAGE" "$log"; then
+    echo "FAIL $label compilation did not stop at E249" >&2
     cat "$log" >&2
     exit 1
   fi
   if [[ -e "$out" ]]; then
-    echo "FAIL $label produced an artifact despite E218" >&2
+    echo "FAIL $label produced an artifact despite E249" >&2
     ls -l "$out" >&2
     exit 1
   fi
-  echo "PASS $label produced no requested native artifact after E218"
+  echo "PASS $label produced no requested native artifact after E249"
 }
 
 assert_compile_reserved tests/compile-fail/f128_f256_source_signature_reserved.sio single_module
@@ -265,8 +269,8 @@ if run_compiler --probe-native-streaming "$render_wide_path" >"$streaming_log" 2
   cat "$streaming_log" >&2
   exit 1
 fi
-if ! grep -Fq 'error[E218' "$streaming_log" || ! grep -Fq "$RESERVED_MESSAGE" "$streaming_log"; then
-  echo "FAIL render streaming probe did not stop at parser E218" >&2
+if ! grep -Fq 'error[E249' "$streaming_log" || ! grep -Fq "$RESERVED_MESSAGE" "$streaming_log"; then
+  echo "FAIL render streaming probe did not stop at parser E249" >&2
   cat "$streaming_log" >&2
   exit 1
 fi
@@ -281,13 +285,13 @@ for forbidden_stage in \
     exit 1
   fi
 done
-echo "PASS live render skip-check route stopped at parser E218 before typecheck/summary/body"
+echo "PASS live render skip-check route stopped at parser E249 before typecheck/summary/body"
 
 echo "PASS madaros_f128_f256_format_identity_gate"
 echo "claim=internal_format_identity_plus_fresh_source_canonical_cli_containment"
-echo "source_values=parser_E218_with_checker_defense_on_canonical_cli_paths"
+echo "source_values=parser_E249_with_checker_defense_on_canonical_cli_paths"
 echo "ir_schema=unchanged"
 echo "value_transport=not_implemented"
-echo "ci_enforcement=not_wired_manual_gate"
+echo "ci_enforcement=madaros_witness_gate"
 echo "future_preparsed_cache=out_of_scope_must_version_or_revalidate"
 echo "internal_direct_load_lower=not_claimed_must_check_parser_errors"

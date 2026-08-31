@@ -7,7 +7,7 @@ use gpu::kernel_ir::*
 use gpu::ptx::*
 
 // Lower a complete GPU kernel IR to PTX
-pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
+pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
     var buf = ptx_buf_new()
 
     // 1. Emit header (.version, .target, .address_size). A wmma m16n16k16 tile needs sm_70+
@@ -1585,7 +1585,7 @@ fn gpu_emit_oct_recur(pAR: string, pBR: string, pxR: string, pCR: string, pHR: s
 }
 
 // Lower all operations in sequence
-fn gpu_lower_ops(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
+fn gpu_lower_ops(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
     var out = buf
     var i: i64 = 0
 
@@ -1598,8 +1598,42 @@ fn gpu_lower_ops(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Di
     out
 }
 
+// Fail-closed refusal for a GpuOpcode that reaches PTX lowering with no rule (#2221).
+//
+// This match had 53 arms against 102 declared GpuOpcode variants and no wildcard.
+// The cost was not confined to the 49 missing arms. lean_single reports a
+// non-exhaustive match with tc_error_hard and then RETURNS from compiling the
+// match, leaving it valueless (lean_single.sio:25492) — and the build still exits
+// 0. So gpu_lower_op returned garbage for EVERY opcode, and `souc --gpu-target`
+// on current main emitted 2 bytes of PTX for kernels that used to lower fully.
+// Measured 2026-08-28: with these arms in place a 9-kernel PTX corpus is again
+// byte-identical to the last compiler built before #2215 made the
+// non-exhaustiveness visible; without them it was empty.
+//
+// Every unlowered opcode now has an arm that calls this and names itself. The
+// refusal is COMPILE-TIME for the programmer and a runtime abort inside the
+// compiler process: gpu_lower_op runs while Madaros lowers a user kernel, so this
+// aborts that compilation and no PTX is written. It cannot be a static check on
+// the enum, because the static check is exactly the non-exhaustiveness error being
+// removed here. What preserves the static signal is that the 49 arms are NAMED
+// rather than a wildcard: a future 103rd variant is again reported as
+// non-exhaustive at build time.
+//
+// panic() discards its message under the lean_single codegen that builds Madaros
+// (it lowers to a bare exit(1) — emit_assert_fail, lean_single.sio:8491), so the
+// opcode name has to be printed before the panic. That is why this function, and
+// its callers up to the two GPU drivers (which already declare IO), carries the
+// IO effect.
+fn gpu_refuse_unlowered(buf: PtxBuf, opcode_name: string) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
+    print("error: gpu codegen: no PTX lowering rule for GpuOpcode::")
+    print(opcode_name)
+    print(" - refusing to emit PTX (see issue #2221)\n")
+    panic("gpu codegen: unlowered GpuOpcode reached PTX lowering")
+    buf
+}
+
 // Lower a single GPU operation to PTX
-fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
+fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
     // Struct-first representation avoids enum field destructuring in the
     // self-hosted IR; switch on opcode and use struct fields explicitly.
     let opcode = op.opcode
@@ -2756,6 +2790,62 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             out = ptx_push_str(out, ";\n")
             out
         }
+
+        // --- Unlowered opcodes: fail closed, by name (#2221) ---
+        // These 49 GpuOpcode variants have no PTX emission rule. Until one is
+        // written each refuses by name, instead of falling off a non-exhaustive
+        // match and emitting nothing at all. Writing a real lowering means
+        // REPLACING the arm here, never deleting it: the named arms are what keep
+        // this match exhaustive, so a 103rd variant is still caught at build time.
+        GpuOpcode::GpuAtomicAnd => gpu_refuse_unlowered(buf, "GpuAtomicAnd"),
+        GpuOpcode::GpuAtomicCas => gpu_refuse_unlowered(buf, "GpuAtomicCas"),
+        GpuOpcode::GpuAtomicExch => gpu_refuse_unlowered(buf, "GpuAtomicExch"),
+        GpuOpcode::GpuAtomicMax => gpu_refuse_unlowered(buf, "GpuAtomicMax"),
+        GpuOpcode::GpuAtomicMin => gpu_refuse_unlowered(buf, "GpuAtomicMin"),
+        GpuOpcode::GpuAtomicOr => gpu_refuse_unlowered(buf, "GpuAtomicOr"),
+        GpuOpcode::GpuAtomicXor => gpu_refuse_unlowered(buf, "GpuAtomicXor"),
+        GpuOpcode::GpuBallot => gpu_refuse_unlowered(buf, "GpuBallot"),
+        GpuOpcode::GpuCgReduce => gpu_refuse_unlowered(buf, "GpuCgReduce"),
+        GpuOpcode::GpuCgSync => gpu_refuse_unlowered(buf, "GpuCgSync"),
+        GpuOpcode::GpuCgTiledPartition => gpu_refuse_unlowered(buf, "GpuCgTiledPartition"),
+        GpuOpcode::GpuClz => gpu_refuse_unlowered(buf, "GpuClz"),
+        GpuOpcode::GpuCos => gpu_refuse_unlowered(buf, "GpuCos"),
+        GpuOpcode::GpuCpAsyncWait => gpu_refuse_unlowered(buf, "GpuCpAsyncWait"),
+        GpuOpcode::GpuCvtF32Tf32 => gpu_refuse_unlowered(buf, "GpuCvtF32Tf32"),
+        GpuOpcode::GpuExit => gpu_refuse_unlowered(buf, "GpuExit"),
+        GpuOpcode::GpuExp2 => gpu_refuse_unlowered(buf, "GpuExp2"),
+        GpuOpcode::GpuFenceAcqRel => gpu_refuse_unlowered(buf, "GpuFenceAcqRel"),
+        GpuOpcode::GpuFenceAcquire => gpu_refuse_unlowered(buf, "GpuFenceAcquire"),
+        GpuOpcode::GpuFenceRelease => gpu_refuse_unlowered(buf, "GpuFenceRelease"),
+        GpuOpcode::GpuGetGridDim => gpu_refuse_unlowered(buf, "GpuGetGridDim"),
+        GpuOpcode::GpuGetLaneId => gpu_refuse_unlowered(buf, "GpuGetLaneId"),
+        GpuOpcode::GpuGetSmId => gpu_refuse_unlowered(buf, "GpuGetSmId"),
+        GpuOpcode::GpuGetWarpId => gpu_refuse_unlowered(buf, "GpuGetWarpId"),
+        GpuOpcode::GpuLdGlobalCached => gpu_refuse_unlowered(buf, "GpuLdGlobalCached"),
+        GpuOpcode::GpuLg2 => gpu_refuse_unlowered(buf, "GpuLg2"),
+        GpuOpcode::GpuMembar => gpu_refuse_unlowered(buf, "GpuMembar"),
+        GpuOpcode::GpuMma => gpu_refuse_unlowered(buf, "GpuMma"),
+        GpuOpcode::GpuMmaF16 => gpu_refuse_unlowered(buf, "GpuMmaF16"),
+        GpuOpcode::GpuMmaTf32 => gpu_refuse_unlowered(buf, "GpuMmaTf32"),
+        GpuOpcode::GpuNot => gpu_refuse_unlowered(buf, "GpuNot"),
+        GpuOpcode::GpuOr => gpu_refuse_unlowered(buf, "GpuOr"),
+        GpuOpcode::GpuPopc => gpu_refuse_unlowered(buf, "GpuPopc"),
+        GpuOpcode::GpuPrefetch => gpu_refuse_unlowered(buf, "GpuPrefetch"),
+        GpuOpcode::GpuRcp => gpu_refuse_unlowered(buf, "GpuRcp"),
+        GpuOpcode::GpuRsqrt => gpu_refuse_unlowered(buf, "GpuRsqrt"),
+        GpuOpcode::GpuSetpGt => gpu_refuse_unlowered(buf, "GpuSetpGt"),
+        GpuOpcode::GpuSetpNe => gpu_refuse_unlowered(buf, "GpuSetpNe"),
+        GpuOpcode::GpuShflBfly => gpu_refuse_unlowered(buf, "GpuShflBfly"),
+        GpuOpcode::GpuShflIdx => gpu_refuse_unlowered(buf, "GpuShflIdx"),
+        GpuOpcode::GpuShflUp => gpu_refuse_unlowered(buf, "GpuShflUp"),
+        GpuOpcode::GpuShl => gpu_refuse_unlowered(buf, "GpuShl"),
+        GpuOpcode::GpuShr => gpu_refuse_unlowered(buf, "GpuShr"),
+        GpuOpcode::GpuShra => gpu_refuse_unlowered(buf, "GpuShra"),
+        GpuOpcode::GpuSin => gpu_refuse_unlowered(buf, "GpuSin"),
+        GpuOpcode::GpuStGlobalWriteback => gpu_refuse_unlowered(buf, "GpuStGlobalWriteback"),
+        GpuOpcode::GpuTmaLoad => gpu_refuse_unlowered(buf, "GpuTmaLoad"),
+        GpuOpcode::GpuTmaStore => gpu_refuse_unlowered(buf, "GpuTmaStore"),
+        GpuOpcode::GpuVote => gpu_refuse_unlowered(buf, "GpuVote"),
     }
 }
 

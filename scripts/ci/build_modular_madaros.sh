@@ -36,6 +36,24 @@ if [[ "$OUT" == -* ]]; then
     exit 2
 fi
 
+relax_bootstrap_vmem_limit() {
+    local before after
+    before="$(ulimit -v 2>/dev/null || true)"
+    if [[ -z "$before" || "$before" == "unlimited" ]]; then
+        return 0
+    fi
+
+    ulimit -v unlimited 2>/dev/null || true
+    after="$(ulimit -v 2>/dev/null || true)"
+    if [[ "$after" == "unlimited" ]]; then
+        echo "→ relaxed VMEM limit for bootstrap build: $before -> unlimited"
+    else
+        echo "warning: could not relax VMEM limit for bootstrap build (ulimit -v=$before); old bootstrap read_file may SIGSEGV under large module imports" >&2
+    fi
+}
+
+relax_bootstrap_vmem_limit
+
 # Resolve the bootstrap ELF used to derive the source-tracking seed. It MUST be an
 # ELF — never the bin/souc wrapper (a #!-script that now routes to Madaros); the
 # `#!` guard skips any wrapper. bin/souc-linux-x86_64 is preferred over the older

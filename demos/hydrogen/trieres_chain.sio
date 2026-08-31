@@ -1,0 +1,740 @@
+// demos/hydrogen/trieres_chain.sio
+//
+// TRIERES hydrogen valley — the wellhead-to-dispensed cost of green hydrogen
+// as an epistemic p-box. The question: does valley-scale green H2 beat the
+// 6 EUR/kg dispensing gate? The honest answer is an interval, and this file
+// computes it three ways — the conventional single number (independent
+// uniform inputs), the distribution-free corner p-box, and a GUM first-order
+// cross-check — then uses Sobol variance shares to name the contracts that
+// actually carry the decision.
+//
+// Context: TRIERES is an EU hydrogen-valley project (Grant Agreement
+// 101112056); NCSR Demokritos is a paid beneficiary (~197.5k EUR). Written
+// for Dr. Emmanuel Stamatakis (NCSR Demokritos, H2Lab). It is the valley-
+// scale companion to hub_chain.sio (Crete system, delivered EUR/kg): same
+// monotone-chain p-box method, different scope — this chain ends at the
+// dispenser and puts the valley's capacity factor on trial.
+//
+// SOURCED inputs (his / Demokritos literature, as used in hub_chain.sio):
+//   - electrolyser CAPEX 1500 EUR/kW, O&M 20 EUR/kW/yr, specific energy
+//     46.4 kWh/kg, system LCOE scenarios 0.046-0.052 EUR/kWh, CRF(7 %, 25 y)
+//     — Energies 16:6257 (2023), Stamatakis et al.;
+//   - MH compression energy 44-89 kWh_th/kg — the endpoints of his
+//     seven-stage (Renewable Energy 147:164, 2020) and dual-stage
+//     (IJHE 46:29272, 2021) compressor papers;
+//   - waste-heat price [0.005, 0.02] EUR/kWh_th and tank storage 500 EUR/kg
+//     cycling 30-45 x/yr — hub_chain.sio intervals (Energies 2023 basis).
+//
+// ILLUSTRATIVE ASSUMPTIONS (OURS, labeled — no citable source; swap slots):
+//   - capacity factor CF in [0.55, 0.80]: valley-scale hybrid utilization
+//     from the consensus spec. CONTRAST: his published Crete electrolyser
+//     CF interval is [0.35, 0.44] (hub_chain.sio) — the valley claim is
+//     higher utilization by hybridization, and that claim is on trial here;
+//   - CAPEX multiplier [0.8, 1.2] and specific energy +-2.5 kWh/kg —
+//     smr_h2_lcoh.sio screening idiom;
+//   - dispensing cost [0.50, 1.50] EUR/kg — invented range (compression
+//     cascade + storage + retail margin at the pump), no citable source;
+//   - aleatory operational bands sigma_elec 0.002, sigma_CF 0.02,
+//     sigma_eth 5.0 — hub_chain.sio idiom;
+//   - the 6 EUR/kg gate itself (consensus spec threshold; same gate as
+//     hub_chain.sio for cross-demo comparability).
+//
+// Method: D = prod + compr + storage + dispensing is MONOTONE in every
+// epistemic input (increasing in prices/energies/CAPEX/dispensing,
+// decreasing in CF and cycling), so the p-box on P(D < 6) is exact via
+// corner evaluation — machine-checked in
+// formal/lean4/SounioHydrogenPbox.lean (monotone_event_equiv), no
+// independence assumption anywhere in that bound. The conventional
+// independence-uniform Monte Carlo is shown NEXT TO it, labeled as the
+// artifact it is. Sobol first-order shares are computed two ways: exact
+// GUM-linear indices (partials at the nominal, analytic) and a
+// Saltelli/Jansen Monte Carlo on the true nonlinear model — under the
+// conventional independence-uniform measure, and labeled as such: they are
+// a screening map, not an epistemic claim.
+//
+// Run:  bin/souc run demos/hydrogen/trieres_chain.sio
+// Byte-identical on the Madaros and lean_single engines by construction (see
+// the determinism note below); ends with TRIERES_CHAIN_OK.
+
+// NOTE: `use epistemic::pbox::*` and `use epistemic::sobol_indices::*`
+// together trip a spurious E035 (both modules export a `run_tests` symbol;
+// dual-wildcard collision). Qualified calls without `use` silently no-op on
+// this compiler, so the workaround is selective import of the two pbox
+// functions this file uses.
+use epistemic::sobol_indices::*
+use epistemic::pbox::new
+use epistemic::pbox::width
+
+// ─── pure-Sounio math (no extern) ───
+
+fn mh_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn mh_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn mh_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+fn mh_ln(x: f64) -> f64 with Mut, Div {
+    var m = x
+    var k: i64 = 0
+    while m >= 2.0 { m = m / 2.0; k = k + 1 }
+    while m < 1.0 { m = m * 2.0; k = k - 1 }
+    let y = (m - 1.0) / (m + 1.0)
+    let y2 = y * y
+    var term = y
+    var sum = 0.0
+    var i: i64 = 0
+    while i < 12 {
+        sum = sum + term / (2.0 * (i as f64) + 1.0)
+        term = term * y2
+        i = i + 1
+    }
+    2.0 * sum + (k as f64) * 0.6931471805599453
+}
+
+// normal CDF via Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7 on erf)
+fn phi(x: f64) -> f64 with Mut, Div {
+    var v = x / 1.4142135623730951
+    var neg = false
+    if v < 0.0 { neg = true; v = 0.0 - v }
+    let t = 1.0 / (1.0 + 0.3275911 * v)
+    let t2 = t * t
+    let poly = 0.254829592 * t - 0.284496736 * t2 + 1.421413741 * t2 * t
+             - 1.453152027 * t2 * t2 + 1.061405429 * t2 * t2 * t
+    var e = 1.0 - poly * mh_exp(0.0 - v * v)
+    if neg { e = 0.0 - e }
+    0.5 * (1.0 + e)
+}
+
+// ─── PRNG (xorshift, deterministic seed → reproducible receipt) ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut {
+    RNG_A = a
+    RNG_B = b
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_u() -> f64 with Mut, Div {
+    (rng_next() % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_u(); j = j + 1 }
+    sum - 6.0
+}
+
+// ─── cross-engine determinism helpers ───
+//
+// The two compiler backends (Madaros, lean_single) evaluate this file's
+// pure-Sounio float chains to within 1 ulp of each other, but their f64
+// PRINTERS are not interchangeable — one truncates where the other rounds,
+// and 6-decimal decimals are not binary-representable, so no binary float
+// can be trusted to print identically on both. Therefore every number below
+// is printed by print_fix6, which scales to an INTEGER with round-half-up
+// and emits decimal digits as string literals — bit-identical integer in,
+// byte-identical text out. Monte Carlo hit counts compare a micro-EUR
+// integer (round-half-up of D x 10^6) against the integer gate 6 000 000,
+// so no borderline float `<` can flip a count.
+
+fn floor_i64(x: f64) -> i64 with Mut {
+    var n = x as i64
+    if (n as f64) > x { n = n - 1 }
+    return n
+}
+
+fn pct(hits: i64, n: i64) -> f64 with Div {
+    100.0 * (hits as f64) / (n as f64)
+}
+
+fn pd(d: i64) with IO {
+    if d == 0 { print("0") }
+    if d == 1 { print("1") }
+    if d == 2 { print("2") }
+    if d == 3 { print("3") }
+    if d == 4 { print("4") }
+    if d == 5 { print("5") }
+    if d == 6 { print("6") }
+    if d == 7 { print("7") }
+    if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+// fixed 6-decimal printer; |x| < 10^6, round-half-up
+fn print_fix6(x: f64) with IO, Mut {
+    var v = x
+    if v < 0.0 { print("-"); v = 0.0 - v }
+    let n = floor_i64(v * 1000000.0 + 0.5)
+    let ip = n / 1000000
+    let fp = n % 1000000
+    var div: i64 = 100000
+    while div > ip { div = div / 10 }
+    if div < 1 { div = 1 }
+    while div > 0 { pd((ip / div) % 10); div = div / 10 }
+    print(".")
+    var fdiv: i64 = 100000
+    while fdiv > 0 { pd((fp / fdiv) % 10); fdiv = fdiv / 10 }
+}
+
+// ─── the valley chain ───
+
+fn crf(r: f64, n_yr: i64) -> f64 with Mut, Div {
+    let q = mh_exp((n_yr as f64) * mh_ln(1.0 + r))
+    r * q / (q - 1.0)
+}
+
+// production [EUR/kg]: electricity + annualized CAPEX/O&M over annual output.
+// A = annual EUR per kW; kg per kW per year = CF x 8760 / e_spec.
+fn prod_cost(p_elec: f64, capex_m: f64, e_spec: f64, cf: f64) -> f64 with Mut, Div {
+    let a = 1500.0 * capex_m * crf(0.07, 25) + 20.0
+    e_spec * p_elec + a * e_spec / (cf * 8760.0)
+}
+
+// compression [EUR/kg]: thermal energy x waste-heat price
+fn compr_cost(e_th: f64, p_heat: f64) -> f64 {
+    e_th * p_heat
+}
+
+// storage [EUR/kg]: 500 EUR/kg tank, CRF 7 %/25 y, ncyc cycles/yr
+fn storage_cost(ncyc: f64) -> f64 with Mut, Div {
+    500.0 * crf(0.07, 25) / ncyc
+}
+
+// wellhead -> dispensed cost [EUR/kg]
+fn delivered(p_elec: f64, capex_m: f64, e_spec: f64, cf: f64,
+             e_th: f64, p_heat: f64, ncyc: f64, disp: f64) -> f64 with Mut, Div {
+    prod_cost(p_elec, capex_m, e_spec, cf)
+        + compr_cost(e_th, p_heat) + storage_cost(ncyc) + disp
+}
+
+// analytic partials of D at the evaluation point (for GUM and exact
+// first-order shares of the linearized model)
+fn d_pelec(e_spec: f64) -> f64 { e_spec }
+fn d_capex(e_spec: f64, cf: f64) -> f64 with Mut, Div {
+    1500.0 * crf(0.07, 25) * e_spec / (cf * 8760.0)
+}
+fn d_espec(p_elec: f64, capex_m: f64, cf: f64) -> f64 with Mut, Div {
+    let a = 1500.0 * capex_m * crf(0.07, 25) + 20.0
+    p_elec + a / (cf * 8760.0)
+}
+fn d_cf(capex_m: f64, e_spec: f64, cf: f64) -> f64 with Mut, Div {
+    let a = 1500.0 * capex_m * crf(0.07, 25) + 20.0
+    0.0 - a * e_spec / (8760.0 * cf * cf)
+}
+fn d_eth(p_heat: f64) -> f64 { p_heat }
+fn d_pheat(e_th: f64) -> f64 { e_th }
+fn d_ncyc(ncyc: f64) -> f64 with Mut, Div {
+    0.0 - 500.0 * crf(0.07, 25) / (ncyc * ncyc)
+}
+fn d_disp() -> f64 { 1.0 }
+
+// ─── epistemic intervals (globals so the MC/Sobol draws share them) ───
+// cols: 0 p_elec | 1 capex mult | 2 e_spec | 3 CF | 4 compr energy |
+//       5 heat price | 6 tank cycling | 7 dispensing
+
+var LO8: [f64; 8] = [0.0; 8]
+var HI8: [f64; 8] = [0.0; 8]
+
+fn mid(c: i64) -> f64 with Div {
+    0.5 * (LO8[c] + HI8[c])
+}
+
+// ─── Monte Carlo: P(D < 6 EUR/kg), integer micro-EUR decision ───
+
+// aleatory scatter only, epistemic inputs pinned (corners / nominal)
+fn mc_hits_pinned(p_elec: f64, capex_m: f64, e_spec: f64, cf: f64,
+                  e_th: f64, p_heat: f64, ncyc: f64, disp: f64,
+                  n: i64) -> i64 with Mut, Div {
+    var hits: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let e = p_elec + 0.002 * rand_normal()
+        let c = cf + 0.02 * rand_normal()
+        let t = e_th + 5.0 * rand_normal()
+        let d = delivered(e, capex_m, e_spec, c, t, p_heat, ncyc, disp)
+        let k6 = floor_i64(d * 1000000.0 + 0.5)
+        if k6 < 6000000 { hits = hits + 1 }
+        i = i + 1
+    }
+    hits
+}
+
+// the CONVENTIONAL analysis: all eight epistemic inputs as independent
+// uniforms on their intervals + the same aleatory bands. Accumulates
+// mean/sumsq for the printed statistics; returns hits.
+fn mc_hits_indep(n: i64, acc_mean: f64, tag: i64) -> i64 with IO, Mut, Div {
+    var hits: i64 = 0
+    var sum = 0.0
+    var sumsq = 0.0
+    var i: i64 = 0
+    while i < n {
+        var v0 = 0.0
+        var v1 = 0.0
+        var v2 = 0.0
+        var v3 = 0.0
+        var v4 = 0.0
+        var c: i64 = 0
+        while c < 8 {
+            // NOTE: keep the RNG call in its own statement — on this
+            // Madaros build, a Mut-effectful call combined with a
+            // global-array read in one expression double-consumes the
+            // stream (engine divergence; lean_single is correct).
+            let u = rand_u()
+            let x = LO8[c] + (HI8[c] - LO8[c]) * u
+            if c == 0 { v0 = x }
+            if c == 1 { v1 = x }
+            if c == 2 { v2 = x }
+            if c == 3 { v3 = x }
+            if c == 4 { v4 = x }
+            c = c + 1
+        }
+        let e = v0 + 0.002 * rand_normal()
+        let cc = v3 + 0.02 * rand_normal()
+        let t = v4 + 5.0 * rand_normal()
+        let u5 = rand_u()
+        let ph = LO8[5] + (HI8[5] - LO8[5]) * u5
+        let u6 = rand_u()
+        let ny = LO8[6] + (HI8[6] - LO8[6]) * u6
+        let u7 = rand_u()
+        let dp = LO8[7] + (HI8[7] - LO8[7]) * u7
+        let d = delivered(e, v1, v2, cc, t, ph, ny, dp)
+        sum = sum + d
+        sumsq = sumsq + d * d
+        let k6 = floor_i64(d * 1000000.0 + 0.5)
+        if k6 < 6000000 { hits = hits + 1 }
+        i = i + 1
+    }
+    let mean = sum / (n as f64)
+    print("  mean delivered [EUR/kg] : "); print_fix6(mean); println("")
+    print("  std  delivered [EUR/kg] : ")
+    print_fix6(mh_sqrt(sumsq / (n as f64) - mean * mean)); println("")
+    hits
+}
+
+// ─── Sobol machinery (Saltelli matrices, precomputed outputs) ───
+// 8 inputs, uniform on their intervals (the conventional measure). The
+// model is NOT linear here (1/CF, 1/ncyc, products), so the GUM-linear
+// indices are the exact shares of the LINEARIZED model and Jansen on the
+// true model is the sampling cross-check — both labeled.
+
+var SAL_A: [f64; 128000] = [0.0; 128000]
+var SAL_B: [f64; 128000] = [0.0; 128000]
+var SFA: [f64; 16384] = [0.0; 16384]
+var SFB: [f64; 16384] = [0.0; 16384]
+var SFAB: [f64; 16384] = [0.0; 16384]
+var SIG8: [f64; 16384] = [0.0; 16384]
+var OUT8: [f64; 16384] = [0.0; 16384]
+
+fn draw_input(c: i64) -> f64 with Mut, Div {
+    // RNG call hoisted into its own statement — see mc_hits_indep note.
+    let u = rand_u()
+    LO8[c] + (HI8[c] - LO8[c]) * u
+}
+
+fn eval_row(c_override: i64, j: i64) -> f64 with Mut, Div {
+    let v0 = SAL_A[0 * 16000 + j]
+    let v1 = SAL_A[1 * 16000 + j]
+    let v2 = SAL_A[2 * 16000 + j]
+    var v3 = SAL_A[3 * 16000 + j]
+    let v4 = SAL_A[4 * 16000 + j]
+    let v5 = SAL_A[5 * 16000 + j]
+    let v6 = SAL_A[6 * 16000 + j]
+    let v7 = SAL_A[7 * 16000 + j]
+    var r0 = v0
+    var r1 = v1
+    var r2 = v2
+    var r3 = v3
+    var r4 = v4
+    var r5 = v5
+    var r6 = v6
+    var r7 = v7
+    if c_override == 0 { r0 = SAL_B[0 * 16000 + j] }
+    if c_override == 1 { r1 = SAL_B[1 * 16000 + j] }
+    if c_override == 2 { r2 = SAL_B[2 * 16000 + j] }
+    if c_override == 3 { r3 = SAL_B[3 * 16000 + j] }
+    if c_override == 4 { r4 = SAL_B[4 * 16000 + j] }
+    if c_override == 5 { r5 = SAL_B[5 * 16000 + j] }
+    if c_override == 6 { r6 = SAL_B[6 * 16000 + j] }
+    if c_override == 7 { r7 = SAL_B[7 * 16000 + j] }
+    delivered(r0, r1, r2, r3, r4, r5, r6, r7)
+}
+
+fn eval_row_b(j: i64) -> f64 with Mut, Div {
+    let r0 = SAL_B[0 * 16000 + j]
+    let r1 = SAL_B[1 * 16000 + j]
+    let r2 = SAL_B[2 * 16000 + j]
+    let r3 = SAL_B[3 * 16000 + j]
+    let r4 = SAL_B[4 * 16000 + j]
+    let r5 = SAL_B[5 * 16000 + j]
+    let r6 = SAL_B[6 * 16000 + j]
+    let r7 = SAL_B[7 * 16000 + j]
+    delivered(r0, r1, r2, r3, r4, r5, r6, r7)
+}
+
+// ─── Sobol section (helper — see the NOTE at the call site in main) ───
+
+fn print_sobol() with IO, Mut, Div {
+    log_linear_indices(SIG8, &!OUT8, 8)
+    let ns: i64 = 16000
+    rng_seed(314159265, 271828182)
+    var c: i64 = 0
+    var j: i64 = 0
+    while c < 8 {
+        j = 0
+        while j < ns { SAL_A[c * 16000 + j] = draw_input(c); j = j + 1 }
+        c = c + 1
+    }
+    c = 0
+    while c < 8 {
+        j = 0
+        while j < ns { SAL_B[c * 16000 + j] = draw_input(c); j = j + 1 }
+        c = c + 1
+    }
+    j = 0
+    while j < ns {
+        SFA[j] = eval_row(0 - 1, j)
+        SFB[j] = eval_row_b(j)
+        j = j + 1
+    }
+    // Centered Viano/Saltelli first-order estimator: the stdlib's
+    // first_order_jansen computes mean(fB·(fAB − fA))/var; the identity
+    // only needs E[fAB] = E[fA], so centering fB by its SAMPLE mean is
+    // asymptotically unbiased (O(1/n) bias, negligible at n = 16000) and
+    // cuts the estimator noise ~10x — raw Viano is dominated by the
+    // 6.4 EUR mean of the output, not by the signal.
+    var mb = 0.0
+    j = 0
+    while j < ns { mb = mb + SFB[j]; j = j + 1 }
+    mb = mb / (ns as f64)
+    j = 0
+    while j < ns { SFB[j] = SFB[j] - mb; j = j + 1 }
+    let var_tot = variance(SFA, ns)
+
+    print("Sobol first-order shares of Var(D) [%] — CONVENTIONAL measure")
+    println("")
+    print("  (independence-uniform, aleatory excluded): GUM-linear exact")
+    println("")
+    print("  (linearized model) | Jansen on the true model (centered")
+    println("")
+    print("  estimator, Saltelli n = 16000):")
+    println("")
+    var jansen_sum = 0.0
+    c = 0
+    while c < 8 {
+        j = 0
+        while j < ns {
+            SFAB[j] = eval_row(c, j)
+            j = j + 1
+        }
+        let sj = first_order_jansen(SFA, SFB, SFAB, ns, var_tot)
+        jansen_sum = jansen_sum + sj
+        if c == 0 { print("  LCOE price      : ") }
+        if c == 1 { print("  CAPEX mult      : ") }
+        if c == 2 { print("  specific energy : ") }
+        if c == 3 { print("  capacity factor : ") }
+        if c == 4 { print("  compr energy    : ") }
+        if c == 5 { print("  heat price      : ") }
+        if c == 6 { print("  tank cycling    : ") }
+        if c == 7 { print("  dispensing      : ") }
+        print("GUM-lin ")
+        print_fix6(100.0 * OUT8[c]); print(" | Jansen ")
+        print_fix6(100.0 * sj); println("")
+        c = c + 1
+    }
+    print("  Jansen indices sum (centered estimator): the gap to 100 is")
+    println("")
+    print("  genuine interaction share — energy x price products couple the")
+    println("")
+    print("  intervals — not missing mass: ")
+    print_fix6(100.0 * jansen_sum); println("")
+    println("")
+}
+
+// ─── main ───
+
+fn main() -> i32 with IO, Mut, Div {
+    // SOURCED intervals (see header)
+    LO8[0] = 0.046; HI8[0] = 0.052      // LCOE EUR/kWh (Energies 2023)
+    LO8[4] = 44.0; HI8[4] = 89.0        // compr kWh_th/kg (his two papers)
+    LO8[5] = 0.005; HI8[5] = 0.02       // heat EUR/kWh_th (hub_chain)
+    LO8[6] = 30.0; HI8[6] = 45.0        // tank cycling /yr (hub_chain)
+    // ILLUSTRATIVE ASSUMPTIONS (OURS — see header)
+    LO8[1] = 0.8; HI8[1] = 1.2          // CAPEX multiplier
+    LO8[2] = 43.9; HI8[2] = 48.9        // e_spec kWh/kg
+    LO8[3] = 0.55; HI8[3] = 0.80        // CF — the valley claim on trial
+    LO8[7] = 0.50; HI8[7] = 1.50        // dispensing EUR/kg
+
+    print("=== TRIERES valley chain: wellhead -> dispensed EUR/kg ===")
+    println("")
+    print("  TRIERES hydrogen valley (EU Grant Agreement 101112056; NCSR")
+    println("")
+    print("  Demokritos beneficiary). Gate: 6 EUR/kg dispensed (spec).")
+    println("")
+    print("  SOURCED: LCOE .046-.052, 1500 EUR/kW, 20 EUR/kW/yr, 46.4")
+    println("")
+    print("  kWh/kg (Energies 2023); compression 44-89 kWh_th/kg (his two")
+    println("")
+    print("  compressor papers); heat .005-.02, tank 500 EUR/kg x 30-45")
+    println("")
+    print("  cycles (hub_chain). ILLUSTRATIVE (ours, labeled): CF [.55,")
+    println("")
+    print("  .80], CAPEX x[0.8,1.2], e_spec +-2.5, dispensing [.50,1.50].")
+    println("")
+    println("")
+
+    // ── stage-by-stage intervals (deterministic corners) ──
+    print("stage intervals [EUR/kg] (best .. worst corner):")
+    println("")
+    print("  production   : [")
+    print_fix6(prod_cost(0.046, 0.8, 43.9, 0.80)); print(" , ")
+    print_fix6(prod_cost(0.052, 1.2, 48.9, 0.55)); println(" ]")
+    print("  compression  : [")
+    print_fix6(compr_cost(44.0, 0.005)); print(" , ")
+    print_fix6(compr_cost(89.0, 0.02)); println(" ]")
+    print("  storage      : [")
+    print_fix6(storage_cost(45.0)); print(" , ")
+    print_fix6(storage_cost(30.0)); println(" ]")
+    print("  dispensing   : [0.500000 , 1.500000]  <- ILLUSTRATIVE (ours)")
+    println("")
+    println("")
+
+    let d_lo = delivered(0.046, 0.8, 43.9, 0.80, 44.0, 0.005, 45.0, 0.50)
+    let d_hi = delivered(0.052, 1.2, 48.9, 0.55, 89.0, 0.02, 30.0, 1.50)
+    let d_mid = delivered(mid(0), mid(1), mid(2), mid(3),
+                          mid(4), mid(5), mid(6), mid(7))
+    print("delivered cost interval [EUR/kg]: [")
+    print_fix6(d_lo); print(" , "); print_fix6(d_hi); println(" ]")
+    print("nominal point estimate [EUR/kg]:   ")
+    print_fix6(d_mid); print("  <- MISSES the 6 EUR gate")
+    println("")
+    println("")
+
+    // ── the conventional analysis: independence assumed, one number ──
+    let n: i64 = 20000
+    print("CONVENTIONAL analysis (independent uniform inputs + aleatory,")
+    println("")
+    print("  MC n = 20000 — the number a standard toolkit reports):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let h_ind = mc_hits_indep(n, 0.0, 0)
+    print("  P(dispensed < 6 EUR/kg) [%]   : "); print_fix6(pct(h_ind, n))
+    println("")
+    println("")
+
+    // ── distribution-free p-box: only two corners matter (monotone) ──
+    print("DISTRIBUTION-FREE corner p-box (aleatory scatter only, MC n =")
+    println("")
+    print("  20000 per corner; monotonicity Lean-checked, no independence")
+    println("")
+    print("  assumption anywhere):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let h_best = mc_hits_pinned(0.046, 0.8, 43.9, 0.80, 44.0, 0.005, 45.0, 0.50, n)
+    print("  BEST  corner P(<6) [%]: "); print_fix6(pct(h_best, n)); println("")
+    rng_seed(314159265, 271828182)
+    let h_worst = mc_hits_pinned(0.052, 1.2, 48.9, 0.55, 89.0, 0.02, 30.0, 1.50, n)
+    print("  WORST corner P(<6) [%]: "); print_fix6(pct(h_worst, n)); println("")
+    let box = new(pct(h_worst, n), pct(h_best, n))
+    print("  PBOX on beating 6 EUR/kg: [")
+    print_fix6(box.lo); print(" , "); print_fix6(box.hi)
+    print("] %  width "); print_fix6(width(box)); println("")
+    println("")
+
+    // ── GUM first-order cross-check at the nominal ──
+    // sigma_D from uniform interval variances w^2/3 through analytic
+    // partials + the aleatory bands — same composition as mc_hits_indep.
+    let s3 = mh_sqrt(3.0)
+    let g0 = d_pelec(mid(2))
+    let g1 = d_capex(mid(2), mid(3))
+    let g2 = d_espec(mid(0), mid(1), mid(3))
+    let g3 = d_cf(mid(1), mid(2), mid(3))
+    let g4 = d_eth(mid(5))
+    let g5 = d_pheat(mid(4))
+    let g6 = d_ncyc(mid(6))
+    let g7 = d_disp()
+    let w0 = 0.5 * (HI8[0] - LO8[0])
+    let w1 = 0.5 * (HI8[1] - LO8[1])
+    let w2 = 0.5 * (HI8[2] - LO8[2])
+    let w3 = 0.5 * (HI8[3] - LO8[3])
+    let w4 = 0.5 * (HI8[4] - LO8[4])
+    let w5 = 0.5 * (HI8[5] - LO8[5])
+    let w6 = 0.5 * (HI8[6] - LO8[6])
+    let w7 = 0.5 * (HI8[7] - LO8[7])
+    var var_gum = (g0 * w0) * (g0 * w0) / 3.0 + (g1 * w1) * (g1 * w1) / 3.0
+        + (g2 * w2) * (g2 * w2) / 3.0 + (g3 * w3) * (g3 * w3) / 3.0
+        + (g4 * w4) * (g4 * w4) / 3.0 + (g5 * w5) * (g5 * w5) / 3.0
+        + (g6 * w6) * (g6 * w6) / 3.0 + (g7 * w7) * (g7 * w7) / 3.0
+    var_gum = var_gum + (g0 * 0.002) * (g0 * 0.002)
+        + (g3 * 0.02) * (g3 * 0.02) + (g4 * 5.0) * (g4 * 5.0)
+    let sig_gum = mh_sqrt(var_gum)
+    print("GUM first-order cross-check at nominal (uniform w^2/3 +")
+    println("")
+    print("  aleatory; analytic partials):")
+    println("")
+    print("  sigma_D [EUR/kg]          : "); print_fix6(sig_gum); println("")
+    print("  GUM P(<6) [%]             : ")
+    print_fix6(100.0 * phi((6.0 - d_mid) / sig_gum)); println("")
+    println("")
+
+    // ── one-at-a-time corners: which interval can flip the gate alone ──
+    print("one-at-a-time corners (P(<6) [%], others at nominal):")
+    println("")
+    print("  nominal point              : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  LCOE     .046 / .052       : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(LO8[0], mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(HI8[0], mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  CAPEX    x0.8 / x1.2       : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), LO8[1], mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), HI8[1], mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  e_spec   43.9 / 48.9       : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), LO8[2], mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), HI8[2], mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  CF       .80 / .55  (valley): ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), mid(2), HI8[3], mid(4), mid(5), mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), mid(2), LO8[3], mid(4), mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  compr    44 / 89 kWh_th    : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), mid(2), mid(3), LO8[4], mid(5), mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), mid(2), mid(3), HI8[4], mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  heat     .005 / .02        : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), mid(2), mid(3), mid(4), LO8[5], mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), mid(2), mid(3), mid(4), HI8[5], mid(6), mid(7), n), n))
+    println("")
+    print("  cycling  45 / 30           : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), HI8[6], mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), LO8[6], mid(7), n), n))
+    println("")
+    print("  dispensing .50 / 1.50      : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), LO8[7], n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), HI8[7], n), n))
+    println("")
+    println("")
+
+    // decisive coalition: the three flippers at their favourable ends
+    print("decisive COALITION (CF .80 + heat .005 + dispensing .50,")
+    println("")
+    print("  rest nominal): ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned(mid(0), mid(1), mid(2), HI8[3], mid(4), LO8[5], mid(6), LO8[7], n), n))
+    println("")
+    println("")
+
+    // ── Sobol first-order shares of Var(D) — conventional measure ──
+    SIG8[0] = g0 * w0 / s3
+    SIG8[1] = g1 * w1 / s3
+    SIG8[2] = g2 * w2 / s3
+    SIG8[3] = mh_abs(g3) * w3 / s3
+    SIG8[4] = g4 * w4 / s3
+    SIG8[5] = g5 * w5 / s3
+    SIG8[6] = mh_abs(g6) * w6 / s3
+    SIG8[7] = g7 * w7 / s3
+    // NOTE: the Sobol section lives in a helper — on this Madaros build,
+    // appending the estimator loops inline to main's loop body mis-lowers
+    // a later array loop (SIGSEGV right after the section header print;
+    // lean_single is correct). A fresh function boundary resets the
+    // codegen shape.
+    print_sobol()
+
+    // ── the statement ──
+    print("Reading: the nominal valley chain lands ABOVE the 6 EUR gate, and")
+    println("")
+    print("the conventional independence analysis prices the gate at one")
+    println("")
+    print("number — a number that is pure assumption: the distribution-free")
+    println("")
+    print("p-box spans the full [0, 100], undetermined. The one-at-a-time")
+    println("")
+    print("table names the flippers: the waste-heat contract and the")
+    println("")
+    print("dispensing tariff EACH carry the gate at their favourable ends;")
+    println("")
+    print("utilization — the valley's design pride — cannot do it alone.")
+    println("")
+    print("Sobol agrees and ranks the rest: the electrolyser specs that")
+    println("")
+    print("dominate the literature are minority shareholders of the variance.")
+    println("")
+    print("For TRIERES: price the heat contract and the dispensing business")
+    println("")
+    print("model FIRST; CF is a multiplier, not a saviour. The shares are a")
+    println("")
+    print("map drawn under the assumption the p-box refuses — the interval")
+    println("")
+    print("is the deliverable, the map is how you shrink it.")
+    println("")
+    println("TRIERES_CHAIN_OK")
+    0
+}

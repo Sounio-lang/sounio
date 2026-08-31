@@ -387,3 +387,58 @@ This repository runs many parallel agents with a single human author. Pre-commit
 Every non-trivial offload appends to `.claude/llm_offload_log.md`. Bug-catching offloads require an `LLM-offload-review:` trailer in the commit message. The policy document lists fallback rules when a provider key is missing or down.
 
 **Codex agents must not skip this step**. If you find yourself about to commit a `vancomycin_*.sio`, a Lean theorem statement, or a paper draft without a logged offload review, stop and run the review first.
+
+## Agent coordination — read the bus before you start
+
+Ten agent slots share this pod (`claude-1..3`, `codex-1..3`, `grok-cli1..2`,
+`kimi-cli1..2`) and one filesystem. Coordination used to be a document that
+nobody wrote to. It is now a channel.
+
+> **`agent-bus.sh` is not on `main`. Check before you reach for it.**
+> `scripts/dev/agent-bus.sh`, `scripts/mcp/agent_bus_mcp.py` and
+> `scripts/mcp/agent-bus.mcp.json` are tracked only on the long-running
+> integration lineage that `/workspace/sounio` is checked out on (added in
+> `925d8fa33d`; a later commit message claims it landed "on main where every
+> agent can reach it" — it did not). From any worktree cut off `main` all three
+> are absent, so the commands below fail with *no such file*. That is a missing
+> tool, **not** an empty bus — do not conclude nobody is coordinating.
+>
+> On a `main`-based checkout use `bin/sounio-coord`, which *is* on `main` and is
+> what the session hooks already call on your behalf:
+> ```bash
+> bin/sounio-coord brief                                  # FIRST THING
+> bin/sounio-coord status                                 # claims, conflicts, worktrees
+> bin/sounio-coord scope --agent ID --lane ID --intent T  # take/extend a lease
+> bin/sounio-coord inbox  --agent ID --lane ID            # messages waiting for you
+> bin/sounio-coord send   --agent ID --lane ID --kind info --message '...'
+> ```
+> `send` with no `--to-agent`/`--to-lane` broadcasts to every lane. Its store is
+> `${TMPDIR:-/tmp}/sounio-coord/<repo-key>` — a *different* store from the
+> `agent-bus` one below, so a post to one is not visible from the other.
+
+Where `agent-bus.sh` is present:
+
+```bash
+scripts/dev/agent-bus.sh brief          # FIRST THING. hazards, leases, recent events
+scripts/dev/agent-bus.sh claim <res>    # before a build lock, a shared file, a lane
+scripts/dev/agent-bus.sh post finding 'what you learned'
+scripts/dev/agent-bus.sh hazard add <slug> 'what will silently ruin others' measurements'
+```
+
+It is not push — nothing interrupts another agent's loop. You hear others when
+you read, so the whole protocol is: **`brief` before you start, `post` when your
+state changes.** Leases expire, so a crashed agent never parks a resource.
+
+For BeagleCockpit and anything else that has to know as things happen, the same
+bus is served over MCP (`scripts/mcp/agent_bus_mcp.py`, merge `scripts/mcp/agent-bus.mcp.json` into your gitignored `.mcp.json`).
+Subscribe to `bus://events` or `bus://hazards` and the server sends
+`notifications/resources/updated` the moment another agent posts — that is real
+push, not polling. Tools: `bus_post`, `bus_claim`, `bus_release`, `bus_hazard`,
+`bus_brief`. Both doors write the same storage, so an agent on the shell CLI and
+an agent on MCP are on one channel.
+
+Post a `hazard` for anything that makes a measurement lie rather than fail:
+a poisoned environment variable, a stale artifact, a checkout parked on another
+branch. Those cost hours precisely because the run still exits and prints a
+number. Storage is `/workspace/.agents/bus`, outside every checkout, because
+agents work in different worktrees.

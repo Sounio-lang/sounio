@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # gemini-check-stdlib.sh — Batch analyze stdlib modules using Gemini Ultra
-# Usage: ./scripts/gemini-check-stdlib.sh [module-pattern] [max-files]
-# Example: ./scripts/gemini-check-stdlib.sh "epistemic/*.sio" 5
+# Usage: ./scripts/mcp/gemini-check-stdlib.sh [module-pattern] [max-files]
+# Example: ./scripts/mcp/gemini-check-stdlib.sh "epistemic/*.sio" 5
 
 set -euo pipefail
 

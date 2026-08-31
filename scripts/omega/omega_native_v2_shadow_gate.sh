@@ -117,12 +117,16 @@ grep -q '"managed_handles":true' "$CONTRACT_SELFTEST"
 grep -q '"descriptor_tables":true' "$CONTRACT_SELFTEST"
 grep -q '"handle_indirection":true' "$CONTRACT_SELFTEST"
 grep -q '"descriptor_tables_embedded":true' "$CONTRACT_SELFTEST"
-grep -q '"gc_mark_compact_model":true' "$CONTRACT_SELFTEST"
-grep -q '"gc_precise_descriptor_scanning":true' "$CONTRACT_SELFTEST"
-grep -q '"gc_handle_relocation_model":true' "$CONTRACT_SELFTEST"
-grep -q '"ffi_pinning_model":true' "$CONTRACT_SELFTEST"
-grep -q '"gc_runtime_retry_active":true' "$CONTRACT_SELFTEST"
-grep -q '"gc_current_frame_root_scan":true' "$CONTRACT_SELFTEST"
+grep -q '"gc_mark_compact_model":false' "$CONTRACT_SELFTEST"
+grep -q '"gc_precise_descriptor_scanning":false' "$CONTRACT_SELFTEST"
+grep -q '"gc_handle_relocation_model":false' "$CONTRACT_SELFTEST"
+# Pinning is UNWIRED on the live emitter (pin_count never incremented).
+# Honesty: advertise false until a reclaim lane wires real pins (#1792 class).
+grep -q '"ffi_pinning_model":false' "$CONTRACT_SELFTEST"
+grep -q '"pin_registry_ready":false' "$CONTRACT_SELFTEST"
+grep -q '"tracing_gc":false' "$CONTRACT_SELFTEST"
+grep -q '"gc_runtime_retry_active":false' "$CONTRACT_SELFTEST"
+grep -q '"gc_current_frame_root_scan":false' "$CONTRACT_SELFTEST"
 
 cp "$CONTRACT_SELFTEST" "$CONTRACT_V1"
 cp "$SHADOW_CONTRACT_SELFTEST" "$SHADOW_CONTRACT_V1"
@@ -149,12 +153,13 @@ cat >"$OUT_DIR/native_backend_v2_gate.v1.json" <<'EOF'
   "managed_handles": true,
   "descriptor_tables_embedded": true,
   "handle_indirection": true,
-  "gc_mark_compact_model": true,
-  "gc_precise_descriptor_scanning": true,
-  "gc_handle_relocation_model": true,
-  "ffi_pinning_model": true,
-  "gc_runtime_retry_active": true,
-  "gc_current_frame_root_scan": true,
+  "gc_mark_compact_model": false,
+  "gc_precise_descriptor_scanning": false,
+  "gc_handle_relocation_model": false,
+  "ffi_pinning_model": false,
+  "pin_registry_ready": false,
+  "gc_runtime_retry_active": false,
+  "gc_current_frame_root_scan": false,
   "gc_retry_smoke_exit_code": 23
 }
 EOF

@@ -52,7 +52,7 @@ sites unchanged.
 
 | Kernel | Emission outcome |
 |---|---|
-| 318 PTX golden gate | PASS 318/318 unchanged |
+| 318 PTX golden gate | PASS 318/318 unchanged **(2026-05-11 receipt; live 2026-08-18 is 0/318, #1915)** |
 | LSE-8 gate | PASS 7/7 unchanged |
 | Sinkhorn-16, 2 iters | PASS, 657 KB PTX in 37s (was 13s — 3× slower from larger buffer copies) |
 | Sinkhorn-16, 4 iters | **segfault** at ~52s |
@@ -123,7 +123,7 @@ without functional change. The cap stays at 262144 (256 KB), Sinkhorn-
 < 2` body comment), and all gates remain green at their
 previously-committed state:
 
-- `kaxi_ptx_golden_gate.sh` PASS 318/318
+- `kaxi_ptx_golden_gate.sh` PASS 318/318 **(2026-05-11 receipt; live 2026-08-18 is 0/318, #1915)**
 - `kretikos_kaxi_lse8_gate.sh` PASS 7/7
 - `kretikos_kaxi_sinkhorn16_gate.sh` PASS 7/7
 - `kretikos_kaxi_fmad_invariance_gate.sh` PASS 18/18
