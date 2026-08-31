@@ -705,6 +705,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.loom-kernel-exec-grant-cell | repo_only | docs/internal/concepts/loom-kernel-exec-grant-cell.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.loom-kernel-invocation-cell | repo_only | docs/internal/concepts/loom-kernel-invocation-cell.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.loom-kernel-peer-activation-capsule | repo_only | docs/internal/concepts/loom-kernel-peer-activation-capsule.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.loom-sovereign-change-kernel | repo_only | docs/internal/concepts/loom-sovereign-change-kernel.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.loom-sovereign-execution-kernel | repo_only | docs/internal/concepts/loom-sovereign-execution-kernel.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.maturity-ladder | repo_only | docs/internal/concepts/MATURITY_LADDER.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.no-implicit-degradation | repo_only | docs/internal/concepts/no-implicit-degradation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
