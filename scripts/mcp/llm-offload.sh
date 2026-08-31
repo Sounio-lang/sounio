@@ -8,7 +8,9 @@
 #                  resolved to the weaker v4-flash and is no longer a listed model)
 #   xai|grok     — Grok 4.3 (primary adversarial math/review lane)
 #   xai-fast     — Grok 4.1 Fast Reasoning (lower-latency fallback)
-#   zai|glm      — Z.AI GLM-5.2 direct (independent math/review provider)
+#   kimi|k3      — Kimi K3 (Moonshot, api.moonshot.ai, 1M ctx, thinking always on): the
+#                  independent second math/review vendor since 2026-08-31 (replaced zai)
+#   zai|glm      — Z.AI GLM-5.2 direct (opt-in; 1313 Fair-Usage lockout 2026-08-31)
 #   local        — a LOCAL OpenAI-compatible endpoint (Ollama/vLLM/llama.cpp/LM Studio):
 #                  set LOCAL_LLM_URL (with the /v1 prefix) and LOCAL_LLM_MODEL
 #   local2       — a second local endpoint (LOCAL2_LLM_URL / LOCAL2_LLM_MODEL), so a
@@ -73,7 +75,7 @@ call_openai_compat() {
             model: $model,
             messages: [{role: "user", content: $prompt}],
             max_tokens: $maxtok,
-            temperature: 0.7
+            temperature: (if ($model | startswith("kimi-k")) then 1.0 else 0.7 end)
         }')" > "$outfile" 2>&1 || true
     # `|| true` is load-bearing under `set -e`: curl exits non-zero on a TIMEOUT or a
     # connection failure (unlike an HTTP error, where it exits 0 with a JSON body), and
@@ -110,6 +112,18 @@ run_provider() {
         xai-fast)
             [[ -n "${XAI_API_KEY:-}" ]] && \
             call_openai_compat "Grok 4.1 fast" "https://api.x.ai/v1" "$XAI_API_KEY" "grok-4-1-fast-reasoning" "$OUTDIR/grok-fast.json"
+            ;;
+        kimi|k3|moonshot)
+            # Kimi K3 (Moonshot AI), OpenAI-compatible. Docs 2026-08-31: base https://api.moonshot.ai/v1,
+            # model `kimi-k3`, env MOONSHOT_API_KEY (KIMI_API_KEY accepted). temperature is FIXED at 1.0
+            # by the API (anything else is rejected) — see the model-keyed temperature in
+            # call_openai_compat. Thinking is always on. Server default max_tokens is 131072;
+            # OFFLOAD_MAX_TOKENS still caps it here. Account needs a $1 top-up.
+            if [[ -n "${KIMI_API_KEY:-${MOONSHOT_API_KEY:-}}" ]]; then
+                call_openai_compat "Kimi K3 (Moonshot)" "${KIMI_BASE_URL:-https://api.moonshot.ai/v1}" "${KIMI_API_KEY:-$MOONSHOT_API_KEY}" "${KIMI_MODEL:-kimi-k3}" "$OUTDIR/kimi.json"
+            else
+                echo "  <- Kimi: SKIPPED (set MOONSHOT_API_KEY or KIMI_API_KEY in ~/.sounio-keys.env)"
+            fi
             ;;
         zai|glm|zhipu)
             # Z.AI (Zhipu) direct, OpenAI-compatible. Accepts ZAI_API_KEY or ZHIPU_API_KEY.
@@ -191,7 +205,7 @@ expand_providers() {
     local result=()
     for p in "$@"; do
         if [[ "$p" == "all" ]]; then
-            result+=(deepseek xai zai grok-code groq gemini qwen mistral llama cohere openrouter minimax)
+            result+=(deepseek xai kimi zai grok-code groq gemini qwen mistral llama cohere openrouter minimax)
         else
             result+=("$p")
         fi
