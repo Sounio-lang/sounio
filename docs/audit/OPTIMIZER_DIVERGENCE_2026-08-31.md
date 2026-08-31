@@ -133,6 +133,46 @@ is not the cause of the 632. If the repository's own precedent holds — `ci.yml
 records 1028 corpus failures that were one segfault — the lorenz family is where
 a second reduction should start, and it has not been attempted here.
 
+### Second reduction, on the lorenz family — what it rules out
+
+The `lorenz` family is 84% of the population, so it was reduced next. The result
+is negative in a useful way: three plausible causes are excluded.
+
+**Not arity.** `lorenz_i256_step1_taylor2_proof_trace_skeleton_check` takes nine
+`i64` arguments and returns the wrong value under `-O`. Read through the process
+exit status, which carries the low byte of the returned `i64`:
+
+    expected 174108453 (mod 256 = 37)
+      without -O   37     correct
+      with    -O   255    = -1
+
+An arity-8 sibling in the same module fails identically, with valid arguments
+taken from its own test:
+
+    lorenz_i256_step1_taylor2_replay_preflight_check   expected mod 256 = 187
+      without -O   187        with -O   255
+
+A first attempt at this comparison used arbitrary arguments (`1,2,3,4`) for the
+low-arity calls. Those agreed across builds — but **vacuously**: both sides hit
+the same `-1` validation sentinel, so the agreement said nothing. Only calls with
+arguments the function accepts are informative here.
+
+**Not the `Mod` effect.** All 80 `pub fn` in `lorenz_i256_cert_step1.sio` declare
+`with Mod`, the held effect, and `stdlib/check/effects.sio` records that 2800
+`with Mod` sites "still return -1" — which matches the observed sentinel exactly.
+But the qd128 case carries no `Mod` at all and still breaks, so the hold does not
+explain it.
+
+**Not the calling convention, in the qd128 case.** `qd_add` and `qd_mul` have
+identical signatures — `(Qd128, Qd128) -> Qd128 with Mut, Panic` — same arity,
+same types, same effects. `qd_add` is unaffected under `-O`; `qd_mul` returns
+zero. Whatever `-O` breaks there is in the multiplication body, not in how the
+call is made or how the module boundary is crossed.
+
+The two manifestations also differ in sentinel: the lorenz functions return `-1`,
+`qd_mul` returns `0`. That is consistent with one optimiser fault surfacing in two
+ways, and equally consistent with two faults. This audit does not decide which.
+
 ## What this does NOT establish
 
 **Where the defect is.** 632 programs is not 632 bugs — the corpus gate's own
