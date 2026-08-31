@@ -521,6 +521,38 @@ invariantes morreram) para o algébrico-complexo (onde a não-vacuidade é grát
 e falta uma paridade de classe de Segre). É a formulação mais promissora até
 agora — e a mais computável.
 
+## Rodada 15: TODAS as paridades se anulam — e a curva revela sua anatomia: RETAS
+
+**Fechamento do círculo das obstruções (por dados próprios):** a paridade dos
+cruzamentos de cada componente com um hiperplano real = ε da componente
+(validado: (1,1)/(2,2)/(1,1) ↔ (−,−)/(+,+)/(−,−)); d_a mod 2 de Γ_ℂ =
+#cruzamentos reais mod 2 = componente-a de [Γ] = **0**. Logo o bidegree
+complexo é PAR e **a rota do grau ímpar (R14) morre pelos nossos próprios
+dados de censo** — a quarta e última esperança de obstrução de paridade.
+Conclusão estrutural do dia: a existência de witnesses NÃO é forçada por
+nenhum invariante topológico/enumerativo de paridade; ela é
+ALGÉBRICO-CONSTRUTIVA.
+
+**E a anatomia da curva aponta a construção:**
+- Bidegree real da CONF#1: **(4,4)** = componentes de grau (1,1), (2,2), (1,1).
+- Nuvens de pontos: **KRANK = MRANK = 2 nas componentes ímpares** — são
+  RETAS PROJETIVAS nos dois fatores: **(1,1)-curvas = pênceis lineares de
+  witnesses**: u(t) = u₀+tu₁, w(t) = w₀+tw₁ com T(u₀,w₀) = T(u₁,w₁) = 0 e
+  **T(u₀,w₁) + T(u₁,w₀) = 0**. A componente par é uma cônica (rank 3).
+- Estrutura da CONF#1: **duas retas de witnesses + uma cônica**.
+
+Teste exato negativo (registrado): os dois witnesses INTEIROS do par duro
+(e₁,e₂)vs(e₂,e₃) NÃO formam pêncil entre si (cross ≠ 0, exato) — o pêncil de
+uma config específica deve ser extraído da reta traçada (fit racional), não
+de pares arbitrários de witnesses.
+
+**O PROGRAMA FINAL (algébrico, nascido de 4 obstruções mortas):**
+> Provar: toda configuração admite um PÊNCIL de witnesses — um sistema
+> (u₀,u₁,w₀,w₁) com as três equações acima. Alvo intermediário: extrair o
+> pêncil exato da CONF#1 (rationalizar a reta traçada), ler sua forma
+> octoniônica, e generalizar — o caminho de RQ→lei→prova que já funcionou
+> três vezes hoje (ghost law, associadores, forma fechada do parceiro).
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD
