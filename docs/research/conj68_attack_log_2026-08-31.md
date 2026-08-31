@@ -365,6 +365,68 @@ tradução (thread cap) — daí o split em dois arquivos Lean; e `Poly` precisa
 ser `abbrev` (não `def`) para herdar `BEq` de List — o erro manifestava como
 "failed to create thread" espúrio.
 
+## Rodada 10: RETRATAÇÃO PARCIAL DA RODADA 9 — P3 é vácua; o argumento precisa de uma 3ª relação genuína
+
+**Erro encontrado na lapidação (antes de qualquer publicação):** para u,w
+puros, wu = conj(uw) implica u∘w = uw + wu = 2Re(uw)·e₀ — SEMPRE REAL.
+Logo Im(u∘w) ≡ 0 e "P3" (⟨T, u∘w⟩ = 0) é trivialmente verdadeira mas
+VÁCUA como restrição: o probe passou porque T é puro e u∘w é real, não
+porque exista uma terceira linha perpendicular. Só há DUAS relações
+pontuais genuínas (P1, P2: φ alternada). Consequência: o fibrado é de posto
+11 − 2 = 9 > 8 = dim base, a obstrução primária vive em H⁹ = 0, e **o
+argumento de Euler da Rodada 9 colapsa como enunciado**. A aritmética
+α⁴β⁴ = 1 (souc + Lean) permanece correta — para um fibrado cuja existência
+dependia da relação vácua.
+
+Estado corrigido da rota α: falta UMA relação pontual genuína (com o twist
+certo) para o empate posto = dimensão. A caça: dicionário de formas
+cúbicas/bilineares ⟨[u,w], V(u,w)⟩ ≡ 0 com V ∈ {[u,w,w], (uw)w, w(wu),
+Jacobiano de Malcev, ...} — verificação exata sobre pares puros aleatórios
+(conj68_pointwise_relations_probe.sio, estendido). Se existir → recomputar a
+classe com o twist de V; se não → a rota precisa de topologia deficit-1
+(grau relativo/equivariante) ou de outra ideia.
+
+Lição (a de sempre, e ainda assim): entusiasmo não substitui o cheque de
+vacuidade — testar uma identidade sem testar que ela RESTRINGE é meio teste.
+
+## Rodada 11: A ROTA α RENASCE MAIS FORTE — relações de ASSOCIADOR + obstrução primária em H⁷
+
+A caça pós-retratação achou as relações verdadeiras, e desta vez com o
+dever de casa completo ANTES do anúncio:
+
+**As quatro relações pontuais genuínas** (T = [u,w], u,w puros):
+1. T ⊥ u, T ⊥ w — φ totalmente alternada (twists γ₁, γ₂).
+2. **T ⊥ [u,w,w] e T ⊥ [w,u,u]** — os ASSOCIADORES (twists γ₁, γ₂).
+   *Prova* (não só amostras): ⟨[u,w],[u,w,w]⟩ = ⟨[u,w],(uw)w⟩ (P1 + w² = −n(w));
+   o termo ⟨uw,(uw)w⟩ morre por auto-negação via ⟨a,bc⟩ = ⟨ac̄,b⟩; o termo
+   ⟨wu,(uw)w⟩, com v = uw e wu = conj v, reduz a ⟨v²,w⟩ = 2Re(v)⟨uw,w⟩ e
+   ⟨uw,w⟩ = n(w)⟨u,1⟩ = 0. ∎ Simétrico para [w,u,u].
+   *Não-vacuidade* (a lição da R10): rank{u,w,[u,w,w],[w,u,u]} = 4 em
+   2000/2000 amostras inteiras exatas.
+
+**Consequência topológica corrigida:** E₇ ≅ ℝ¹¹ ⊖ 2γ₁ ⊖ 2γ₂, posto 7 < 8;
+para posto < dim, a obstrução PRIMÁRIA a uma seção sem zeros vive em H⁷ e
+sua não-nulidade sozinha força zeros:
+
+    w₇(E₇ ⊗ γ₁γ₂) = Σᵢ wᵢ(E₇)(α+β)^{7−i},
+    w(E₇) = (1+α²+α⁴)(1+β²+β⁴)
+    ⟹  w₇ = α⁴β³ + α³β⁴  ≠ 0
+
+— computado à mão, em souc (`conj68_euler_class.sio`, INVERSE7_CHECK OK,
+ambos os coeficientes = 1) e no kernel do Lean
+(`euler7_primary_obstruction_nonzero`, LEAN_OK).
+
+**⟹ toda configuração admite witness ⟹ Conjecture 6.8 — módulo a lapidação,
+agora com a lista fechada:**
+(i) independência genérica das QUATRO projeções em W₁₁ (medida em ℝ¹⁶;
+falta o passo proj_{W₁₁} — codimensão favorável, medir);
+(ii) os loci de degeneração ([u]=[x], [w]=[x′], associadores caindo no span);
+o argumento padrão: seção sem zeros ⟹ seção sem zeros do fibrado honesto
+fora dos loci + extensão/posição geral ou blow-up.
+Um bônus da versão posto-7: mesmo onde UMA relação degenera, sobram 3 e o
+posto local ≤ 8 = dim — a folga do deficit-(-1) torna a lapidação mais
+robusta que a versão original.
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD

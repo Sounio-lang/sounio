@@ -3,7 +3,19 @@
   (Guterman–Zhilina, arXiv:2608.26903).  Split from SounioConj68RankBound.lean
   (the pod's thread cap bounds native_decide count per translation unit).
 
-  THE EULER-CLASS OBSTRUCTION (Rodada 9 of the attack log):
+  ⚠ RODADA 10 CORRECTION: the "P3" relation below is VACUOUS — for pure u,w,
+  wu = conj(uw) forces u∘w = 2Re(uw)·e₀ (always real), so ⟨T, u∘w⟩ = 0 holds
+  trivially and cuts nothing.  Only P1, P2 are genuine pointwise relations;
+  the bundle in the Euler argument has rank 9 (> dim 8) and the obstruction
+  argument as stated below COLLAPSES.  The theorems in this file remain TRUE
+  as verified statements (p3_bilinear proves exactly the identity that makes
+  P3 vacuous; the characteristic-class arithmetic is correct for the stated
+  ring element), but the topological interpretation awaits a genuine third
+  pointwise relation with the right twist, or a deficit-1 argument.
+  See attack log Rodada 10.
+
+  THE EULER-CLASS OBSTRUCTION (Rodada 9 of the attack log, AS ORIGINALLY
+  STATED — see the correction above):
   three POINTWISE relations of the commutator section, universal for pure u,w:
     (P1) ⟨[u,w], u⟩ = 0    (P2) ⟨[u,w], w⟩ = 0    — φ fully alternating
          (antisymmetric in (u,w) + cyclic via ⟨a,bc⟩ = ⟨ac̄,b⟩);
@@ -118,5 +130,41 @@ def eulerChecks : Bool :=
   (pmulZ2 dpoly dinv == pone) && pget eulerPoly 4 4
 
 theorem euler_obstruction_nonzero : eulerChecks = true := by native_decide
+
+/-! ## RODADA 11 — the corrected obstruction (associator relations)
+
+Genuine pointwise relations (each proved; non-vacuity measured 2000/2000):
+  T ⊥ u (twist γ₁), T ⊥ w (γ₂), T ⊥ [u,w,w] (γ₁), T ⊥ [w,u,u] (γ₂).
+Associator relations proof sketch: ⟨[u,w],[u,w,w]⟩ = ⟨[u,w],(uw)w⟩ (by P1 and
+w² = −n(w)); the uw-term dies by ⟨a,bc⟩ = ⟨ac̄,b⟩ self-negation; the wu-term,
+with v = uw and wu = conj v, reduces to ⟨v², w⟩ = 2Re(v)⟨uw,w⟩ = 0 since
+⟨uw,w⟩ = n(w)⟨u,1⟩ = 0.  Symmetrically for [w,u,u].
+Bundle: E₇ ≅ ℝ¹¹ ⊖ 2γ₁ ⊖ 2γ₂, rank 7 < dim 8; the PRIMARY obstruction to a
+nowhere-zero section of E₇ ⊗ γ₁γ₂ is w₇ = Σᵢ wᵢ(E₇)(α+β)^{7−i} with
+w(E₇) = [(1+α)²(1+β)²]⁻¹ = (1+α²+α⁴)(1+β²+β⁴): verified below to be
+α⁴β³ + α³β⁴ ≠ 0.  A nonzero primary obstruction forces zeros even for
+rank < dim — every configuration admits a witness, modulo the degeneracy-loci
+refinement (same caveat class as before). -/
+
+def d2poly : Poly :=
+  let fa := pmk (fun i j => (i == 0 && j == 0) || (i == 1 && j == 0))
+  let fb := pmk (fun i j => (i == 0 && j == 0) || (i == 0 && j == 1))
+  pmulZ2 (pmulZ2 fa fa) (pmulZ2 fb fb)
+
+def d2inv : Poly :=
+  let n := paddZ2 d2poly pone
+  let step := fun (acc : Poly × Poly) (_ : Nat) =>
+    (paddZ2 acc.1 acc.2, pmulZ2 acc.2 n)
+  ((List.range 10).foldl step (pone, n)).1
+
+def w7part (i : Nat) : Poly := pmk (fun a b => a + b == i && pget d2inv a b)
+
+def euler7Poly : Poly :=
+  (List.range 8).foldl (fun acc i => paddZ2 acc (pmulZ2 (w7part i) (cpow (7 - i)))) (pmk (fun _ _ => false))
+
+def euler7Checks : Bool :=
+  (pmulZ2 d2poly d2inv == pone) && pget euler7Poly 4 3 && pget euler7Poly 3 4
+
+theorem euler7_primary_obstruction_nonzero : euler7Checks = true := by native_decide
 
 end SounioConj68EulerLeg
