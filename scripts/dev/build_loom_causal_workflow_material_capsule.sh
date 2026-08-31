@@ -404,6 +404,7 @@ SOUNIO_LOOM_CAUSAL_MID_EXEC_OUTPUT="$MID_EXEC_RUNTIME" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_causal_workflow_mid_exec_fixture.sh" >/dev/null
 [[ "$(sha256_file "$MID_EXEC_RUNTIME")" == "$(manifest_value "$MID_EXEC_MANIFEST" executable_sha256)" ]] ||
   fail 'source-fresh Sounio mid-exec runtime drifted from its freeze'
+chmod 0555 "$CAUSAL_WORKFLOW_RUNTIME" "$MID_EXEC_RUNTIME"
 
 [[ "$(sha256_file "$DATA/operation-grant-fixtures.v1")" == \
   52674ef4332a4b6d54e2d55ca9a58c55de21e6686aca82ae70b9d22b7d260af2 ]] ||

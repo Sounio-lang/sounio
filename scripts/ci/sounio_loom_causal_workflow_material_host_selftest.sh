@@ -220,7 +220,8 @@ MID_EXEC_RUNTIME="$CAPSULE/$(record_value "$MANIFEST" mid_exec_runtime_path)"
 [[ "$(record_value "$CAUSAL_WORKFLOW_MANIFEST" producing_language)" == Sounio &&
    "$(record_value "$CAUSAL_WORKFLOW_MANIFEST" language_role)" == SEMANTIC_AUTHORITY &&
    "$(record_value "$CAUSAL_WORKFLOW_MANIFEST" action)" == 9037 &&
-   "$(record_value "$CAUSAL_WORKFLOW_MANIFEST" executable_sha256)" == "$(sha256_file "$CAUSAL_WORKFLOW_RUNTIME")" ]] ||
+   "$(record_value "$CAUSAL_WORKFLOW_MANIFEST" executable_sha256)" == "$(sha256_file "$CAUSAL_WORKFLOW_RUNTIME")" &&
+   "$(stat -c '%u:%g:%a' "$CAUSAL_WORKFLOW_RUNTIME")" == 0:0:555 ]] ||
   fail 'action-9037 Sounio runtime provenance drifted'
 [[ "$(record_value "$MID_EXEC_MANIFEST" schema)" == loom-causal-workflow-mid-exec-freeze-v1 && \
    "$(record_value "$MID_EXEC_MANIFEST" stage)" == SEMANTICS_FROZEN && \
@@ -235,7 +236,8 @@ MID_EXEC_RUNTIME="$CAPSULE/$(record_value "$MANIFEST" mid_exec_runtime_path)"
    "$(record_value "$MID_EXEC_MANIFEST" executable_sha256)" == "$(sha256_file "$MID_EXEC_RUNTIME")" && \
    "$(record_value "$MANIFEST" mid_exec_runtime_sha256)" == "$(sha256_file "$MID_EXEC_RUNTIME")" && \
    "$(record_value "$MANIFEST" mid_exec_manifest_sha256)" == "$(sha256_file "$MID_EXEC_MANIFEST")" && \
-   "$(record_value "$MANIFEST" mid_exec_semantics_sha256)" == "$(record_value "$MID_EXEC_MANIFEST" semantics_sha256)" ]] ||
+   "$(record_value "$MANIFEST" mid_exec_semantics_sha256)" == "$(record_value "$MID_EXEC_MANIFEST" semantics_sha256)" && \
+   "$(stat -c '%u:%g:%a' "$MID_EXEC_RUNTIME")" == 0:0:555 ]] ||
   fail 'Sounio mid-exec freeze closure drifted before execution'
 
 release_frame="$(record_value "$MID_EXEC_MANIFEST" wire_schema) $(record_value "$MID_EXEC_MANIFEST" release_stage_word) $(record_value "$MID_EXEC_MANIFEST" release_word0) $(record_value "$MID_EXEC_MANIFEST" release_word1)"
