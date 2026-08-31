@@ -653,3 +653,43 @@ atacar UM witness via forma fechada grau-2 + PSLQ dos k. A obstrução topológi
 (w₇=α⁴β³+α³β⁴, R11/Teorema 6.1) continua sendo a única prova de EXISTÊNCIA que não
 depende de construção — o manuscrito §6 já a carrega; a Lemma L(iii) (excisão
 relativa codim-4) é o gargalo formal restante, independente do colapso do pêncil.
+
+### R17b — robustez: o cap de 40 não fabricou o negativo (checado a pedido do revisor)
+
+Furo metodológico apontado: 6/8 seeds saturavam `WITNESSES 40` (cap `nwit<40`) e o
+census só traça a partir dos witnesses retidos — uma reta cujos witnesses caíssem fora
+seria invisível. Correção: cap 40→300 (`wit[3000]`, `visited[300]`), componentes 6→8,
+e LEITURA do campo MAXED (antes ignorado).
+
+- Witnesses são CONTÍNUOS (curvas): configs saturam mesmo em 300 (`WITNESSES 300`,
+  MAXED>0). Contagem é sem sentido — os 13/24/74/139/300 são artefatos de cluster.
+- TESTE DE SENSIBILIDADE (o decisivo): controle positivo (config das retas do R16) com
+  os MESMOS settings de cap alto ainda pega as duas retas — COMP KRANK=MRANK=2 CROSS(1,1),
+  MAXED 19. Logo o método É sensível a retas mesmo saturando; "só cônicas" nas genéricas
+  não é truncamento.
+- Sweep com caps altos: 20 cônicas (KRANK=3 MRANK=3), 0 retas (1,1) genuínas
+  (KRANK=2 MRANK=2). As únicas rank-2 (5 componentes, todas na config especial
+  a=2e₃−2e₄, seed 12345678, MAXED 0 com 24 witnesses honestos) são DEGENERADAS (2,1)/(1,2)
+  = "reta de u com w FIXO", não pêncil (1,1). **R17 sobrevive; agora robusto.**
+
+### R17c — a topologia dura: w₇ MORRE em B∖Z (a obstrução primária não prova sozinha)
+
+Fazendo a excisão na ponta do lápis (confirmado pelo revisor): H⁷(B;ℤ/2) tem só 2
+monômios (α⁴β³, α³β⁴). Thom: Z_i codim 4, Z₁∩Z₂ = 1 ponto (codim 8, invisível a H⁷) ⟹
+im(H⁷(B,B∖Z)→H⁷(B)) = span{α⁴β³,α³β⁴} = TODO H⁷(B). Por exatidão i*: H⁷(B)→H⁷(B∖Z) = 0,
+logo **w₇|_{B∖Z} = 0**. Mas E₇ só existe sobre B∖Z (salta a rank 8 em Z). A obstrução
+primária do fibrado honesto sobre o aberto B∖Z é ZERO — como tem de ser (obstruções de
+grau-topo sobre variedades abertas penteiam-se para os fins). ⟹ **Teorema 6.1 (w₇≠0) NÃO
+prova sozinho a conjectura.** w₇∈im(j*) é check de consistência necessário, não derivação.
+
+A prova, SE existir, é a obstrução RELATIVA o_rel(s) ∈ H⁷(B,∂N(Z)) ≅ H³(Z₁)⊕H³(Z₂),
+usando L(ii) (s≠0 em Z = dado de bordo). o_rel = w₇ ⟺ grau local de s numa fatia normal
+4-dim a cada Z_i ÍMPAR. o_rel PODE ser 0 (graus pares) — aí a seção nowhere-zero existiria
+e o argumento não fecha. Invariante = classe H³(Z₁)=ℤ/2⟨[ℝP³]⟩, NÃO contagem. Manuscrito
+§6/Cor 6.2 reescritos honestamente condicionais.
+
+**Endgame único restante:** computar deg_local(s; Z₁) mod 2 (winding de T num S³ ligando
+o locus paralelo u∥x). Rotas paralelas vivas: (b) positividade do discriminante da
+quadrática de witness (coefs explícitos em n(a),n(a′),⟨z,z′⟩, ghost-law) — problema de
+álgebra nas identidades que já temos, subiu de prioridade agora que o primário morreu no
+aberto.

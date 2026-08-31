@@ -118,9 +118,18 @@ H⁷; its mod-2 reduction is
 *(Hand computation; Sounio exact polynomial arithmetic
 `conj68_euler_class.sio`; Lean `euler7_primary_obstruction_nonzero`.)*
 
-A nonzero primary obstruction forces every section to vanish somewhere —
-i.e., every configuration admits a witness — PROVIDED the bundle E₇ is
-honest over the relevant skeleton. This is the content of:
+A nonzero primary obstruction would force every section to vanish somewhere,
+PROVIDED E₇ were an honest rank-7 bundle over all of B. **It is not, and this
+matters:** E₇ lives only over B ∖ Z, and there the obstruction vanishes.
+Indeed, since Z₁, Z₂ have codimension 4 and Z₁∩Z₂ is a single point (codim 8,
+invisible to H⁷), the Thom computation of Prop 6.1b gives
+im(H⁷(B, B∖Z) → H⁷(B)) = span{α⁴β³, α³β⁴} = **all** of H⁷(B; ℤ/2) (which has
+exactly these two monomials). By exactness i*: H⁷(B) → H⁷(B∖Z) is therefore the
+zero map, so **w₇|_{B∖Z} = 0**. The primary obstruction of the honest bundle
+E₇ over the *open* manifold B ∖ Z is zero — as it must be, top-degree
+obstructions over open manifolds comb out to the ends. Consequently Theorem 6.1
+is **not, by itself, a proof**: w₇ ≠ 0 is a necessary consistency check on the
+relative obstruction, not a derivation of it. The actual content is:
 
 **Remark 6.1a (reconciliation of w₇ ≠ 0 with [Γ] = 0).** A measured fact must
 be reconciled with Theorem 6.1: tracing the witness curve Γ and reading its
@@ -170,8 +179,21 @@ u ∥ x. R12's measurement (local rank 8 = dim B near Z, every drop by exactly
 one) is the codimension-1 shadow of an odd local degree; the exact mod-2 degree
 is the content in preparation.
 
-**Corollary 6.2** (conditional on L(iii)). Every pair of zero divisors admits
-a length-≤3 commuting path: **diam Γ_C^Z(𝕊) = 3**, proving the GZ conjecture.
+**Corollary 6.2** (conditional). *If* the relative primary obstruction
+o_rel(s) ∈ H⁷(B, ∂N(Z)) ≅ H³(Z₁) ⊕ H³(Z₂) is nonzero — equivalently, if the
+local degree of s on a normal 4-slice to Z₁ or Z₂ is odd (L(iii)) — then every
+pair of zero divisors admits a length-≤3 commuting path, i.e.
+**diam Γ_C^Z(𝕊) = 3**, proving the GZ conjecture.
+
+**We flag honestly**: o_rel(s) is *not* determined by Theorem 6.1. Its image in
+H⁷(B) must be w₇ for consistency (Prop 6.1b), but o_rel could still be 0 in
+H³(Z₁)⊕H³(Z₂) if the local degrees are even — in which case a nowhere-zero
+section could exist and the argument would not close. The invariant to compute
+is the H³(Z₁) = ℤ/2⟨[ℝP³]⟩ class, **not** a witness count: R14 shows witnesses
+form curves (Jac rank 7, 320/320), so their number is infinite and hunt tallies
+(13/24/74/139/300…) are cluster-tolerance artifacts, not zero counts. The
+existence of witnesses in every sampled configuration (§7) is strong empirical
+support that o_rel ≠ 0, but is not a proof of it.
 
 ## 7. Supporting evidence and negative results
 
@@ -193,7 +215,7 @@ a length-≤3 commuting path: **diam Γ_C^Z(𝕊) = 3**, proving the GZ conjectu
   (verified exactly in ℤ). But a genericity sweep (8 configurations, both zero
   divisors sampled, one per process; tracer validated on the (e₁,e₂) config as a
   positive control reproducing 2 lines + 1 conic) found **0 line components
-  (KRANK = MRANK = 2) and 20 conic components (KRANK = MRANK = 3)**: generically
+  (KRANK=MRANK=2) and 20 conic components (KRANK=MRANK=3)** (raised the witness cap 40→300 and confirmed the tracer still resolves the (e₁,e₂) lines under the raised cap — a sensitivity check, so the null is not a truncation artifact): generically
   the odd components are conics, and the pencil is the split-conic degeneration
   at the symmetric point. Consequently a witness-existence proof cannot rest on
   a uniform linear pencil; it must rest on the obstruction argument (§6), which
