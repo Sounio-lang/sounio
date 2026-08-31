@@ -1378,6 +1378,39 @@ fn lower_live_diag_enabled() -> bool with IO, Mut, Panic, Div {
 var LOWER_DIAG_BODY_ON: i64 = 0
 var LOWER_DIAG_BODY_CHECKED: i64 = 0
 
+var LOWER_RECV_TRACE_ON: i64 = 0
+var LOWER_RECV_TRACE_CHECKED: i64 = 0
+
+fn lower_recv_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if LOWER_RECV_TRACE_CHECKED == 0 {
+        LOWER_RECV_TRACE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_RECV_TRACE"), "1") {
+            LOWER_RECV_TRACE_ON = 1
+        }
+    }
+    LOWER_RECV_TRACE_ON == 1
+}
+
+// Receiver SHAPE, for the one decision that turns a method call into a body-less
+// function: `if recv_type.len > 0 { mangle(t, m) } else { m }`. An unresolved
+// receiver emits the call against the BARE method name and invents a slot that
+// nothing ever fills -- lower_method_recv_type says exactly this a few hundred
+// lines below ("lowering invents a body-less `er_add` function"). Knowing WHICH
+// shapes still fail is the difference between closing them and guessing.
+fn lower_print_expr_kind(k: ExprKind) with IO, Mut, Panic, Div {
+    if k == ExprKind::ExprIdent { print("ident") }
+    else if k == ExprKind::ExprFieldAccess { print("field") }
+    else if k == ExprKind::ExprCall { print("call") }
+    else if k == ExprKind::ExprMethodCall { print("method_call") }
+    else if k == ExprKind::ExprIndex { print("index") }
+    else if k == ExprKind::ExprUnary { print("unary") }
+    else if k == ExprKind::ExprPath { print("path") }
+    else if k == ExprKind::ExprStructLit { print("struct_lit") }
+    else if k == ExprKind::ExprBlock { print("block") }
+    else if k == ExprKind::ExprIf { print("if") }
+    else { print("other") }
+}
+
 fn lower_body_diag_enabled() -> bool with IO, Mut, Panic, Div {
     if LOWER_DIAG_BODY_CHECKED == 0 {
         LOWER_DIAG_BODY_CHECKED = 1
@@ -15917,6 +15950,31 @@ impl Lowerer {
                     // Tuple-let desugaring emits `let arr = __tup.0`. The call
                     // binding above recorded the named element layout for slot
                     // 0; project it onto `arr` so `arr[i].field` stays typed.
+                    // `let c = pair.0` where the tuple slot holds a named struct.
+                    // Measured on a gen2 self-compile: 1562 of 1856 unresolved
+                    // method receivers are idents, and the top ones are `lo`, `c`,
+                    // `lo1..lo4` -- locals rebound from exactly this shape, 824
+                    // times across check.sio and lower.sio. An unresolved receiver
+                    // sends the call to the BARE method name, which invents a
+                    // body-less function the backend then refuses (empty_stub_ud2).
+                    // The slot's struct is already recorded on the tuple local; it
+                    // simply was not read here.
+                    let tsi = lower_name_tuple_index((*expr_box).name)
+                    if tsi >= 0 {
+                        match (*expr_box).left {
+                            Some(tb) => {
+                                if (*tb).kind == ExprKind::ExprIdent {
+                                    let tsl = lo.lookup_local_tuple_struct_layout((*tb).name, tsi)
+                                    if tsl >= 0 && tsl < (*lo.struct_layouts).count {
+                                        lo = lo.bind_local_struct_type(
+                                            s.name,
+                                            (*lo.struct_layouts).entries[tsl as usize].type_name)
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     if lower_name_tuple_index((*expr_box).name) == 0 {
                         match (*expr_box).left {
                             Some(tuple_base) => {
@@ -15976,6 +16034,17 @@ impl Lowerer {
                     let ret_name = lo.return_struct_name_for_fn_id(fn_id)
                     if ret_name.len > 0 {
                         lo = lo.bind_local_struct_type(s.name, ret_name)
+                    }
+                    // `let pair = c.method(...)` where the method returns
+                    // `(Self, T)`. The plain-call branch above records the tuple
+                    // slot's struct; method syntax did not, and method syntax is
+                    // how this compiler reaches almost all of them.
+                    let m_slot = lo.return_tuple_struct_slot_for_fn_id(fn_id)
+                    if m_slot >= 0 {
+                        let m_layout = lower_struct_layout_index_of(
+                            &(*lo.struct_layouts),
+                            lo.return_tuple_struct_name_for_fn_id(fn_id))
+                        lo = lo.bind_local_tuple_struct(s.name, m_layout, m_slot)
                     }
                 } else if (*expr_box).kind == ExprKind::ExprIdent {
                     // `let b = nx`: propagate the source variable's struct type (e.g. a Box
@@ -19657,6 +19726,33 @@ impl Lowerer {
             }
         }
         let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, e.name) } else { e.name }
+        if recv_type.len == 0 && lower_recv_trace_enabled() {
+            print("recv_unresolved kind=")
+            match e.left {
+                Some(rv) => {
+                    lower_print_expr_kind((*rv).kind)
+                    // The receiver's NAME when it is an ident, and the enclosing
+                    // function's name, because the two together say whether the
+                    // gap is the local or the frame it sits in: a body lowered
+                    // under a BARE name never gets its `self` typed (the owner is
+                    // recovered from `T_method`), so every local copied from self
+                    // inside it is untyped too, and every method call on one of
+                    // them lands on the bare name in turn.
+                    if (*rv).kind == ExprKind::ExprIdent {
+                        print(" recv=")
+                        print(str_from_bytes((*rv).name.buf, (*rv).name.len))
+                    }
+                }
+                _ => {
+                    print("none")
+                }
+            }
+            print(" method=")
+            print(str_from_bytes(e.name.buf, e.name.len))
+            print(" in=")
+            print(str_from_bytes((*self.current_func).name.buf, (*self.current_func).name.len))
+            print("\n")
+        }
         let pair_b = self.lower_opt_expr_ref(&e.left)
         var lo1 = pair_b.0
         var base_reg = pair_b.1
