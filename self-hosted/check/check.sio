@@ -8423,7 +8423,38 @@ fn checker_enum_visible_inplace(c: *mut Checker, enum_idx: i64) -> bool with Mut
     )
 }
 
+fn checker_reject_invalid_implicit_native_builtin_arity_inplace(c: *mut Checker, e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    match e.left {
+        Some(callee) => {
+            if (*callee).kind != ExprKind::ExprIdent {
+                return false
+            }
+            let name = (*callee).name
+            if !name_is_native_backend_builtin(name) {
+                return false
+            }
+            // A declared function, including an extern declaration, has a real
+            // FnSig and is checked by checker_check_call_args_inplace below.
+            // This guard is only for implicit runtime builtins bound as TyUnknown.
+            if checker_fn_sigs_find_inplace(c, name) >= 0 {
+                return false
+            }
+            let argc = expr_list_handle_count(expr_list_handle(e.args))
+            if native_backend_builtin_arity_is_valid(name, argc) {
+                return false
+            }
+            checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+            checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+            return true
+        }
+        None => false
+    }
+}
+
 fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if checker_reject_invalid_implicit_native_builtin_arity_inplace(c, e) {
+        return ty_error()
+    }
     if checker_expr_is_gpu_launch_invocation_call(e) {
         match e.left {
             Some(desc) => {
@@ -15459,6 +15490,74 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("__sounio_seq_push")) { return true } // id 51
     if name_eq(n, make_name("__sounio_seq_get")) { return true }  // id 52
     if name_eq(n, make_name("__sounio_seq_set")) { return true }  // id 53
+    false
+}
+
+// Closed source-level ABI for unresolved native-backend builtins. These names
+// are installed as TyUnknown by checker_collect_runtime_builtins_inplace, so
+// without this table they never reach checker_check_call_args_inplace. Keep the
+// default fail-closed: adding an implicit backend builtin without declaring its
+// arity must produce E010 instead of silently dropping machine arguments.
+fn native_backend_builtin_arity_is_valid(n: Name, argc: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    if name_eq(n, make_name("str_slice")) {
+        return argc == 2 || argc == 3
+    }
+    if argc == 0 {
+        return name_eq(n, make_name("get_arg_count"))
+            || name_eq(n, make_name("getpid"))
+            || name_eq(n, make_name("getppid"))
+            || name_eq(n, make_name("abort"))
+    }
+    if argc == 1 {
+        return name_eq(n, make_name("print_int"))
+            || name_eq(n, make_name("print_char"))
+            || name_eq(n, make_name("print"))
+            || name_eq(n, make_name("get_arg"))
+            || name_eq(n, make_name("str_len"))
+            || name_eq(n, make_name("read_file"))
+            || name_eq(n, make_name("file_size"))
+            || name_eq(n, make_name("sqrt"))
+            || name_eq(n, make_name("print_f64"))
+            || name_eq(n, make_name("exp"))
+            || name_eq(n, make_name("log"))
+            || name_eq(n, make_name("sin"))
+            || name_eq(n, make_name("cos"))
+            || name_eq(n, make_name("assert"))
+            || name_eq(n, make_name("heap_alloc"))
+            || name_eq(n, make_name("heap_free"))
+            || name_eq(n, make_name("f64_to_bits"))
+            || name_eq(n, make_name("bits_to_f64"))
+            || name_eq(n, make_name("malloc"))
+            || name_eq(n, make_name("free"))
+            || name_eq(n, make_name("exit"))
+            || name_eq(n, make_name("system"))
+            || name_eq(n, make_name("floor"))
+            || name_eq(n, make_name("ceil"))
+            || name_eq(n, make_name("tgamma"))
+    }
+    if argc == 2 {
+        return name_eq(n, make_name("str_eq"))
+            || name_eq(n, make_name("starts_with"))
+            || name_eq(n, make_name("str_concat"))
+            || name_eq(n, make_name("str_char_at"))
+            || name_eq(n, make_name("str_from_bytes"))
+            || name_eq(n, make_name("read_i64"))
+            || name_eq(n, make_name("read_f64"))
+            || name_eq(n, make_name("acknowledge"))
+            || name_eq(n, make_name("require_confidence"))
+            || name_eq(n, make_name("pow"))
+            || name_eq(n, make_name("__sounio_seq_push"))
+            || name_eq(n, make_name("__sounio_seq_get"))
+    }
+    if argc == 3 {
+        return name_eq(n, make_name("write_file"))
+            || name_eq(n, make_name("write_i64"))
+            || name_eq(n, make_name("write_f64"))
+            || name_eq(n, make_name("__sounio_seq_set"))
+    }
+    if argc == 7 {
+        return name_eq(n, make_name("syscall6"))
+    }
     false
 }
 
