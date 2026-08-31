@@ -21,12 +21,14 @@ with d(x,x′) ≥ 3, there exist u ∈ Im C(x), w ∈ Im C(x′), u,w ≠ 0, wi
 4-dimensional orthogonalizer).
 
 We study the bilinear commutator map T(u,w) = [u,w] on Im C(x) × Im C(x′) and
-prove sharp rank laws for it, all mechanically verified. We then present a
-characteristic-class argument that reduces the conjecture to a technical lemma
-about two explicit codimension-4 degeneracy strata, which we characterize
-exactly. Every algebraic identity below has (i) a short proof, (ii) exact
-integer verification on random instances, and (iii) a Lean 4 kernel-checked
-canonical instance (no `sorry`, Mathlib-free).
+prove sharp rank laws for it, all mechanically verified. We then examine — and
+**close as a negative result** — a characteristic-class approach to existence: the
+relevant relative Euler class is computed and shown to vanish (§6), so witness
+existence is not topologically forced by this bundle and must be established
+algebraically (§8). Every algebraic identity below has (i) a short proof, (ii)
+exact integer verification on random instances, and (iii) a Lean 4 kernel-checked
+canonical instance (no `sorry`, Mathlib-free). The rank laws (§§2–5) stand on
+their own as the paper's positive contribution.
 
 Throughout: x = (a,b), x′ = (a′,b′) normalized zero divisors (n(a) = n(b) = 1
 etc.), z = ab, z′ = a′b′ their Γ_O-invariants, x̃ = (b,−a) the hexagon
@@ -131,69 +133,55 @@ obstructions over open manifolds comb out to the ends. Consequently Theorem 6.1
 is **not, by itself, a proof**: w₇ ≠ 0 is a necessary consistency check on the
 relative obstruction, not a derivation of it. The actual content is:
 
-**Remark 6.1a (reconciliation of w₇ ≠ 0 with [Γ] = 0).** A measured fact must
-be reconciled with Theorem 6.1: tracing the witness curve Γ and reading its
-orientation signs gives [Γ] = 0 in H₁(B; ℤ/2) = ℤ/2⟨[ℝP¹×pt], [pt×ℝP¹]⟩
-(census (a,b) = (0,0)). Under Poincaré duality these generators map to
-{α³β⁴, α⁴β³}, so a *naïve* reading would demand [Γ]₂ = w₇ = α⁴β³+α³β⁴ ≠ 0 — a
-contradiction. The resolution is that **E₇ is not honest over Z**: the four
-constraint projections drop from rank 4 to rank 3 on the parallel locus (§4,
-measured in R12), so s is not a transverse section of a global rank-7 bundle
-and the identity e(E₇) = PD[Z(s)] fails globally. Instead
-e(E₇ ⊗ γ₁γ₂) = [Γ] + excess(Z) with [Γ] = 0 and excess(Z) = w₇. The obstruction
-is **relative** (a class in H⁷(B, N(Z))), supported on the codimension-4 locus
-the census cannot see (Γ ∩ Z = ∅ is a theorem). Thus [Γ] = 0 (Γ non-empty but
-null-homologous) and w₇ ≠ 0 (relative obstruction, Z-supported) coexist without
-contradiction; R14's "falsified PD prediction" falsified the wrong prediction.
+**The correct forcing invariant, and its vanishing.** The existence of a witness
+is *not* controlled by the absolute obstruction over the open manifold B ∖ Z.
+Let M = B ∖ N̊(Z), a compact 8-manifold with boundary ∂M = ∂N(Z); by (F3-type)
+Lemma L(ii) below, s is nowhere zero on N(Z), hence gives a nowhere-zero
+boundary section s|_{∂M}. A witness is a zero of s in the interior of M, and the
+obstruction that *forces* one is the **relative Euler class**
+  e_rel(E₇ ⊗ γ₁γ₂, s|_{∂M}) ∈ H⁷(M, ∂M; ℤ̃) ≅ H₁(M; ℤ̃),
+(Lefschetz duality). Removing the codimension-4 locus Z from the 8-manifold B
+leaves π₁ unchanged, so mod 2 this group is H₁(M; ℤ/2) ≅ H₁(B; ℤ/2) = (ℤ/2)²,
+and it is exactly the class the census reads: **e_rel ≡ [Γ] = 0** (measured,
+R14). The invariant that would force a witness is measured to vanish.
 
-**Proposition 6.1b (Thom description of the obstruction) [T].** The normal
-bundle of Z₁ = {[x]}×ℝP⁴ (resp. Z₂) in B has rank 4 with mod-2 Thom class α⁴
-(resp. β⁴). The Thom isomorphism gives H⁷(B, B∖Z) ≅ H³(Z₁) ⊕ H³(Z₂) =
-ℤ/2⟨β³⟩ ⊕ ℤ/2⟨α³⟩, and the pushforward to H⁷(B) sends β³ ↦ α⁴β³, α³ ↦ α³β⁴.
-Hence im(H⁷(B, B∖Z) → H⁷(B)) = span{α⁴β³, α³β⁴} — matching the exact
-computation of R13 — and this map is injective (2-dim onto 2-dim). Therefore
-**w₇ = α⁴β³ + α³β⁴ is exactly the sum of the two Thom pushforwards of the
-fundamental classes [Z₁], [Z₂]**, and the relative primary obstruction, if it
-equals w₇, is uniquely determined.
+**Theorem 6.2 (the characteristic-class route is closed) [M, T].** For the
+commutator section s on B = ℝP⁴×ℝP⁴, the relative primary obstruction to a
+global nowhere-zero section vanishes: e_rel = [Γ] = 0. Two independent reasons:
+1. **No local obstruction at Z, on dimension grounds.** Extending a nowhere-zero
+   section across a codimension-k locus whose fibre sphere is S^{r−1} has first
+   obstruction in π_{k−1}(S^{r−1}), which is nonzero only for k ≥ r. Here k = 4
+   (codim Z_i) and r = 7 (rank E₇): since 4 < 7 the linking 3-sphere maps into
+   S⁶ (or S⁷ on Z) and π₃(S⁶) = π₃(S⁷) = 0. **There is no Z-supported obstruction
+   for any section whatsoever** — a fortiori none for s.
+2. **The absolute class w₇ carries no information about s.** H⁷(B; ℤ/2) is
+   2-dimensional with basis {α⁴β³, α³β⁴}, and the two Thom pushforwards of the
+   normal bundles of Z₁, Z₂ (mod-2 Thom classes α⁴, β⁴) are exactly that basis.
+   Hence im(H⁷(B, B∖Z) → H⁷(B)) = H⁷(B) *automatically*, and **every** degree-7
+   class "appears supported on Z". The equality w₇ = α⁴β³ + α³β⁴ ∈ im(j*) is a
+   tautology of low-dimensional cohomology, not a geometric localization of the
+   obstruction of s. (This corrects the reading of R13, which had kept this route
+   looking alive.)
 
-**Technical Lemma L** [L]. Let Z = Z₁ ∪ Z₂ with Z₁ = {[x]} × ℝP⁴,
-Z₂ = ℝP⁴ × {[x′]} (each ≅ ℝP⁴, codimension 4 in B). Then
-(i) off Z the four constraint projections are independent in W₁₁ (measured:
-2312/2312 samples over 40 configurations at rank 9 of the full 9-row stack;
-every one of the 85 rank drops occurred at parallel points and dropped by
-exactly one [M]);
-(ii) on Z the local rank is 8 = dim B, and the section s is canonically
-nonvanishing near Z whenever d(x,x′) ≥ 3 (s(x,w) = [x,w] = 0 would give
-w ∈ Im C(x) ∩ Im C(x′), i.e. d ≤ 2);
-(iii) [in preparation — reduced to a local degree] By (ii), s is nowhere zero
-on a tubular neighbourhood N(Z), so it defines a nowhere-zero section over
-∂N(Z); a global nowhere-zero section would extend it over all of B. The
-obstruction to that extension is the relative primary class in
-H⁷(B, N(Z)) ≅ H³(Z₁) ⊕ H³(Z₂) (Prop 6.1b), whose image in H⁷(B) is
-Σᵢ deg_local(s; Zᵢ) · (Thom pushforward of [Zᵢ]). By Prop 6.1b the two
-pushforwards are α⁴β³ and α³β⁴, so this image equals w₇ = α⁴β³ + α³β⁴ **iff
-the local degree of s on a normal 4-slice to each Zᵢ is odd.** The single
-remaining computation is therefore: **deg_local(s; Z₁) ≡ deg_local(s; Z₂) ≡ 1
-(mod 2)** — the winding of T on a small 3-sphere linking the parallel locus
-u ∥ x. R12's measurement (local rank 8 = dim B near Z, every drop by exactly
-one) is the codimension-1 shadow of an odd local degree; the exact mod-2 degree
-is the content in preparation.
+*Consequence.* Theorem 6.1 (w₇ ≠ 0 for the *virtual* bundle over B) is a
+consistency check with no forcing power: over B ∖ Z, where the honest E₇ lives,
+w₇ restricts to 0, and the relative Euler class that would count interior zeros
+is [Γ] = 0. **The former Corollary 6.2 (diam = 3 via this obstruction) is
+withdrawn.** Witness existence is therefore an *algebraic*, not a topological,
+fact — see §8.
 
-**Corollary 6.2** (conditional). *If* the relative primary obstruction
-o_rel(s) ∈ H⁷(B, ∂N(Z)) ≅ H³(Z₁) ⊕ H³(Z₂) is nonzero — equivalently, if the
-local degree of s on a normal 4-slice to Z₁ or Z₂ is odd (L(iii)) — then every
-pair of zero divisors admits a length-≤3 commuting path, i.e.
-**diam Γ_C^Z(𝕊) = 3**, proving the GZ conjecture.
+*Scope, honestly.* (i) The claim is that **this** route, as constructed, is
+dead — not that no topological proof exists. (ii) e_rel = [Γ] presumes the census
+enumerated all components of Γ; the tracer is handle-limited (~5 components per
+configuration, R17b) so [Γ] = 0 is measured, not proven. This does not revive
+forcing: unfound components would have to carry an odd class while the found ones
+already sum to zero, for which there is no evidence.
 
-**We flag honestly**: o_rel(s) is *not* determined by Theorem 6.1. Its image in
-H⁷(B) must be w₇ for consistency (Prop 6.1b), but o_rel could still be 0 in
-H³(Z₁)⊕H³(Z₂) if the local degrees are even — in which case a nowhere-zero
-section could exist and the argument would not close. The invariant to compute
-is the H³(Z₁) = ℤ/2⟨[ℝP³]⟩ class, **not** a witness count: R14 shows witnesses
-form curves (Jac rank 7, 320/320), so their number is infinite and hunt tallies
-(13/24/74/139/300…) are cluster-tolerance artifacts, not zero counts. The
-existence of witnesses in every sampled configuration (§7) is strong empirical
-support that o_rel ≠ 0, but is not a proof of it.
+**Lemma L(ii) [T].** On Z the section is canonically nonvanishing whenever
+d(x,x′) ≥ 3: s(x,w) = [x,w] = 0 would give w ∈ Im C(x) ∩ Im C(x′), i.e. d ≤ 2.
+Off Z the four constraint projections are independent in W₁₁ (2312/2312 samples,
+rank 9; all 85 rank drops at parallel points, each by exactly one [M]); on Z the
+local rank is 8 = dim B. (This is the boundary datum for e_rel above.)
 
 ## 7. Supporting evidence and negative results
 
@@ -220,6 +208,25 @@ support that o_rel ≠ 0, but is not a proof of it.
   at the symmetric point. Consequently a witness-existence proof cannot rest on
   a uniform linear pencil; it must rest on the obstruction argument (§6), which
   never required one. (This is why §6, not a construction, carries the theorem.)
+
+## 8. The constructive route (in progress)
+
+With the topological forcing closed (§6), witness existence must be exhibited
+algebraically. The generic data dictate the shape: away from the maximally
+symmetric configuration (e₁,e₂), the odd components of the witness curve are
+**conics**, not lines (§7). We therefore seek a witness as a real root of an
+explicit quadratic in the frame coordinates. The program:
+1. Rationalize a conic component from a generic configuration (the same
+   polish-and-reconstruct pipeline that produced the R16 line pencil), obtaining
+   its degree-2 defining relation in frame coordinates.
+2. Read off the resulting quadratic q(t) whose roots are the witnesses along the
+   conic, with coefficients explicit in n(a), n(a′), ⟨z, z′⟩ and the ghost-law
+   quantities of §4.
+3. Prove disc q ≥ 0 uniformly for d(x,x′) ≥ 3, using the identities of §§2–5.
+   Positivity of an explicit expression in owned invariants is an algebra
+   problem, not a topology one — the route that survives §6.
+
+A real root of q for every admissible pair would prove diam Γ_C^Z(𝕊) = 3.
 
 ## Appendix: verification artifacts (this repository)
 

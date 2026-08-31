@@ -693,3 +693,46 @@ o locus paralelo u∥x). Rotas paralelas vivas: (b) positividade do discriminant
 quadrática de witness (coefs explícitos em n(a),n(a′),⟨z,z′⟩, ghost-law) — problema de
 álgebra nas identidades que já temos, subiu de prioridade agora que o primário morreu no
 aberto.
+
+## Rodada 18: A ROTA TOPOLÓGICA ESTÁ FECHADA (negativo completo, não "em preparação")
+
+Consultei Grok (xai) + revisor forte no ponto duro. Grok errou ($\pi_3(S^7)\cong\mathbb{Z}/2$
+— FALSO, $\pi_3(S^7)=0$), e o erro dele iluminou a verdade. Conclusão, no grupo CERTO:
+
+**O invariante de forçamento é a classe de Euler RELATIVA**, não a absoluta sobre o aberto:
+  e_rel(E₇, s|_∂M) ∈ H⁷(M,∂M) ≅ H₁(M;ℤ/2),  M = B∖N̊(Z).
+Remover Z (codim 4) de B (dim 8) não muda π₁ ⟹ H₁(M;ℤ/2) ≅ H₁(B;ℤ/2) = (ℤ/2)², e o
+census R14 mediu EXATAMENTE essa classe: **[Γ] = 0**. Ou seja, o invariante que forçaria
+existência é medido-NULO. (Meu argumento anterior "w₇|_{B∖Z}=0 ⟹ sem forçamento" era
+non-sequitur: grupo errado. A restrição H⁷(B)→H⁷(B∖Z) não diz nada sobre H⁷(M,∂M).)
+
+**Kill dimensional independente:** estender seção nowhere-zero por um locus de codim k
+com esfera-fibra S^{r-1} tem primeira obstrução em π_{k-1}(S^{r-1}), não-nula só se k≥r.
+Aqui k=4 (codim de Z_i), r=7 (rank de E₇): **4 < 7 ⟹ NENHUMA obstrução local em Z, para
+qualquer seção.** A esfera de linking S³ mapeia em S⁶/S⁷ e π₃(S⁶)=π₃(S⁷)=0.
+
+**A RAIZ DO ERRO QUE MANTEVE §6 VIVO POR 4 RODADAS (R11→R17):** R13 concluiu
+"im(H⁷(B,B∖Z)→H⁷(B)) = span{α⁴β³,α³β⁴} = w₇ ⟹ obstrução suportada em Z". Isso é
+COINCIDÊNCIA DE COHOMOLOGIA PEQUENA, não localização geométrica: H⁷(B;ℤ/2) TEM só 2
+monômios (α⁴β³, α³β⁴), e os dois pushforwards de Thom de [Z₁],[Z₂] são exatamente essa
+base ⟹ im(j*) = TODO H⁷(B) automaticamente. TODA classe de grau 7 "aparece suportada em
+Z". R13 carregou ZERO informação sobre s. Lição mais transferível do dia: num H^n de
+dimensão baixa, "está na imagem da excisão" é vácuo, não evidência.
+
+**Status honesto (duas direções de escopo):**
+(i) É "ESTA rota, como construída, está morta" — NÃO "não existe prova topológica".
+(ii) e_rel = [Γ] pressupõe que o census achou TODAS as componentes; R17b mostrou que ele
+é handle-limitado (~5/config, nem sempre fecha). Medido 0, não provado 0. Mas isso não
+resgata o forçamento: componentes não-achadas teriam de carregar classe ÍMPAR enquanto as
+achadas já cancelam — sem razão para isso.
+
+**Corolário 6.2 RETRATADO** (era condicional em o_rel≠0; o_rel medido = 0). §6 reescrito
+como negativo completo: a obstrução relativa foi computada e VANISHES; rota fechada.
+Uma rota fechada é contribuição real (mata o approach de característica para este alvo).
+
+**PIVÔ TOTAL PARA A ROTA CONSTRUTIVA (b):** a existência do witness NÃO é topológica —
+é algébrica. Programa concreto (primeiro deliverable): racionalizar uma CÔNICA das configs
+genéricas do R17 (como o R16 fez com a reta), ler a relação grau-2 em coords de frame,
+extrair a forma quadrática do witness, expressar o discriminante em n(a),n(a′),⟨z,z′⟩ e as
+grandezas da ghost-law, e provar positividade contra as identidades que já temos. Cônica é
+o que os dados genéricos REALMENTE mostram (≠ pêncil).
