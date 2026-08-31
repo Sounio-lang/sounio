@@ -96,8 +96,7 @@ activate_runtime() {
   local ensure_output='' ensure_rc=0
   version_dir="$RUNTIME_ROOT/versions/$runtime_id"
   manifest="$version_dir/manifest"
-  [[ -f "$manifest" && -x "$version_dir/bin/sounio-coord-runtime" && \
-    -f "$version_dir/hooks/sounio_coord_agent_hook_runtime.py" ]] || \
+  [[ -f "$manifest" && -x "$version_dir/bin/sounio-coord-runtime" ]] || \
     die "installed runtime is incomplete: $runtime_id"
   protocol="$(manifest_value "$manifest" protocol_version)"
   [[ "$protocol" == "$CLIENT_PROTOCOL" ]] || \
@@ -141,6 +140,39 @@ activate_runtime() {
     [[ "$(manifest_value "$manifest" loom_language_authority_semantics_sha256)" == \
       16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff ]] || \
       die "installed native hook is not bound to the frozen Sounio authority: $runtime_id"
+  fi
+  if grep -q '^capability=loom-native-hook-cutover-v1$' "$manifest"; then
+    local cutover_capsule="$version_dir/policy/native-hook-cutover"
+    local cutover_config
+    grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" && \
+      [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+        -x "$version_dir/bin/sounio-loom-native-hook-cutover" ]] || \
+      die "installed runtime declares native hook cutover without Loom or frozen Sounio action 9045: $runtime_id"
+    [[ ! -e "$version_dir/hooks/sounio_coord_agent_hook_runtime.py" && \
+      ! -e "$version_dir/hooks/sounio_coord_agent_hook.py" ]] || \
+      die "installed native hook cutover still contains a Python hook bridge: $runtime_id"
+    [[ "$(manifest_value "$manifest" loom_native_hook_cutover_semantics_sha256)" == \
+      27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882 && \
+      "$(manifest_value "$manifest" loom_native_hook_cutover_manifest_sha256)" == \
+      16a4f7e24e1fcdb71690b3031914b2fe6cd389ad866154b7bf73907f007cfc4a ]] || \
+      die "installed native hook cutover is not bound to frozen Sounio action 9045: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" loom_native_hook_cutover_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-native-hook-cutover"
+    verify_manifest_binary_sha256 "$manifest" loom_native_hook_cutover_manifest_sha256 \
+      "$cutover_capsule/tools/loom/native_hook_cutover.freeze.v1"
+    verify_manifest_binary_sha256 "$manifest" loom_native_hook_cutover_source_sha256 \
+      "$cutover_capsule/stdlib/coordination/loom_native_hook_cutover_authority.sio"
+    verify_manifest_binary_sha256 "$manifest" loom_native_hook_cutover_entrypoint_sha256 \
+      "$cutover_capsule/tools/loom/native_hook_cutover_authority_main.sio"
+    for cutover_config in codex claude cursor grok; do
+      verify_manifest_binary_sha256 "$manifest" \
+        "loom_native_hook_cutover_${cutover_config}_config_sha256" \
+        "$cutover_capsule/configs/${cutover_config}.json"
+      if grep -Eiq 'python|pypy|rustc|cargo|node[[:space:]]|ruby[[:space:]]|awk[[:space:]]|bc[[:space:]]' \
+        "$cutover_capsule/configs/${cutover_config}.json"; then
+        die "installed native hook config contains a prohibited bridge: $cutover_config"
+      fi
+    done
   fi
   if grep -q '^capability=loom-runtime-authority-capsule-v1$' "$manifest"; then
     local authority_capsule="$version_dir/policy/language-authority"
@@ -719,7 +751,6 @@ fi
 
 installer_source="$SOURCE_ROOT/scripts/dev/install_sounio_coord_runtime.sh"
 runtime_source="$SOURCE_ROOT/scripts/dev/sounio_coord_runtime.sh"
-hook_source="$SOURCE_ROOT/scripts/dev/sounio_coord_agent_hook_runtime.py"
 causal_source="$SOURCE_ROOT/scripts/dev/sounio_coord_causal_runtime.py"
 agentd_source="$SOURCE_ROOT/scripts/dev/sounio_coord_agentd.py"
 fleet_source="$SOURCE_ROOT/scripts/dev/sounio_coord_fleet.py"
@@ -730,6 +761,7 @@ fleet_model_generator="$SOURCE_ROOT/scripts/dev/sounio_fleet_tla_sabotage.py"
 fleet_trace_verifier="$SOURCE_ROOT/scripts/dev/sounio_fleet_trace_verify.py"
 loom_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom.sh"
 loom_language_authority_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_language_authority.sh"
+loom_native_hook_cutover_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_native_hook_cutover.sh"
 loom_custody_transfer_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_custody_transfer.sh"
 loom_execution_outcome_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_execution_outcome.sh"
 loom_lane_health_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_lane_health.sh"
@@ -749,6 +781,13 @@ loom_project="$SOURCE_ROOT/tools/loom"
 loom_language_authority_entrypoint="$SOURCE_ROOT/tools/loom/language_authority_main.sio"
 loom_language_authority_module="$SOURCE_ROOT/stdlib/coordination/loom_language_authority.sio"
 loom_language_authority_freeze="$SOURCE_ROOT/tools/loom/language_authority.freeze.v1"
+loom_native_hook_cutover_entrypoint="$SOURCE_ROOT/tools/loom/native_hook_cutover_authority_main.sio"
+loom_native_hook_cutover_module="$SOURCE_ROOT/stdlib/coordination/loom_native_hook_cutover_authority.sio"
+loom_native_hook_cutover_freeze="$SOURCE_ROOT/tools/loom/native_hook_cutover.freeze.v1"
+loom_native_hook_cutover_codex_config="$SOURCE_ROOT/.codex/hooks.json"
+loom_native_hook_cutover_claude_config="$SOURCE_ROOT/.claude/settings.json"
+loom_native_hook_cutover_cursor_config="$SOURCE_ROOT/.cursor/hooks.json"
+loom_native_hook_cutover_grok_config="$SOURCE_ROOT/.grok/hooks/loom-native.json"
 loom_custody_transfer_entrypoint="$SOURCE_ROOT/tools/loom/custody_transfer_main.sio"
 loom_custody_transfer_module="$SOURCE_ROOT/stdlib/coordination/loom_custody_transfer.sio"
 loom_custody_transfer_freeze="$SOURCE_ROOT/tools/loom/custody_transfer.freeze.v1"
@@ -857,7 +896,6 @@ loom_change_sources=(
 )
 [[ -x "$installer_source" ]] || die "runtime installer source missing or not executable: $installer_source"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
-[[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
 [[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
 [[ -x "$agentd_source" ]] || die "agent supervisor source missing or not executable: $agentd_source"
 [[ -x "$fleet_source" ]] || die "fleet launcher source missing or not executable: $fleet_source"
@@ -871,6 +909,8 @@ loom_change_sources=(
 [[ -x "$loom_build_source" ]] || die "Loom build entrypoint missing or not executable: $loom_build_source"
 [[ -x "$loom_language_authority_build_source" ]] || \
   die "Loom language-authority build entrypoint missing or not executable: $loom_language_authority_build_source"
+[[ -x "$loom_native_hook_cutover_build_source" ]] || \
+  die "Loom native-hook cutover build entrypoint missing or not executable: $loom_native_hook_cutover_build_source"
 [[ -x "$loom_custody_transfer_build_source" ]] || \
   die "Loom custody-transfer build entrypoint missing or not executable: $loom_custody_transfer_build_source"
 [[ -x "$loom_execution_outcome_build_source" ]] || \
@@ -912,6 +952,14 @@ loom_change_sources=(
   -f "$loom_language_authority_module" && \
   -f "$loom_language_authority_freeze" ]] || \
   die "Loom frozen Sounio language-authority source bundle is incomplete"
+[[ -f "$loom_native_hook_cutover_entrypoint" && \
+  -f "$loom_native_hook_cutover_module" && \
+  -f "$loom_native_hook_cutover_freeze" && \
+  -f "$loom_native_hook_cutover_codex_config" && \
+  -f "$loom_native_hook_cutover_claude_config" && \
+  -f "$loom_native_hook_cutover_cursor_config" && \
+  -f "$loom_native_hook_cutover_grok_config" ]] || \
+  die "Loom frozen Sounio native-hook cutover bundle is incomplete"
 [[ -f "$loom_custody_transfer_entrypoint" && \
   -f "$loom_custody_transfer_module" && \
   -f "$loom_custody_transfer_freeze" ]] || \
@@ -1036,6 +1084,7 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 "$loom_build_source" >/dev/null
 loom_binary="$loom_project/_build/default/src/loom.exe"
 loom_language_authority_binary="$loom_project/.runtime/sounio-loom-language-authority-runtime"
+loom_native_hook_cutover_binary="$loom_project/.runtime/sounio-loom-native-hook-cutover"
 loom_custody_transfer_binary="$loom_project/_build/default/src/sounio-loom-custody-transfer-runtime"
 loom_execution_outcome_binary="$loom_project/.runtime/sounio-loom-execution-outcome-runtime"
 loom_lane_health_binary="$loom_project/.runtime/sounio-loom-lane-health-runtime"
@@ -1086,6 +1135,8 @@ loom_material_change_expected_sha="$(
   die "Loom Sounio action 9044 failed its install probe"
 [[ -x "$loom_language_authority_binary" ]] || \
   die "Loom build omitted its frozen Sounio language-authority runtime"
+[[ -x "$loom_native_hook_cutover_binary" ]] || \
+  die "Loom build omitted frozen Sounio native-hook cutover action 9045"
 [[ -x "$loom_custody_transfer_binary" ]] || \
   die "Loom build omitted its frozen Sounio custody-transfer runtime"
 [[ -x "$loom_execution_outcome_binary" ]] || \
@@ -1136,6 +1187,16 @@ read -r loom_language_authority_actual_sha _ < <(
 )
 [[ "$loom_language_authority_actual_sha" == "$loom_language_authority_expected_sha" ]] || \
   die "Loom language-authority runtime does not match its freeze manifest"
+loom_native_hook_cutover_probe="$(printf '0\n' | "$loom_native_hook_cutover_binary")"
+[[ "$loom_native_hook_cutover_probe" == \
+  'SOUNIO_NATIVE_HOOK_CUTOVER_SELFTEST PASS cases=12' ]] || \
+  die "Loom frozen Sounio native-hook cutover runtime failed its install probe"
+loom_native_hook_cutover_expected_sha="$(
+  manifest_value "$loom_native_hook_cutover_freeze" executable_sha256
+)"
+loom_native_hook_cutover_actual_sha="$(sha256sum "$loom_native_hook_cutover_binary" | awk '{print $1}')"
+[[ "$loom_native_hook_cutover_actual_sha" == "$loom_native_hook_cutover_expected_sha" ]] || \
+  die "Loom native-hook cutover runtime does not match its freeze manifest"
 loom_custody_transfer_probe="$(printf '0\n' | "$loom_custody_transfer_binary")"
 [[ "$loom_custody_transfer_probe" == \
   'SOUNIO_CUSTODY_TRANSFER_SELFTEST PASS cases=30' ]] || \
@@ -1299,13 +1360,18 @@ loom_quorum_probe="$({
   die "Loom native Sounio journal-quorum adapter failed its install probe"
 
 bundle_sources=(
-  "$installer_source" "$runtime_source" "$hook_source" "$causal_source"
+  "$installer_source" "$runtime_source" "$causal_source"
   "$agentd_source"
   "$fleet_source" "$fleetd_source" "$fleet_model_source"
   "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier"
   "$loom_build_source" "$loom_language_authority_build_source"
   "$loom_language_authority_entrypoint" "$loom_language_authority_module"
   "$loom_language_authority_freeze"
+  "$loom_native_hook_cutover_build_source"
+  "$loom_native_hook_cutover_entrypoint" "$loom_native_hook_cutover_module"
+  "$loom_native_hook_cutover_freeze" "$loom_native_hook_cutover_codex_config"
+  "$loom_native_hook_cutover_claude_config" "$loom_native_hook_cutover_cursor_config"
+  "$loom_native_hook_cutover_grok_config"
   "$loom_custody_transfer_build_source" "$loom_custody_transfer_entrypoint"
   "$loom_custody_transfer_module" "$loom_custody_transfer_freeze"
   "$loom_execution_outcome_build_source" "$loom_execution_outcome_entrypoint"
@@ -1418,6 +1484,9 @@ else
   mkdir -p "$stage/bin" "$stage/hooks" "$stage/formal" \
     "$stage/policy/language-authority/tools/loom" \
     "$stage/policy/language-authority/stdlib/coordination" \
+    "$stage/policy/native-hook-cutover/tools/loom" \
+    "$stage/policy/native-hook-cutover/stdlib/coordination" \
+    "$stage/policy/native-hook-cutover/configs" \
     "$stage/policy/product-activation/tools/loom" \
     "$stage/policy/product-activation/stdlib/coordination" \
     "$stage/policy/product-activation/scripts/dev" \
@@ -1448,6 +1517,22 @@ else
     "$stage/policy/language-authority/tools/loom/language_authority_main.sio"
   install -m 0644 "$loom_language_authority_module" \
     "$stage/policy/language-authority/stdlib/coordination/loom_language_authority.sio"
+  install -m 0555 "$loom_native_hook_cutover_binary" \
+    "$stage/bin/sounio-loom-native-hook-cutover"
+  install -m 0444 "$loom_native_hook_cutover_freeze" \
+    "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover.freeze.v1"
+  install -m 0444 "$loom_native_hook_cutover_entrypoint" \
+    "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover_authority_main.sio"
+  install -m 0444 "$loom_native_hook_cutover_module" \
+    "$stage/policy/native-hook-cutover/stdlib/coordination/loom_native_hook_cutover_authority.sio"
+  install -m 0444 "$loom_native_hook_cutover_codex_config" \
+    "$stage/policy/native-hook-cutover/configs/codex.json"
+  install -m 0444 "$loom_native_hook_cutover_claude_config" \
+    "$stage/policy/native-hook-cutover/configs/claude.json"
+  install -m 0444 "$loom_native_hook_cutover_cursor_config" \
+    "$stage/policy/native-hook-cutover/configs/cursor.json"
+  install -m 0444 "$loom_native_hook_cutover_grok_config" \
+    "$stage/policy/native-hook-cutover/configs/grok.json"
   install -m 0755 "$loom_custody_transfer_binary" \
     "$stage/bin/sounio-loom-custody-transfer-runtime"
   install -m 0755 "$loom_execution_outcome_binary" \
@@ -1602,7 +1687,6 @@ else
   done
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
-  install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
   coord_runtime_sha256="$(sha256sum "$stage/bin/sounio-coord-runtime" | awk '{print $1}')"
   loom_runtime_sha256="$(sha256sum "$stage/bin/sounio-loom-runtime" | awk '{print $1}')"
   loom_sovereign_runtime_sha256="$(
@@ -1641,6 +1725,22 @@ else
   loom_language_authority_policy_entrypoint_sha256="$(
     sha256sum "$stage/policy/language-authority/tools/loom/language_authority_main.sio" | awk '{print $1}'
   )"
+  loom_native_hook_cutover_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-native-hook-cutover" | awk '{print $1}'
+  )"
+  loom_native_hook_cutover_manifest_sha256="$(
+    sha256sum "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover.freeze.v1" | awk '{print $1}'
+  )"
+  loom_native_hook_cutover_source_sha256="$(
+    sha256sum "$stage/policy/native-hook-cutover/stdlib/coordination/loom_native_hook_cutover_authority.sio" | awk '{print $1}'
+  )"
+  loom_native_hook_cutover_entrypoint_sha256="$(
+    sha256sum "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover_authority_main.sio" | awk '{print $1}'
+  )"
+  loom_native_hook_cutover_codex_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/codex.json" | awk '{print $1}')"
+  loom_native_hook_cutover_claude_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/claude.json" | awk '{print $1}')"
+  loom_native_hook_cutover_cursor_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/cursor.json" | awk '{print $1}')"
+  loom_native_hook_cutover_grok_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/grok.json" | awk '{print $1}')"
   loom_custody_transfer_runtime_sha256="$(
     sha256sum "$stage/bin/sounio-loom-custody-transfer-runtime" | awk '{print $1}'
   )"
@@ -1686,6 +1786,29 @@ else
       "$loom_language_authority_policy_source_sha256"
     printf 'loom_language_authority_policy_entrypoint_sha256=%s\n' \
       "$loom_language_authority_policy_entrypoint_sha256"
+    printf 'loom_native_hook_cutover_language=Sounio\n'
+    printf 'loom_native_hook_cutover_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_native_hook_cutover_operational_attachment=OCaml\n'
+    printf 'loom_native_hook_cutover_stage=SEMANTICS_FROZEN\n'
+    printf 'loom_native_hook_cutover_frame=9045\n'
+    printf 'loom_native_hook_cutover_semantics_sha256=27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882\n'
+    printf 'loom_native_hook_cutover_runtime_sha256=%s\n' \
+      "$loom_native_hook_cutover_runtime_sha256"
+    printf 'loom_native_hook_cutover_manifest_sha256=%s\n' \
+      "$loom_native_hook_cutover_manifest_sha256"
+    printf 'loom_native_hook_cutover_source_sha256=%s\n' \
+      "$loom_native_hook_cutover_source_sha256"
+    printf 'loom_native_hook_cutover_entrypoint_sha256=%s\n' \
+      "$loom_native_hook_cutover_entrypoint_sha256"
+    printf 'loom_native_hook_cutover_codex_config_sha256=%s\n' \
+      "$loom_native_hook_cutover_codex_config_sha256"
+    printf 'loom_native_hook_cutover_claude_config_sha256=%s\n' \
+      "$loom_native_hook_cutover_claude_config_sha256"
+    printf 'loom_native_hook_cutover_cursor_config_sha256=%s\n' \
+      "$loom_native_hook_cutover_cursor_config_sha256"
+    printf 'loom_native_hook_cutover_grok_config_sha256=%s\n' \
+      "$loom_native_hook_cutover_grok_config_sha256"
+    printf 'loom_native_hook_cutover_python_bridge_absent=true\n'
     printf 'loom_custody_transfer_language=Sounio\n'
     printf 'loom_custody_transfer_role=SEMANTIC_AUTHORITY\n'
     printf 'loom_custody_transfer_stage=SEMANTICS_FROZEN\n'
@@ -1802,6 +1925,7 @@ else
     printf 'capability=loom-transactional-custody-transfer-v1\n'
     printf 'capability=loom-durable-execution-outcome-v1\n'
     printf 'capability=loom-native-agent-hook-v1\n'
+    printf 'capability=loom-native-hook-cutover-v1\n'
     printf 'capability=loom-runtime-authority-capsule-v1\n'
     printf 'capability=loom-product-launch-dark-attachment-v1\n'
     printf 'capability=loom-sovereign-execution-kernel-product-v1\n'

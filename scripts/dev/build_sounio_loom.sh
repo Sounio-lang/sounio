@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
 LANGUAGE_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
+NATIVE_HOOK_CUTOVER_MANIFEST="$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1"
 EXECUTION_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/execution_authority.freeze.v2"
 EXECUTION_OUTCOME_MANIFEST="$ROOT_DIR/tools/loom/execution_outcome.freeze.v1"
 SUBPROCESS_MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1"
@@ -16,6 +17,7 @@ frozen_toolchain_root=''
 execution_outcome_toolchain_root=''
 subprocess_membrane_toolchain_root=''
 lane_health_toolchain_root=''
+native_hook_cutover_toolchain_root=''
 resident_membrane_stage_root=''
 resident_membrane_v2_stage_root=''
 resident_membrane_v3_stage_root=''
@@ -26,6 +28,7 @@ cleanup() {
   [[ -z "$execution_outcome_toolchain_root" ]] || rm -rf "$execution_outcome_toolchain_root"
   [[ -z "$subprocess_membrane_toolchain_root" ]] || rm -rf "$subprocess_membrane_toolchain_root"
   [[ -z "$lane_health_toolchain_root" ]] || rm -rf "$lane_health_toolchain_root"
+  [[ -z "$native_hook_cutover_toolchain_root" ]] || rm -rf "$native_hook_cutover_toolchain_root"
   [[ -z "$resident_membrane_stage_root" ]] || rm -rf "$resident_membrane_stage_root"
   [[ -z "$resident_membrane_v2_stage_root" ]] || rm -rf "$resident_membrane_v2_stage_root"
   [[ -z "$resident_membrane_v3_stage_root" ]] || rm -rf "$resident_membrane_v3_stage_root"
@@ -100,6 +103,30 @@ prepare_lane_health_toolchain() {
   actual_compiler_sha="$(sha256sum "$lane_health_toolchain_root/bin/souc-lean-single-x86_64" | awk '{print $1}')"
   [[ "$actual_wrapper_sha" == "$wrapper_sha" && "$actual_compiler_sha" == "$compiler_sha" ]] || {
     echo 'error: reconstructed lane-health Sounio toolchain failed hash verification' >&2
+    exit 1
+  }
+}
+
+prepare_native_hook_cutover_toolchain() {
+  local executable_commit wrapper_sha compiler_sha actual_wrapper_sha actual_compiler_sha
+  [[ -f "$NATIVE_HOOK_CUTOVER_MANIFEST" ]] || {
+    echo 'error: frozen Sounio native-hook cutover manifest is required' >&2
+    exit 1
+  }
+  executable_commit="$(manifest_value "$NATIVE_HOOK_CUTOVER_MANIFEST" sounio_executable_commit)"
+  wrapper_sha="$(manifest_value "$NATIVE_HOOK_CUTOVER_MANIFEST" toolchain_wrapper_sha256)"
+  compiler_sha="$(manifest_value "$NATIVE_HOOK_CUTOVER_MANIFEST" toolchain_compiler_sha256)"
+  git -C "$ROOT_DIR" cat-file -e "${executable_commit}^{commit}" 2>/dev/null || {
+    echo "error: frozen native-hook cutover Sounio toolchain commit is unavailable: $executable_commit" >&2
+    exit 1
+  }
+  native_hook_cutover_toolchain_root="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-native-hook-cutover-toolchain.XXXXXX")"
+  git -C "$ROOT_DIR" archive "$executable_commit" \
+    bin/souc bin/souc-lean-single-x86_64 | tar -x -C "$native_hook_cutover_toolchain_root"
+  actual_wrapper_sha="$(sha256sum "$native_hook_cutover_toolchain_root/bin/souc" | awk '{print $1}')"
+  actual_compiler_sha="$(sha256sum "$native_hook_cutover_toolchain_root/bin/souc-lean-single-x86_64" | awk '{print $1}')"
+  [[ "$actual_wrapper_sha" == "$wrapper_sha" && "$actual_compiler_sha" == "$compiler_sha" ]] || {
+    echo 'error: reconstructed native-hook cutover Sounio toolchain failed hash verification' >&2
     exit 1
   }
 }
@@ -184,6 +211,9 @@ if [[ -z "${SOUNIO_LOOM_LANE_HEALTH_PREBUILT:-}" || \
   -z "${SOUNIO_LOOM_LANE_HEALTH_PARITY_PREBUILT:-}" ]]; then
   prepare_lane_health_toolchain
 fi
+if [[ -z "${SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_PREBUILT:-}" ]]; then
+  prepare_native_hook_cutover_toolchain
+fi
 language_authority_output="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
 if [[ -n "${SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT:-}" ]]; then
   [[ -x "$SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT" ]] || {
@@ -198,6 +228,31 @@ else
     SOUNIO_LOOM_LANGUAGE_AUTHORITY_OUTPUT="$language_authority_output" \
     "$SCRIPT_DIR/build_sounio_loom_language_authority.sh"
 fi
+native_hook_cutover_output="$ROOT_DIR/tools/loom/.runtime/sounio-loom-native-hook-cutover"
+if [[ -n "${SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_PREBUILT:-}" ]]; then
+  [[ -x "$SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_PREBUILT" ]] || {
+    echo 'error: SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_PREBUILT is not executable' >&2
+    exit 1
+  }
+  mkdir -p "$(dirname "$native_hook_cutover_output")"
+  install -m 0755 "$SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_PREBUILT" \
+    "$native_hook_cutover_output"
+else
+  SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_SOUC="$native_hook_cutover_toolchain_root/bin/souc" \
+    SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_OUTPUT="$native_hook_cutover_output" \
+    "$SCRIPT_DIR/build_sounio_loom_native_hook_cutover.sh"
+fi
+native_hook_cutover_expected_sha="$(manifest_value "$NATIVE_HOOK_CUTOVER_MANIFEST" executable_sha256)"
+native_hook_cutover_actual_sha="$(sha256sum "$native_hook_cutover_output" | awk '{print $1}')"
+[[ "$native_hook_cutover_actual_sha" == "$native_hook_cutover_expected_sha" ]] || {
+  echo 'error: rebuilt native-hook cutover runtime failed frozen hash verification' >&2
+  exit 1
+}
+[[ "$(printf '0\n' | "$native_hook_cutover_output")" == \
+  'SOUNIO_NATIVE_HOOK_CUTOVER_SELFTEST PASS cases=12' ]] || {
+  echo 'error: rebuilt native-hook cutover runtime failed its install probe' >&2
+  exit 1
+}
 execution_authority_output="$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-authority-runtime"
 if [[ -n "${SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT:-}" ]]; then
   [[ -x "$SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT" ]] || {
