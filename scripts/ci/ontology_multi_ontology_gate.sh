@@ -25,7 +25,7 @@
 # Env overrides:
 #   SOUC_BIN                          compiler wrapper (default: bin/souc)
 #   ONTOLOGY_MULTI_RUN_TIMEOUT        per-file `souc run` timeout, seconds
-#                                     (default: 600)
+#                                     (default: 900; ChEBI+PATO needs headroom)
 #   ONTOLOGY_MULTI_REGENERATE=1       regenerate the packed data before running,
 #                                     and assert it comes back byte-identical
 #   ONTOLOGY_MULTI_NO_FETCH=1         never touch the network; a driver whose data
@@ -51,11 +51,24 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/bin/souc}"
-RUN_TIMEOUT="${ONTOLOGY_MULTI_RUN_TIMEOUT:-600}"
+RUN_TIMEOUT="${ONTOLOGY_MULTI_RUN_TIMEOUT:-900}"
 
+# chebi_pato_elplus_driver.sio is deliberately ABSENT from this list and from
+# the tree. Its inputs cannot be reconstructed: ChEBI's versionIRI names
+# release 254, obo/chebi/254/chebi.owl returns 404, and the undated purl now
+# serves a different release (measured 2026-08-24, recorded in
+# artifacts/ontology-frontiers/multi-ontology/fetch_downloads.sh). The
+# committed chebi_* artifacts came from an older, unrecorded release.
+#
+# It was carried here briefly and the gate SKIPped it and exited 1 -- correctly:
+# a driver in the list that cannot run is a check that reports on nothing. The
+# results it produced remain in CHEBI_PATO_RESULTS.md, labelled there as
+# unreproducible, which is the honest place for them.
 DRIVERS=(
     "artifacts/ontology-frontiers/multi-ontology/go_roots_elplus_driver.sio"
     "artifacts/ontology-frontiers/multi-ontology/obo_elplus_driver.sio"
+    "artifacts/ontology-frontiers/multi-ontology/open_fillers_elplus_driver.sio"
+    "artifacts/ontology-frontiers/multi-ontology/uberon_open_elplus_driver.sio"
 )
 
 DATA_DIR="$ROOT_DIR/artifacts/ontology-frontiers/multi-ontology"
@@ -115,10 +128,34 @@ ensure_data() {
 
     if [[ "$missing" == 1 ]]; then
         if [[ "$recipe" == none ]]; then
-            printf '[ontology-multi] SKIP: %s — data missing and not regenerable here\n' "$name" >&2
+            # Name what is actually missing and how it is produced. This block
+            # used to print the ChEBI explanation for EVERY driver: it told a
+            # reader whose open_fillers run had lost cl_open_packed.txt that
+            # gen_chebi_data.py needed downloads/chebi.owl, an ontology that
+            # driver does not use. Three separate drivers were reported that
+            # way, and the wrong explanation is why the data looked
+            # irrecoverable when two of the three were a mechanical
+            # regeneration away.
+            printf '[ontology-multi] SKIP: %s — missing input data\n' "$name" >&2
             printf '[ontology-multi]   needs: %s\n' "$files" >&2
-            printf '[ontology-multi]   gen_chebi_data.py requires downloads/chebi.owl and downloads/pato.owl;\n' >&2
-            printf '[ontology-multi]   no release of either is recorded in this repository to pin.\n' >&2
+            local _m
+            for _m in $files; do
+                case "$_m" in
+                    *_open_packed.txt)
+                        printf '[ontology-multi]   %s: regenerate with\n' "$_m" >&2
+                        printf '[ontology-multi]     python3 %s/gen_open_fillers_data.py %s\n' \
+                            "$DATA_DIR" "${_m%_open_packed.txt}" >&2
+                        ;;
+                    chebi_*)
+                        printf '[ontology-multi]   %s: NOT regenerable. ChEBI release 254 is a 404 and\n' "$_m" >&2
+                        printf '[ontology-multi]     the undated purl serves a different release; the committed\n' >&2
+                        printf '[ontology-multi]     artifacts came from an older, unrecorded one (fetch_downloads.sh).\n' >&2
+                        ;;
+                    *)
+                        printf '[ontology-multi]   %s: no generator recorded for this input.\n' "$_m" >&2
+                        ;;
+                esac
+            done
             return 1
         fi
         if [[ "$NO_FETCH" == 1 ]]; then

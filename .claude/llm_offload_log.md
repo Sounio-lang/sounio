@@ -3268,6 +3268,50 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-07-19 | deepseek | review | test_prescription_chain_e2e.sio | PROVIDER_ERROR | Insufficient Balance. |
 | 2026-07-19 | xai/Grok 4.3 | review | test_prescription_chain_e2e.sio | ADDRESSED | Wired GUM U95 into `gum_band_decide`; documented Matzke *0.06 L/h and illustrative CV=0.25; claims_not_made bedside. Dead-code GUM critique fixed. Raw: `/tmp/llm-offload-bh5nkB/`. |
 
+## 2026-07-20 - governed examples extraction math review
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 attempted | math-review | examples extraction source diff | ADDRESSED_SINGLE_PROVIDER_DEGRADED_WITH_DISAGREEMENT | xAI confirmed the population variance, GUM addition/product propagation, Monte Carlo circle bound, derivative, Simpson integration, golden-section search, and sine-series calculations. Its `meas_sqrt` objection misread `var g = x`: for `x <= 1`, the initial guess remains `x`, not `0.5`. Z.AI returned its usage-quota error and is not counted as a pass. Raw: `/tmp/llm-offload-pQiK2l/`. |
+| 2026-07-20 | xai/Grok 4.1 fast | math-review | examples extraction source diff | ADDRESSED | The review correctly identified that `3142` represents approximately `pi * 1000`, not a floating-point value of pi. The example now names the value `pi_times_1000` and explicitly limits itself to a deterministic smoke test without a statistical-quality claim. The reviewer also accepted the CSV, GUM, and Newton-example calculations. Raw: `/tmp/llm-offload-Sa2T0A/`. |
+| 2026-07-20 | xai/Grok 4.1 fast | math-review | revised examples extraction source diff | PASS_SINGLE_PROVIDER_DEGRADED | The follow-up approved all reviewed formulas and asserted numerical results, including the clarified fixed-point Monte Carlo output. Independent-provider re-review remains pending under the provider-failure rule. Raw: `/tmp/llm-offload-NTsHFY/`. |
+| 2026-07-20 | none | byte-identical extraction carry | unchanged governed `examples/` content materialized in `sounio-examples` | WAIVED_BYTE_IDENTICAL_SOURCE_CARRY | Files not otherwise changed by this lane are copied byte-identically from the already-public governed source tree. The staged source `examples/` tree and staged destination root both resolved to Git tree `5f38b6bb59f6267a7c7ac3b7ec59cc6cdf1ff46c` **as staged on 2026-07-20**. Re-measured 2026-08-30 after merging `origin/main@c1e7937cb9` and annotating the six bare function types: `examples/` is now `e3363ce73db06a0ba140c4eeee94714d679a2fe9` (it was `9c06432ae0` at the 2026-08-27 measurement, and `5f38b6bb59` as staged), because `main` has added files to `examples/` since, and this lane has now changed `higher_order.sio` and `newton_root.sio` — the pair identity above is a historical staging fact, not a current one, and the destination must be re-staged from this tree before that identity can be reasserted. (`packages/epistemic-core/` still resolves to `4c92f052b7f3fd56bb64f9b6c8b239beb3e06ea8`, unchanged.) This operation introduces no additional mathematical, clinical, or publication claim. The changed mathematical examples are covered by the reviews above. |
+
+## 2026-07-20 - canonical production catalog refresh observation
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 | review | canonical_production_repository_catalog.py and its 30-assertion gate | ADDRESSED_SINGLE_PROVIDER_WITH_SECONDARY_PARTIAL | Tightened GitHub organization-login validation and its diagnostic, added explicit null-node rejection coverage, and documented the fail-closed single-page v1 observation boundary. xAI's remaining findings about repository-local imports, atomic no-clobber hard-link publication, null handling, and catalog symlink refusal contradict the executable paths and focused gate. Z.AI surfaced the login/pagination questions but exhausted its response before a final verdict, so it is not counted as a pass. Raw: `/tmp/llm-offload-PMqLcA/`, `/tmp/llm-offload-rkyl40/`. |
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 | external raw review | initial mapping-reconfirmation request | AMBIGUITY_FOUND_AND_ADDRESSED | Z.AI correctly classified the artifact as an unanswered request with no authority. xAI interpreted the optional response template as if the five mappings had already been reconfirmed; this was treated as a real presentation defect. The request now records `request_status = unanswered-request-only`, no selection or proposal authority, zero template effect, explicit rejection of template-as-response, and delimited optional response markers. Raw: `/tmp/llm-offload-yDsCsc/`. |
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 | external raw review | hardened mapping-reconfirmation request | PASS_TWO_PROVIDERS | Both reviewers preserved the intended boundary: the file is request-only, records no mapping decision, proposal authority, production approval, destination write, source removal, or cutover authorization. No corrective finding remained. Raw: `/tmp/llm-offload-WK2DRF/`. |
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 | external raw review | canonical production catalog refresh README | PASS_TWO_PROVIDERS | Both reviewers separated global source-head drift from governed-unit byte identity, recognized that the five destination heads were unchanged, and confirmed that the observation does not reuse the old decision or emit a new proposal. No corrective finding was raised. Raw: `/tmp/llm-offload-2P0X5o/`. |
+| 2026-07-20 | none | main integration | codimension-and-the-bits-functional.md | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | This lane integrated current `origin/main`; the working-tree object and `origin/main` object are both `ad9ec67492fa5657d50e5de3419b58f71f7675cd`. This lane did not author, revise, publish, or make a new mathematical claim in the artifact. |
+| 2026-07-20 | none | main integration | mercy-exchange-rate.md | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | This lane integrated current `origin/main`; the working-tree object and `origin/main` object are both `4645dbfd67c0064cb5d61b2dcf61ba09b4915efb`. This lane did not author, revise, publish, or make a new mathematical claim in the artifact. |
+
+## 2026-07-20 - canonical catalog refresh draft PR review
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2, deepseek, and groq attempted | external raw review | draft PR description for canonical production catalog refresh observation | PASS_SINGLE_PROVIDER_DEGRADED | xAI returned no BLOCKER, MAJOR, or MINOR finding after checking authority boundaries, point-in-time scope, byte-continuity wording, and validation consistency. Two Z.AI attempts produced empty response files and are not counted as passes. DeepSeek returned `Insufficient Balance`; Groq rejected its configured key. The description remains a draft, records an unanswered request only, and grants no authority. Raw: `/tmp/llm-offload-o57tpc/`, `/tmp/llm-offload-9pdcUd/`, `/tmp/llm-offload-kKy9gp/`, `/tmp/llm-offload-XBycIB/`. |
+
+## 2026-07-20 - canonical catalog refresh issue request review
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 | external raw review | issue #1122 catalog-refresh observation and unanswered reconfirmation request | PASS_TWO_PROVIDERS | Both reviewers found no BLOCKER, MAJOR, or MINOR issue and preserved the intended classification: point-in-time observation, no mapping response or selection, no new proposal, and no source-removal, production, repository-write, or cutover authority. The exact reviewed body was published as issue comment `5018122998` (1,744 bytes, SHA-256 `c4f69223ecbae95a0d55f698c255c0bfcfb6ac2f5992ebce07e8038a0b2a3fdb`) and verified byte-identical through the GitHub API. Raw: `/tmp/llm-offload-SXzk3v/`. |
+| 2026-07-20 | none | main integration | affective_ordering.py; codimension-and-the-bits-functional.md; erosion-hebbian-result.md; erosion_hebbian.py; river-variational-and-the-ordering-null.md | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | This lane integrated current `origin/main@943d0a2f2`. Every listed index object equals the corresponding `origin/main` object. This catalog-refresh lane did not author, revise, execute, publish, or make a new mathematical or research claim in these artifacts. The core object IDs are `0748c2bf`, `3e1ce84e`, `370c16cc`, `51c2eb60`, and `dd010f1a`. |
+| 2026-07-20 | none | main integration | EPISTEMIC_TRUST_MAP_2026-07-14.md; order_spread_exact.sio; order_spread_trust.sio; witness_import_order_spread.sio; madaros_dual_gum_knowledge.sio | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | These epistemic claim/code surfaces are exact `origin/main@943d0a2f2` carries. This lane did not edit their semantics or use them as evidence for the catalog observation. `order_spread_exact.sio` is object `b4a19598f45058bf47169e7c280db41672f2d84b` in both the merge index and upstream. |
+
+## 2026-07-20 - catalog-bound mapping proposal preparation review
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 | external raw review | issue #1122 catalog-bound five-mapping reconfirmation record | PASS_TWO_PROVIDERS | xAI found no BLOCKER, MAJOR, or MINOR issue. Z.AI initially questioned the intentionally asymmetric `distribution:sounio-research-examples` to `Sounio-lang/sounio-examples` pair because the first review prompt omitted the original five-row request; the follow-up supplied that request and Z.AI confirmed that all five pairs are exact, the catalog-prefix expansion is unambiguous, and authority remains limited to preparing and reviewing a `proposed-not-approved` proposal. The reviewed body was published as issue comment `5018371541` and verified byte-identical at 2,101 bytes with SHA-256 `b92601cfb96d21da48ae2fb7d4c0c3504ca9ce8eec584b08da988f72cb7fdccb`. Raw: `/tmp/llm-offload-LxrjTy/`, `/tmp/llm-offload-rA7WN8/`. |
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 | review | `20260720T030329Z` mapping decision, receipt, `proposed-not-approved` proposal, gap assessment, source response, and README | PASS_TWO_PROVIDERS_WITH_REVIEW_PROMPT_CORRECTION | xAI returned `NO ISSUES FOUND AT REQUESTED SEVERITY`. Z.AI's complete-package pass exhaustively matched the five rows, bindings, identities, and authority boundaries but exhausted its output before a verdict. A compact follow-up incorrectly projected nonexistent gap-target keys through `jq`, producing review-only nulls and a MAJOR finding; the generated artifact instead uses required `head_oid` and `assessment_status` fields, both populated for every target. Given the actual objects plus their schema and successful executable verification, Z.AI withdrew the finding and returned `NO ISSUES FOUND AT REQUESTED SEVERITY`. Raw: `/tmp/llm-offload-tCfBKp/`, `/tmp/llm-offload-iQeEbW/`, `/tmp/llm-offload-4ICN5R/`, `/tmp/llm-offload-P5aO1N/`. |
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 | review | `20260720T030329Z/drift-observation.v1.json` and updated README | PASS_TWO_PROVIDERS_WITH_SECONDARY_VERDICT_FOLLOWUP | xAI returned `NO ISSUES FOUND AT REQUESTED SEVERITY`. Z.AI's full pass checked the catalog/source heads, ancestor interpretation, five destination pairs, five governed-tree pairs, proposal identities, chronology, and non-authorizing limitations without producing a concrete finding, but exhausted output before its verdict. A compact verdict follow-up returned `NO ISSUES FOUND AT REQUESTED SEVERITY`. The read-only observation records canonical `main` 47 commits ahead at `4620b2889`, all governed source trees unchanged, and all five destination heads still catalog-exact; it does not replace or widen the proposal. Raw: `/tmp/llm-offload-0j80qf/`, `/tmp/llm-offload-nCIvgv/`, `/tmp/llm-offload-swRb6C/`. |
+
+
+
 ## 2026-07-25 - rupture A/B/C/D contracts landing
 
 | Date | Provider | Task | Target | Outcome | Note |
@@ -3665,4 +3709,107 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-08-23 | xai/grok-4.5 [OK] + zai/glm-5.2 [ERROR — provider error on every call this session, no verdict emitted] | math-review (RETROACTIVE) | formal/lean4/SounioZDFiberAntisym.lean (Tier 161: `cp2_ref_eq`, `dev_base`, `deviation_law` — THE DEVIATION LAW) | ADDRESSED_SINGLE_PROVIDER (zai errored; per policy an incomplete review, not a pass) | RETROACTIVE: this tier was committed earlier today BEFORE the pre-commit policy hook was installed in this tree, so it shipped without the mandatory M1 review. This row supplies it. No `[FAIL]`. **Q1** `[OK]`: `cp2_pow2_labels 0 (p+j)` is exactly W = 1 at the same level and H as `cp2_pow2_labels p j`, so Δcp2 = 0 needs no extra hypothesis. **Q2** `[OK]`: with Δcp2 = 0 the inhomogeneity `24·cp2 + 72H − 176` is label-free, both sides share H at fixed level, and the `(2^(i+1))³ = 8·(2^i)³` bridge matches the RHS. **Q3** `[OK]` — it independently re-derived (H−2)(H−4)(H−8) = 64·(2^j−1)(2^(j−1)−1)(2^(j−2)−1) = 64·21·[j,3]₂ and 9·64·21/7 = 1728. **Q4** `[OK]` on scope, and specifically `[OK]` that the mask-artifact reading is cited rather than proved — the tier says so itself. Two `[TIGHTENABLE]`s, both about inherited rather than local risk: the Δcp2 step's legitimacy rests on Tier 157b carrying no silent p ≥ 1 assumption (it does not — `cp2_pow2_labels` is stated ∀p), and `dev_base` is only as strong as `s3_reference_closed7`, which is the concurrent lane's and which I audited numerically but did not read (see the Tier 169 row). |
 | 2026-08-24 | local/`local-think` via the on-prem gateway (second leg; xai/grok-4.5 already logged 2026-08-23) | math-review (SECOND LEG, retroactive) | formal/lean4/SounioZDFiberAntisym.lean (Tier 169 `dev_control_W12_m4` docstring) | ADDRESSED | The second leg on Tier 169 returned `[OK]` on all the arithmetic — it re-derived `[4,3]₂ = 15` by a different route than grok (q-binomial `(1+q)(1+q+q²)` at q = 2) and re-checked the negative control's `8/3` impossibility — plus one `[TIGHTENABLE]` **neither grok nor I had raised**: the docstring said the law "is stated only for `W = 2^j`" without saying that `2^j` means EXACTLY `2^j`. Acted on in this commit, and stated more strongly than the reviewer asked, because this tier's own two measurements force it and pull in opposite directions: `W = 24` (multiple of 8) DOES reproduce `W = 8`'s deviation (13824), while `W = 12` (multiple of 4) does NOT reproduce `W = 4`'s (0, since `[2,3]₂ = 0`) — it gives 4608. So neither "multiples inherit the deviation" nor its negation holds in general, and `dev_control_W12_m4` is the second half of that pair. The docstring now says to read the hypothesis as an equality on `W`, never as divisibility. Docstring only; no statement or proof changed; full-file build exit 0 under lean 4.33.0, 104 s. **Why this row is dated today on this branch:** the second-leg pass and its correction row live on `lane/claude-3/20260814` (`3d969f9cca`); this branch carries only the six 2026-08-23 rows, so the review that produced this change was not recorded here. That is the gap the hook caught, and correctly. |
 
+| 2026-08-24 | xai/grok-4.3 [MAJOR findings addressed] + deepseek [ERROR: invalid API key] + gemini/openrouter [ERROR: insufficient credits] | fan-out / evidence review | docs/compiler/KNOWN_LIMITATIONS.md + scripts/ci/sounio_stdlib_surface_support_gate.sh | ADDRESSED_SINGLE_PROVIDER | xAI correctly required a stronger source-vs-shipped-artifact boundary for Madaros Hessian and an exact definition of the partially closed i256/i512 surface; both were added. Its Epistemic(-1) concern was addressed by limiting the cross-engine claim to measured syntax acceptance and naming the sentinel mechanism as Madaros-only. Its f128 concern was resolved by separating the E218 engine-split gate/fixtures from the passing payload/wire scaffolding gates. The proposed inventory check is not vacuous: scanner output is the expected value and independently maintained prose is the observed value, so tree drift without a doc edit fails; a code comment now states this invariant. The ownership/closure objection conflated separate registry rows and required no change. Raw: `/tmp/llm-offload-AfStlF/`. |
+| 2026-08-24 | xai/grok-4.3 [NO MATHEMATICAL CONTENT TO REVIEW] + zai/glm-5.2 [ERROR: weekly/monthly limit exhausted] | math-review | docs/compiler/KNOWN_LIMITATIONS.md (i256/i512 and Hessian capability-boundary wording) | PASS_SINGLE_PROVIDER_DEGRADED | Required M1 fan-out was invoked on the final documentation diff. xAI classified it as capability/evidence wording with no mathematical derivation to audit; Z.AI returned quota error code 1310 and is not represented as a pass. The executable/numeric claims remain grounded in the named source witnesses, direct engine probes, and the source-vs-shipped-artifact split. Raw: `/tmp/llm-offload-3eGlYB/`. |
 | 2026-08-28 | math-review | WAIVED | SounioCDCoreLaw.lean, SounioSeamFlip.lean | Both files arrive unchanged from `origin/main` through a merge commit whose only authored content is a one-line regenerated census. Blob-identical to `origin/main` (`0a263c52`, `310b4c31`), so there is no new mathematical content for a review to read. Re-reviewing a merge that changed neither file would produce a log row asserting more than the work behind it. |
+
+## 2026-08-04 — SAN-FPGA paper review (post-blocker fixes)
+
+**Target:** docs/papers/san_fpga_deployment_2026-08-04.md + arxiv/submit/main.tex
+**Task:** review
+**Provider:** xai/Grok 4.3
+**Trigger:** External-facing arXiv paper revised after peer-review blockers
+**Status:** DONE
+
+**Key findings:**
+1. Energy figure (3.3 nJ/sample) rests on coarse 1 Hz board-level subtraction; paper already adds uncertainty language but may need raw traces or stronger caveat.
+2. CPU baseline measured on different host (Xeon Gold 6526Y) than U250 DL380; noted as limitation, same-host measurement is future work.
+3. Training results are single-run small-subset; paper already frames as machinery demonstration, not statistical claim.
+4. "First measured deployment" softened to "to our knowledge".
+5. Metered-MAC convention is partial; paper already states this and EarlyStop decomposition shows freeze-on-green dominates.
+6. Table numbering: markdown uses "Table 1b" but LaTeX longtable has no caption number; need to fix formal numbering.
+7. 1.08× wall-time claim appears only in abstract; body has 0.196 ms vs 0.213 ms; need to reconcile or remove.
+
+**Actions taken / pending:**
+- Added CPU baseline Table 1b and reframed FPGA value as offload+energy+spec.
+- Added energy uncertainty paragraph.
+- Softened priority claims.
+- Pending: fix Table 1/1b numbering in markdown; reconcile 1.08× abstract claim; run CPU baseline on DL380 if access permits.
+
+## 2026-08-05 — SAN-FPGA paper final blocker closure
+
+**Target:** docs/papers/san_fpga_deployment_2026-08-04.md + arxiv/submit/main.tex + arxiv/san-fpga-arxiv-submit-2026-08-04.{pdf,zip}
+**Task:** review (post-full-CIFAR-10 run)
+**Provider:** xai/Grok 4.3 (prior round); no new offload invoked for this editorial closure
+**Trigger:** Full CIFAR-10 ResNet-50 control run completed (Slurm job 8615)
+**Status:** DONE
+
+**Full CIFAR-10 ResNet-50 result (50 000 / 10 000, τ = 0.85, 60 epochs, Slurm job 8615):**
+- SAN: t* = None, final acc = 0.7686, S_m = 10 303 TMAC.
+- EarlyStop: t* = 22, final acc = 0.8513, S_m = 9 552 TMAC.
+- Dense: t* = 24, final acc = 0.8650, S_m = 24 918 TMAC.
+- SAN vs Dense: −58.7%; SAN vs EarlyStop: +7.8%; EarlyStop vs Dense: −61.7%.
+- Job failed after ledger with CUDA OOM in latency benchmark; ledger lines are reported as measured.
+
+**Actions taken:**
+- Added §4.6 "Full CIFAR-10 ResNet-50 run (negative control)" with Table 6.
+- Renumbered former §4.6 End-to-end to §4.7 and its table to Table 7.
+- Updated abstract to state the negative control explicitly and scope small-subset savings as machinery demonstration only.
+- Updated §5.2 limitations to replace "No full-CIFAR-10 headline" with a paragraph on the full-run findings.
+- Regenerated main.tex via pandoc, reapplied newunicodechar fixes (τ, ≤, ≥, ≈, ↔, ×, ⌊, ⌋), compiled PDF (19 pages, no missing characters).
+- Updated submission PDF/zip and both gists.
+
+**Residual notes from prior offload:**
+- Table numbering corrected (no more "Table 1b").
+- 1.08× abstract claim reconciled with body (0.213 ms / 0.196 ms ≈ 1.087, rounded to 1.08×).
+- CPU baseline remains on different host (Xeon Gold 6526Y); same-host DL380 measurement still future work.
+
+## 2026-08-05 — SAN-FPGA paper pre-commit fan-out review
+
+**Target:** docs/papers/san_fpga_deployment_2026-08-04.md
+**Task:** review
+**Provider:** xai/Grok 4.3 (deepseek/gemini errored)
+**Trigger:** External-facing arXiv paper; pre-commit policy gate
+**Status:** DONE
+
+**Key findings:**
+1. [BLOCKER] Energy figure precision rests on coarse 1 Hz sensor; addressed with uncertainty language, raw idle/load values, and order-of-magnitude framing.
+2. [BLOCKER] CPU baseline on different host; addressed by disclosing limitation and listing same-host DL380 measurement as future work.
+3. [MAJOR] Single seed/no variance; mitigated by launching seed=42 and τ=0.80 jobs (8619/8620) for sensitivity analysis.
+4. [MAJOR] "First measured deployment" claim; softened to "to our knowledge" throughout.
+5. [MAJOR] Full-CIFAR-10 negative result not reflected in abstract; addressed by adding explicit qualifying clause in abstract.
+6. [MINOR] Q0.15 edge cases; noted as future hardening, not blocking submission.
+
+**Actions taken:**
+- Fan-out and single-provider reviews logged; paper already revised for items 1,2,4,5.
+- Jobs 8619 (seed=42) and 8620 (τ=0.80) submitted to Slurm for sensitivity coverage.
+- Commit proceeds with residual items disclosed.
+| 2026-08-05 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED | Pre-commit fan-out review of external-facing arXiv draft. Grok flagged: energy precision (addressed), CPU baseline host difference (addressed), single seed (mitigated by jobs 8619/8620), priority claim (softened), full-CIFAR-10 abstract mismatch (addressed), Q0.15 edge cases (noted as future work). Raw: /tmp/llm-offload-ySaGWl/. |
+| 2026-08-05 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED_SENSITIVITY_ADDED | Pre-commit review after adding full-CIFAR-10 sensitivity study (jobs 8615/8619/8620). Grok findings from prior round already addressed: energy precision, CPU baseline host, single seed (now two seeds), priority claim, abstract mismatch. New content: three-run sensitivity table showing SAN–EarlyStop variance from −6.5% to +71.3%, freeze-on-green dominance (55–88% savings), and lower SAN accuracy (0.759–0.769) vs EarlyStop (0.824–0.851) and Dense (0.850–0.865). Raw: /tmp/llm-offload-ySaGWl/. |
+| 2026-08-05 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED_SAN_V2_ADDED | Pre-commit review after adding SAN-v2 section (§4.8) with gradient analysis and learned-gating results. Grok findings from prior rounds already addressed. New content: per-stage gradient norms showing v1 pathology (trunk gradients grow 8–23× vs final head 5×), SAN-v2 with MLP heads + learned gate improving accuracy 0.768→0.812 and reducing S_m 22%, but learned gate converging to exit_frac=1.000 (always exit at first stage). Raw: /tmp/llm-offload-ySaGWl/. |
+| 2026-08-05 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED_SAN_V3_ADDED | Pre-commit review after adding SAN-v3 section (§4.8). Grok findings from prior rounds already addressed. New content: SAN-v3 with curriculum (stage-accuracy-gated) and depth penalty implemented in suffering_aware_large_architecture_v2.py; validation pending cluster availability. Raw: /tmp/llm-offload-ySaGWl/. |
+| 2026-08-05 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED_SAN_V3_RESULTS | Pre-commit review after adding SAN-v3 results (job 8630). Grok findings from prior rounds already addressed. New content: SAN-v3 with curriculum + depth penalty reaches τ=0.85 at epoch 13, acc 0.8561, S_m 5814 TMAC (−76.7% vs Dense, −51.7% vs EarlyStop). First SAN variant to reach competitive accuracy with large measured efficiency gain. Raw: /tmp/llm-offload-ySaGWl/. |
+| 2026-08-06 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED_SAN_V4_RESULTS | Pre-commit review after adding SAN-v4 results (job 8631). Grok findings from prior rounds already addressed. New content: SAN-v4 with post-τ distillation + adaptive exit reaches τ=0.85 at epoch 12, acc 0.8557, S_m 5399 TMAC (−78.3% vs Dense, −60.6% vs EarlyStop). Exit fraction remains zero; savings come from freeze-on-green, not inference-time early exits. Raw: /tmp/llm-offload-ySaGWl/. |
+| 2026-08-06 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED_SAN_V5_RESULTS | Pre-commit review after adding SAN-v5 results (job 8634). Grok findings from prior rounds already addressed. New content: SAN-v5 with adaptive curriculum + accuracy guarantee + multi-exit distillation reaches τ=0.85 at epoch 12, acc 0.8512, S_m 5399 TMAC — same as SAN-v4 but slightly lower accuracy. Negative result reported honestly: aggressive curriculum acceleration does not help at this target. Raw: /tmp/llm-offload-ySaGWl/. |
+
+## 2026-08-06 — SAN-FPGA repositioned paper (The Suffering Ledger)
+
+- Task: adversarial review of the repositioned paper draft (audit-instrument thesis, §4.9 gate case study)
+- Providers: grok (xAI, OK), zai GLM-5.2 (OK), deepseek (ERROR)
+- Target: `docs/papers/san_fpga_deployment_2026-08-04.md`
+- Verdicts: Grok — 3 substantive (first-combined-instrument needs search appendix; abstract energy claim stronger than body; §4.9 "strongest argument" overstates since gradient tools could have caught it). Z.AI — 2 fatal-seeming, verified against cluster logs: (a) Table 6 vs Table 8 same-seed baseline divergence = cross-job GPU nondeterminism, NOT copy-paste (jobs 8615/8619/8630 logs confirm distinct within-run legs); fixed with variance disclosure note + dropped "statistically indistinguishable"; (b) "integer-exact accounting of executed FLOPs" wording overclaims vs LUT-based FPGA attestation — fixed by scoping to "executed-path accounting at framework level" + "root-of-trust for the decision and its accounting" + new §5.2 limitation bullet. Also reconciled 3 Imagenette throughput envelopes (Table 1/§4.5/§4.7) and Table 7 total composition.
+- Outcome: all findings addressed in place before commit. Full review: /tmp/offload_review_v7paper.md (session-local).
+
+## 2026-08-30 - origin/main integration (PR #2225)
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-08-30 | none | main integration | san_fpga_deployment_2026-08-04.md; SounioCDCoreLaw.lean; SounioSeamFlip.lean; SounioSedenionBipartite.lean | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | This lane merged `origin/main@c1e7937cb9` to clear an inherited Contracts red. Every listed path resolves to the same Git object in the merge index as on `origin/main`: `74067092`, `0a263c52`, `310b4c31`, `ea9d277a`. This lane did not author, revise, or make any new mathematical, clinical, or publication claim in these artefacts; they were reviewed on the PRs that landed them on `main`. |
+
+| 2026-08-30 | none | effect annotation | examples/higher_order.sio; examples/newton_root.sio | WAIVED_NO_NEW_MATHEMATICAL_CLAIM | SOUNIO-SPEC-06 §6.0 requires a function type to carry the function's effects. The six bare function types in these two files were annotated `with Mut, Panic, Div`; `apply` and `apply2` widened their own signatures to match, because a bare fn-type parameter cannot be annotated without the enclosing function declaring the same effects (measured: `error[E035]`). No numeric constant, formula, or asserted result changed. Both examples still check clean and still exit with their documented codes (`higher_order` 75, `newton_root` 50); `newton_root.sio` in fact went from two `error[E009]` fn-type mismatches to `check: OK`, because the bare parameter type did not match the effectful `my_sin` being passed to it. |
+
+## 2026-08-30 - origin/main integration (PR #2232)
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-08-30 | none | main integration | san_fpga_deployment_2026-08-04.md; SounioCDCoreLaw.lean; SounioSeamFlip.lean; SounioSedenionBipartite.lean | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | This lane merged `origin/main@c1e7937cb9` to clear an inherited Contracts red. Each listed path resolves to the same Git object in the merge index as on `origin/main`, so this lane authored no part of it and makes no new mathematical claim in it. `SounioCDCoreLaw.lean` and `SounioSeamFlip.lean` in particular landed on `main` independently of this branch; the merge resolution therefore DROPS this branch's duplicate lakefile registrations for both and keeps only «SounioZDChi», whose `.lean` file exists on this branch alone. |

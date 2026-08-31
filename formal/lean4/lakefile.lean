@@ -749,3 +749,12 @@ lean_lib «SounioFoMultimodFragment» where
 -- `lean_lib «SounioCDTowerAutomorphism»`, but `formal/lean4/SounioCDTowerAutomorphism.lean`
 -- exists on neither `origin/main` nor this PR head. The registration was dangling
 -- (non-default target, so `lake build` never surfaced it) and is dropped here.
+--
+-- NOTE (merge 2026-08-30): the #1580-split block that stood here also registered
+-- «SounioCDCoreLaw» and «SounioSeamFlip». Both landed on `origin/main`
+-- independently and are registered above; re-adding them here would declare the
+-- same target twice. Only «SounioZDChi» is still carried by this branch alone --
+-- formal/lean4/SounioZDChi.lean exists on neither `origin/main` nor any other
+-- lane -- so it keeps its entry, or the file would sit in the tree unbuilt.
+@[default_target]
+lean_lib «SounioZDChi» where

@@ -2,8 +2,8 @@
 topic_id: repo.docs.compiler.known-limitations
 authority: repo_only
 audience: contributors
-last_validated: 2026-03-07
-validated_by: A4
+last_validated: 2026-08-24
+validated_by: codex-3
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
 -->
 
@@ -13,7 +13,7 @@ This document tracks limitations in the Sounio language implementation.
 **Authoritative source for maturity tiering is `docs/serious-language/public-claim-registry.v1.tsv`.**
 This file is reconciled to that registry. If they disagree, the registry wins.
 
-Last reconciled: 2026-05-27 (PL adoption audit). Earlier "all-green" claims have been corrected against live probes; see §"Reconciliation notes" below.
+Last reconciled: 2026-08-24 against `origin/main` at `7ecec1088158db3a92983cb3c96f9fc52f5ed19e`, then re-measured 2026-08-27 on rebase against `origin/main` at `055825a3f9`, and again 2026-08-29 on merge against `origin/main` at `64db7167f8` (only the stdlib file count moved: 1604 -> 1608). Engine- and artifact-specific limits below name their scope; an unqualified claim must hold for both Madaros and `lean_single`.
 
 ## Maturity Tiers
 
@@ -25,11 +25,9 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 |-----------|--------|-------|
 | Lexer/Parser/AST | Production | logos-based, error recovery, comprehensive |
 | Type Checker (core) | Production | Bidirectional inference, generic monomorphization (1–2 params), unification |
-| Epistemic Types — Knowledge<T> / GUM | Production* | Registry tier: `validated_research`. "Production" here = single-file emit + GUM propagation works; clinical use must still cite the named gate. |
 | Effects System | Production | 9+ effects (IO, Mut, Panic, Div, Alloc, Session, Observe, Audit, Hypothesis; +GPU, Deterministic). Strict E035 subset check at call sites. |
 | HIR + HLIR | Production | SSA generation, async transform |
 | SIR | Production | Domain-specific IR, epistemic passes |
-| Ownership/Borrowing | Production | Method receiver type resolved from declared signature; exclusive `&!Self` enforces borrow-conflict tracking; shared `&Self` is read-only. No heuristic string matching. |
 | Native Backend (Linux x86-64) | Production | Registry: `platform.linux_x86_64 = stable`. Direct x86-64 ELF emission + epistemic runtime + continuations. (There is no Cranelift/JIT backend — the retired Rust Cranelift runner is gone; the default compiler is self-hosted Madaros.) |
 | Interpreter | Production | Full eval, 100+ builtins |
 | Module System (single-file import unit) | Production | 2-pass resolver, imports, hierarchical namespaces |
@@ -45,12 +43,13 @@ Tiers below mirror the public-claim registry's `claim_level`/`closure_status` co
 | LLVM Codegen | Validated research | LLVM 18 bridge `self-hosted/llvm/souc_emit_llvm.c` wired but disabled in the checked artifact; `--backend llvm` needs a feature-flag rebuild. Previously over-claimed as Production. |
 | Refinement Types + SMT | Validated research | Static engine handles constants, condition narrowing, monotonicity; complex predicates fall back to runtime assertions with W040 diagnostic. |
 | Module imports across files | Validated research | Registry: `modules.imports = validated_research`. |
-| Ownership / borrowing examples | Validated research | Registry: `ownership.borrowing = validated_research`; avoid Rust equivalence. |
+| Ownership / borrowing | Validated research | Registry: `ownership.borrowing = validated_research`; exclusive/shared receiver fixtures are covered, but this is not a claim of Rust-equivalent ownership semantics. |
 | Editor tooling preview | Validated research | Registry: `tooling.editor = validated_research/closed`. `scripts/ci/sounio_editor_tooling_support_gate.sh` proves public `bin/souc format`/`fmt`, file-backed `bin/souc repl`, preview `bin/souc lsp --stdio`, G5a/G5b, bash LSP smoke, initialize capability smoke, and VS Code/Helix/Neovim static wiring. This is a SOTA-preview support contract, not mature IDE support. |
 | LSP pure-Sounio server rebuild | Prototype blocker | `self-hosted/lsp/server.sio` currently fails to rebuild under the active Madaros path; the checked preview LSP route is `tools/lsp/sounio-lsp.sh` via `bin/souc lsp --stdio`. Do not claim the pure-Sounio LSP rebuild until `tools/lsp/test_protocol.sh` or an equivalent gate is green. |
 | GPU PTX backend | Validated research | Registry: `gpu.ptx = validated_research`. Named gate covers L4 fixtures; out-of-fixture behavior is research. |
 | 168 / Cayley-Dickson algebra | Validated research | Registry: `algebra.168 = validated_research`. Algebraic/formal artifacts only — no biological or EEG advantage claims. |
 | Ontology subsystem | Validated research | Registry: `ontology = validated_research`. Rebuilt ontology validation surfaces only. |
+| Epistemic Types — `Knowledge<T>` / GUM | Validated research | Single-file emit and named GUM gates are validated surfaces. Engine-specific epsilon semantics and payload bounds remain active limitations below; clinical use must cite the exact engine and gate. |
 
 Editor-tooling details:
 
@@ -72,10 +71,10 @@ Editor-tooling details:
 
 | Component | Registry row | Honest status |
 |-----------|--------------|---------------|
-| **Standard library support surface** | `stdlib.surface = validated_research` | Claim only the bounded support contract checked by `scripts/ci/sounio_stdlib_surface_support_gate.sh`: current inventory has 1316 `.sio` files, 0 disabled files, 0 stub-only `mod.sio` files, and 178 active module entrypoints; package-backed epistemic/GUM, units, formats, io-primitives, canonical PETAB, and PBPK/GUM workflows pass through `scripts/ci/package_pbpk_gum_gate.sh`. **NOT PROVED:** broad all-file stdlib callability, `scripts/ci/stdlib_evolution_gate.sh`, hyper native lanes, fMRI/PBPK science pipeline, external runtime dependencies, cryptographic security, clinical/regulatory validity, or API stability beyond the checked gate. |
+| **Standard library support surface** | `stdlib.surface = validated_research` | Claim only the bounded support contract checked by `scripts/ci/sounio_stdlib_surface_support_gate.sh`: current inventory has 1608 `.sio` files, 0 disabled files, 0 stub-only `mod.sio` files, and 178 active module entrypoints; package-backed epistemic/GUM, units, formats, io-primitives, canonical PETAB, and PBPK/GUM workflows pass through `scripts/ci/package_pbpk_gum_gate.sh`. **NOT PROVED:** broad all-file stdlib callability, `scripts/ci/stdlib_evolution_gate.sh`, hyper native lanes, fMRI/PBPK science pipeline, external runtime dependencies, cryptographic security, clinical/regulatory validity, or API stability beyond the checked gate. |
 | **Package manager / registry** | `tooling.package = validated_research` | Local `~/.sounio/registry/` only. No public registry. Local package manifests, local package imports, and `tools/sounio-pkg/sounio-pkg` build/check/test smoke are covered by `scripts/ci/sounio_package_support_gate.sh`. |
 | **Generic structs/functions/traits** | `generics.* = prototype` | Multi-type-param generic functions work (incl. 3+ params, verified); do not claim a mature trait ecosystem. Trait bounds are parsed but not enforced at call sites. No trait objects. |
-| **Linear closures** | `closures.lambdas = validated_research` | Regular closures (capture, HOF, escape) are **implemented and gate-tested** (16/17 `tests/run-pass/closure_*.sio`). **Linear closures** (capturing linear resources, `closure_linear.sio`) are the one open feature — marked `//@ ignore`, tracked separately. |
+| **Closures** | `closures.lambdas = stale_conflicting` | Non-capturing/direct/HOF forms and some captured forms have passing fixtures, but the registry is deliberately downgraded. Captured closures used as first-class values and cross-engine parity remain unresolved; `closure_linear.sio` is still ignored. Do not promote this row until the registry and native gates are reconciled. |
 | **Units of measure** | `units.measure = prototype` | Fixture-backed prototype surface. |
 | **Refinement types (general)** | `refinement.types = prototype` | Beta/prototype; runtime fallback dominates non-trivial predicates. |
 | **Hypercomplex NN (broad)** | `hypercomplex.nn = prototype` | Research/prototype unless a named gate covers the exact behavior. |
@@ -86,28 +85,38 @@ Editor-tooling details:
 
 ### Active Known Bugs / Architectural Gaps
 
-**`i256` is `i64`, and the Lorenz certificate's products exceed `i64` by nine orders of magnitude (2026-08-20, OPEN).**
-No integer width in Sounio carries semantics: `i8` gives `200` for `100 + 100`
-where `-56` is due, and `i256` on `5e18 + 5e18` returns the exact `i64`
-wraparound. `fn i256_*` occurs **zero** times in all of `stdlib/`, so there is no
-limb implementation underneath the annotation.
+**`i256`/`i512` have bounded limb semantics; complete integer-width and Lorenz closure remain open (2026-08-24, PARTIALLY CLOSED).**
+The previous statement that `i256` was only `i64` is false for current Madaros.
+Compiler-owned descriptors, interned immediates, wide multiplication and literal
+right shift now execute for `i256` and `i512`. On the checked Madaros artifact,
+`tests/run-pass/r1_i256_lorenz_peak.sio` prints
+`R1_I256_PEAK 0 434083786`; the source-build receipt and sabotage control are in
+`docs/audit/R1_I256_I512_LIMBS_2026-08-20.md`.
 
-`stdlib/systems/` — 56,327 lines, 220 importers, almost entirely the Lorenz i256
-certification — carries **733** `i256` annotations on the certificate's own
-quantities. Measured on an independently source-built compiler with an exact
-arbitrary-precision replay (#2046): the maximum intermediate actually reached is
+Here **PARTIALLY CLOSED means only** that descriptor-backed wide multiplication
+and literal right shift have executable witnesses, including the Lorenz peak
+magnitude. `scripts/ci/madaros_wide_int_gate.sh` separately covers the native
+wide-integer emitter; the R1 receipt's sabotage run proves its compiler-owned
+multiply witness can fail. It does not close the certificate bodies.
+
+The boundary is narrow. Wide values are still represented as consecutive virtual
+registers plus an immediate pool, wide-local `print_int` is unsafe, and the
+Lorenz certificate bodies were not changed or re-certified. Narrow integer-width
+semantics are also not implied by the new wide path. In `stdlib/systems/`, an
+independent arbitrary-precision replay (#2046) found a maximum intermediate of
 **8,007,432,506,888,905,229,835,698,176**, which is **868,167,572×** the signed
 `i64` ceiling, at `y_lte_source * den` in
-`stdlib/systems/lorenz_i256_cert_step5.sio:2310`. **That product wraps.**
+`stdlib/systems/lorenz_i256_cert_step5.sio:2310`; the new wide-multiply witness
+shows that this magnitude can be represented on the implemented path, not that
+every operation in those certificate bodies is sound.
 
 Coverage is bounded and declared: steps 1–6, the step and trajectory-5
 certificates, children 0–1, the refinement ledger. Children 2–4, bridge families
 and long loops are marked `NOT EXECUTABLE` for that receipt.
 
-**Do not state that any certificate conclusion is wrong.** That is unaudited: an
-overflowed product inside a comparison can still land on the correct side. The
-honest statement is **the arithmetic is unsound and the conclusions are
-unaudited**. Spec: `docs/spec/S12_NUMERIC_TOWER.md` §12.2.6, ruling §12.4-6.
+**Do not state that any certificate conclusion is either proved or wrong from
+these receipts.** The conclusions remain unaudited. Spec:
+`docs/spec/S12_NUMERIC_TOWER.md` §12.2.6 and ruling §12.4-6.
 
 
 **ε has opposite polarities in the two engines — a patient-safety compile-fail test passes under the default compiler (2026-08-19, OPEN).**
@@ -127,6 +136,41 @@ The three covering gates (`clinical_vanco_tdm_e2e`,
 under `lean_single` and does not hold under the default compiler.** A decision
 on ε's polarity is owed; patching one engine alone re-points the other half of
 the corpus. Audit: `docs/audit/EPSILON_POLARITY_FORK_2026-08-19.md`.
+
+**`f128`/`f256` source values are an engine split, not a universal unsupported type (2026-08-24, OPEN).**
+Current Madaros deliberately refuses source signatures, literals, arithmetic and
+casts with E218 at the V0-A format-identity boundary. The `lean_single` seed does
+not enforce that boundary: it accepts the arithmetic/cast fixtures and can emit
+an ELF. Therefore neither "Sounio supports `f128`/`f256` arithmetic" nor
+"Sounio rejects it" is true without an engine name. Compiler-owned descriptors,
+the bounded numeric-payload arena and the V0-C wire codec are implemented
+scaffolding; they are not source-value arithmetic. The V0-B/V0-D ladder remains
+deliberately red until literals and compiler-owned softfloat operations consume
+the oracle corpora. The engine split is pinned by
+`scripts/ci/madaros_f128_f256_format_identity_gate.sh` and the
+`f128_v0b_arithmetic_rejected.sio`/`f256_v0b_arithmetic_rejected.sio` fixtures.
+The passing `numeric_payload` and `numeric_wire` gates establish only the
+compiler-owned scaffolding; the staged ladder deliberately fails while E218
+still blocks V0-B source literals.
+
+**Unary `~` is accepted by `lean_single` and refused by Madaros (2026-08-24, OPEN).**
+`tests/run-pass/bitwise_not_bootstrap_regression.sio` compiles and returns 0
+under `SOUNIO_SOUC_ENGINE=lean_single`. Current Madaros refuses the same integer
+bitwise-not expressions with E005. The full parity baseline consequently records
+the fixture as `LEAN-ONLY`; documentation or examples using `~` must name the
+seed engine until the modular checker/lowerer agrees.
+
+**`Epistemic(N)` accepts positive literal floors, but negative payload syntax collides with absence in both engines (2026-08-24, PARTIALLY CLOSED).**
+Madaros and `lean_single` agree on the checked N=400/401/950/999 floor matrix:
+400 is accepted and larger required floors are refused with E215-equivalent
+diagnostics. Both engines also **accept the syntax** `with Epistemic(-1)`; that
+measurement does not establish that their internal reasons are identical. In
+the modular Madaros parser,
+`-1` is the no-payload sentinel and the parenthesized negative literal is erased
+to that same representation. Thus positive literal floors are enforced, while
+negative effect payloads are not modeled and must not be described as a valid
+confidence floor. Receipt:
+`docs/audit/MADAROS_EPISTEMIC_PAYLOAD_GATE_2026-08-20.md`.
 
 
 **Imported-module native path (D1–D4) — partial closeout (2026-07-14 → Wave10 2026-07-21).** On the default **native** engine, composing real modules historically failed or *silently miscompiled* in four distinct ways. Full catalogue + minimal repros + priority: [`docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md`](../audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md). Which stdlib results survive native import: [`docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md`](../audit/EPISTEMIC_TRUST_MAP_2026-07-14.md). Live gate: `scripts/epistemic_trust_gate.sh`.
@@ -212,28 +256,55 @@ This file previously claimed several rows as "Production" that the public-claim 
 - **Added:** "Active Known Bugs / Architectural Gaps" section enumerating the three bundle-compile roots.
 - **Fixed:** CLI exit-code contract — `souc check` now propagates typecheck failures (G2). Probed before/after in the audit. The wrapper `bin/souc` had `exit 0` in each dispatch arm; replaced with explicit `exit "$_rc"`.
 
-### lambda-spec-reconciliation (RESOLVED 2026-05-27)
+### lambda-spec-reconciliation (historical probe; registry downgraded again)
 
-`closures.lambdas` was previously marked `stale_conflicting`. Probe on 2026-05-27 confirmed that lambda literals (capture, HOF, escape, arity-2) compile and run correctly — 16/17 `tests/run-pass/closure_*.sio` pass. The registry is updated to `validated_research/closed`. Spec §4.7 is now fully normative. The one open item is linear closures (`closure_linear.sio`, `//@ ignore`).
+The 2026-05-27 probe established a useful bounded result for lambda literals,
+but its promotion is no longer current. The authoritative registry now marks
+`closures.lambdas = stale_conflicting/downgraded`; captured first-class values,
+native-v2 behavior and `closure_linear.sio` remain outside the proved surface.
+The maturity table above follows the current registry rather than preserving
+the historical `validated_research/closed` conclusion.
 
-### Fixed in Self-Hosted Compiler — All Bugs Closed
+### Engine-qualified fixes and residuals
 
-**`extern "C"` integer FFI return register** (fixed, **lean_single**; the default engine is covered by the entry below as of 2026-08-23 — see engine split): `strip_extern_blocks()` (`self-hosted/compiler/lean_single.sio`) now emits Sounio stub functions (OS syscalls for integer-returning `getpid`/`getppid`, `heap_alloc`/`heap_free` for `malloc`/`free`, `__native_*_f64` intrinsics for math). Stubs use Sounio's internal calling convention (RAX), bypassing the XMM0/RAX confusion entirely. Unblocks `stdlib/os/`, `stdlib/mem/`, `stdlib/sync/`. Regression test: `tests/run-pass/ffi_integer_return.sio`.
+**`extern "C"` FFI is allowlisted and engine-specific (PARTIALLY CLOSED).**
+The two engines do not share an arbitrary native linker:
 
-**Engine split (verified 2026-08-17).** This entry names no engine, but `strip_extern_blocks()` is lean_single-specific. Under the default Madaros engine, this surface had a *separate, later* history: `docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md` found `system()`/`getpid()` calls under Madaros were **silently non-functional** — they claimed success (returned 0) while doing nothing, with no diagnostic — and recorded Track A (Madaros) as open and unpatched. That gap is now closed for a specific, allowlisted set of names by P0-F (#1755, commit `1e8d48cdc8`, merged to `main` 2026-08-17): `getpid`, `getppid`, `malloc`, `free`, `exit`, `abort`, `system` now have real emitters in `self-hosted/native/codegen_x86_linux.sio`, each backed by a per-name execution witness (not just a clean `check`) in `scripts/ci/ffi_posix_builtin_gate.sh`. Any `extern "C"` name outside that allowlist still fails closed under Madaros with `error[E250]` rather than silently fabricating a result — see `name_is_native_backend_builtin` in `self-hosted/check/check.sio`.
+- **`lean_single`:** `strip_extern_blocks()` emits Sounio stubs using the
+  internal calling convention for its implemented OS, memory and math names.
+- **Madaros POSIX:** #1755 implemented and execution-tested `getpid`, `getppid`,
+  `malloc`, `free`, `exit`, `abort` and `system`; the per-name witnesses live in
+  `scripts/ci/ffi_posix_builtin_gate.sh`.
+- **Madaros math:** #2079 added checked `ffi_` wrappers and execution vectors for
+  the implemented math names, including `pow` and `tgamma`.
+- **Fail-closed boundary:** a non-allowlisted Madaros extern is rejected by the
+  backend-builtin guard with **E250** — measured at the raise site
+  (`checker_report_error_at_inplace(c, e.span, 250, ...)`, `check.sio:8659`),
+  not read off prose. It is not silently replaced with zero, and the current
+  diagnostic is neither E137 nor E219; #2191 renumbered that code.
+- **What it replaced:** under Madaros this surface was once silently
+  non-functional — `docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md`
+  found `system()`/`getpid()` returning 0 while doing nothing, no diagnostic.
+  Closed for the allowlisted names by #1755 (`1e8d48cdc8`), each backed by a
+  per-name EXECUTION witness rather than a clean `check`.
+- **Residual:** aggregate-reference arguments are not sound through the
+  signatureless `ffi_` path. `tests/run-pass/ffi_system_array_arg.sio` still
+  fails at execution, while the pointer-scalar/string form works. Arbitrary
+  shared-library lookup, GOT/PLT and `-lfoo` remain open below.
 
-**Beyond FFI / f128–f256 (same day, not the tilde alone).** Dual-engine disagreement is load-bearing for enforcement and for science values:
+**Other dual-engine findings.** Engine disagreement is load-bearing for
+enforcement and science values:
 
 - **#1798 (CLOSED):** Madaros accepted a forward ontology `inverse_of` that lean_single rejected with **E158**; Madaros was aligned to lean_single declaration-order (`scripts/ci/madaros_ontology_enforcement_gate.sh`).
 - **#1792 (OPEN):** Madaros prints `var=0.000000` where lean_single shows ~1e-5 on dissertation adaptive witnesses (plus ep28 confidence bit-pattern fabrication). Detect-only gate: `scripts/ci/epistemic_fabrication_detect_gate.sh`. Full variance-slot / multi-module f64 ABI repair is a separate compiler lane.
 
-**`extern "C"` FFI on the default Madaros engine** (fixed 2026-08-16, Track A): under lean_single, `strip_extern_blocks()` emits Sounio stub functions using the internal RAX convention. Under **default Madaros** the same capability now exists via the `ffi_` builtin registry: the parser rewrites each `extern "C"` declaration into a wrapper forwarding to an `ffi_<name>` intrinsic (brace-form blocks handled re-entrantly, one declaration per item — no dropped declarations), the checker binds the implemented intrinsics, and `codegen_x86_linux.sio` emits them (`getpid`/`getppid` syscalls, `exit`/`abort` via `exit_group`, `malloc`/`free` via the mmap heap, `system` via fork/execve/wait4). **Fail-closed:** an `extern` whose intrinsic is unimplemented now fails at check time with E137 instead of silently returning a fabricated 0. Unblocks `stdlib/os/`, `stdlib/mem/`, `stdlib/sync/` on the default engine. Regression tests: `tests/run-pass/ffi_integer_return.sio`, `ffi_getppid_return.sio`, `ffi_extern_block_multi_decl.sio`, `ffi_exit_terminates.sio`, `ffi_malloc_free_roundtrip.sio`, `ffi_system_exec.sio`; compile-fail `ffi_unimplemented_extern_must_reject.sio`. **Residual:** a reference-to-aggregate extern parameter (`&[i8;N]`) forwards an empty pointer through the signatureless `ffi_` path (a `string`/pointer-scalar arg works) — `//@ known-failure` `ffi_system_array_arg.sio`; see `docs/audit/MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16.md`.
-
 **Observation boundary coverage** (fixed): `Observe` now enforced for comparison, IO-arg, FFI-arg, and pattern-match scrutinee in both x86-64 and ARM64 codepaths. Self-hosted compiler and multi-file checker are now aligned. Test: `tests/compile-fail/observe_io_boundary.sio`.
 
-### Fixed in Self-Hosted Compiler (live in current binary)
+### Fixed in the legacy single-file compiler
 
-The following bugs were fixed in `lean_single.sio` and are active in the current `bin/souc-native` (rebuilt 2026-04-20):
+The following historical fixes are in `lean_single.sio` and its legacy native
+artifacts. They are not claims about the default Madaros engine unless a Madaros
+gate is named separately.
 
 **Mixed-Hyper optimizer metadata** (fixed): When a function mixes Hyper algebras (2+ distinct algebra kinds in its type signature), `checker_infer_fn_hyper_algebra` now computes the most-restrictive algebra kind (intersection of rule sets) instead of bailing with -1. `ocp_configure_small_context` applies the appropriate conservative reassoc strategy for that kind: free(0) for Real/Complex/Quaternion, fano_selective(2) for Octonion, blocked(1) for Sedenion/Clifford. Additionally, when a function's `hyper_algebra_kind` is -1 (tag lost at lowering) but the compilation unit has a single unambiguous algebra declaration, `ocp_infer_algebra_from_table` re-infers the kind from the registry entry so homogeneous helper functions benefit from algebra-specific reassociation. Also fixed: Octonion (kind=3) incorrectly defaulted to strategy=1 (blocked) in the fallback path; now correctly uses strategy=2 (fano_selective). Multi-algebra intersection remains a TODO (`// TODO: mixed algebra intersection` in `ocp_infer_algebra_from_table`).
 
@@ -269,17 +340,21 @@ The following bugs were fixed in `lean_single.sio` and are active in the current
 
 Numerical regressions in pharmacokinetics, GUM uncertainty propagation, and clinical pathways are strictly monitored. It is an absolute policy that regression tolerances must never be loosened or "afrouxadas" through artificial modifications simply to make tests pass. If a physical model test or mathematical/clinical verification fails, the underlying compiler code or the physical model itself must be fixed honestly.
 
-### Pruned/Experimental Modules
+### Experimental and external-dependency modules
 
-The following stdlib modules are stubs or incomplete:
+The current stdlib inventory contains **0 disabled files** and **0 stub-only
+`mod.sio` files**; the previous disabled/stub list was stale. That inventory is
+not a completeness or security proof:
 
-- `stdlib/gpu/` - requires CUDA runtime (behind `--features gpu`)
-- `stdlib/crypto/` - pure-Sounio sha256/hmac/rng are active; random.sio.disabled and hash.sio.disabled require additional algorithm work
-- `stdlib/compress/` - gzip.sio requires libz at link time; zstd.sio requires libzstd at link time (external runtime libraries, not an FFI limitation)
-- `stdlib/ffi/` - stub
-- `stdlib/autodiff/` - framework only
-- `stdlib/interop/` - stub
-- `stdlib/text/*.sio.disabled`, `stdlib/time/*.sio.disabled` - old Rust-style stubs (use `u32`/`u64`/closures/`for..in`); superseded by pure-Sounio rewrites already active as `.sio` files
+- `stdlib/gpu/` requires a CUDA runtime for execution.
+- `stdlib/crypto/` is active, but no cryptographic-security claim follows from
+  source presence or the bounded stdlib support gate.
+- `stdlib/compress/` has external-runtime lanes for libz/libzstd; arbitrary
+  dynamic linking remains limited as documented below.
+- `stdlib/ffi/` contains active helpers, subject to the allowlisted,
+  engine-specific FFI boundary above.
+- `stdlib/autodiff/` and `stdlib/interop/` have active source surfaces, but broad
+  end-to-end validation is not established by the inventory gate.
 
 ### Recently Activated Modules
 
@@ -360,10 +435,17 @@ Examples of this pattern in recent history:
 
 Because the modular compiler and legacy seed are no longer the same source file, reviewers should check which lane a PR affects. Default Madaros changes need the modular-source build plus named Madaros gates; legacy-seed changes still need a `lean_single.sio` bootstrap proof.
 
-### Planned resolution
+### Parity status and planned resolution
 
-1. **Parity harness (`tests/parity/`, planned near-term).** For a fixed set of `.sio` programs drawn from `examples/` and `tests/compile-fail/`, compile via both paths and diff the stdout/stderr and exit codes (not the binaries — timestamps and symbol ordering make binary-equality unreliable). Divergence flips CI red.
-2. **Bootstrap retirement (roadmap, long term).** Retire `lean_single.sio` as an escape hatch once the modular compiler has enough fixed-point and parity evidence.
+1. **Parity harness exists but is not workflow-reachable.**
+   `scripts/ci/engine_parity_gate.sh` compares compile/run outcomes and stdout
+   for both engines against `tests/engine_parity_baseline.txt`. The committed
+   baseline contains 1007 classified rows. Running the gate prevents new drift
+   only where it is actually invoked; the workflow currently runs the narrower
+   epsilon parity gate, not the full harness.
+2. **Bootstrap retirement remains long term.** Retire `lean_single.sio` as an
+   escape hatch only after the modular compiler has sufficient fixed-point and
+   parity evidence.
 
 Until that lands, treat the modular tree as the source for the default Madaros prebuilt and `lean_single.sio` as the seed/escape-hatch source.
 
@@ -417,16 +499,17 @@ unit mg = 0.001 * kg;
 unit velocity = m / s;
 ```
 
-## Reserved Keywords
+## Keyword and identifier status
 
-The following identifiers are reserved and used by the language:
-- `var` - mutable binding
-- `effect` - effect declaration
-- `type` - type alias definition
-- `module` - module declaration
-- `use` - module import
-- `pub` - public visibility modifier
-- `unit` - unit definition
+There is no trustworthy seven-word "reserved keyword" list. Keyword-shaped
+words are split between hard-reserved and contextual-identifier behavior in the
+lexer/token tables and parser. For example, `on` is contextual in current
+Madaros; `var` is usable in some identifier positions but still introduces a
+binding form in parameter position. Use
+`scripts/ci/parser_keyword_classification_gate.sh` for the declared
+classification and `scripts/ci/keyword_identifier_capability_gate.sh` for
+executable identifier-position probes. Engine behavior must be named when those
+gates disagree with `lean_single`.
 
 ## Scoping Behavior - All Resolved
 
@@ -454,15 +537,68 @@ All previously planned features are implemented as of v0.99.0:
 | Forward declarations | v0.99.0 | 2-pass resolver |
 | Unit definitions | v0.99.0 | User-defined units + checking |
 
-## Hessian AD Capabilities and Architectural Limits (β⁷)
+## Hessian AD is engine-specific (β⁷)
 
-`hessian_of(expr, j, k)` computes ∂²expr/∂xⱼ∂xₖ via second-order forward-mode AD.
+The artifact half of this boundary has since closed for the transcendental
+chain rule; what remains engine-specific is the Madaros/`lean_single` split
+below, plus the standing rule that the committed ELF is not a receipt for the
+tree it ships beside.
+
+### Shipped Madaros artifact
+
+The committed Madaros ELF was last refreshed at `e5e7ce8aff` (#2128,
+2026-08-24), which is **after** #2115/#2119. Re-measured on this branch
+(2026-08-27, `bin/madaros-linux-x86_64` md5 `ac6995af`): compiling and running
+`tests/run-pass/madaros_hessian_transcendental.sio` with that ELF prints five
+non-zero rows (`h_poly=2.000000`, `h_sin=-0.479426`, `h_cos=-0.877583`,
+`h_exp=1.648721`, `h_e2x=10.873127`) and `MADAROS_HESSIAN_TRANSCENDENTAL_PASS`.
+`scripts/ci/madaros_binary_source_drift_gate.sh` independently reports
+`behind: 0` with `ok  hessian_of transcendental chain rule`. The distributed
+default therefore **does** carry the #2119 transcendental chain rule as of that
+refresh.
+
+This closes the artifact gap for that surface only. Other Hessian surfaces are
+still open in **both** the source and the artifact: re-measured on the same
+committed ELF, `tests/run-pass/madaros_hessian_quotient.sio` still prints
+`h_aa=h_ab=h_bb=h_rec=0.000000` and `MADAROS_HESSIAN_QUOTIENT_FAIL`. Do not
+generalise the transcendental result to Hessian AD as a whole.
+
+This does not make the artifact a receipt for the tree in general.
+`bin/souc --version` still explicitly reports that the ELF is the committed
+binary and was not built from the checked-out tree, and the drift gate is what
+says how far behind it is at any given commit — read the gate, not this
+paragraph, before citing the shipped binary for compiler behaviour.
+
+> Historical note: at the 2026-08-24 reconciliation SHA `7ecec1088158` this
+> section said the shipped ELF predated #2115/#2119 and printed
+> `MADAROS_HESSIAN_TRANSCENDENTAL_FAIL`. That was true of the ELF frozen at
+> `842195928ae5` and stopped being true when #2128 rebuilt it hours later.
+
+### Madaros current source only
+
+At reconciliation SHA `7ecec10881`, the Madaros source lowering implements the product rule
+and the second-order chain rule for `sin`, `cos` and `exp` when the inner
+expression is a leaf or linear expression. The executable witness
+`tests/run-pass/madaros_hessian_transcendental.sio` checks five closed-form rows.
+Composite inner expressions that carry their own Hessian, including
+`exp(x*x)`, `exp(sin(x))` and `sin(sin(x))`, are deliberately refused by
+clearing the Hessian and returning `0.0`; the `f'(g)H(g)` path is known wrong
+and is not presented as implemented. This source-current behavior is evidenced
+by the merged #2119 source/witness pair, and — since the #2128 rebuild — by the
+committed ELF described above as well.
+
+### `lean_single` seed
+
+The claims in this section describe the `lean_single` seed implementation unless
+a Madaros gate is named. They are not universal two-engine claims.
+`hessian_of(expr, j, k)` computes ∂²expr/∂xⱼ∂xₖ via second-order forward-mode AD
+on that path.
 
 ### What Works
 
 - **8 function inputs** (channels 0–7): indices 0–7 from `measure()` calls, 36 upper-triangular pairs
 - **Arithmetic**: `+`, `−`, `*`, `/` propagate full Hessian and first-order sensitivities
-- **Transcendentals (unary)**: `sqrt`, `exp`, `ln`/`log`, `sin`, `cos`, `tan`, `atan`, `tanh`, `asin`, `acos` — full chain rule f′ and f″ in all 8 channels
+- **Transcendentals (unary)**: `sqrt`, `exp`, `ln`/`log`, `sin`, `cos`, `tan`, `atan`, `tanh`, `asin`, `acos` — chain-rule support is limited to channels 0–3
 - **Two-arg builtins**: `atan2(y,x)` and `pow(x,y)` — full Hessian propagation for channels 0–3 and 10 pairs
 
 ### Architectural Limitations (Tier 4 — Not Planned for Near-Term)
@@ -475,11 +611,11 @@ All previously planned features are implemented as of v0.99.0:
 
 ### Channel-at-`.value` semantics (resolves former "Butterfly #3")
 
-Phase 5 re-evaluation: the MEAS_KNOW_IDX counter at `lean_single.sio:393` is incremented on every `.value` access to a Knowledge variable.  Channels are assigned **at `.value` extraction time, not at `measure()` time**.  A Knowledge struct at rest has no channel identity; it acquires one only when the user extracts `.value`.
+Phase 5 re-evaluation: the `MEAS_KNOW_IDX` counter in `lean_single.sio` is incremented on every `.value` access to a Knowledge variable.  Channels are assigned **at `.value` extraction time, not at `measure()` time**.  A Knowledge struct at rest has no channel identity; it acquires one only when the user extracts `.value`.
 
 This means the KAS-1 pattern (extract `.value` first, do scalar arithmetic) is **not a workaround** for a compiler limitation — it is the direct expression of the channel-assignment semantics.  Formalised in `formal/ChannelAssignmentSemantics.lean` (Phase 5 Lean file).
 
-`compile_knowledge_muldiv_x86` at `lean_single.sio:5766` correctly does not touch `MEAS_KNOW_IDX`; Knowledge multiplication is channel-silent.  Attempting `hessian_of((k1 * k2).value, 0, 1)` asks for `∂²/∂x_0∂x_1` of a one-input function (the single `.value` access seeds only channel 0); the result is zero by correctness of the channel-at-`.value` model, not by any bug.
+`compile_knowledge_muldiv_x86` in `lean_single.sio` correctly does not touch `MEAS_KNOW_IDX`; Knowledge multiplication is channel-silent.  Attempting `hessian_of((k1 * k2).value, 0, 1)` asks for `∂²/∂x_0∂x_1` of a one-input function (the single `.value` access seeds only channel 0); the result is zero by correctness of the channel-at-`.value` model, not by any bug.
 
 **The KAS-1 pattern (formalised in `formal/KnowledgeArithmeticSoundness.lean` + `formal/ChannelAssignmentSemantics.lean`)** expresses a multi-input Hessian function directly under the channel-at-`.value` semantics:
 
@@ -552,10 +688,10 @@ as a standalone program instead of via an imported module, correctly refuses
 to emit (exit 2, no ELF) — the tolerance is specific to the imported-module
 path.
 
-The mechanism (`lean_single.sio:29451-29469`, "CONVERGENCE FIX") only rewinds
+The mechanism under the `CONVERGENCE FIX` block in `lean_single.sio` only rewinds
 and stubs an imported function with a clean `return 0` placeholder when that
 function accumulates **more than 10** typecheck errors
-(`fn_err_count > 10 && fn_is_import`, `:29454-29458`). Below that threshold,
+(`fn_err_count > 10 && fn_is_import`). Below that threshold,
 the function's already-emitted, partially-broken codegen is left in the
 binary as-is — not stubbed, not refused.
 
