@@ -128,8 +128,15 @@ correct and the seed being lax. This audit establishes that the two disagree and
 that CI cannot see it; it does not adjudicate 112 individual cases.
 
 What is certain: 110 tests with no declared engine dependency do not pass under
-the compiler `bin/souc` invokes by default, and no gate in this repository
-notices.
+the compiler `bin/souc` invokes by default.
+
+**CORRECTED 2026-08-31.** An earlier version of this sentence ended "and no gate
+in this repository notices." That was wrong. `scripts/ci/madaros_corpus_regression_gate.sh`
+exists, has a checked-in baseline and measures this territory at larger scope; it
+is deliberately unwired for a reason ci.yml states in full. Nothing in CI notices,
+which is managed debt rather than blindness. See
+TOLERATED_BUCKETS_REMEASURED_2026-08-31.md, which also re-measures that gate:
+1028 failures outside baseline on 2026-07-27, 39 on 2026-08-31.
 
 ## Affected files
 
