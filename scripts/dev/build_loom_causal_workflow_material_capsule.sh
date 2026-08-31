@@ -40,7 +40,7 @@ parent="$(dirname "$OUTPUT")"
 mkdir -p "$parent"
 [[ -d "$parent" && ! -L "$parent" ]] || fail 'capsule output parent is absent or linked'
 
-for tool in git sha256sum stat install mktemp find sort chmod mv cp c++ ocamlfind dune; do
+for tool in git sha256sum stat install mktemp find grep sort chmod mv cp c++ ocamlfind dune; do
   command -v "$tool" >/dev/null 2>&1 || fail "required build tool is absent: $tool"
 done
 
@@ -58,6 +58,7 @@ for input in \
   scripts/dev/build_sounio_loom_causal_workflow_run_grant_fixture.sh \
   scripts/dev/build_sounio_loom_causal_workflow_attest_grant_fixture.sh \
   scripts/dev/build_sounio_loom_causal_workflow_kernel_fixture.sh \
+  scripts/dev/build_sounio_loom_causal_workflow_mid_exec_fixture.sh \
   scripts/dev/build_loom_causal_workflow_journal_fixture.sh; do
   [[ -x "$ROOT_DIR/$input" && ! -L "$ROOT_DIR/$input" ]] ||
     fail "required source-fresh builder is absent, linked, or non-executable: $input"
@@ -65,6 +66,9 @@ done
 
 SOURCE_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail 'source commit is not canonical'
+MID_EXEC_FREEZE_COMMIT=469d7fecaf8609275250223e7b55993c1e6f641e
+git -C "$ROOT_DIR" merge-base --is-ancestor "$MID_EXEC_FREEZE_COMMIT" "$SOURCE_COMMIT" ||
+  fail 'committed Sounio mid-exec freeze is not an ancestor of the capsule source'
 CONTROLLER_COMMIT="$(manifest_value "$ROOT_DIR/tools/loom/exec_grant_controller.runtime.v1" controller_commit)"
 RESIDENT_COMMIT="$(manifest_value "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4" sounio_resident_v4_commit)"
 [[ "$CONTROLLER_COMMIT" =~ ^[0-9a-f]{40}$ && "$RESIDENT_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
@@ -72,6 +76,7 @@ RESIDENT_COMMIT="$(manifest_value "$ROOT_DIR/tools/loom/resident_membrane.runtim
 
 CONTROLLER_RUNTIME_MANIFEST="$ROOT_DIR/tools/loom/exec_grant_controller.runtime.v1"
 RESIDENT_RUNTIME_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
+MATERIAL_RUNTIME_MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_material.runtime.v1"
 [[ "$(manifest_value "$CONTROLLER_RUNTIME_MANIFEST" semantic_authority)" == Sounio &&
    "$(manifest_value "$CONTROLLER_RUNTIME_MANIFEST" action)" == 9030 &&
    "$(manifest_value "$CONTROLLER_RUNTIME_MANIFEST" controller_commit)" == "$CONTROLLER_COMMIT" &&
@@ -81,6 +86,35 @@ RESIDENT_RUNTIME_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
   fail 'action-9030 dependency authority posture drifted'
 [[ "$(manifest_value "$CONTROLLER_RUNTIME_MANIFEST" resident_runtime_manifest_sha256)" == "$(sha256_file "$RESIDENT_RUNTIME_MANIFEST")" ]] ||
   fail 'controller no longer binds the selected resident runtime manifest'
+[[ "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" stage)" == MATERIAL_PARITY_MID_EXEC_PROBE_READY && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" semantic_authority)" == Sounio && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" semantic_freeze_commit)" == "$MID_EXEC_FREEZE_COMMIT" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" workflow_manifest_sha256)" == "$(sha256_file "$ROOT_DIR/tools/loom/causal_workflow_kernel.freeze.v1")" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" workflow_semantics_sha256)" == "$(manifest_value "$ROOT_DIR/tools/loom/causal_workflow_kernel.freeze.v1" semantics_sha256)" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" mid_exec_manifest_sha256)" == "$(sha256_file "$ROOT_DIR/tools/loom/causal_workflow_mid_exec.freeze.v1")" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" mid_exec_semantics_sha256)" == "$(manifest_value "$ROOT_DIR/tools/loom/causal_workflow_mid_exec.freeze.v1" semantics_sha256)" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" known_p0_count)" == 0 && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" known_p0_fails_closed)" == true && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" controller_recovery)" == false && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" pod_loss_measured)" == false && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" material_cell_survival_measured)" == false && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" barrier_nonce_source)" == getrandom && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" barrier_nonce_storage)" == HostGuardian-memory-only && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" barrier_nonce_secret_persisted)" == false && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" transport_trust)" == trusted-privileged-root-observer && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" same_uid_peer_isolation)" == false && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" hostile_transport_isolation)" == false && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" barrier_hold_timeout_milliseconds)" == 600000 && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" guardian_request_timeout_milliseconds)" == 570000 && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" broker_timeout_milliseconds)" == 650000 && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" outer_unit_timeout_milliseconds)" == 720000 && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" host_canary_source_sha256)" == "$(sha256_file "$ROOT_DIR/tools/loom/src/loom_causal_workflow_host_canary.inc")" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" material_cell_source_sha256)" == "$(sha256_file "$ROOT_DIR/tools/loom/src/loom_causal_workflow_material_cell.cpp")" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" capsule_builder_sha256)" == "$(sha256_file "${BASH_SOURCE[0]}")" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" host_selftest_sha256)" == "$(sha256_file "$ROOT_DIR/scripts/ci/sounio_loom_causal_workflow_material_host_selftest.sh")" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" host_probe_sha256)" == "$(sha256_file "$ROOT_DIR/scripts/dev/run_loom_causal_workflow_material_host_probe.sh")" && \
+   "$(manifest_value "$MATERIAL_RUNTIME_MANIFEST" host_evidence_sha256)" == "$(sha256_file "$ROOT_DIR/tools/loom/evidence/loom-causal-workflow-material-mid-exec-host-v1-20260831.txt")" ]] ||
+  fail 'material host runtime posture has a P0 gap or overclaims unmeasured recovery'
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/loom-causal-workflow-material-capsule.XXXXXX")"
 STAGE="$(mktemp -d "$parent/.loom-causal-workflow-material-capsule.stage.XXXXXX")"
@@ -97,10 +131,11 @@ trap cleanup EXIT
 RELEASE="$STAGE/release"
 BIN="$RELEASE/bin"
 DATA="$RELEASE/data"
+GATES="$RELEASE/gates"
 AUTHORITY_ROOT="$RELEASE/authority-root"
 META="$STAGE/meta"
-mkdir -p "$BIN" "$DATA" "$AUTHORITY_ROOT/.git" "$META"
-chmod 0700 "$STAGE" "$RELEASE" "$BIN" "$DATA" "$AUTHORITY_ROOT" "$META"
+mkdir -p "$BIN" "$DATA" "$GATES" "$AUTHORITY_ROOT/.git" "$META"
+chmod 0700 "$STAGE" "$RELEASE" "$BIN" "$DATA" "$GATES" "$AUTHORITY_ROOT" "$META"
 chmod 0555 "$AUTHORITY_ROOT/.git"
 
 install_root_file() {
@@ -154,6 +189,7 @@ AUTHORITY_FILES=(
   tools/loom/exec_operation_catalog.freeze.v1
   tools/loom/exec_result_record.freeze.v1
   tools/loom/causal_workflow_kernel.freeze.v1
+  tools/loom/causal_workflow_mid_exec.freeze.v1
   tools/loom/causal_workflow_run_grant_fixture.freeze.v1
   tools/loom/causal_workflow_attest_grant_fixture.freeze.v1
   tools/loom/causal_workflow_journal.runtime.v1
@@ -168,16 +204,32 @@ AUTHORITY_FILES=(
   tools/loom/exec_result_record_authority_main.sio
   stdlib/coordination/loom_causal_workflow_kernel_authority.sio
   tools/loom/causal_workflow_kernel_authority_main.sio
+  stdlib/coordination/loom_causal_workflow_mid_exec_authority.sio
+  tools/loom/causal_workflow_mid_exec_authority_main.sio
   tools/loom/exec_operation_grant_fixture_main.sio
   tools/loom/causal_workflow_run_grant_fixture_main.sio
   tools/loom/causal_workflow_attest_grant_fixture_main.sio
   tools/loom/product_exec_cell_fixture_main.sio
+  tools/loom/src/loom_kernel_principal_broker.cpp
+  tools/loom/src/loom_causal_workflow_host_canary.inc
+  tools/loom/src/loom_causal_workflow_material_cell.cpp
   tools/loom/src/loom_causal_workflow.ml
   tools/loom/causal_workflow_journal_fixture.ml
+  scripts/ci/sounio_loom_causal_workflow_mid_exec_freeze_selftest.sh
+  tools/loom/evidence/loom-causal-workflow-material-mid-exec-prereg-v1-20260831.txt
+  tools/loom/evidence/loom-causal-workflow-material-mid-exec-host-v1-20260831.txt
 )
 for relative in "${AUTHORITY_FILES[@]}"; do
   install_root_file "$relative"
 done
+
+# Package the two host-facing gates inside the immutable payload. The probe may
+# transport this directory, but it cannot replace either gate with a checkout
+# copy after the capsule manifest has been measured.
+install -m 0555 "$ROOT_DIR/scripts/ci/sounio_loom_causal_workflow_material_host_selftest.sh" \
+  "$GATES/sounio_loom_causal_workflow_material_host_selftest.sh"
+install -m 0555 "$ROOT_DIR/scripts/dev/run_loom_causal_workflow_material_host_probe.sh" \
+  "$GATES/run_loom_causal_workflow_material_host_probe.sh"
 
 # The frozen OCaml controller first validates its Sounio fixture manifest. Its
 # grant cell then loads the 9030 authority, and the single resident process
@@ -261,6 +313,15 @@ for key in "${CAUSAL_DEPENDENCY_KEYS[@]}"; do
     fail "causal authority dependency drifted: $key"
 done
 
+MID_EXEC_MANIFEST="$ROOT_DIR/tools/loom/causal_workflow_mid_exec.freeze.v1"
+[[ "$(git -C "$ROOT_DIR" show "$MID_EXEC_FREEZE_COMMIT:tools/loom/causal_workflow_mid_exec.freeze.v1" | sha256sum | cut -d ' ' -f 1)" == \
+   "$(sha256_file "$MID_EXEC_MANIFEST")" ]] ||
+  fail 'committed Sounio mid-exec freeze manifest drifted after freeze commit'
+install_manifest_closure "$MID_EXEC_MANIFEST" \
+  contract source entrypoint build_script selftest first_manifest \
+  first_evidence freeze_evidence parent_9037_manifest toolchain_wrapper \
+  toolchain_compiler
+
 # Action 9030's frozen controller and resident manifests pin source hashes.
 # Build them from the manifest-pinned trees; the other three material layers
 # below deliberately use the exact current working tree.
@@ -338,6 +399,11 @@ SOUNIO_LOOM_CAUSAL_WORKFLOW_OUTPUT="$CAUSAL_WORKFLOW_RUNTIME" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_causal_workflow_kernel_fixture.sh" >/dev/null
 [[ "$(sha256_file "$CAUSAL_WORKFLOW_RUNTIME")" == "$(manifest_value "$CAUSAL_MANIFEST" executable_sha256)" ]] ||
   fail 'source-fresh Sounio causal workflow runtime drifted from its freeze'
+MID_EXEC_RUNTIME="$AUTHORITY_ROOT/tools/loom/_build/default/src/sounio-loom-causal-workflow-mid-exec"
+SOUNIO_LOOM_CAUSAL_MID_EXEC_OUTPUT="$MID_EXEC_RUNTIME" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_causal_workflow_mid_exec_fixture.sh" >/dev/null
+[[ "$(sha256_file "$MID_EXEC_RUNTIME")" == "$(manifest_value "$MID_EXEC_MANIFEST" executable_sha256)" ]] ||
+  fail 'source-fresh Sounio mid-exec runtime drifted from its freeze'
 
 [[ "$(sha256_file "$DATA/operation-grant-fixtures.v1")" == \
   52674ef4332a4b6d54e2d55ca9a58c55de21e6686aca82ae70b9d22b7d260af2 ]] ||
@@ -350,7 +416,26 @@ SOUNIO_LOOM_CAUSAL_WORKFLOW_OUTPUT="$CAUSAL_WORKFLOW_RUNTIME" \
   fail 'source-fresh causal attest fixture bundle drifted'
 
 chmod 0555 "$BIN"/*
+chmod 0555 "$GATES"/*
 chmod 0444 "$DATA"/*
+# A capsule may carry only the nonce digest and policy language. A nonce secret
+# artifact would create ambient file-based release authority, so refuse the
+# path and schema before the payload inventory is sealed. Privileged root Pods
+# remain trusted observers here; this is not hostile transport isolation.
+nonce_schema_version=v1
+nonce_secret_schema="loom-causal-material-barrier-nonce-secret-${nonce_schema_version}"
+while IFS= read -r -d '' path; do
+  [[ "$(basename "$path")" != barrier-nonce.secret ]] ||
+    fail "raw barrier nonce secret entered capsule: $path"
+  set +e
+  grep -aFq "$nonce_secret_schema" "$path"
+  status=$?
+  set -e
+  [[ $status -eq 1 ]] || {
+    [[ $status -eq 0 ]] && fail "raw barrier nonce secret schema entered capsule: $path"
+    fail "barrier nonce secret capsule scan failed: $path"
+  }
+done < <(find "$RELEASE" -type f -print0)
 chmod -R go-w "$STAGE"
 while IFS= read -r -d '' directory; do
   chmod 0555 "$directory"
@@ -378,6 +463,7 @@ cat > "$MANIFEST" <<EOF
 schema=loom-causal-workflow-material-host-capsule-v1
 stage=MATERIAL_PARITY_HOST_PROBE
 source_commit=$SOURCE_COMMIT
+semantic_freeze_commit=$MID_EXEC_FREEZE_COMMIT
 controller_dependency_commit=$CONTROLLER_COMMIT
 resident_dependency_commit=$RESIDENT_COMMIT
 semantic_authority=Sounio
@@ -385,10 +471,25 @@ workflow_action=9037
 launch_action=9030
 controller_language=OCaml
 material_language=C++20
+barrier_nonce_source=getrandom
+barrier_nonce_storage=HostGuardian-memory-only
+barrier_nonce_secret_persisted=false
+transport_trust=trusted-privileged-root-observer
+same_uid_peer_isolation=false
+hostile_transport_isolation=false
+barrier_hold_timeout_milliseconds=600000
+guardian_request_timeout_milliseconds=570000
+broker_timeout_milliseconds=650000
+outer_unit_timeout_milliseconds=720000
 capsule_layout=unpacked-directory-v1
 release_path=release
 authority_root_path=release/authority-root
 broker_path=release/bin/loom-kernel-principal-broker
+broker_sha256=$(sha256_file "$BIN/loom-kernel-principal-broker")
+broker_source_path=release/authority-root/tools/loom/src/loom_kernel_principal_broker.cpp
+broker_source_sha256=$(sha256_file "$ROOT_DIR/tools/loom/src/loom_kernel_principal_broker.cpp")
+host_canary_source_path=release/authority-root/tools/loom/src/loom_causal_workflow_host_canary.inc
+host_canary_source_sha256=$(sha256_file "$ROOT_DIR/tools/loom/src/loom_causal_workflow_host_canary.inc")
 controller_runtime_path=release/bin/loom-exec-grant-controller
 resident_runtime_path=release/bin/sounio-loom-resident-membrane-runtime-v4
 product_runtime_path=release/bin/sounio-loom-runtime
@@ -407,8 +508,29 @@ operation_result_runtime_sha256=$(sha256_file "$BIN/sounio-loom-exec-result-reco
 operation_result_runtime_language=Sounio
 operation_result_runtime_role=SEMANTIC_AUTHORITY
 material_cell_path=release/bin/loom-causal-workflow-material-cell
+material_cell_sha256=$(sha256_file "$BIN/loom-causal-workflow-material-cell")
+material_cell_source_path=release/authority-root/tools/loom/src/loom_causal_workflow_material_cell.cpp
+material_cell_source_sha256=$(sha256_file "$ROOT_DIR/tools/loom/src/loom_causal_workflow_material_cell.cpp")
+material_runtime_manifest_path=release/authority-root/tools/loom/causal_workflow_material.runtime.v1
+material_runtime_manifest_sha256=$(sha256_file "$MATERIAL_RUNTIME_MANIFEST")
+material_host_evidence_path=release/authority-root/tools/loom/evidence/loom-causal-workflow-material-mid-exec-host-v1-20260831.txt
+material_host_evidence_sha256=$(sha256_file "$ROOT_DIR/tools/loom/evidence/loom-causal-workflow-material-mid-exec-host-v1-20260831.txt")
 journal_runtime_path=release/bin/loom-causal-workflow-journal-fixture
 causal_workflow_runtime_path=release/authority-root/tools/loom/_build/default/src/sounio-loom-causal-workflow-kernel
+mid_exec_runtime_path=release/authority-root/tools/loom/_build/default/src/sounio-loom-causal-workflow-mid-exec
+mid_exec_runtime_sha256=$(sha256_file "$MID_EXEC_RUNTIME")
+mid_exec_manifest_path=release/authority-root/tools/loom/causal_workflow_mid_exec.freeze.v1
+mid_exec_manifest_sha256=$(sha256_file "$MID_EXEC_MANIFEST")
+mid_exec_semantics_sha256=$(manifest_value "$MID_EXEC_MANIFEST" semantics_sha256)
+mid_exec_release_frame_sha256=$(printf '%s\n' "$(manifest_value "$MID_EXEC_MANIFEST" wire_schema) $(manifest_value "$MID_EXEC_MANIFEST" release_stage_word) $(manifest_value "$MID_EXEC_MANIFEST" release_word0) $(manifest_value "$MID_EXEC_MANIFEST" release_word1)" | sha256sum | cut -d ' ' -f 1)
+mid_exec_replacement_invocation_frame_sha256=$(printf '%s\n' "$(manifest_value "$MID_EXEC_MANIFEST" wire_schema) $(manifest_value "$MID_EXEC_MANIFEST" claim_replacement_invocation_stage) $(manifest_value "$MID_EXEC_MANIFEST" claim_replacement_invocation_word0) $(manifest_value "$MID_EXEC_MANIFEST" claim_replacement_invocation_word1)" | sha256sum | cut -d ' ' -f 1)
+mid_exec_replacement_invocation_decision_sha256=$(printf '%s' "$(manifest_value "$MID_EXEC_MANIFEST" claim_replacement_invocation_decision)" | sha256sum | cut -d ' ' -f 1)
+mid_exec_barrier_nonce_frame_sha256=$(printf '%s\n' "$(manifest_value "$MID_EXEC_MANIFEST" wire_schema) $(manifest_value "$MID_EXEC_MANIFEST" claim_barrier_nonce_stage) $(manifest_value "$MID_EXEC_MANIFEST" claim_barrier_nonce_word0) $(manifest_value "$MID_EXEC_MANIFEST" claim_barrier_nonce_word1)" | sha256sum | cut -d ' ' -f 1)
+mid_exec_barrier_nonce_decision_sha256=$(printf '%s' "$(manifest_value "$MID_EXEC_MANIFEST" claim_barrier_nonce_decision)" | sha256sum | cut -d ' ' -f 1)
+host_selftest_path=release/gates/sounio_loom_causal_workflow_material_host_selftest.sh
+host_selftest_sha256=$(sha256_file "$GATES/sounio_loom_causal_workflow_material_host_selftest.sh")
+host_probe_path=release/gates/run_loom_causal_workflow_material_host_probe.sh
+host_probe_sha256=$(sha256_file "$GATES/run_loom_causal_workflow_material_host_probe.sh")
 controller_runtime_manifest_path=release/authority-root/tools/loom/exec_grant_controller.runtime.v1
 resident_runtime_manifest_path=release/authority-root/tools/loom/resident_membrane.runtime.v4
 operation_fixture_manifest_path=release/authority-root/tools/loom/exec_operation_grant_fixture.freeze.v1

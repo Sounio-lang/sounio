@@ -4,7 +4,102 @@ constexpr std::string_view kFrozenCausalAttestGrantManifestSha256 =
     "60050ea0310dd3b48dfe83d0d9d16d11adaf017a36a5efcfe6647fbe8e201bbd";
 constexpr std::string_view kFrozenCausalWorkflowManifestSha256 =
     "ef8dc0fadeb1cb33b1ba31d77551b8ca962bc97d1204998057b071b9b7921437";
+constexpr std::string_view kFrozenCausalMidExecManifestSha256 =
+    "7dfe285941220f7c3ef62948ec97f87584e7f8cb473da0203a76f5b23cdeca3e";
 constexpr auto kCausalMaterialDeadline = std::chrono::seconds(30);
+
+class CausalEphemeralSecret {
+ public:
+  explicit CausalEphemeralSecret(std::string value) : value_(std::move(value)) {}
+  CausalEphemeralSecret(const CausalEphemeralSecret&) = delete;
+  CausalEphemeralSecret& operator=(const CausalEphemeralSecret&) = delete;
+  ~CausalEphemeralSecret() { erase(); }
+
+  const std::string& value() const { return value_; }
+
+  void erase() noexcept {
+    volatile char* bytes = value_.empty() ? nullptr : value_.data();
+    for (std::size_t index = 0; index < value_.size(); ++index) {
+      bytes[index] = 0;
+    }
+    value_.clear();
+  }
+
+ private:
+  std::string value_;
+};
+
+bool causal_regular_file_contains(const std::filesystem::path& path,
+                                  std::string_view needle) {
+  UniqueFd descriptor(open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+  struct stat info {};
+  if (descriptor.get() < 0 || fstat(descriptor.get(), &info) != 0 ||
+      !S_ISREG(info.st_mode) || info.st_nlink != 1) {
+    throw Error("causal nonce scan encountered unsafe file: " + path.string());
+  }
+  std::array<char, 8192> buffer{};
+  std::string carry;
+  for (;;) {
+    const ssize_t count = read(descriptor.get(), buffer.data(), buffer.size());
+    if (count > 0) {
+      std::string window = carry;
+      window.append(buffer.data(), static_cast<std::size_t>(count));
+      if (window.find(needle) != std::string::npos) return true;
+      const std::size_t retained =
+          std::min(window.size(), needle.empty() ? 0 : needle.size() - 1);
+      carry = window.substr(window.size() - retained);
+    } else if (count == 0) {
+      return false;
+    } else if (errno != EINTR) {
+      throw Error("causal nonce scan read failed: " + path.string());
+    }
+  }
+}
+
+void causal_require_nonce_memory_only(const std::string& authority_root,
+                                      const std::string& store,
+                                      std::string_view raw_nonce) {
+  if (!lowercase_digest(raw_nonce) ||
+      std::filesystem::path(authority_root).filename() != "authority-root" ||
+      std::filesystem::path(authority_root).parent_path().filename() !=
+          "release") {
+    throw Error("causal raw nonce memory boundary is malformed");
+  }
+  std::error_code error;
+  if (std::filesystem::exists(std::filesystem::path(store) /
+                                  "barrier-nonce.secret",
+                              error) ||
+      error) {
+    throw Error("causal raw nonce secret file exists");
+  }
+  const std::filesystem::path capsule =
+      std::filesystem::path(authority_root).parent_path().parent_path();
+  for (const std::filesystem::path& base :
+       {capsule, std::filesystem::path(store)}) {
+    if (!std::filesystem::is_directory(base, error) || error) {
+      throw Error("causal nonce scan root is unavailable");
+    }
+    std::filesystem::recursive_directory_iterator iterator(base, error), end;
+    if (error) throw Error("causal nonce scan cannot enumerate root");
+    while (iterator != end) {
+      const std::filesystem::file_status status = iterator->symlink_status(error);
+      if (error) throw Error("causal nonce scan cannot inspect entry");
+      if (std::filesystem::is_symlink(status)) {
+        throw Error("causal nonce scan encountered a link");
+      }
+      if (std::filesystem::is_regular_file(status) &&
+          causal_regular_file_contains(iterator->path(), raw_nonce)) {
+        throw Error("causal raw nonce escaped HostGuardian memory");
+      }
+      if (!std::filesystem::is_regular_file(status) &&
+          !std::filesystem::is_directory(status)) {
+        throw Error("causal nonce scan encountered a special entry");
+      }
+      iterator.increment(error);
+      if (error) throw Error("causal nonce scan traversal failed");
+    }
+  }
+}
 
 struct CausalCellGrantFixtures {
   std::string command;
@@ -148,6 +243,17 @@ struct CausalMaterialObservation {
   }
 };
 
+struct CausalMaterialBarrier {
+  std::map<std::string, std::string> fields;
+  std::string running_witness_sha256;
+  std::string barrier_nonce_sha256;
+  std::string material_cgroup_sha256;
+  std::string material_executable_sha256;
+  std::string run_grant_generation;
+  pid_t material_pid = 0;
+  std::uint64_t material_start_tick = 0;
+};
+
 class HostCausalMaterialCell {
  public:
   HostCausalMaterialCell(std::string runtime, std::string systemd_run,
@@ -207,13 +313,158 @@ class HostCausalMaterialCell {
   std::uint64_t start_tick() const { return start_tick_; }
   uid_t uid() const { return uid_; }
   gid_t gid() const { return gid_; }
+  const std::string& invocation_id() const { return invocation_id_; }
+
+  bool running_barrier_authenticated(
+      const CausalMaterialBarrier& barrier) const {
+    try {
+      return authenticated() &&
+             property("InvocationID") == invocation_id_ &&
+             process_start_tick(barrier.material_pid) ==
+                 barrier.material_start_tick &&
+             sha256(process_cgroup(barrier.material_pid)) ==
+                 barrier.material_cgroup_sha256 &&
+             file_sha256(process_executable(barrier.material_pid)) ==
+                 barrier.material_executable_sha256 &&
+             process_cgroup(barrier.material_pid).find(unit_) !=
+                 std::string::npos;
+    } catch (...) {
+      return false;
+    }
+  }
+
+  CausalMaterialBarrier arm_run_exact(
+      const std::string& arm, const std::string& run_ticket_sha256,
+      const std::string& artifact_sha256,
+      const std::string& run_grant_generation,
+      const std::string& guardian_generation,
+      const std::string& barrier_nonce_sha256) {
+    if (mode_ != "RUN_EXACT" || finished_ || armed_ || !authenticated()) {
+      throw Error("causal material RUN_EXACT ARM precondition invalid");
+    }
+    const auto deadline =
+        std::chrono::steady_clock::now() + kCausalMaterialDeadline;
+    quorum_write_all(input_.get(), arm + "\n", deadline);
+    const auto fields = operation_key_value_line(
+        quorum_read_line(output_.get(), output_buffer_, 128 * 1024, deadline,
+                         "causal material EXEC_STARTED barrier timeout"),
+        "LOOM_CAUSAL_MATERIAL_EXEC_BARRIER_V1");
+    if (operation_require(fields, "mode") != "RUN_EXACT" ||
+        operation_require(fields, "semantic_authority") != "Sounio" ||
+        operation_require(fields, "action") != "9037" ||
+        operation_require(fields, "state") != "MATERIAL_RUNNING_IN_EXEC" ||
+        operation_require(fields, "run_ticket_sha256") != run_ticket_sha256 ||
+        operation_require(fields, "artifact_sha256") != artifact_sha256 ||
+        operation_require(fields, "run_grant_generation") !=
+            run_grant_generation ||
+        operation_require(fields, "guardian_generation") !=
+            guardian_generation ||
+        operation_require(fields, "unit") != unit_ ||
+        operation_require(fields, "unit_invocation_id") != invocation_id_ ||
+        operation_require(fields, "barrier_nonce_sha256") !=
+            barrier_nonce_sha256 ||
+        operation_require(fields, "principal_sha256") != principal_sha256_ ||
+        operation_require(fields, "descriptor_binding_sha256") !=
+            descriptor_binding_sha256_ ||
+        operation_require(fields, "ptrace_event") != "PTRACE_EVENT_EXEC" ||
+        operation_require(fields, "artifact_instruction_observed") != "false") {
+      throw Error("causal material EXEC_STARTED barrier binding invalid");
+    }
+    const auto material_pid = parse_u64(operation_require(fields, "material_pid"));
+    const auto material_start =
+        parse_u64(operation_require(fields, "material_start_tick"));
+    if (!material_pid || *material_pid <= 1 ||
+        *material_pid >
+            static_cast<std::uint64_t>(std::numeric_limits<pid_t>::max()) ||
+        !material_start || *material_start == 0 ||
+        !lowercase_digest(
+            operation_require(fields, "material_cgroup_sha256")) ||
+        operation_require(fields, "material_executable_sha256") !=
+            artifact_sha256 ||
+        !lowercase_digest(
+            operation_require(fields, "running_witness_sha256"))) {
+      throw Error("causal material EXEC_STARTED identity malformed");
+    }
+    const std::string canonical =
+        "LOOM_CAUSAL_MATERIAL_RUNNING_IN_EXEC/1|guardian_generation=" +
+        guardian_generation + "|unit=" + unit_ + "|unit_invocation_id=" +
+        invocation_id_ + "|material_pid=" + std::to_string(*material_pid) +
+        "|material_start_tick=" + std::to_string(*material_start) +
+        "|material_cgroup_sha256=" +
+        operation_require(fields, "material_cgroup_sha256") +
+        "|run_grant_generation=" + run_grant_generation +
+        "|barrier_nonce_sha256=" + barrier_nonce_sha256 +
+        "|run_ticket_sha256=" + run_ticket_sha256 + "|artifact_sha256=" +
+        artifact_sha256 + "|principal_sha256=" + principal_sha256_ +
+        "|descriptor_binding_sha256=" + descriptor_binding_sha256_;
+    if (sha256(canonical) !=
+        operation_require(fields, "running_witness_sha256")) {
+      throw Error("causal material EXEC_STARTED witness digest invalid");
+    }
+    CausalMaterialBarrier barrier;
+    barrier.fields = fields;
+    barrier.running_witness_sha256 =
+        operation_require(fields, "running_witness_sha256");
+    barrier.barrier_nonce_sha256 = barrier_nonce_sha256;
+    barrier.material_cgroup_sha256 =
+        operation_require(fields, "material_cgroup_sha256");
+    barrier.material_executable_sha256 = artifact_sha256;
+    barrier.run_grant_generation = run_grant_generation;
+    barrier.material_pid = static_cast<pid_t>(*material_pid);
+    barrier.material_start_tick = *material_start;
+    armed_ = true;
+    return barrier;
+  }
+
+  CausalMaterialObservation release_run_exact(
+      const CausalMaterialBarrier& barrier, const std::string& raw_nonce,
+      const std::string& sounio_release_receipt_sha256) {
+    if (mode_ != "RUN_EXACT" || finished_ || !armed_ || released_ ||
+        !authenticated() || sha256(raw_nonce) != barrier.barrier_nonce_sha256 ||
+        !lowercase_digest(sounio_release_receipt_sha256)) {
+      throw Error("causal material RUN_EXACT RELEASE precondition invalid");
+    }
+    const auto deadline =
+        std::chrono::steady_clock::now() + kCausalMaterialDeadline;
+    quorum_write_all(input_.get(),
+                     "RELEASE RUN_EXACT " + barrier.running_witness_sha256 +
+                         " " + raw_nonce + " " +
+                         sounio_release_receipt_sha256 + "\n",
+                     deadline);
+    released_ = true;
+    CausalMaterialObservation observation = read_observation(deadline);
+    if (operation_require(observation.fields, "running_witness_sha256") !=
+            barrier.running_witness_sha256 ||
+        operation_require(observation.fields, "barrier_nonce_sha256") !=
+            barrier.barrier_nonce_sha256 ||
+        operation_require(observation.fields, "run_grant_generation") !=
+            barrier.run_grant_generation ||
+        operation_require(observation.fields,
+                          "sounio_release_receipt_sha256") !=
+            sounio_release_receipt_sha256 ||
+        operation_require(observation.fields, "post_exec_barrier") != "true" ||
+        operation_require(observation.fields, "release_bound") != "true") {
+      throw Error("causal material RUN_EXACT result release binding invalid");
+    }
+    return observation;
+  }
 
   CausalMaterialObservation execute(const std::string& arm) {
-    if (finished_ || !authenticated()) {
+    if (mode_ == "RUN_EXACT") {
+      throw Error("causal material RUN_EXACT requires split ARM and RELEASE");
+    }
+    if (finished_ || armed_ || !authenticated()) {
       throw Error("causal material cell identity drifted before ARM");
     }
     const auto deadline = std::chrono::steady_clock::now() + kCausalMaterialDeadline;
     quorum_write_all(input_.get(), arm + "\n", deadline);
+    armed_ = true;
+    return read_observation(deadline);
+  }
+
+ private:
+  CausalMaterialObservation read_observation(
+      std::chrono::steady_clock::time_point deadline) {
     const std::string header = quorum_read_line(
         output_.get(), output_buffer_, 128 * 1024, deadline,
         "causal material result timeout");
@@ -267,6 +518,8 @@ class HostCausalMaterialCell {
     observation.identity_authenticated = true;
     return observation;
   }
+
+ public:
 
   void close(CausalMaterialObservation& observation) {
     if (finished_ || observation.mode != mode_ || !authenticated()) {
@@ -340,7 +593,9 @@ class HostCausalMaterialCell {
              property("NoNewPrivileges") == "yes" &&
              property("ProtectSystem") == "strict" &&
              property("PrivateNetwork") == "yes" &&
-             property("MemoryDenyWriteExecute") == "yes";
+             property("MemoryDenyWriteExecute") == "yes" &&
+             (invocation_id_.empty() ||
+              property("InvocationID") == invocation_id_);
     } catch (...) {
       return false;
     }
@@ -522,6 +777,7 @@ class HostCausalMaterialCell {
       throw Error("causal material READY binding invalid");
     }
     principal_sha256_ = operation_require(fields, "principal_sha256");
+    invocation_id_ = property("InvocationID");
     descriptor_binding_sha256_ =
         operation_require(fields, "descriptor_binding_sha256");
     const std::string expected_principal = sha256(
@@ -531,6 +787,12 @@ class HostCausalMaterialCell {
         "|cgroup_sha256=" + sha256(process_cgroup(pid_)) +
         "|executable_sha256=" + file_sha256(runtime_));
     if (!lowercase_digest(principal_sha256_) ||
+        invocation_id_.size() != 32 ||
+        !std::all_of(invocation_id_.begin(), invocation_id_.end(),
+                     [](unsigned char character) {
+                       return (character >= '0' && character <= '9') ||
+                              (character >= 'a' && character <= 'f');
+                     }) ||
         !lowercase_digest(descriptor_binding_sha256_) ||
         principal_sha256_ != expected_principal ||
         descriptor_binding_sha256_ != expected_descriptor_binding_sha256_) {
@@ -572,6 +834,7 @@ class HostCausalMaterialCell {
   std::map<std::string, UniqueFd> reference_files_;
   std::string unit_;
   std::string principal_sha256_;
+  std::string invocation_id_;
   std::string descriptor_binding_sha256_;
   std::string expected_descriptor_binding_sha256_;
   std::string cgroup_relative_;
@@ -585,6 +848,8 @@ class HostCausalMaterialCell {
   uid_t uid_ = 0;
   gid_t gid_ = 0;
   bool finished_ = false;
+  bool armed_ = false;
+  bool released_ = false;
 };
 
 void causal_write_atomic_record(const std::string& path,
@@ -695,10 +960,30 @@ class CausalWorkflowJournalClient {
         operation_require(fields, "head_sha256").size() != 64 ||
         operation_require(fields, "compile_count").empty() ||
         operation_require(fields, "ticket_count").empty() ||
-        operation_require(fields, "launch_count").empty()) {
+        operation_require(fields, "launch_count").empty() ||
+        operation_require(fields, "result_count").empty() ||
+        operation_require(fields, "attestation_count").empty()) {
       throw Error("causal workflow journal receipt incomplete");
     }
     return fields;
+  }
+
+  std::string decision(const std::string& operation,
+                       const std::vector<std::string>& arguments = {}) const {
+    std::vector<std::string> values = {operation, repo_root_, state_root_,
+                                       workflow_id_};
+    values.insert(values.end(), arguments.begin(), arguments.end());
+    const QuorumToolResult result =
+        quorum_run_tool(runtime_, values, std::chrono::seconds(30));
+    if (result.exit_code != 0) {
+      throw Error("causal workflow journal refused " + operation + ": " +
+                  trim(result.output));
+    }
+    const std::string line = trim(result.output);
+    if (line.empty() || line.find('\n') != std::string::npos) {
+      throw Error("causal workflow journal decision malformed");
+    }
+    return line;
   }
 
  private:
@@ -735,52 +1020,308 @@ std::string causal_publish_typed_handle(const std::string& store,
   return path;
 }
 
-bool causal_wait_for_pod_loss_release(const std::string& store,
-                                      const std::string& guardian_generation,
-                                      const std::string& workflow_id) {
-  const std::string ready_record =
-      "loom-causal-pod-loss-ready-v1\n"
-      "guardian_generation=" + guardian_generation + "\nworkflow_id=" +
-      workflow_id + "\nphase=RUNNING\n";
-  const std::string ready_sha256 = sha256(ready_record);
-  causal_write_atomic_record(store + "/pod-loss-ready.record", ready_record,
-                             0400);
-  const std::string release_path = store + "/pod-loss-release.record";
+struct CausalMidExecPolicy {
+  std::string runtime;
+  std::string release_frame;
+  std::string release_decision;
+  std::string release_output_sha256;
+  std::string replacement_invocation_frame;
+  std::string replacement_invocation_decision;
+  std::string claim_frame;
+  std::string claim_decision;
+  std::string claim_output_sha256;
+};
+
+CausalMidExecPolicy load_causal_mid_exec_policy(const std::string& root) {
+  const std::string manifest_path =
+      root + "/tools/loom/causal_workflow_mid_exec.freeze.v1";
+  const Manifest manifest = parse_frozen_manifest(
+      manifest_path, kFrozenCausalMidExecManifestSha256,
+      "causal workflow mid-exec action 9037");
+  if (manifest.require("schema") !=
+          "loom-causal-workflow-mid-exec-freeze-v1" ||
+      manifest.require("stage") != "SEMANTICS_FROZEN" ||
+      manifest.require("producing_language") != "Sounio" ||
+      manifest.require("language_role") != "SEMANTIC_AUTHORITY" ||
+      manifest.require("action") != "9037" ||
+      manifest.require("subordinate_contract") != "mid-exec-v1" ||
+      manifest.require("causal_sabotage") != "PASS" ||
+      manifest.require("exact_counts") !=
+          "compile+ticket+launch+result+attestation:1" ||
+      manifest.require("material_execution") != "false" ||
+      manifest.require("pod_loss_measured") != "false") {
+    throw Error("causal mid-exec Sounio authority posture invalid");
+  }
+  const auto frame = [&](const std::string& stage_key,
+                         const std::string& word_prefix) {
+    return manifest.require("wire_schema") + " " +
+           manifest.require(stage_key) + " " +
+           manifest.require(word_prefix + "_word0") + " " +
+           manifest.require(word_prefix + "_word1");
+  };
+  CausalMidExecPolicy policy;
+  policy.runtime = canonical_path(
+      root + "/tools/loom/_build/default/src/"
+             "sounio-loom-causal-workflow-mid-exec");
+  if (!process_witness_root_artifact(policy.runtime, true) ||
+      file_sha256(policy.runtime) != manifest.require("executable_sha256")) {
+    throw Error("causal mid-exec Sounio runtime provenance invalid");
+  }
+  policy.release_frame = frame("release_stage_word", "release");
+  policy.release_decision = manifest.require("release_decision");
+  policy.release_output_sha256 = manifest.require("release_output_sha256");
+  policy.replacement_invocation_frame =
+      frame("claim_replacement_invocation_stage",
+            "claim_replacement_invocation");
+  policy.replacement_invocation_decision =
+      manifest.require("claim_replacement_invocation_decision");
+  policy.claim_frame = frame("claim_stage_word", "claim");
+  policy.claim_decision = manifest.require("claim_decision");
+  policy.claim_output_sha256 = manifest.require("claim_output_sha256");
+  return policy;
+}
+
+QuorumToolResult causal_run_mid_exec_authority(const std::string& runtime,
+                                               const std::string& frame) {
+  int input_pipe[2];
+  int output_pipe[2];
+  if (pipe2(input_pipe, O_CLOEXEC) != 0 ||
+      pipe2(output_pipe, O_CLOEXEC) != 0) {
+    throw Error("cannot create causal mid-exec authority pipes");
+  }
+  UniqueFd input_read(input_pipe[0]);
+  UniqueFd input_write(input_pipe[1]);
+  UniqueFd output_read(output_pipe[0]);
+  UniqueFd output_write(output_pipe[1]);
+  const pid_t child = fork();
+  if (child < 0) throw Error("cannot fork causal mid-exec authority");
+  if (child == 0) {
+    if (dup2(input_read.get(), STDIN_FILENO) < 0 ||
+        dup2(output_write.get(), STDOUT_FILENO) < 0 ||
+        dup2(output_write.get(), STDERR_FILENO) < 0) {
+      _exit(126);
+    }
+    char* const arguments[] = {const_cast<char*>(runtime.c_str()), nullptr};
+    execv(runtime.c_str(), arguments);
+    _exit(127);
+  }
+  input_read = UniqueFd();
+  output_write = UniqueFd();
+  quorum_write_all(input_write.get(), frame + "\n",
+                   std::chrono::steady_clock::now() +
+                       std::chrono::seconds(2));
+  input_write = UniqueFd();
+  const int flags = fcntl(output_read.get(), F_GETFL, 0);
+  if (flags < 0 ||
+      fcntl(output_read.get(), F_SETFL, flags | O_NONBLOCK) != 0) {
+    kill(child, SIGKILL);
+    waitpid(child, nullptr, 0);
+    throw Error("cannot configure causal mid-exec authority output");
+  }
+  std::string output;
+  std::array<char, 4096> buffer{};
+  int status = 0;
+  bool exited = false;
+  bool output_open = true;
   const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(180);
-  struct stat release_info {};
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!exited || output_open) {
+    if (!exited) {
+      const pid_t waited = waitpid(child, &status, WNOHANG);
+      if (waited == child) exited = true;
+      if (waited < 0 && errno != EINTR) {
+        throw Error("causal mid-exec authority wait failed");
+      }
+    }
+    while (output_open) {
+      const ssize_t count =
+          read(output_read.get(), buffer.data(), buffer.size());
+      if (count > 0) {
+        output.append(buffer.data(), static_cast<std::size_t>(count));
+        if (output.size() > 128 * 1024) {
+          kill(child, SIGKILL);
+          waitpid(child, nullptr, 0);
+          throw Error("causal mid-exec authority output exceeded limit");
+        }
+      } else if (count == 0) {
+        output_open = false;
+      } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        break;
+      } else if (errno != EINTR) {
+        throw Error("causal mid-exec authority output read failed");
+      }
+    }
+    if (exited && !output_open) break;
+    if (std::chrono::steady_clock::now() >= deadline) {
+      kill(child, SIGKILL);
+      while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
+      }
+      throw Error("causal mid-exec Sounio authority timeout");
+    }
+    struct pollfd descriptor {output_read.get(), POLLIN | POLLHUP, 0};
+    static_cast<void>(poll(&descriptor, 1, 10));
+  }
+  if (!WIFEXITED(status)) {
+    throw Error("causal mid-exec Sounio authority terminated abnormally");
+  }
+  return {WEXITSTATUS(status), trim(output)};
+}
+
+void causal_require_root_record(
+    const std::string& path,
+    std::chrono::steady_clock::time_point deadline) {
+  struct stat info {};
   while (std::chrono::steady_clock::now() < deadline) {
-    if (lstat(release_path.c_str(), &release_info) == 0) break;
-    if (errno != ENOENT) throw Error("causal Pod-loss release stat failed");
+    if (lstat(path.c_str(), &info) == 0) break;
+    if (errno != ENOENT) throw Error("causal mid-exec record stat failed");
     poll(nullptr, 0, 20);
   }
-  if (lstat(release_path.c_str(), &release_info) != 0 ||
-      !S_ISREG(release_info.st_mode) || release_info.st_uid != 0 ||
-      release_info.st_gid != 0 || release_info.st_nlink != 1 ||
-      (release_info.st_mode & 0777) != 0400) {
-    throw Error("causal Pod-loss release metadata unsafe");
+  if (lstat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
+      info.st_uid != 0 || info.st_gid != 0 || info.st_nlink != 1 ||
+      (info.st_mode & 0777) != 0400) {
+    throw Error("causal mid-exec record metadata unsafe or absent");
   }
-  const auto fields = operation_record_fields(
-      read_file(release_path), "loom-causal-pod-loss-release-v1");
+}
+
+struct CausalMidExecRelease {
+  bool pod_loss_synchronized = false;
+  std::string sounio_release_receipt_sha256;
+};
+
+CausalMidExecRelease causal_wait_for_mid_exec_release(
+    const std::string& store, const std::string& guardian_generation,
+    const std::string& workflow_id, const std::string& run_grant_generation,
+    const HostCausalMaterialCell& cell, const CausalMaterialBarrier& barrier,
+    const CausalMidExecPolicy& policy) {
+  const auto barrier_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(570);
+  const std::string ready_record =
+      "loom-causal-material-mid-exec-ready-v1\n"
+      "guardian_generation=" + guardian_generation + "\nworkflow_id=" +
+      workflow_id + "\nrun_grant_generation=" + run_grant_generation +
+      "\nbarrier_nonce_sha256=" + barrier.barrier_nonce_sha256 +
+      "\nrunning_witness_sha256=" + barrier.running_witness_sha256 +
+      "\nrun_ticket_sha256=" +
+      operation_require(barrier.fields, "run_ticket_sha256") +
+      "\nartifact_sha256=" +
+      operation_require(barrier.fields, "artifact_sha256") +
+      "\nmaterial_unit=" + cell.unit() + "\nmaterial_invocation_id=" +
+      cell.invocation_id() + "\nmaterial_pid=" +
+      std::to_string(barrier.material_pid) + "\nmaterial_start_tick=" +
+      std::to_string(barrier.material_start_tick) +
+      "\nmaterial_cgroup_sha256=" + barrier.material_cgroup_sha256 +
+      "\nmaterial_principal_sha256=" + cell.principal_sha256() +
+      "\ndescriptor_binding_sha256=" + cell.descriptor_binding_sha256() +
+      "\nstate=MATERIAL_RUNNING_IN_EXEC\n";
+  const std::string ready_sha256 = sha256(ready_record);
+  causal_write_atomic_record(store + "/mid-exec-ready.record", ready_record,
+                             0400);
   const auto safe_uid = [](const std::string& value) {
     return value.size() >= 16 && value.size() <= 64 &&
            std::all_of(value.begin(), value.end(), [](unsigned char character) {
              return std::isalnum(character) || character == '-';
            });
   };
-  if (fields.size() != 6 ||
-      operation_require(fields, "guardian_generation") !=
+  const auto lowercase_invocation_id = [](const std::string& value) {
+    return value.size() == 32 &&
+           std::all_of(value.begin(), value.end(), [](unsigned char character) {
+             return (character >= '0' && character <= '9') ||
+                    (character >= 'a' && character <= 'f');
+           });
+  };
+
+  const std::string sabotage_path = store + "/mid-exec-sabotage.record";
+  causal_require_root_record(sabotage_path, barrier_deadline);
+  const auto sabotage = operation_record_fields(
+      read_file(sabotage_path), "loom-causal-material-mid-exec-sabotage-v1");
+  if (sabotage.size() != 15 ||
+      operation_require(sabotage, "guardian_generation") !=
           guardian_generation ||
-      operation_require(fields, "workflow_id") != workflow_id ||
-      operation_require(fields, "ready_sha256") != ready_sha256 ||
-      operation_require(fields, "pod_a_deleted") != "true" ||
-      !safe_uid(operation_require(fields, "pod_a_uid")) ||
-      !safe_uid(operation_require(fields, "pod_b_uid")) ||
-      operation_require(fields, "pod_a_uid") ==
-          operation_require(fields, "pod_b_uid")) {
-    throw Error("causal Pod-loss release binding invalid");
+      operation_require(sabotage, "workflow_id") != workflow_id ||
+      operation_require(sabotage, "ready_sha256") != ready_sha256 ||
+      operation_require(sabotage, "running_witness_sha256") !=
+          barrier.running_witness_sha256 ||
+      operation_require(sabotage, "run_grant_generation") !=
+          run_grant_generation ||
+      operation_require(sabotage, "barrier_nonce_sha256") !=
+          barrier.barrier_nonce_sha256 ||
+      operation_require(sabotage, "observed_material_unit") != cell.unit() ||
+      operation_require(sabotage, "observed_material_invocation_id") ==
+          cell.invocation_id() ||
+      !lowercase_invocation_id(
+          operation_require(sabotage, "observed_material_invocation_id")) ||
+      operation_require(sabotage, "observed_material_pid") !=
+          std::to_string(barrier.material_pid) ||
+      operation_require(sabotage, "observed_material_start_tick") !=
+          std::to_string(barrier.material_start_tick) ||
+      operation_require(sabotage, "observed_material_cgroup_sha256") !=
+          barrier.material_cgroup_sha256 ||
+      operation_require(sabotage, "expected_decision") != "DENY592" ||
+      operation_require(sabotage, "pod_a_deleted") != "true" ||
+      !safe_uid(operation_require(sabotage, "pod_a_uid")) ||
+      !safe_uid(operation_require(sabotage, "pod_b_uid")) ||
+      operation_require(sabotage, "pod_a_uid") ==
+          operation_require(sabotage, "pod_b_uid") ||
+      !cell.running_barrier_authenticated(barrier)) {
+    throw Error("causal mid-exec replacement sabotage binding invalid");
   }
-  return true;
+  const QuorumToolResult refusal = causal_run_mid_exec_authority(
+      policy.runtime, policy.replacement_invocation_frame);
+  if (refusal.exit_code != 42 ||
+      refusal.output != policy.replacement_invocation_decision) {
+    throw Error("Sounio did not refuse replacement InvocationID as DENY592");
+  }
+  const std::string refusal_record =
+      "loom-causal-material-mid-exec-sabotage-refusal-v1\n"
+      "decision=DENY592\ndecision_output_sha256=" + sha256(refusal.output) +
+      "\noriginal_running_witness_sha256=" +
+      barrier.running_witness_sha256 +
+      "\noriginal_cell_held=true\nrelease_sent=false\n";
+  causal_write_atomic_record(store + "/mid-exec-sabotage-refusal.record",
+                             refusal_record, 0400);
+
+  const std::string release_path = store + "/mid-exec-release-request.record";
+  causal_require_root_record(release_path, barrier_deadline);
+  const auto release = operation_record_fields(
+      read_file(release_path),
+      "loom-causal-material-mid-exec-release-request-v1");
+  if (release.size() != 15 ||
+      operation_require(release, "guardian_generation") !=
+          guardian_generation ||
+      operation_require(release, "workflow_id") != workflow_id ||
+      operation_require(release, "ready_sha256") != ready_sha256 ||
+      operation_require(release, "running_witness_sha256") !=
+          barrier.running_witness_sha256 ||
+      operation_require(release, "run_grant_generation") !=
+          run_grant_generation ||
+      operation_require(release, "barrier_nonce_sha256") !=
+          barrier.barrier_nonce_sha256 ||
+      operation_require(release, "material_unit") != cell.unit() ||
+      operation_require(release, "material_invocation_id") !=
+          cell.invocation_id() ||
+      operation_require(release, "material_pid") !=
+          std::to_string(barrier.material_pid) ||
+      operation_require(release, "material_start_tick") !=
+          std::to_string(barrier.material_start_tick) ||
+      operation_require(release, "material_cgroup_sha256") !=
+          barrier.material_cgroup_sha256 ||
+      operation_require(release, "pod_a_deleted") != "true" ||
+      operation_require(release, "pod_a_uid") !=
+          operation_require(sabotage, "pod_a_uid") ||
+      operation_require(release, "pod_b_uid") !=
+          operation_require(sabotage, "pod_b_uid") ||
+      operation_require(release, "replacement_sabotage") != "DENY592" ||
+      !cell.running_barrier_authenticated(barrier)) {
+    throw Error("causal mid-exec release request binding invalid");
+  }
+  const QuorumToolResult admission =
+      causal_run_mid_exec_authority(policy.runtime, policy.release_frame);
+  if (admission.exit_code != 0 ||
+      admission.output.rfind(policy.release_decision + "\n", 0) != 0 ||
+      sha256(admission.output) != policy.release_output_sha256) {
+    throw Error("Sounio mid-exec release admission drifted");
+  }
+  return {true, policy.release_output_sha256};
 }
 
 int selftest_causal_workflow_material_host(
@@ -812,6 +1353,8 @@ int selftest_causal_workflow_material_host(
       causal_manifest.require("launch_authority") != "action-9030") {
     throw Error("causal workflow semantic authority posture invalid");
   }
+  const CausalMidExecPolicy mid_exec_policy =
+      load_causal_mid_exec_policy(root);
   const OperationExecCellFixtures compile_fixtures =
       load_operation_exec_cell_fixtures(operation_fixture_manifest_path,
                                         operation_fixture_bundle_path);
@@ -964,8 +1507,12 @@ int selftest_causal_workflow_material_host(
        sha256(compile.handle)}));
 
   const std::string run_grant_generation = random_generation_sha256();
+  CausalEphemeralSecret barrier_nonce(random_generation_sha256());
+  const std::string barrier_nonce_sha256 = sha256(barrier_nonce.value());
   std::string run_ticket;
   bool pod_loss_synchronized = false;
+  CausalMaterialBarrier run_barrier;
+  std::string sounio_release_receipt_sha256;
 
   CausalMaterialObservation run;
   {
@@ -1058,21 +1605,52 @@ int selftest_causal_workflow_material_host(
       throw Error("causal RUN_EXACT action-9030 consume refused");
     }
     const std::string run_start_receipt = sha256(consume.line + "\n");
+    run_barrier = cell.arm_run_exact(
+        "ARM RUN_EXACT " + run_ticket + " " + compile.artifact_sha256 + " " +
+            run_grant_generation + " " + barrier_nonce_sha256 + " " +
+            guardian_generation + " " + cell.unit() + " " +
+            cell.invocation_id(),
+        run_ticket, compile.artifact_sha256, run_grant_generation,
+        guardian_generation, barrier_nonce_sha256);
     const std::string run_pid_identity = sha256(
-        "LOOM_CAUSAL_RUN_PID/1|principal=" + cell.principal_sha256() +
-        "|unit=" + cell.unit() + "|pid=" + std::to_string(cell.pid()) +
-        "|start_tick=" + std::to_string(cell.start_tick()));
+        "LOOM_CAUSAL_RUN_PID/2|principal=" + cell.principal_sha256() +
+        "|unit=" + cell.unit() + "|invocation_id=" + cell.invocation_id() +
+        "|material_pid=" + std::to_string(run_barrier.material_pid) +
+        "|material_start_tick=" +
+        std::to_string(run_barrier.material_start_tick) +
+        "|material_cgroup_sha256=" + run_barrier.material_cgroup_sha256 +
+        "|barrier_nonce_sha256=" + barrier_nonce_sha256);
     static_cast<void>(journal.command(
-        "material-mark-running", "MATERIAL_RUNNING",
-        {run_start_receipt, run_pid_identity}));
+        "material-mark-running", "MATERIAL_RUNNING_IN_EXEC",
+        {run_start_receipt, cell.invocation_id(),
+         std::to_string(run_barrier.material_pid),
+         std::to_string(run_barrier.material_start_tick),
+         run_barrier.material_cgroup_sha256, barrier_nonce_sha256,
+         run_pid_identity}));
     if (pod_loss_control == "enabled") {
-      pod_loss_synchronized = causal_wait_for_pod_loss_release(
-          store, guardian_generation, workflow_id);
-    } else if (!pod_loss_control.empty() && pod_loss_control != "disabled") {
-      throw Error("causal Pod-loss control mode invalid");
+      const CausalMidExecRelease release = causal_wait_for_mid_exec_release(
+          store, guardian_generation, workflow_id, run_grant_generation, cell,
+          run_barrier, mid_exec_policy);
+      pod_loss_synchronized = release.pod_loss_synchronized;
+      sounio_release_receipt_sha256 =
+          release.sounio_release_receipt_sha256;
+    } else {
+      throw Error("causal mid-exec Pod-loss control must be enabled");
     }
-    run = cell.execute("ARM RUN_EXACT " + run_ticket + " " +
-                       compile.artifact_sha256);
+    const std::string release_replay = journal.decision(
+        "material-release-replay",
+        {guardian_generation, cell.invocation_id(),
+         std::to_string(run_barrier.material_pid),
+         std::to_string(run_barrier.material_start_tick),
+         run_barrier.material_cgroup_sha256, run_grant_generation,
+         barrier_nonce_sha256});
+    if (release_replay.rfind("EXEC_RELEASE_RECEIPT outcome=ADMITTED ", 0) != 0 ||
+        release_replay.find(mid_exec_policy.release_decision) ==
+            std::string::npos) {
+      throw Error("OCaml mid-exec release parity refused exact witness");
+    }
+    run = cell.release_run_exact(run_barrier, barrier_nonce.value(),
+                                 sounio_release_receipt_sha256);
     if (operation_require(run.fields, "exit_code") != "0" ||
         operation_require(run.fields, "stdout_sha256") !=
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ||
@@ -1081,6 +1659,8 @@ int selftest_causal_workflow_material_host(
       throw Error("causal RUN_EXACT observation diverged from Sounio freeze");
     }
     causal_write_atomic_record(store + "/result.record", run.record, 0400);
+    causal_require_nonce_memory_only(root, store, barrier_nonce.value());
+    barrier_nonce.erase();
     static_cast<void>(causal_publish_typed_handle(
         store, run.handle_type, run.handle, run.handle_sha256));
     static_cast<void>(journal.command(
@@ -1219,9 +1799,28 @@ int selftest_causal_workflow_material_host(
     }
   }
   if (!attest.success_complete()) throw Error("causal ATTEST extinction incomplete");
-  static_cast<void>(journal.command(
+  const auto final_status = journal.command(
       "material-close-attest", "MATERIAL_ATTESTED_CLOSED",
-      {attest.record_sha256, attest.handle_sha256}));
+      {attest.record_sha256, attest.handle_sha256});
+  if (operation_require(final_status, "compile_count") != "1" ||
+      operation_require(final_status, "ticket_count") != "1" ||
+      operation_require(final_status, "launch_count") != "1" ||
+      operation_require(final_status, "result_count") != "1" ||
+      operation_require(final_status, "attestation_count") != "1") {
+    throw Error("causal workflow final exact-once counts diverged");
+  }
+  const std::string ocaml_claim = journal.decision("material-claim-final");
+  if (ocaml_claim.rfind("FINAL_CLAIM_RECEIPT outcome=ADMITTED ", 0) != 0 ||
+      ocaml_claim.find(mid_exec_policy.claim_decision) == std::string::npos) {
+    throw Error("OCaml final claim parity refused exact counts");
+  }
+  const QuorumToolResult sounio_claim = causal_run_mid_exec_authority(
+      mid_exec_policy.runtime, mid_exec_policy.claim_frame);
+  if (sounio_claim.exit_code != 0 ||
+      sounio_claim.output.rfind(mid_exec_policy.claim_decision + "\n", 0) != 0 ||
+      sha256(sounio_claim.output) != mid_exec_policy.claim_output_sha256) {
+    throw Error("Sounio final continuity claim drifted");
+  }
 
   std::cout
       << "LOOM_CAUSAL_WORKFLOW_MATERIAL_HOST PASS semantic_authority=Sounio"
@@ -1231,6 +1830,24 @@ int selftest_causal_workflow_material_host(
       << " artifact_record_sha256=" << compile.record_sha256
       << " run_ticket_sha256=" << run_ticket
       << " run_grant_generation=" << run_grant_generation
+      << " barrier_nonce_sha256=" << barrier_nonce_sha256
+      << " barrier_nonce_source=getrandom"
+      << " barrier_nonce_storage=HostGuardian-memory-only"
+      << " barrier_nonce_secret_persisted=false"
+      << " transport_trust=trusted-privileged-root-observer"
+      << " same_uid_peer_isolation=false hostile_transport_isolation=false"
+      << " running_witness_sha256=" << run_barrier.running_witness_sha256
+      << " material_unit=" << operation_require(run.fields, "unit")
+      << " material_invocation_id="
+      << operation_require(run.fields, "unit_invocation_id")
+      << " material_pid=" << run_barrier.material_pid
+      << " material_start_tick=" << run_barrier.material_start_tick
+      << " material_cgroup_sha256=" << run_barrier.material_cgroup_sha256
+      << " mid_exec_release_authority=Sounio"
+      << " mid_exec_release_sabotage=DENY592"
+      << " sounio_release_receipt_sha256="
+      << sounio_release_receipt_sha256
+      << " final_claim_receipt_sha256=" << sha256(sounio_claim.output)
       << " run_exact_actual=true result_record_sha256=" << run.record_sha256
       << " attest_actual=true attestation_record_sha256="
       << attest.record_sha256
@@ -1251,15 +1868,15 @@ int selftest_causal_workflow_material_host(
       << " action9030_sabotage=PASS"
       << " compile_grant_sabotage=DENY492"
       << " run_grant_sabotage=DENY492 attest_grant_sabotage=DENY492"
-      << " action9030_sabotage=PASS"
-      << " compile_grant_sabotage=DENY492"
-      << " run_grant_sabotage=DENY492 attest_grant_sabotage=DENY492"
       << " typed_handle_persistence=true"
       << " run_ticket_is_bearer=false run_ticket_is_execution_authority=false"
-      << " compile_count=1 ticket_count=1 launch_count=1"
+      << " compile_count=1 ticket_count=1 launch_count=1 result_count=1"
+      << " attestation_count=1"
       << " controller_recovery=false pod_loss_measured=false"
       << " pod_loss_synchronized="
       << (pod_loss_synchronized ? "true" : "false")
+      << " pod_loss_boundary=MATERIAL_RUNNING_IN_EXEC"
+      << " material_cell_survival_measured=false"
       << " python_executed=false rust_executed=false production_activation=false"
       << " parity_open=false claim_ready=false\n";
   return 0;
