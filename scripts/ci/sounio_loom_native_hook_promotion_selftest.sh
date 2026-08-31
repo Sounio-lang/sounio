@@ -71,11 +71,15 @@ grep -q '^LOOM_NATIVE_HOOKS_ACTIVATED ' <<< "$output" ||
 receipt="$(sed -n 's/.* receipt=\(.*\)$/\1/p' <<< "$output")"
 [[ -f "$receipt" ]] || fail 'positive promotion receipt is missing'
 grep -q '^result=ACTIVATED$' "$receipt" || fail 'positive promotion receipt is not activated'
-grep -q '^canary_allow_receipts=12$' "$receipt" ||
-  fail 'positive promotion did not retain its twelve-ALLOW canary proof'
-grep -q '^canary_runtime_capsule_receipts=12$' "$receipt" ||
+grep -q '^canary_lifecycle_receipts=12$' "$receipt" ||
+  fail 'positive promotion did not retain its twelve lifecycle receipts'
+grep -q '^canary_cleanup_receipts=1$' "$receipt" ||
+  fail 'positive promotion did not retain its Codex cleanup receipt'
+grep -q '^canary_allow_receipts=13$' "$receipt" ||
+  fail 'positive promotion did not retain its thirteen-ALLOW canary proof'
+grep -q '^canary_runtime_capsule_receipts=13$' "$receipt" ||
   fail 'positive promotion did not retain its runtime-capsule proof'
-grep -q '^canary_action_9045_receipts=12$' "$receipt" ||
+grep -q '^canary_action_9045_receipts=13$' "$receipt" ||
   fail 'positive promotion did not retain its Sounio action 9045 proof'
 grep -q '^canary_providers=codex+claude+cursor+grok$' "$receipt" ||
   fail 'positive promotion did not retain its four-provider binding'
@@ -134,4 +138,4 @@ grep -q '^foreign-index-lock$' "$locked/.git/index.lock" ||
   fail 'promotion removed a foreign target Git index lock'
 
 printf '%s\n' \
-  'sounio-loom-native-hook-promotion-selftest: PASS promotion=atomic runtime=manifest-bound git_index=locked policyless_canary=12-ALLOW providers=codex+claude+cursor+grok action=9045 rollback=exact dirty_target=refused foreign_lock=preserved python_oracle=absent rust_oracle=absent'
+  'sounio-loom-native-hook-promotion-selftest: PASS promotion=atomic runtime=manifest-bound git_index=locked policyless_canary=13-ALLOW lifecycle_receipts=12 codex_cleanup_receipts=1 providers=codex+claude+cursor+grok action=9045 rollback=exact dirty_target=refused foreign_lock=preserved python_oracle=absent rust_oracle=absent'
