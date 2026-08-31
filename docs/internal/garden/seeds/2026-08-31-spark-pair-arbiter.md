@@ -2,17 +2,8 @@
 topic_id: repo.docs.internal.garden.seeds.2026-08-31-spark-pair-arbiter
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.garden.seeds.2026-08-31-spark-pair-arbiter
--->
-
-<!-- docs:meta
-topic_id: repo.docs.internal.garden.seeds.2026-08-31-spark-pair-arbiter
-authority: repo_only
-audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: 2026-08-31
+validated_by: Codex
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.garden.seeds.2026-08-31-spark-pair-arbiter
 -->
 
@@ -152,6 +143,9 @@ The material scheduler fence has two sides:
 
 The Spark nodes also require a dedicated `NoSchedule` taint tolerated only by
 the Slurm workers, arbiter probes, and admitted Spark-pair workloads.
+Creation and update of Pods carrying that toleration or targeting either node
+directly is guarded by a fail-closed `ValidatingAdmissionPolicy`. Phase 1
+admits no user workload role; the future Inkling role remains denied.
 
 ## Refusal surface
 
@@ -171,10 +165,10 @@ The Sounio policy must refuse at least:
 
 ## Open questions
 
-- The current Spark nodes have no DCGM exporter and the current `slurmd` image
-  lacks a usable `nvidia-smi`. The material bridge therefore needs an exclusive
-  per-node reservation probe that obtains the GPU and executes the host NVIDIA
-  toolchain before `K8S_OWNED` can be admitted.
+- The canonical GB10s report `[N/A]` for framebuffer memory because they use
+  unified memory. Phase 1 freezes UUID, product and driver identity and records
+  `UNAVAILABLE_UNIFIED`, while continuing to require clean process, `pmon`, MPS
+  and utilisation evidence before `K8S_OWNED`.
 - Root processes launched outside both Kubernetes and Slurm are outside the
   initial threat boundary. A later host fence agent would be required for that
   stronger claim.

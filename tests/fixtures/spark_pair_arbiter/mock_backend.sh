@@ -41,11 +41,17 @@ arg_value() {
 }
 
 maybe_fail() {
-  local command="$1"
+  local command="$1" marker
   if [[ "${SOUNIO_SPARK_PAIR_MOCK_SLEEP_COMMAND:-}" == "$command" ]]; then
     sleep "${SOUNIO_SPARK_PAIR_MOCK_SLEEP_SECONDS:-5}"
   fi
-  [[ "${SOUNIO_SPARK_PAIR_MOCK_FAIL:-}" != "$command" ]] || fail "injected $command failure"
+  if [[ "${SOUNIO_SPARK_PAIR_MOCK_FAIL:-}" == "$command" ]]; then
+    marker="$MOCK_DIR/failure-injected-$command"
+    if [[ ! -f "$marker" ]]; then
+      : > "$marker"
+      fail "injected $command failure"
+    fi
+  fi
 }
 
 add_bit() {
@@ -88,16 +94,20 @@ facts() {
   state="$(read_value state SLURM_OWNED)"
   epoch="$(read_value epoch 1)"
   lease_holder="$(read_value holder slurm-owned)"
-  live="${SOUNIO_SPARK_PAIR_MOCK_LEASE_LIVE:-1}"
+  if [[ "$(read_value recovered_live 0)" == 1 ]]; then
+    live=1
+  else
+    live="${SOUNIO_SPARK_PAIR_MOCK_LEASE_LIVE:-1}"
+  fi
   reservations="$(read_value reservations 0)"
 
   [[ "$lease_holder" == "$holder" ]] && authority="$(add_bit "$authority" 8 1)"
   authority="$(add_bit "$authority" 16 "$live")"
   authority="$(add_bit "$authority" 32 1)"
-  authority="$(add_bit "$authority" 64 "${SOUNIO_SPARK_PAIR_MOCK_NODESET_MATCH:-1}")"
+  authority="$(add_bit "$authority" 64 "${SOUNIO_SPARK_PAIR_MOCK_NODESET_MATCH:-$(read_value nodeset_match 1)}")"
   authority="$(add_bit "$authority" 128 "${SOUNIO_SPARK_PAIR_MOCK_PLUGIN_EXCLUSIVE:-1}")"
-  authority="$(add_bit "$authority" 256 "${SOUNIO_SPARK_PAIR_MOCK_ADMISSION_READY:-1}")"
-  authority="$(add_bit "$authority" 512 "${SOUNIO_SPARK_PAIR_MOCK_TAINT_EXACT:-1}")"
+  authority="$(add_bit "$authority" 256 "${SOUNIO_SPARK_PAIR_MOCK_ADMISSION_READY:-$(read_value admission_ready 1)}")"
+  authority="$(add_bit "$authority" 512 "${SOUNIO_SPARK_PAIR_MOCK_TAINT_EXACT:-$(read_value taint_exact 1)}")"
 
   slurm="$(add_bit "$slurm" 1 "${SOUNIO_SPARK_PAIR_MOCK_GPU_REQUEST_EXACT:-1}")"
   slurm="$(add_bit "$slurm" 2 "${SOUNIO_SPARK_PAIR_MOCK_SLURM_READY:-1}")"
@@ -128,6 +138,7 @@ facts() {
 
 lease_acquire() {
   local holder state epoch
+  [[ "${SOUNIO_SPARK_PAIR_MOCK_FREEZE_BOUND:-1}" == 1 ]] || fail 'mock Lease freeze binding mismatch'
   holder="$(arg_value --holder "$@")"
   state="$(read_value state SLURM_OWNED)"
   [[ "$state" == SLURM_OWNED ]] || fail "state $state is not acquirable"
@@ -185,7 +196,35 @@ lease_recovery_acquire() {
   write_value epoch "$next"
   write_value holder "$holder"
   write_value state RECOVERY_REQUIRED
+  write_value recovered_live 1
   printf 'epoch=%s state=RECOVERY_REQUIRED\n' "$next"
+}
+
+lease_bootstrap_recovery_acquire() {
+  local holder epoch receipt live stored_holder next
+  holder="$(arg_value --holder "$@")"
+  epoch="$(arg_value --epoch "$@")"
+  receipt="$(arg_value --receipt "$@")"
+  [[ "${SOUNIO_SPARK_PAIR_MOCK_FREEZE_BOUND:-1}" == 1 ]] || fail 'mock Lease freeze binding mismatch'
+  [[ "${SOUNIO_SPARK_PAIR_MOCK_JOURNAL_BOUND:-1}" == 1 ]] || fail 'mock journal freeze binding mismatch'
+  [[ "$(read_value epoch 0)" == "$epoch" ]] || fail 'bootstrap recovery epoch mismatch'
+  [[ "$(read_value state '')" == UNINITIALIZED ]] || fail 'bootstrap recovery state mismatch'
+  verify_receipt "$receipt" "$epoch" 27
+  [[ "$(receipt_value "$receipt" from_state)" == UNINITIALIZED ]] || fail 'bootstrap recovery receipt source mismatch'
+  [[ "$(receipt_value "$receipt" expected_to_state)" == UNINITIALIZED ]] || fail 'bootstrap recovery receipt destination mismatch'
+  live="${SOUNIO_SPARK_PAIR_MOCK_LEASE_LIVE:-1}"
+  stored_holder="$(read_value holder '')"
+  if [[ "$live" == 1 && "$stored_holder" != "$holder" ]]; then
+    fail "cannot recover live bootstrap held by $stored_holder"
+  fi
+  next=$((epoch + 1))
+  write_value epoch "$next"
+  write_value holder "$holder"
+  write_value state UNINITIALIZED
+  write_value recovered_live 1
+  write_value nodeset_match 1
+  write_value journal 1
+  printf 'epoch=%s state=UNINITIALIZED\n' "$next"
 }
 
 main() {
@@ -197,7 +236,39 @@ main() {
   shift || true
   maybe_fail "$command"
   case "$command" in
+    prebootstrap-facts)
+      [[ ! -f "$MOCK_DIR/state" ]] || fail 'mock Lease already exists'
+      printf 'state=UNINITIALIZED epoch=1 observed_epoch=1 authority_mask=97 slurm_mask=26 k8s_mask=768\n'
+      ;;
     bootstrap-lease)
+      [[ ! -f "$MOCK_DIR/state" ]] || fail 'mock Lease already exists'
+      holder="$(arg_value --holder "$@")"
+      epoch="$(arg_value --epoch "$@")"
+      receipt="$(arg_value --receipt "$@")"
+      [[ "$epoch" == 1 ]] || fail 'initial epoch mismatch'
+      verify_receipt "$receipt" "$epoch" 28
+      write_value state UNINITIALIZED
+      write_value epoch 1
+      write_value holder "$holder"
+      write_value drained 0
+      write_value slurmd_absent 0
+      write_value slurmd_bound 1
+      write_value reservations 0
+      write_value nvml_clean 0
+      write_value workloads_zero 1
+      write_value stale_zero 1
+      write_value resume_verified 1
+      write_value nodeset_match 1
+      write_value admission_ready 0
+      write_value taint_exact 0
+      if [[ "${SOUNIO_SPARK_PAIR_MOCK_FAIL_AFTER_LEASE:-0}" == 1 ]]; then
+        write_value journal 0
+        fail 'injected action28 failure after Lease creation'
+      fi
+      write_value journal 1
+      printf 'epoch=1 state=UNINITIALIZED\n'
+      ;;
+    fixture-slurm-owned)
       write_value state SLURM_OWNED
       write_value epoch 1
       write_value holder slurm-owned
@@ -209,10 +280,31 @@ main() {
       write_value workloads_zero 1
       write_value stale_zero 1
       write_value resume_verified 1
+      write_value admission_ready 1
+      write_value taint_exact 1
+      write_value journal 1
+      ;;
+    fixture-uninitialized)
+      write_value state UNINITIALIZED
+      write_value epoch 1
+      write_value holder bootstrap-old
+      write_value drained 0
+      write_value slurmd_absent 0
+      write_value slurmd_bound 1
+      write_value reservations 0
+      write_value nvml_clean 0
+      write_value workloads_zero 1
+      write_value stale_zero 1
+      write_value resume_verified 1
+      write_value nodeset_match 1
+      write_value admission_ready 0
+      write_value taint_exact 0
+      write_value journal 1
       ;;
     facts) facts "$@" ;;
     lease-acquire) lease_acquire "$@" ;;
     lease-recovery-acquire) lease_recovery_acquire "$@" ;;
+    lease-bootstrap-recovery-acquire) lease_bootstrap_recovery_acquire "$@" ;;
     lease-transition) lease_transition "$@" ;;
     lease-renew)
       [[ "$(read_value holder '')" == "$(arg_value --holder "$@")" ]] || fail 'heartbeat holder mismatch'
@@ -220,13 +312,31 @@ main() {
       verify_receipt "$(arg_value --receipt "$@")" "$(arg_value --epoch "$@")" 7
       ;;
     enter-recovery) write_value state RECOVERY_REQUIRED ;;
-    drain-slurm) guard '2 22 23' "$@"; write_value drained 1; write_value resume_verified 0 ;;
-    install-fence) guard 24 "$@"; write_value admission_ready 1; write_value taint_exact 1 ;;
-    install-gpu-bound-slurmd) guard 25 "$@"; write_value slurmd_absent 0; write_value slurmd_bound 1 ;;
+    drain-slurm)
+      guard '2 22 23' "$@"
+      printf 'drain-slurm\n' >> "$MOCK_DIR/effects"
+      write_value drained 1
+      write_value resume_verified 0
+      ;;
+    install-fence)
+      guard 24 "$@"
+      printf 'install-fence\n' >> "$MOCK_DIR/effects"
+      write_value admission_ready 1
+      write_value taint_exact 1
+      ;;
+    install-gpu-bound-slurmd)
+      guard 25 "$@"
+      write_value nodeset_generation 2
+      write_value nodeset_match 1
+      write_value slurmd_absent 0
+      write_value slurmd_bound 1
+      ;;
     detach-slurmd) guard '4 20' "$@"; write_value slurmd_absent 1; write_value slurmd_bound 0 ;;
     create-reservations)
       guard '5 21' "$@"
-      if [[ "${SOUNIO_SPARK_PAIR_MOCK_PARTIAL_RESERVATION:-0}" == 1 ]]; then
+      if [[ "${SOUNIO_SPARK_PAIR_MOCK_PARTIAL_RESERVATION:-0}" == 1 && \
+            ! -f "$MOCK_DIR/partial-reservation-injected" ]]; then
+        : > "$MOCK_DIR/partial-reservation-injected"
         write_value reservations 1
       else
         write_value reservations 2

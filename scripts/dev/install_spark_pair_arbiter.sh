@@ -4,10 +4,9 @@ set -euo pipefail
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
-POLICY="${SOUNIO_SPARK_PAIR_POLICY:-$ROOT_DIR/tools/cluster/spark_pair_arbiter.policy.v1}"
-FREEZE="${SOUNIO_SPARK_PAIR_FREEZE:-$ROOT_DIR/tools/cluster/spark_pair_arbiter.freeze.v1}"
-BACKEND="$ROOT_DIR/scripts/dev/spark_pair_arbiter_k8s_backend.sh"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
+POLICY="$ROOT_DIR/tools/cluster/spark_pair_arbiter.policy.v1"
+FREEZE="$ROOT_DIR/tools/cluster/spark_pair_arbiter.freeze.v1"
 ARBITER="$ROOT_DIR/scripts/dev/spark_pair_arbiter.sh"
 SELFTEST="$ROOT_DIR/scripts/ci/spark_pair_arbiter_selftest.sh"
 MODE="${1:---check}"
@@ -32,38 +31,9 @@ slurm_exec() {
     "deploy/$(policy_value "$POLICY" slurm_login_deployment)" -- "$@"
 }
 
-wait_nodeset_observed() {
-  local deadline generation observed
-  deadline=$((SECONDS + $(policy_value "$POLICY" operation_timeout_seconds)))
-  while (( SECONDS < deadline )); do
-    generation="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
-      "$(policy_value "$POLICY" nodeset_name)" -o jsonpath='{.metadata.generation}')"
-    observed="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
-      "$(policy_value "$POLICY" nodeset_name)" -o jsonpath='{.status.observedGeneration}')"
-    [[ "$generation" == "$observed" ]] && return 0
-    sleep 2
-  done
-  fail 'NodeSet controller did not observe the fenced generation'
-}
-
-wait_slurm_drained() {
-  local deadline nodes jobs
-  deadline=$((SECONDS + $(policy_value "$POLICY" operation_timeout_seconds)))
-  while (( SECONDS < deadline )); do
-    nodes="$(slurm_exec scontrol show node \
-      "$(policy_value "$POLICY" node_0_slurm),$(policy_value "$POLICY" node_1_slurm)" -o)"
-    jobs="$(slurm_exec squeue -h -w \
-      "$(policy_value "$POLICY" node_0_slurm),$(policy_value "$POLICY" node_1_slurm)")"
-    if [[ "$(grep -c 'State=.*DRAINED' <<<"$nodes")" == 2 && -z "$jobs" ]]; then
-      return 0
-    fi
-    sleep 2
-  done
-  fail 'both Spark Slurm nodes did not reach DRAINED'
-}
-
 preflight() {
-  local node_0 node_1 nodeset plugin_0 plugin_1 jobs slurm_nodes reservations workloads
+  local node_0 node_1 nodeset plugin_0 plugin_1 jobs steps slurm_nodes reservations workloads
+  local slurmd_pods node pod mem_available_mb slurm_line slurm_free_mb slurm_count=0
   "$ARBITER" verify >/dev/null || fail 'frozen arbiter verification failed'
   [[ "$(policy_value "$POLICY" allow_model_download)" == false ]] || fail 'model download must remain disabled'
   [[ "$(policy_value "$POLICY" allow_litellm_change)" == false ]] || fail 'LiteLLM changes must remain disabled'
@@ -88,10 +58,36 @@ preflight() {
 
   jobs="$(slurm_exec squeue -h -w "$(policy_value "$POLICY" node_0_slurm),$(policy_value "$POLICY" node_1_slurm)")"
   [[ -z "$jobs" ]] || fail 'Spark Slurm queue is not empty'
+  steps="$(slurm_exec squeue --steps -h -w "$(policy_value "$POLICY" node_0_slurm),$(policy_value "$POLICY" node_1_slurm)")"
+  [[ -z "$steps" ]] || fail 'Spark Slurm steps are not empty'
   slurm_nodes="$(slurm_exec scontrol show node \
     "$(policy_value "$POLICY" node_0_slurm),$(policy_value "$POLICY" node_1_slurm)" -o)"
   [[ "$(grep -c 'CPUAlloc=0' <<<"$slurm_nodes")" == 2 ]] || fail 'Spark Slurm CPU allocations are nonzero'
   [[ "$(grep -c 'AllocMem=0' <<<"$slurm_nodes")" == 2 ]] || fail 'Spark Slurm memory allocations are nonzero'
+  while IFS= read -r slurm_line; do
+    slurm_free_mb="$(sed -n 's/.* FreeMem=\([0-9][0-9]*\).*/\1/p' <<<"$slurm_line")"
+    [[ "$slurm_free_mb" =~ ^[0-9]+$ ]] || fail 'Slurm FreeMem observation is malformed'
+    (( slurm_free_mb >= $(policy_value "$POLICY" minimum_free_memory_mb) )) || \
+      fail "Slurm FreeMem below safety floor: ${slurm_free_mb}MiB"
+    slurm_count=$((slurm_count + 1))
+  done <<<"$slurm_nodes"
+  [[ $slurm_count -eq 2 ]] || fail 'Slurm did not return exactly two Spark node records'
+
+  slurmd_pods="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get pods \
+    -l 'app.kubernetes.io/name=slurmd,app.kubernetes.io/instance=slurm-pilot-worker-spark' -o json)"
+  for node in "$(policy_value "$POLICY" node_0_k8s)" "$(policy_value "$POLICY" node_1_k8s)"; do
+    pod="$(jq -r --arg node "$node" '[.items[] | select(.spec.nodeName == $node and .status.phase == "Running") | .metadata.name] | if length == 1 then .[0] else "" end' <<<"$slurmd_pods")"
+    [[ -n "$pod" ]] || fail "expected exactly one running slurmd Pod on $node"
+    timeout "$(policy_value "$POLICY" kubelet_exec_timeout_seconds)" \
+      kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" exec "$pod" -- /bin/true >/dev/null || \
+      fail "kubelet exec path unavailable for $node"
+    mem_available_mb="$(timeout "$(policy_value "$POLICY" kubelet_exec_timeout_seconds)" \
+      kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" exec "$pod" -- \
+      awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo)"
+    [[ "$mem_available_mb" =~ ^[0-9]+$ ]] || fail "MemAvailable observation malformed for $node"
+    (( mem_available_mb >= $(policy_value "$POLICY" minimum_free_memory_mb) )) || \
+      fail "MemAvailable below safety floor on $node: ${mem_available_mb}MiB"
+  done
 
   reservations="$(kubectl -n "$(policy_value "$POLICY" namespace)" get pods \
     -l 'pireus.sounio.dev/spark-pair-reservation=true' -o json)"
@@ -113,11 +109,10 @@ on_failure() {
 apply_fence() {
   local holder
   holder="bootstrap-$(hostname)-$(date -u +%Y%m%dT%H%M%S)"
-  "$BACKEND" --policy "$POLICY" --freeze "$FREEZE" bootstrap-lease --holder "$holder"
   DRAIN_STARTED=1
   SOUNIO_SPARK_PAIR_HOLDER="$holder" \
     SOUNIO_SPARK_PAIR_RECEIPT_DIR="${SOUNIO_SPARK_PAIR_RECEIPT_DIR:-$HOME/.local/state/pireus-spark-pair/receipts}" \
-    "$ARBITER" bootstrap
+    "$ARBITER" bootstrap-init
   DRAIN_STARTED=0
 }
 

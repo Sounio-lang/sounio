@@ -11,7 +11,7 @@ metadata:
   name: pireus-spark-pair-admission
   namespace: beagle
 data:
-  state: BOOTSTRAP
+  state: UNINITIALIZED
   epoch: "1"
   holder: bootstrap
   allowWorkload: "false"
@@ -42,6 +42,18 @@ spec:
           (has(object.spec.tolerations) && object.spec.tolerations.exists(t,
             (t.key == 'pireus.sounio.dev/spark-pair' || (t.key == '' && t.operator == 'Exists')) &&
             (!has(t.effect) || t.effect == '' || t.effect == 'NoSchedule')
+          )) ||
+          (params.data.state == 'UNINITIALIZED' && (
+            object.spec.containers.exists(c,
+              has(c.resources) &&
+              ((has(c.resources.requests) && 'nvidia.com/gpu' in c.resources.requests) ||
+               (has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits))
+            ) ||
+            (has(object.spec.initContainers) && object.spec.initContainers.exists(c,
+              has(c.resources) &&
+              ((has(c.resources.requests) && 'nvidia.com/gpu' in c.resources.requests) ||
+               (has(c.resources.limits) && 'nvidia.com/gpu' in c.resources.limits))
+            ))
           ))
         ) ||
         (
@@ -52,6 +64,13 @@ spec:
             ]) ||
           (object.metadata.namespace == 'kube-system' &&
             object.spec.serviceAccountName == 'default' &&
+            object.metadata.ownerReferences.exists(o,
+              o.controller == true && o.kind == 'DaemonSet' &&
+              ((o.name == 'nvidia-device-plugin-3c59' &&
+                o.uid == '67a030e6-0341-4a11-9a9e-b904dcab6db2') ||
+               (o.name == 'nvidia-device-plugin-8e54' &&
+                o.uid == 'c11cc321-3e41-45ba-baf6-69747796b664'))
+            ) &&
             object.spec.containers.all(c,
               c.image == 'nvcr.io/nvidia/k8s-device-plugin:v0.18.0')) ||
           (object.metadata.namespace == 'ceph-csi-cephfs' &&
@@ -123,4 +142,33 @@ spec:
     name: pireus-spark-pair-admission
     namespace: beagle
     parameterNotFoundAction: Deny
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: pireus-spark-pair-binding-fence
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods/binding"]
+        scope: "*"
+  validations:
+    - expression: >-
+        !(object.target.name in ['spark-3c59', 'spark-8e54']) ||
+        request.userInfo.username == 'system:kube-scheduler'
+      message: Manual Pod bindings to the Spark pair are forbidden.
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: pireus-spark-pair-binding-fence
+spec:
+  policyName: pireus-spark-pair-binding-fence
   validationActions: [Deny]

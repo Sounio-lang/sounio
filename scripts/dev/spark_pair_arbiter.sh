@@ -4,12 +4,23 @@ set -euo pipefail
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
-POLICY="${SOUNIO_SPARK_PAIR_POLICY:-$ROOT_DIR/tools/cluster/spark_pair_arbiter.policy.v1}"
-FREEZE="${SOUNIO_SPARK_PAIR_FREEZE:-$ROOT_DIR/tools/cluster/spark_pair_arbiter.freeze.v1}"
-AUTHORITY="${SOUNIO_SPARK_PAIR_AUTHORITY:-$ROOT_DIR/tools/cluster/_build/default/sounio-spark-pair-arbiter}"
-BUILD="${SOUNIO_SPARK_PAIR_BUILD:-$ROOT_DIR/scripts/dev/build_sounio_spark_pair_arbiter.sh}"
-BACKEND="${SOUNIO_SPARK_PAIR_BACKEND:-$ROOT_DIR/scripts/dev/spark_pair_arbiter_k8s_backend.sh}"
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
+TEST_MODE="${SOUNIO_SPARK_PAIR_TEST_MODE:-}"
+if [[ "$TEST_MODE" == fixture-v1 ]]; then
+  ROOT_DIR="${SOUNIO_SOURCE_ROOT:-}"
+  POLICY="${SOUNIO_SPARK_PAIR_POLICY:-$ROOT_DIR/tools/cluster/spark_pair_arbiter.policy.v1}"
+  FREEZE="${SOUNIO_SPARK_PAIR_FREEZE:-$ROOT_DIR/tools/cluster/spark_pair_arbiter.freeze.v1}"
+  AUTHORITY="${SOUNIO_SPARK_PAIR_AUTHORITY:-$ROOT_DIR/tools/cluster/_build/default/sounio-spark-pair-arbiter}"
+  BUILD="${SOUNIO_SPARK_PAIR_BUILD:-$ROOT_DIR/scripts/dev/build_sounio_spark_pair_arbiter.sh}"
+  BACKEND="${SOUNIO_SPARK_PAIR_BACKEND:-$ROOT_DIR/scripts/dev/spark_pair_arbiter_k8s_backend.sh}"
+else
+  ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
+  POLICY="$ROOT_DIR/tools/cluster/spark_pair_arbiter.policy.v1"
+  FREEZE="$ROOT_DIR/tools/cluster/spark_pair_arbiter.freeze.v1"
+  AUTHORITY="$ROOT_DIR/tools/cluster/_build/default/sounio-spark-pair-arbiter"
+  BUILD="$ROOT_DIR/scripts/dev/build_sounio_spark_pair_arbiter.sh"
+  BACKEND="$ROOT_DIR/scripts/dev/spark_pair_arbiter_k8s_backend.sh"
+fi
 HOLDER="${SOUNIO_SPARK_PAIR_HOLDER:-pireus-$(hostname)-$$}"
 RECEIPT_DIR="${SOUNIO_SPARK_PAIR_RECEIPT_DIR:-}"
 COMMAND_TIMEOUT="${SOUNIO_SPARK_PAIR_COMMAND_TIMEOUT:-190}"
@@ -21,6 +32,18 @@ LAST_RECEIPT=''
 fail() {
   printf 'spark-pair-arbiter: REFUSE: %s\n' "$*" >&2
   exit 42
+}
+
+verify_runtime_root() {
+  if [[ "$TEST_MODE" == fixture-v1 ]]; then
+    [[ -n "$ROOT_DIR" ]] || fail 'fixture-v1 requires an explicit source root'
+    [[ "$(basename "$SCRIPT_PATH")" == spark-pair-arbiter-fixture ]] || \
+      fail 'fixture-v1 is forbidden in the canonical controller'
+  else
+    [[ -z "$TEST_MODE" ]] || fail 'unknown test mode'
+    [[ -z "${SOUNIO_SOURCE_ROOT:-}${SOUNIO_SPARK_PAIR_POLICY:-}${SOUNIO_SPARK_PAIR_FREEZE:-}${SOUNIO_SPARK_PAIR_AUTHORITY:-}${SOUNIO_SPARK_PAIR_BUILD:-}${SOUNIO_SPARK_PAIR_BACKEND:-}" ]] || \
+      fail 'runtime path overrides are forbidden in the canonical controller'
+  fi
 }
 
 policy_value() {
@@ -56,13 +79,17 @@ verify_frozen_authority() {
   verify_frozen_file authority_source authority_sha256
   verify_frozen_file adapter_source adapter_sha256
   verify_frozen_file expectations_source expectations_sha256
+  verify_frozen_file compiler_source compiler_sha256
   verify_frozen_file material_policy_source material_policy_sha256
   verify_frozen_file material_controller_source material_controller_sha256
   verify_frozen_file material_backend_source material_backend_sha256
   verify_frozen_file admission_manifest_source admission_manifest_sha256
   verify_frozen_file installer_source installer_sha256
   verify_frozen_file selftest_source selftest_sha256
+  verify_frozen_file mock_backend_source mock_backend_sha256
   verify_frozen_file live_gate_source live_gate_sha256
+  verify_frozen_file ci_workflow_source ci_workflow_sha256
+  verify_frozen_file parity_open_source parity_open_sha256
 
   if [[ ! -x "$AUTHORITY" ]]; then
     SOUNIO_SPARK_PAIR_OUTPUT="$AUTHORITY" "$BUILD" >/dev/null
@@ -86,7 +113,47 @@ init_receipt_dir() {
 }
 
 backend() {
-  timeout "$COMMAND_TIMEOUT" "$BACKEND" --policy "$POLICY" --freeze "$FREEZE" "$@"
+  local output status command_text
+  printf -v command_text '%q ' "$BACKEND" --policy "$POLICY" --freeze "$FREEZE" "$@"
+  if output="$(timeout "$COMMAND_TIMEOUT" "$BACKEND" --policy "$POLICY" --freeze "$FREEZE" "$@" 2>&1)"; then
+    status=0
+  else
+    status=$?
+  fi
+  write_material_result "$command_text" "$status" "$output"
+  if [[ $status -eq 0 ]]; then
+    printf '%s\n' "$output"
+  else
+    printf '%s\n' "$output" >&2
+  fi
+  return "$status"
+}
+
+write_material_result() {
+  local command_text="$1" status="$2" output="$3" receipt result decision_hash=none
+  receipt="$RECEIPT_DIR/material-$(date -u +%Y%m%dT%H%M%S%N)-$$.receipt"
+  [[ -z "$LAST_RECEIPT" || ! -r "$LAST_RECEIPT" ]] || decision_hash="$(sha256_file "$LAST_RECEIPT")"
+  if [[ "$status" == 0 ]]; then result=PASS; else result=FAIL; fi
+  {
+    printf 'schema=sounio-spark-pair-material-result-v1\n'
+    printf 'timestamp_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'sounio_source_sha256=%s\n' "$(policy_value "$FREEZE" authority_sha256)"
+    printf 'semantics_freeze_sha256=%s\n' "$(sha256_file "$FREEZE")"
+    printf 'decision_producer_language=Sounio\n'
+    printf 'decision_language_role=SEMANTIC_AUTHORITY\n'
+    printf 'result_producer_language=Bash\n'
+    printf 'result_language_role=MATERIAL_BRIDGE\n'
+    printf 'toolchain=%s\n' "$(policy_value "$FREEZE" compiler_identity)"
+    printf 'hardware=%s:%s,%s:%s\n' \
+      "$(policy_value "$POLICY" node_0_k8s)" "$(policy_value "$POLICY" node_0_uid)" \
+      "$(policy_value "$POLICY" node_1_k8s)" "$(policy_value "$POLICY" node_1_uid)"
+    printf 'command=%s\n' "$command_text"
+    printf 'decision_receipt_sha256=%s\n' "$decision_hash"
+    printf 'result=%s\n' "$result"
+    printf 'exit_status=%s\n' "$status"
+    printf 'result_output_sha256=%s\n' "$(printf '%s' "$output" | sha256sum | cut -d ' ' -f 1)"
+  } > "$receipt"
+  sha256_file "$receipt" > "$receipt.sha256"
 }
 
 frame_field() {
@@ -104,10 +171,36 @@ frame_field() {
 }
 
 observe() {
-  local frame
-  frame="$(backend facts --holder "$HOLDER")" || fail 'backend observation failed or timed out'
+  local frame status
+  set +e
+  frame="$(backend facts --holder "$HOLDER" 2>&1)"
+  status=$?
+  set -e
+  if [[ $status -ne 0 ]]; then
+    write_bridge_denial OBSERVATION_FAILED "status=$status output=$(tr '\n' ' ' <<<"$frame")"
+    fail 'backend observation failed or timed out'
+  fi
   [[ "$frame" != *$'\n'* ]] || fail 'backend emitted a multiline fact frame'
   printf '%s\n' "$frame"
+}
+
+write_bridge_denial() {
+  local stage="$1" reason="$2" receipt
+  receipt="$RECEIPT_DIR/bridge-deny-$(date -u +%Y%m%dT%H%M%S%N)-$$.receipt"
+  {
+    printf 'schema=%s\n' "$(policy_value "$POLICY" receipt_schema)"
+    printf 'timestamp_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'sounio_source_sha256=%s\n' "$(policy_value "$FREEZE" authority_sha256)"
+    printf 'semantics_freeze_sha256=%s\n' "$(sha256_file "$FREEZE")"
+    printf 'receipt_emitter_language=Bash\n'
+    printf 'receipt_emitter_role=MATERIAL_BRIDGE\n'
+    printf 'decision_producer_language=NONE\n'
+    printf 'decision_language_role=NO_SEMANTIC_DECISION\n'
+    printf 'stage=%s\n' "$stage"
+    printf 'result=DENY\n'
+    printf 'reason=%s\n' "$reason"
+  } > "$receipt"
+  sha256_file "$receipt" > "$receipt.sha256"
 }
 
 state_number() {
@@ -145,6 +238,8 @@ action_name() {
     24) printf 'BOOTSTRAP_INSTALL_FENCE\n' ;;
     25) printf 'BOOTSTRAP_INSTALL_SLURMD\n' ;;
     26) printf 'BOOTSTRAP_RESUME_SLURM\n' ;;
+    27) printf 'BOOTSTRAP_TAKEOVER\n' ;;
+    28) printf 'BOOTSTRAP_INITIALIZE\n' ;;
     *) fail "unknown action code: $1" ;;
   esac
 }
@@ -155,7 +250,7 @@ write_receipt() {
   freeze_hash="$(sha256_file "$FREEZE")"
   toolchain="$(policy_value "$FREEZE" compiler_identity)"
   hardware="controller=$(uname -m):$(hostname),nodes=$(policy_value "$POLICY" node_0_k8s):$(policy_value "$POLICY" node_0_uid),$(policy_value "$POLICY" node_1_k8s):$(policy_value "$POLICY" node_1_uid),nodeset=$(policy_value "$POLICY" nodeset_uid)"
-  receipt="$RECEIPT_DIR/epoch-${epoch}-$(date -u +%Y%m%dT%H%M%S)-action-${action}.receipt"
+  receipt="$RECEIPT_DIR/epoch-${epoch}-$(date -u +%Y%m%dT%H%M%S%N)-action-${action}.receipt"
   {
     printf 'schema=%s\n' "$(policy_value "$POLICY" receipt_schema)"
     printf 'timestamp_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -183,9 +278,8 @@ write_receipt() {
   LAST_RECEIPT="$receipt"
 }
 
-admit() {
-  local action="$1" expected_state="$2" expected_to="$3" frame state epoch observed authority_mask slurm_mask k8s_mask result status
-  frame="$(observe)"
+admit_frame() {
+  local action="$1" expected_state="$2" expected_to="$3" frame="$4" state epoch observed authority_mask slurm_mask k8s_mask result status
   state="$(frame_field "$frame" state)"
   epoch="$(frame_field "$frame" epoch)"
   observed="$(frame_field "$frame" observed_epoch)"
@@ -206,6 +300,12 @@ admit() {
   [[ "$(frame_field "$result" to)" == "$expected_to" ]] || fail 'Sounio destination-state binding mismatch'
   [[ "$(frame_field "$result" code)" == 0 ]] || fail 'Sounio result code is not zero'
   CURRENT_EPOCH="$epoch"
+}
+
+admit() {
+  local action="$1" expected_state="$2" expected_to="$3" frame
+  frame="$(observe)"
+  admit_frame "$action" "$expected_state" "$expected_to" "$frame"
 }
 
 transition() {
@@ -267,8 +367,8 @@ acquire_pair() {
   CURRENT_EPOCH="$(frame_field "$lease" epoch)"
   [[ "$CURRENT_EPOCH" =~ ^[1-9][0-9]*$ ]] || fail 'backend returned an invalid epoch'
 
-  transition 2 SLURM_OWNED DRAINING_SLURM
   PAIR_ACQUIRED=1
+  transition 2 SLURM_OWNED DRAINING_SLURM
   backend drain-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   transition 3 DRAINING_SLURM SLURM_QUIESCENT
   transition 4 SLURM_QUIESCENT DETACHING_SLURMD
@@ -333,12 +433,25 @@ on_exit() {
 }
 
 usage() {
-  printf 'Usage: %s verify | bootstrap | status | hold SECONDS | recover\n' "$0" >&2
+  printf 'Usage: %s verify | bootstrap-init | bootstrap | bootstrap-recover | status | hold SECONDS | recover\n' "$0" >&2
   exit 64
+}
+
+bootstrap_sequence() {
+  authorize_stay 24 UNINITIALIZED
+  backend install-fence --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
+  authorize_stay 23 UNINITIALIZED
+  backend drain-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
+  authorize_stay 25 UNINITIALIZED
+  backend install-gpu-bound-slurmd --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
+  authorize_stay 26 UNINITIALIZED
+  backend resume-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
+  transition 1 UNINITIALIZED SLURM_OWNED
 }
 
 main() {
   local command="${1:-}" seconds frame state
+  verify_runtime_root
   verify_frozen_authority
   if [[ "$command" != verify ]]; then init_receipt_dir; fi
   trap on_exit EXIT INT TERM
@@ -349,19 +462,33 @@ main() {
         "$(policy_value "$FREEZE" material_backend_sha256)" \
         "$(policy_value "$FREEZE" admission_manifest_sha256)"
       ;;
+    bootstrap-init)
+      frame="$(backend prebootstrap-facts --holder "$HOLDER")"
+      CURRENT_EPOCH="$(frame_field "$frame" epoch)"
+      admit_frame 28 UNINITIALIZED UNINITIALIZED "$frame"
+      frame="$(backend bootstrap-lease --holder "$HOLDER" --epoch "$CURRENT_EPOCH" \
+        --receipt "$LAST_RECEIPT")"
+      CURRENT_EPOCH="$(frame_field "$frame" epoch)"
+      bootstrap_sequence
+      printf 'SPARK_PAIR_BOOTSTRAP_PASS epoch=%s\n' "$CURRENT_EPOCH"
+      ;;
     bootstrap)
       frame="$(observe)"
       CURRENT_EPOCH="$(frame_field "$frame" epoch)"
-      authorize_stay 23 UNINITIALIZED
-      backend drain-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
-      authorize_stay 24 UNINITIALIZED
-      backend install-fence --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
-      authorize_stay 25 UNINITIALIZED
-      backend install-gpu-bound-slurmd --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
-      authorize_stay 26 UNINITIALIZED
-      backend resume-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
-      transition 1 UNINITIALIZED SLURM_OWNED
+      bootstrap_sequence
       printf 'SPARK_PAIR_BOOTSTRAP_PASS epoch=%s\n' "$CURRENT_EPOCH"
+      ;;
+    bootstrap-recover)
+      frame="$(observe)"
+      state="$(frame_field "$frame" state)"
+      [[ "$state" == UNINITIALIZED ]] || fail "bootstrap recovery requires UNINITIALIZED, observed $state"
+      CURRENT_EPOCH="$(frame_field "$frame" epoch)"
+      admit 27 UNINITIALIZED UNINITIALIZED
+      frame="$(backend lease-bootstrap-recovery-acquire --holder "$HOLDER" --epoch "$CURRENT_EPOCH" \
+        --receipt "$LAST_RECEIPT")"
+      CURRENT_EPOCH="$(frame_field "$frame" epoch)"
+      bootstrap_sequence
+      printf 'SPARK_PAIR_BOOTSTRAP_RECOVERY_PASS epoch=%s\n' "$CURRENT_EPOCH"
       ;;
     status)
       frame="$(observe)"

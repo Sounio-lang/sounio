@@ -3,6 +3,8 @@
 set -euo pipefail
 umask 077
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 POLICY=''
 FREEZE=''
 
@@ -26,7 +28,7 @@ sha256_file() {
 }
 
 repo_root() {
-  cd "$(dirname "$FREEZE")/../.." && pwd -P
+  printf '%s\n' "$ROOT_DIR"
 }
 
 frozen_file_path() {
@@ -60,6 +62,20 @@ receipt_value() {
   value="$(sed -n "s/^${key}=//p" "$receipt")"
   [[ -n "$value" ]] || fail "empty receipt key: $key"
   printf '%s\n' "$value"
+}
+
+frame_field() {
+  local frame="$1" wanted="$2" token key value found=''
+  for token in $frame; do
+    key="${token%%=*}"
+    value="${token#*=}"
+    if [[ "$key" == "$wanted" ]]; then
+      [[ -z "$found" ]] || fail "duplicated evidence field: $wanted"
+      found="$value"
+    fi
+  done
+  [[ -n "$found" ]] || fail "missing evidence field: $wanted"
+  printf '%s\n' "$found"
 }
 
 verify_receipt() {
@@ -100,16 +116,52 @@ verify_receipt() {
     13) expected_from=RECOVERY_REQUIRED; expected_to=SLURM_OWNED ;;
     14) expected_from="$receipt_from"; expected_to="$receipt_from" ;;
     15|16|17|18|19|20|21|22) expected_from=RECOVERY_REQUIRED; expected_to=RECOVERY_REQUIRED ;;
-    23|24|25|26) expected_from=UNINITIALIZED; expected_to=UNINITIALIZED ;;
+    23|24|25|26|27|28) expected_from=UNINITIALIZED; expected_to=UNINITIALIZED ;;
     *) fail "receipt action $action has no material contract" ;;
   esac
   [[ "$receipt_from" == "$expected_from" && "$receipt_to" == "$expected_to" ]] || \
     fail 'receipt transition binding mismatch'
 }
 
+slurm_states_drained() {
+  local nodes="$1" token state base flag count=0 has_drain
+  local -a parts
+  while IFS= read -r token; do
+    state="${token#State=}"
+    IFS='+' read -r base flag <<<"$state"
+    [[ "$base" == IDLE ]] || return 1
+    has_drain=0
+    IFS='+' read -ra parts <<<"$state"
+    for flag in "${parts[@]:1}"; do
+      [[ "$flag" == DRAIN ]] && has_drain=1
+      [[ "$flag" != DRAINING && "$flag" != COMPLETING && "$flag" != DOWN && "$flag" != FAIL ]] || return 1
+    done
+    [[ $has_drain -eq 1 ]] || return 1
+    count=$((count + 1))
+  done < <(tr ' ' '\n' <<<"$nodes" | sed -n '/^State=/p')
+  [[ $count -eq 2 ]]
+}
+
+slurm_states_resumed() {
+  local nodes="$1" token state base flag count=0
+  local -a parts
+  while IFS= read -r token; do
+    state="${token#State=}"
+    IFS='+' read -r base flag <<<"$state"
+    [[ "$base" == IDLE ]] || return 1
+    IFS='+' read -ra parts <<<"$state"
+    for flag in "${parts[@]:1}"; do
+      [[ "$flag" != DRAIN && "$flag" != DRAINING && "$flag" != COMPLETING && "$flag" != DOWN && "$flag" != FAIL ]] || return 1
+    done
+    count=$((count + 1))
+  done < <(tr ' ' '\n' <<<"$nodes" | sed -n '/^State=/p')
+  [[ $count -eq 2 ]]
+}
+
 require_lease_context() {
   local holder="$1" epoch="$2" allowed_states="$3" lease state
   lease="$(lease_json)"
+  verify_lease_freeze_binding "$lease"
   [[ "$(jq -r '.spec.holderIdentity // ""' <<<"$lease")" == "$holder" ]] || fail 'material effect holder mismatch'
   [[ "$(jq -r --arg key "$(policy_value "$POLICY" epoch_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$epoch" ]] || fail 'material effect epoch mismatch'
   state="$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
@@ -202,10 +254,12 @@ sync_admission_projection() {
 }
 
 admission_fail_closed() {
-  local lease policy binding config state epoch holder source_hash freeze_hash
+  local lease policy binding binding_policy binding_binding config state epoch holder source_hash freeze_hash
   lease="$1"
   policy="$(kubectl get validatingadmissionpolicy "$(policy_value "$POLICY" admission_policy)" -o json 2>/dev/null)" || return 1
   binding="$(kubectl get validatingadmissionpolicybinding "$(policy_value "$POLICY" admission_binding)" -o json 2>/dev/null)" || return 1
+  binding_policy="$(kubectl get validatingadmissionpolicy "$(policy_value "$POLICY" admission_binding_policy)" -o json 2>/dev/null)" || return 1
+  binding_binding="$(kubectl get validatingadmissionpolicybinding "$(policy_value "$POLICY" admission_binding_binding)" -o json 2>/dev/null)" || return 1
   config="$(admission_config_json 2>/dev/null)" || return 1
   state="$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
   epoch="$(jq -r --arg key "$(policy_value "$POLICY" epoch_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
@@ -225,6 +279,15 @@ admission_fail_closed() {
     .spec.paramRef.parameterNotFoundAction == "Deny" and
     (.spec.validationActions == ["Deny"])
   ' <<<"$binding" >/dev/null || return 1
+  jq -e '
+    .spec.failurePolicy == "Fail" and
+    (.spec.validations | length) == 1 and
+    (.status.observedGeneration == .metadata.generation) and
+    ((.status.typeChecking.expressionWarnings // []) | length) == 0
+  ' <<<"$binding_policy" >/dev/null || return 1
+  jq -e --arg policy "$(policy_value "$POLICY" admission_binding_policy)" '
+    .spec.policyName == $policy and .spec.validationActions == ["Deny"]
+  ' <<<"$binding_binding" >/dev/null || return 1
   jq -e --arg state "$state" --arg epoch "$epoch" --arg holder "$holder" \
     --arg source "$source_hash" --arg freeze "$freeze_hash" '
       .data.state == $state and .data.epoch == $epoch and .data.holder == $holder and
@@ -274,6 +337,28 @@ lease_is_live() {
     <<<"$json" >/dev/null
 }
 
+verify_lease_freeze_binding() {
+  local lease="$1" source freeze
+  source="$(jq -r --arg key "$(policy_value "$POLICY" source_hash_annotation)" \
+    '.metadata.annotations[$key] // ""' <<<"$lease")"
+  freeze="$(jq -r --arg key "$(policy_value "$POLICY" freeze_hash_annotation)" \
+    '.metadata.annotations[$key] // ""' <<<"$lease")"
+  [[ "$source" == "$(policy_value "$FREEZE" authority_sha256)" ]] || \
+    fail 'Lease Sounio source hash differs from the active freeze'
+  [[ "$freeze" == "$(sha256_file "$FREEZE")" ]] || \
+    fail 'Lease semantics hash differs from the active freeze'
+}
+
+verify_bootstrap_journal_binding() {
+  local journal="$1" source freeze
+  source="$(jq -r '.data.sounioSourceSha256 // ""' <<<"$journal")"
+  freeze="$(jq -r '.data.semanticsFreezeSha256 // ""' <<<"$journal")"
+  [[ "$source" == "$(policy_value "$FREEZE" authority_sha256)" ]] || \
+    fail 'bootstrap journal Sounio source hash differs from the active freeze'
+  [[ "$freeze" == "$(sha256_file "$FREEZE")" ]] || \
+    fail 'bootstrap journal semantics hash differs from the active freeze'
+}
+
 replace_lease() {
   kubectl -n "$(kube_namespace)" replace -f - >/dev/null
 }
@@ -310,11 +395,61 @@ bit_add() {
   fi
 }
 
+prebootstrap_facts() {
+  local holder node_0 node_1 nodeset slurm_nodes slurm_jobs slurm_steps all_pods
+  local authority_mask=1 slurm_mask=0 k8s_mask=0 truth=0
+  holder="$(arg_value --holder "$@")"
+  if kubectl -n "$(kube_namespace)" get lease "$(lease_name)" >/dev/null 2>&1; then
+    fail 'arbiter Lease already exists'
+  fi
+  if kubectl -n "$(kube_namespace)" get configmap \
+    "$(policy_value "$POLICY" bootstrap_journal)" >/dev/null 2>&1; then
+    fail 'bootstrap journal already exists without a Lease'
+  fi
+  node_0="$(kubectl get node "$(node0)" -o json)"
+  node_1="$(kubectl get node "$(node1)" -o json)"
+  nodeset="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
+    "$(policy_value "$POLICY" nodeset_name)" -o json)"
+  slurm_nodes="$(slurm_exec scontrol show node "$(slurm0),$(slurm1)" -o)"
+  slurm_jobs="$(slurm_exec squeue -h -w "$(slurm0),$(slurm1)")"
+  slurm_steps="$(slurm_exec squeue --steps -h -w "$(slurm0),$(slurm1)")"
+  all_pods="$(kubectl get pods -A -o json)"
+
+  truth=0
+  if [[ "$(jq -r '.metadata.uid' <<<"$node_0")" == "$(policy_value "$POLICY" node_0_uid)" &&
+        "$(jq -r '.metadata.uid' <<<"$node_1")" == "$(policy_value "$POLICY" node_1_uid)" &&
+        "$(jq -r '.metadata.uid' <<<"$nodeset")" == "$(policy_value "$POLICY" nodeset_uid)" ]]; then
+    truth=1
+  fi
+  authority_mask="$(bit_add "$authority_mask" 32 "$truth")"
+  authority_mask="$(bit_add "$authority_mask" 64 1)"
+  truth=0
+  slurm_exec scontrol ping | grep -q 'is UP' && truth=1
+  slurm_mask="$(bit_add "$slurm_mask" 2 "$truth")"
+  truth=0
+  [[ -z "$slurm_jobs" && -z "$slurm_steps" ]] && truth=1
+  slurm_mask="$(bit_add "$slurm_mask" 8 "$truth")"
+  truth=0
+  if [[ "$(grep -c 'CPUAlloc=0' <<<"$slurm_nodes")" == 2 &&
+        "$(grep -c 'AllocMem=0' <<<"$slurm_nodes")" == 2 &&
+        "$(grep -c 'AllocTRES= ' <<<"$slurm_nodes")" == 2 ]]; then
+    truth=1
+  fi
+  slurm_mask="$(bit_add "$slurm_mask" 16 "$truth")"
+  truth=0
+  unexpected_gpu_consumers_zero "$all_pods" 1 "$holder" && truth=1
+  k8s_mask="$(bit_add "$k8s_mask" 512 "$truth")"
+  k8s_mask="$(bit_add "$k8s_mask" 256 1)"
+  printf 'state=UNINITIALIZED epoch=1 observed_epoch=1 authority_mask=%s slurm_mask=%s k8s_mask=%s\n' \
+    "$authority_mask" "$slurm_mask" "$k8s_mask"
+}
+
 facts() {
-  local holder lease nodeset node_0 node_1 plugin_0 plugin_1 plugin_pods slurmd_pods reservations workloads all_pods slurm_nodes slurm_jobs
+  local holder lease nodeset node_0 node_1 plugin_0 plugin_1 plugin_pods slurmd_pods reservations workloads all_pods slurm_nodes slurm_jobs slurm_steps
   local state epoch observed_epoch authority_mask=1 slurm_mask=0 k8s_mask=0 truth current_generation lease_generation
   holder="$(arg_value --holder "$@")"
   lease="$(lease_json)"
+  verify_lease_freeze_binding "$lease"
   nodeset="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
     "$(policy_value "$POLICY" nodeset_name)" -o json)"
   node_0="$(kubectl get node "$(node0)" -o json)"
@@ -330,6 +465,7 @@ facts() {
   all_pods="$(kubectl get pods -A -o json)"
   slurm_nodes="$(slurm_exec scontrol show node "$(slurm0),$(slurm1)" -o)"
   slurm_jobs="$(slurm_exec squeue -h -w "$(slurm0),$(slurm1)")"
+  slurm_steps="$(slurm_exec squeue --steps -h -w "$(slurm0),$(slurm1)")"
 
   state="$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" \
     '.metadata.annotations[$key] // ""' <<<"$lease")"
@@ -407,10 +543,10 @@ facts() {
   slurm_exec scontrol ping | grep -q 'is UP' && truth=1
   slurm_mask="$(bit_add "$slurm_mask" 2 "$truth")"
   truth=0
-  [[ "$(grep -Ec 'State=[^ ]*DRAIN' <<<"$slurm_nodes")" == 2 ]] && truth=1
+  slurm_states_drained "$slurm_nodes" && truth=1
   slurm_mask="$(bit_add "$slurm_mask" 4 "$truth")"
   truth=0
-  [[ -z "$slurm_jobs" ]] && truth=1
+  [[ -z "$slurm_jobs" && -z "$slurm_steps" ]] && truth=1
   slurm_mask="$(bit_add "$slurm_mask" 8 "$truth")"
   truth=0
   if [[ "$(grep -c 'CPUAlloc=0' <<<"$slurm_nodes")" == 2 &&
@@ -436,7 +572,7 @@ facts() {
   slurm_mask="$(bit_add "$slurm_mask" 64 "$truth")"
   truth=0
   if [[ "$state" == UNINITIALIZED || "$state" == SLURM_OWNED || "$state" == SLURM_RESTORING || "$state" == RECOVERY_REQUIRED ]]; then
-    if [[ "$(grep -c 'State=IDLE' <<<"$slurm_nodes")" == 2 ]]; then truth=1; fi
+    if slurm_states_resumed "$slurm_nodes"; then truth=1; fi
   fi
   slurm_mask="$(bit_add "$slurm_mask" 128 "$truth")"
 
@@ -489,6 +625,7 @@ lease_acquire() {
   local holder lease state epoch duration now live_holder nodeset_generation updated
   holder="$(arg_value --holder "$@")"
   lease="$(lease_json)"
+  verify_lease_freeze_binding "$lease"
   state="$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
   [[ "$state" == SLURM_OWNED ]] || fail "Lease state is $state, not SLURM_OWNED"
   live_holder="$(jq -r '.spec.holderIdentity // ""' <<<"$lease")"
@@ -547,6 +684,7 @@ lease_transition() {
   esac
   verify_receipt "$receipt" "$action" "$epoch"
   lease="$(lease_json)"
+  verify_lease_freeze_binding "$lease"
   [[ "$(jq -r '.spec.holderIdentity' <<<"$lease")" == "$holder" ]] || fail 'Lease holder changed'
   [[ "$(jq -r --arg key "$(policy_value "$POLICY" epoch_annotation)" '.metadata.annotations[$key]' <<<"$lease")" == "$epoch" ]] || fail 'Lease epoch changed'
   [[ "$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key]' <<<"$lease")" == "$from" ]] || fail 'Lease state changed'
@@ -575,6 +713,7 @@ lease_recovery_acquire() {
   receipt="$(arg_value --receipt "$@")"
   verify_receipt "$receipt" 11 "$epoch"
   lease="$(lease_json)"
+  verify_lease_freeze_binding "$lease"
   live_holder="$(jq -r '.spec.holderIdentity // ""' <<<"$lease")"
   if lease_is_live "$lease" && [[ "$live_holder" != "$holder" ]]; then
     fail "cannot recover a live Lease held by $live_holder"
@@ -605,12 +744,65 @@ lease_recovery_acquire() {
   printf 'epoch=%s state=RECOVERY_REQUIRED\n' "$next_epoch"
 }
 
+lease_bootstrap_recovery_acquire() {
+  local holder epoch receipt lease live_holder stored_epoch state next_epoch duration now generation updated
+  holder="$(arg_value --holder "$@")"
+  epoch="$(arg_value --epoch "$@")"
+  receipt="$(arg_value --receipt "$@")"
+  verify_receipt "$receipt" 27 "$epoch"
+  lease="$(lease_json)"
+  verify_lease_freeze_binding "$lease"
+  if kubectl -n "$(kube_namespace)" get configmap \
+    "$(policy_value "$POLICY" bootstrap_journal)" >/dev/null 2>&1; then
+    verify_bootstrap_journal_binding "$(kubectl -n "$(kube_namespace)" get configmap \
+      "$(policy_value "$POLICY" bootstrap_journal)" -o json)"
+  fi
+  live_holder="$(jq -r '.spec.holderIdentity // ""' <<<"$lease")"
+  if lease_is_live "$lease" && [[ "$live_holder" != "$holder" ]]; then
+    fail "cannot recover a live bootstrap Lease held by $live_holder"
+  fi
+  stored_epoch="$(jq -r --arg key "$(policy_value "$POLICY" epoch_annotation)" '.metadata.annotations[$key] // "0"' <<<"$lease")"
+  state="$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
+  [[ "$stored_epoch" == "$epoch" ]] || fail 'Lease epoch changed before bootstrap recovery CAS'
+  [[ "$state" == UNINITIALIZED ]] || fail 'bootstrap recovery requires UNINITIALIZED Lease state'
+  [[ "$epoch" =~ ^[1-9][0-9]*$ ]] || fail 'stored bootstrap epoch is invalid'
+  next_epoch=$((epoch + 1))
+  duration="$(policy_value "$POLICY" lease_duration_seconds)"
+  generation="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
+    "$(policy_value "$POLICY" nodeset_name)" -o jsonpath='{.metadata.generation}')"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  updated="$(jq --arg holder "$holder" --arg now "$now" --arg epoch "$next_epoch" \
+    --arg generation "$generation" --argjson duration "$duration" \
+    --arg epoch_key "$(policy_value "$POLICY" epoch_annotation)" \
+    --arg state_key "$(policy_value "$POLICY" state_annotation)" \
+    --arg generation_key "$(policy_value "$POLICY" nodeset_generation_annotation)" '
+      .spec.holderIdentity = $holder |
+      .spec.acquireTime = $now |
+      .spec.renewTime = $now |
+      .spec.leaseDurationSeconds = $duration |
+      .spec.leaseTransitions = ((.spec.leaseTransitions // 0) + 1) |
+      .metadata.annotations[$epoch_key] = $epoch |
+      .metadata.annotations[$state_key] = "UNINITIALIZED" |
+      .metadata.annotations[$generation_key] = $generation
+    ' <<<"$lease")"
+  replace_lease <<<"$updated"
+  kubectl annotate nodes "$(node0)" "$(node1)" \
+    "$(policy_value "$POLICY" epoch_annotation)=$next_epoch" --overwrite >/dev/null
+  if kubectl -n "$(kube_namespace)" get configmap \
+    "$(policy_value "$POLICY" admission_configmap)" >/dev/null 2>&1; then
+    sync_admission_projection "$updated"
+  fi
+  ensure_bootstrap_journal BOOTSTRAP_TAKEOVER "$holder" "$receipt"
+  printf 'epoch=%s state=UNINITIALIZED\n' "$next_epoch"
+}
+
 lease_renew() {
   local holder epoch receipt lease now updated
   holder="$(arg_value --holder "$@")"
   epoch="$(arg_value --epoch "$@")"
   receipt="$(arg_value --receipt "$@")"
   lease="$(lease_json)"
+  verify_lease_freeze_binding "$lease"
   [[ "$(jq -r '.spec.holderIdentity' <<<"$lease")" == "$holder" ]] || fail 'Lease holder changed'
   [[ "$(jq -r --arg key "$(policy_value "$POLICY" epoch_annotation)" '.metadata.annotations[$key]' <<<"$lease")" == "$epoch" ]] || fail 'Lease epoch changed'
   [[ "$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key]' <<<"$lease")" == K8S_OWNED ]] || fail 'heartbeat outside K8S_OWNED'
@@ -639,28 +831,35 @@ wait_for() {
 renew_lease_material() {
   local holder="$1" epoch="$2" lease state now updated
   lease="$(lease_json)"
+  verify_lease_freeze_binding "$lease"
   [[ "$(jq -r '.spec.holderIdentity // ""' <<<"$lease")" == "$holder" ]] || fail 'material keepalive holder mismatch'
   [[ "$(jq -r --arg key "$(policy_value "$POLICY" epoch_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$epoch" ]] || fail 'material keepalive epoch mismatch'
   state="$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
-  [[ "$state" != SLURM_OWNED && "$state" != UNINITIALIZED ]] || fail 'material keepalive outside an active transition'
+  [[ "$state" != SLURM_OWNED ]] || fail 'material keepalive outside an active transition'
+  lease_is_live "$lease" || fail 'Lease expired before material keepalive'
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   updated="$(jq --arg now "$now" '.spec.renewTime = $now' <<<"$lease")"
   replace_lease <<<"$updated"
 }
 
 slurm_drained() {
-  local nodes jobs
+  local nodes jobs steps
   nodes="$(slurm_exec scontrol show node "$(slurm0),$(slurm1)" -o)" || return 1
   jobs="$(slurm_exec squeue -h -w "$(slurm0),$(slurm1)")" || return 1
-  [[ "$(grep -Ec 'State=[^ ]*DRAIN' <<<"$nodes")" == 2 && -z "$jobs" ]]
+  steps="$(slurm_exec squeue --steps -h -w "$(slurm0),$(slurm1)")" || return 1
+  slurm_states_drained "$nodes" && [[ -z "$jobs" && -z "$steps" ]]
 }
 
 drain_slurm() {
-  local holder epoch receipt
+  local holder epoch receipt key value effect
   holder="$(arg_value --holder "$@")"
   epoch="$(arg_value --epoch "$@")"
   receipt="$(arg_value --receipt "$@")"
   guard_mutation drain "$holder" "$epoch" "$receipt"
+  key="$(policy_value "$POLICY" spark_taint_key)"
+  value="$(policy_value "$POLICY" spark_taint_value)"
+  effect="$(policy_value "$POLICY" spark_taint_effect)"
+  kubectl taint nodes "$(node0)" "$(node1)" "$key=$value:$effect" --overwrite >/dev/null
   slurm_exec scontrol update NodeName="$(slurm0),$(slurm1)" State=DRAIN Reason="pireus-epoch-$epoch" >/dev/null
   wait_for 'both Slurm nodes to drain' slurm_drained "$holder" "$epoch"
 }
@@ -735,12 +934,14 @@ spec:
           test -z "\${processes//[[:space:]]/}"
           pmon="\$(chroot /host /usr/bin/nvidia-smi pmon -c 1)"
           ! awk 'NF >= 3 && \$2 ~ /^[0-9]+$/ { found=1 } END { exit found ? 0 : 1 }' <<<"\$pmon"
-          ! chroot /host /usr/bin/pgrep -f 'nvidia-cuda-mps' >/dev/null 2>&1
+          ! chroot /host /usr/bin/pgrep -f '[n]vidia-cuda-mps' >/dev/null 2>&1
           driver="\$(chroot /host /usr/bin/nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)"
+          product="\$(chroot /host /usr/bin/nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1 | tr ' ' '_')"
           memory="\$(chroot /host /usr/bin/nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1)"
+          if [[ "\$memory" == '[N/A]' ]]; then memory=UNAVAILABLE_UNIFIED; fi
           utilization="\$(chroot /host /usr/bin/nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | head -n 1)"
-          printf 'PIREUS_NVML_CLEAN node=%s epoch=%s uuid=%s driver=%s memory_mib=%s utilization_pct=%s\n' \
-            "$node" "$epoch" "\$uuid" "\$driver" "\$memory" "\$utilization"
+          printf 'PIREUS_NVML_CLEAN node=%s epoch=%s uuid=%s product=%s driver=%s memory_observation=%s utilization_pct=%s\n' \
+            "$node" "$epoch" "\$uuid" "\$product" "\$driver" "\$memory" "\$utilization"
           touch /tmp/nvml-clean
           exec sleep infinity
       readinessProbe:
@@ -769,20 +970,54 @@ reservations_ready() {
 }
 
 record_nvml_values() {
-  local epoch="$1" holder="$2" evidence0="$3" evidence1="$4" lease now hash0 hash1 updated
+  local epoch="$1" holder="$2" evidence0="$3" evidence1="$4" lease state now hash0 hash1 updated uuid0 uuid1 product0 product1 driver0 driver1 memory0 memory1 utilization0 utilization1
   [[ "$evidence0" == "PIREUS_NVML_CLEAN node=$(node0) epoch=$epoch uuid=GPU-"* ]] || fail '3c59 NVML receipt missing'
   [[ "$evidence1" == "PIREUS_NVML_CLEAN node=$(node1) epoch=$epoch uuid=GPU-"* ]] || fail '8e54 NVML receipt missing'
   hash0="$(printf '%s' "$evidence0" | sha256sum | cut -d ' ' -f 1)"
   hash1="$(printf '%s' "$evidence1" | sha256sum | cut -d ' ' -f 1)"
+  uuid0="$(frame_field "$evidence0" uuid)"
+  uuid1="$(frame_field "$evidence1" uuid)"
+  product0="$(frame_field "$evidence0" product)"
+  product1="$(frame_field "$evidence1" product)"
+  driver0="$(frame_field "$evidence0" driver)"
+  driver1="$(frame_field "$evidence1" driver)"
+  memory0="$(frame_field "$evidence0" memory_observation)"
+  memory1="$(frame_field "$evidence1" memory_observation)"
+  utilization0="$(frame_field "$evidence0" utilization_pct)"
+  utilization1="$(frame_field "$evidence1" utilization_pct)"
+  [[ "$uuid0" == "$(policy_value "$POLICY" node_0_gpu_uuid)" && \
+     "$uuid1" == "$(policy_value "$POLICY" node_1_gpu_uuid)" ]] || fail 'GPU UUID evidence is not the canonical Spark pair'
+  [[ "$product0" == "$(policy_value "$POLICY" gpu_product)" && "$product1" == "$product0" ]] || fail 'GPU product evidence is not canonical GB10'
+  [[ "$driver0" == "$(policy_value "$POLICY" gpu_driver)" && "$driver1" == "$driver0" ]] || fail 'Spark driver versions differ from policy'
+  [[ "$memory0" == "$(policy_value "$POLICY" gpu_memory_observation)" && "$memory1" == "$memory0" ]] || fail 'unified-memory evidence differs from policy'
+  [[ "$utilization0" =~ ^[0-9]+$ && "$utilization1" =~ ^[0-9]+$ ]] || fail 'GPU utilization evidence is malformed'
   lease="$(lease_json)"
+  verify_lease_freeze_binding "$lease"
   [[ "$(jq -r '.spec.holderIdentity' <<<"$lease")" == "$holder" ]] || fail 'Lease holder changed while recording NVML receipts'
+  [[ "$(jq -r --arg key "$(policy_value "$POLICY" epoch_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$epoch" ]] || \
+    fail 'Lease epoch changed while recording NVML receipts'
+  state="$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
+  [[ "$state" == K8S_RESERVING || "$state" == K8S_RELEASING || "$state" == RECOVERY_REQUIRED ]] || \
+    fail 'NVML receipts are outside an admitted reservation or clean-probe state'
+  lease_is_live "$lease" || fail 'Lease expired before recording NVML receipts'
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  updated="$(jq --arg epoch "$epoch" --arg hash0 "$hash0" --arg hash1 "$hash1" --arg now "$now" '
+  updated="$(jq --arg epoch "$epoch" --arg hash0 "$hash0" --arg hash1 "$hash1" --arg now "$now" \
+    --arg uuid0 "$uuid0" --arg uuid1 "$uuid1" --arg product "$product0" --arg driver "$driver0" \
+    --arg memory0 "$memory0" --arg memory1 "$memory1" \
+    --arg utilization0 "$utilization0" --arg utilization1 "$utilization1" '
     .spec.renewTime = $now |
     .metadata.annotations["pireus.sounio.dev/nvml-3c59-epoch"] = $epoch |
     .metadata.annotations["pireus.sounio.dev/nvml-3c59-sha256"] = $hash0 |
+    .metadata.annotations["pireus.sounio.dev/gpu-3c59-uuid"] = $uuid0 |
+    .metadata.annotations["pireus.sounio.dev/gpu-3c59-memory-observation"] = $memory0 |
+    .metadata.annotations["pireus.sounio.dev/gpu-3c59-utilization-pct"] = $utilization0 |
     .metadata.annotations["pireus.sounio.dev/nvml-8e54-epoch"] = $epoch |
-    .metadata.annotations["pireus.sounio.dev/nvml-8e54-sha256"] = $hash1
+    .metadata.annotations["pireus.sounio.dev/nvml-8e54-sha256"] = $hash1 |
+    .metadata.annotations["pireus.sounio.dev/gpu-8e54-uuid"] = $uuid1 |
+    .metadata.annotations["pireus.sounio.dev/gpu-8e54-memory-observation"] = $memory1 |
+    .metadata.annotations["pireus.sounio.dev/gpu-8e54-utilization-pct"] = $utilization1 |
+    .metadata.annotations["pireus.sounio.dev/gpu-product"] = $product |
+    .metadata.annotations["pireus.sounio.dev/nvidia-driver"] = $driver
   ' <<<"$lease")"
   replace_lease <<<"$updated"
 }
@@ -839,13 +1074,15 @@ probe_clean() {
        test -z \"\${processes//[[:space:]]/}\"
        pmon=\"\$(chroot /host /usr/bin/nvidia-smi pmon -c 1)\"
        ! awk 'NF >= 3 && \\\$2 ~ /^[0-9]+\\$/ { found=1 } END { exit found ? 0 : 1 }' <<<\"\$pmon\"
-       ! chroot /host /usr/bin/pgrep -f 'nvidia-cuda-mps' >/dev/null 2>&1
+       ! chroot /host /usr/bin/pgrep -f '[n]vidia-cuda-mps' >/dev/null 2>&1
        uuid=\"\$(chroot /host /usr/bin/nvidia-smi --query-gpu=uuid --format=csv,noheader | head -n 1)\"
+       product=\"\$(chroot /host /usr/bin/nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1 | tr ' ' '_')\"
        driver=\"\$(chroot /host /usr/bin/nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)\"
        memory=\"\$(chroot /host /usr/bin/nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1)\"
+       if [[ \"\$memory\" == '[N/A]' ]]; then memory=UNAVAILABLE_UNIFIED; fi
        utilization=\"\$(chroot /host /usr/bin/nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | head -n 1)\"
-       printf 'PIREUS_NVML_CLEAN node=%s epoch=%s uuid=%s driver=%s memory_mib=%s utilization_pct=%s\\n' \
-         '$actual_node' '$epoch' \"\$uuid\" \"\$driver\" \"\$memory\" \"\$utilization\"" \
+       printf 'PIREUS_NVML_CLEAN node=%s epoch=%s uuid=%s product=%s driver=%s memory_observation=%s utilization_pct=%s\\n' \
+         '$actual_node' '$epoch' \"\$uuid\" \"\$product\" \"\$driver\" \"\$memory\" \"\$utilization\"" \
       )"
     if [[ "$node" == 3c59 ]]; then
       evidence0="$output"
@@ -857,13 +1094,16 @@ probe_clean() {
 }
 
 delete_reservations() {
-  local holder epoch receipt
+  local holder epoch receipt count
   holder="$(arg_value --holder "$@")"
   epoch="$(arg_value --epoch "$@")"
   receipt="$(arg_value --receipt "$@")"
   guard_mutation delete "$holder" "$epoch" "$receipt"
-  kubectl -n "$(kube_namespace)" delete pods \
-    -l 'pireus.sounio.dev/spark-pair-reservation=true' --wait=false >/dev/null 2>&1 || true
+  count="$(reservation_pods_json | jq '.items | length')"
+  if [[ "$count" != 0 ]]; then
+    kubectl -n "$(kube_namespace)" delete pods \
+      -l 'pireus.sounio.dev/spark-pair-reservation=true' --wait=false >/dev/null
+  fi
   wait_for "epoch $epoch reservations to terminate" reservations_absent "$holder" "$epoch"
 }
 
@@ -896,27 +1136,94 @@ restore_slurmd() {
 }
 
 slurm_resumed() {
-  local nodes jobs
+  local nodes jobs steps
   nodes="$(slurm_exec scontrol show node "$(slurm0),$(slurm1)" -o)" || return 1
   jobs="$(slurm_exec squeue -h -w "$(slurm0),$(slurm1)")" || return 1
-  [[ "$(grep -c 'State=IDLE' <<<"$nodes")" == 2 &&
-     "$(grep -c 'CPUAlloc=0' <<<"$nodes")" == 2 && -z "$jobs" ]]
+  steps="$(slurm_exec squeue --steps -h -w "$(slurm0),$(slurm1)")" || return 1
+  slurm_states_resumed "$nodes" &&
+    [[ "$(grep -c 'CPUAlloc=0' <<<"$nodes")" == 2 && -z "$jobs" && -z "$steps" ]]
+}
+
+verify_bootstrap_lease_receipt_context() {
+  local holder="$1" receipt="$2" lease receipt_epoch expected_epoch action
+  lease="$(lease_json)"
+  verify_lease_freeze_binding "$lease"
+  lease_is_live "$lease" || fail 'Lease expired before bootstrap journal update'
+  [[ "$(jq -r '.spec.holderIdentity // ""' <<<"$lease")" == "$holder" ]] || \
+    fail 'Lease holder changed before bootstrap journal update'
+  receipt_epoch="$(receipt_value "$receipt" epoch)"
+  action="$(receipt_value "$receipt" action_code)"
+  expected_epoch="$receipt_epoch"
+  [[ "$action" != 27 ]] || expected_epoch=$((receipt_epoch + 1))
+  [[ "$(jq -r --arg key "$(policy_value "$POLICY" epoch_annotation)" \
+    '.metadata.annotations[$key] // ""' <<<"$lease")" == "$expected_epoch" ]] || \
+    fail 'Lease epoch changed before bootstrap journal update'
 }
 
 bootstrap_journal_step() {
-  local step="$1" receipt="${2:-}" journal updated now receipt_hash='none'
+  local step="$1" holder="$2" receipt="$3" journal updated now receipt_hash
   journal="$(kubectl -n "$(kube_namespace)" get configmap \
     "$(policy_value "$POLICY" bootstrap_journal)" -o json)"
-  if [[ -n "$receipt" ]]; then receipt_hash="$(sha256_file "$receipt")"; fi
+  verify_bootstrap_journal_binding "$journal"
+  verify_bootstrap_lease_receipt_context "$holder" "$receipt"
+  receipt_hash="$(sha256_file "$receipt")"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  updated="$(jq --arg step "$step" --arg now "$now" --arg receipt "$receipt_hash" '
-    .data.step = $step | .data.updatedUtc = $now | .data.lastReceiptSha256 = $receipt
+  updated="$(jq --arg step "$step" --arg now "$now" --arg holder "$holder" --arg receipt "$receipt_hash" '
+    .data.step = $step | .data.updatedUtc = $now | .data.holder = $holder |
+    .data.lastReceiptSha256 = $receipt
   ' <<<"$journal")"
   kubectl -n "$(kube_namespace)" replace -f - <<<"$updated" >/dev/null
 }
 
+ensure_bootstrap_journal() {
+  local step="$1" holder="$2" receipt="$3" now receipt_hash source_hash freeze_hash
+  verify_bootstrap_lease_receipt_context "$holder" "$receipt"
+  if kubectl -n "$(kube_namespace)" get configmap \
+    "$(policy_value "$POLICY" bootstrap_journal)" >/dev/null 2>&1; then
+    bootstrap_journal_step "$step" "$holder" "$receipt"
+    return 0
+  fi
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  receipt_hash="$(sha256_file "$receipt")"
+  source_hash="$(policy_value "$FREEZE" authority_sha256)"
+  freeze_hash="$(sha256_file "$FREEZE")"
+  kubectl -n "$(kube_namespace)" create configmap "$(policy_value "$POLICY" bootstrap_journal)" \
+    --from-literal=step="$step" \
+    --from-literal=holder="$holder" \
+    --from-literal=createdUtc="$now" \
+    --from-literal=updatedUtc="$now" \
+    --from-literal=lastReceiptSha256="$receipt_hash" \
+    --from-literal=sounioSourceSha256="$source_hash" \
+    --from-literal=semanticsFreezeSha256="$freeze_hash" >/dev/null
+}
+
 admission_current() {
   admission_fail_closed "$(lease_json)"
+}
+
+bootstrap_gpu_admission_denied() {
+  local output status
+  set +e
+  output="$(kubectl create --dry-run=server -f - 2>&1 <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pireus-bootstrap-gpu-deny-probe
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: $(policy_value "$POLICY" reservation_image)
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+EOF
+)"
+  status=$?
+  set -e
+  [[ $status -ne 0 && ( "$output" == *'Spark GPU Pods require the current Pireus Lease epoch'* || \
+    "$output" == *'pireus-spark-pair-fence'* ) ]]
 }
 
 install_fence() {
@@ -929,10 +1236,12 @@ install_fence() {
   kubectl apply --server-side --field-manager=pireus-spark-pair -f "$manifest" >/dev/null
   sync_admission_projection
   wait_for 'fail-closed Spark admission projection' admission_current "$holder" "$epoch"
+  bootstrap_gpu_admission_denied || fail 'generic GPU Pod was not denied during UNINITIALIZED bootstrap'
 
   key="$(policy_value "$POLICY" spark_taint_key)"
   value="$(policy_value "$POLICY" spark_taint_value)"
   effect="$(policy_value "$POLICY" spark_taint_effect)"
+  kubectl taint nodes "$(node0)" "$(node1)" "$key=$value:$effect" --overwrite >/dev/null
   for plugin_name in "$(policy_value "$POLICY" device_plugin_0_name)" \
     "$(policy_value "$POLICY" device_plugin_1_name)"; do
     plugin="$(kubectl -n kube-system get daemonset "$plugin_name" -o json)"
@@ -950,11 +1259,10 @@ install_fence() {
       --timeout="$(policy_value "$POLICY" operation_timeout_seconds)s" >/dev/null
     renew_lease_material "$holder" "$epoch"
   done
-  kubectl taint nodes "$(node0)" "$(node1)" "$key=$value:$effect" --overwrite >/dev/null
   pods="$(kubectl get pods -A -o json)"
   unexpected_gpu_consumers_zero "$pods" "$epoch" "$holder" || \
     fail 'unexpected Pod remains on the fenced Spark pair'
-  bootstrap_journal_step FENCE_INSTALLED "$receipt"
+  bootstrap_journal_step FENCE_INSTALLED "$holder" "$receipt"
 }
 
 wait_nodeset_observed() {
@@ -964,6 +1272,26 @@ wait_nodeset_observed() {
   observed="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
     "$(policy_value "$POLICY" nodeset_name)" -o jsonpath='{.status.observedGeneration}')"
   [[ "$generation" == "$observed" ]]
+}
+
+refresh_nodeset_generation() {
+  local holder="$1" epoch="$2" lease generation now updated
+  lease="$(lease_json)"
+  verify_lease_freeze_binding "$lease"
+  [[ "$(jq -r '.spec.holderIdentity // ""' <<<"$lease")" == "$holder" ]] || fail 'NodeSet generation refresh holder mismatch'
+  [[ "$(jq -r --arg key "$(policy_value "$POLICY" epoch_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$epoch" ]] || fail 'NodeSet generation refresh epoch mismatch'
+  [[ "$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == UNINITIALIZED ]] || fail 'NodeSet generation refresh outside bootstrap'
+  lease_is_live "$lease" || fail 'Lease expired before NodeSet generation refresh'
+  generation="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
+    "$(policy_value "$POLICY" nodeset_name)" -o jsonpath='{.metadata.generation}')"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  updated="$(jq --arg generation "$generation" --arg now "$now" \
+    --arg key "$(policy_value "$POLICY" nodeset_generation_annotation)" '
+      .metadata.annotations[$key] = $generation |
+      .spec.renewTime = $now
+    ' <<<"$lease")"
+  replace_lease <<<"$updated"
+  sync_admission_projection "$updated"
 }
 
 install_gpu_bound_slurmd() {
@@ -996,9 +1324,11 @@ install_gpu_bound_slurmd() {
     ' <<<"$nodeset")"
   kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" replace -f - <<<"$patched" >/dev/null
   wait_for 'NodeSet controller observation' wait_nodeset_observed "$holder" "$epoch"
+  refresh_nodeset_generation "$holder" "$epoch"
+  wait_for 'legacy non-GPU-accounted slurmd pods to terminate' slurmd_absent "$holder" "$epoch"
   kubectl label nodes "$(node0)" "$(node1)" "$selector_key=$selector_value" --overwrite >/dev/null
   wait_for 'both GPU-bound slurmd pods' slurmd_bound "$holder" "$epoch"
-  bootstrap_journal_step SLURMD_GPU_BOUND "$receipt"
+  bootstrap_journal_step SLURMD_GPU_BOUND "$holder" "$receipt"
 }
 
 resume_slurm() {
@@ -1012,30 +1342,28 @@ resume_slurm() {
   wait_for 'both Slurm nodes to resume idle' slurm_resumed "$holder" "$epoch"
   if [[ "$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" \
     '.metadata.annotations[$key]' <<<"$(lease_json)")" == UNINITIALIZED ]]; then
-    bootstrap_journal_step SLURM_RESUMED "$receipt"
+    bootstrap_journal_step SLURM_RESUMED "$holder" "$receipt"
   fi
 }
 
 bootstrap_lease() {
-  local namespace name duration generation source_hash freeze_hash now holder journal
+  local namespace name duration generation source_hash freeze_hash now holder epoch receipt
   holder="$(arg_value --holder "$@")"
+  epoch="$(arg_value --epoch "$@")"
+  receipt="$(arg_value --receipt "$@")"
+  [[ "$epoch" == 1 ]] || fail 'initial bootstrap epoch must be one'
+  verify_receipt "$receipt" 28 "$epoch"
   namespace="$(kube_namespace)"
   name="$(lease_name)"
+  kubectl -n "$namespace" get lease "$name" >/dev/null 2>&1 && fail 'arbiter Lease already exists'
+  kubectl -n "$namespace" get configmap "$(policy_value "$POLICY" bootstrap_journal)" >/dev/null 2>&1 && \
+    fail 'bootstrap journal already exists'
   duration="$(policy_value "$POLICY" lease_duration_seconds)"
   generation="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
     "$(policy_value "$POLICY" nodeset_name)" -o jsonpath='{.metadata.generation}')"
   source_hash="$(policy_value "$FREEZE" authority_sha256)"
   freeze_hash="$(sha256sum "$FREEZE" | cut -d ' ' -f 1)"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  journal="$(policy_value "$POLICY" bootstrap_journal)"
-  kubectl -n "$namespace" create configmap "$journal" \
-    --from-literal=step=LEASE_INTENT \
-    --from-literal=holder="$holder" \
-    --from-literal=createdUtc="$now" \
-    --from-literal=updatedUtc="$now" \
-    --from-literal=lastReceiptSha256=none \
-    --from-literal=sounioSourceSha256="$source_hash" \
-    --from-literal=semanticsFreezeSha256="$freeze_hash" >/dev/null
   kubectl -n "$namespace" create -f - >/dev/null <<EOF
 apiVersion: coordination.k8s.io/v1
 kind: Lease
@@ -1056,7 +1384,8 @@ spec:
 EOF
   kubectl annotate nodes "$(node0)" "$(node1)" \
     "$(policy_value "$POLICY" epoch_annotation)=1" --overwrite >/dev/null
-  bootstrap_journal_step LEASE_INITIALIZED
+  ensure_bootstrap_journal LEASE_INITIALIZED "$holder" "$receipt"
+  printf 'epoch=1 state=UNINITIALIZED\n'
 }
 
 main() {
@@ -1066,13 +1395,19 @@ main() {
   [[ "${1:-}" == --freeze ]] || fail 'expected --freeze FILE'
   FREEZE="$2"
   shift 2
+  [[ "$(realpath "$POLICY")" == "$ROOT_DIR/tools/cluster/spark_pair_arbiter.policy.v1" ]] || \
+    fail 'real backend requires the canonical material policy'
+  [[ "$(realpath "$FREEZE")" == "$ROOT_DIR/tools/cluster/spark_pair_arbiter.freeze.v1" ]] || \
+    fail 'real backend requires the canonical semantics freeze'
   verify_frozen_material
   local command="${1:-}"
   shift || true
   case "$command" in
+    prebootstrap-facts) prebootstrap_facts "$@" ;;
     facts) facts "$@" ;;
     lease-acquire) lease_acquire "$@" ;;
     lease-recovery-acquire) lease_recovery_acquire "$@" ;;
+    lease-bootstrap-recovery-acquire) lease_bootstrap_recovery_acquire "$@" ;;
     lease-transition) lease_transition "$@" ;;
     lease-renew) lease_renew "$@" ;;
     drain-slurm) drain_slurm "$@" ;;
