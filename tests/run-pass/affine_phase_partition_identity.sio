@@ -1,0 +1,99 @@
+//@ run-pass
+//@ exit-code: 0
+//@ description: stdlib/epistemic/affine — a partition of a shared-source quantity (two PK phases summing to 2D/CL) has NEGATIVE phase covariance and the affine sum recovers the exact form; the scalar ep_* chain over-states (RQ4, §8.4)
+// Compact form of docs/research/sounio/rq4_vanco_two_compartment_flip.sio (one patient). Stage
+// functions stay far below the Madaros local-slot budget (#2318): each holds ≤ 6 Affine locals.
+
+use epistemic::affine::{
+    af_measured, af_const, af_add, af_sub, af_scale, af_mul, af_div, af_sqrt,
+    af_variance, af_cov, af_value, af_sources_disjoint,
+}
+
+fn near_rel(a: f64, b: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    let ab = if b < 0.0 { 0.0 - b } else { b }
+    ad <= 0.00000001 * (1.0 + ab)
+}
+
+// CL = 0.695·(75·w/(72·SCr)·0.06) + 0.05   (Cockcroft–Gault → Matzke)
+fn cl_of(w: &Affine, sc: &Affine) -> Affine with Mut, Div, Panic {
+    let w75 = af_scale(w, 75.0)
+    let sc72 = af_scale(sc, 72.0)
+    let crcl = af_div(&w75, &sc72)
+    let renal = af_scale(&crcl, 0.06 * 0.695)
+    let nr = af_const(0.05)
+    af_add(&renal, &nr)
+}
+
+// α (which 0) / β (which 1) of the two-compartment system from k10, k12, k21
+fn root_of(k10: &Affine, k12: &Affine, k21: &Affine, which: i64) -> Affine with Mut, Div, Panic {
+    let s01 = af_add(k10, k12)
+    let s = af_add(&s01, k21)
+    let p = af_mul(k10, k21)
+    let s2 = af_mul(&s, &s)
+    let p4 = af_scale(&p, 4.0)
+    let rad = af_sub(&s2, &p4)
+    let disc = af_sqrt(&rad)
+    if which == 0 { let spd = af_add(&s, &disc); return af_scale(&spd, 0.5) }
+    let smd = af_sub(&s, &disc)
+    af_scale(&smd, 0.5)
+}
+
+// 2·A/α (which 0) or 2·B/β (which 1) with A = (D/Vc)(α−k21)/(α−β), B = (D/Vc)(k21−β)/(α−β)
+fn phase_of(dvc: &Affine, alpha: &Affine, beta: &Affine, k21: &Affine, which: i64) -> Affine with Mut, Div, Panic {
+    let amb = af_sub(alpha, beta)
+    if which == 0 {
+        let amk = af_sub(alpha, k21)
+        let ca = af_div(&amk, &amb)
+        let a_ = af_mul(dvc, &ca)
+        let aa = af_div(&a_, alpha)
+        return af_scale(&aa, 2.0)
+    }
+    let kmb = af_sub(k21, beta)
+    let cb = af_div(&kmb, &amb)
+    let b_ = af_mul(dvc, &cb)
+    let bb = af_div(&b_, beta)
+    af_scale(&bb, 2.0)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var ok: i64 = 1
+    // the paper's discriminating patient: 70 ± 1 kg, SCr 1.40 ± 0.14, Q 7 ± 1.4, Vp 35 ± 7, 500 mg q12h
+    let w = af_measured(70.0, 1.0, 0)
+    let sc = af_measured(1.40, 0.14, 1)
+    let q = af_measured(7.0, 1.4, 2)
+    let vp = af_measured(35.0, 7.0, 3)
+    let cl = cl_of(&w, &sc)
+    let vc = af_scale(&w, 0.5)                     // shares the weight source with CL
+    let k10 = af_div(&cl, &vc)
+    let k12 = af_div(&q, &vc)
+    let k21 = af_div(&q, &vp)
+    let alpha = root_of(&k10, &k12, &k21, 0)
+    let beta = root_of(&k10, &k12, &k21, 1)
+    let d = af_const(500.0)
+    let dvc = af_div(&d, &vc)
+    let pa = phase_of(&dvc, &alpha, &beta, &k21, 0)
+    let pb = phase_of(&dvc, &alpha, &beta, &k21, 1)
+    let auc = af_add(&pa, &pb)
+    let d2 = af_const(1000.0)
+    let direct = af_div(&d2, &cl)                  // the identity: AUC24 = 2·D/CL
+
+    // (1) identity holds to first order, value AND variance (Q, Vp cancel exactly)
+    if !near_rel(af_value(&auc), af_value(&direct)) { ok = 0 }
+    if !near_rel(af_variance(&auc), af_variance(&direct)) { ok = 0 }
+    // (2) the phases are NOT disjoint (E230 would reject pa + pb) and their covariance is negative
+    if af_sources_disjoint(&pa, &pb) { ok = 0 }
+    if !(af_cov(&pa, &pb) < 0.0) { ok = 0 }
+    // (3) hence the independence-assuming add over-states: naive > true
+    if !(af_variance(&pa) + af_variance(&pb) > af_variance(&auc)) { ok = 0 }
+    // (4) and the paper's numbers: AUC ≈ 450, u ≈ 44 → lower 95 % bound below 400 (the WARN)
+    let v = af_value(&auc)
+    let u2 = 4.0 * af_variance(&auc)               // (2u)²
+    if !(v > 440.0 && v < 460.0) { ok = 0 }
+    if !((v - 400.0) * (v - 400.0) < u2) { ok = 0 }  // v − 2u < 400
+
+    if ok == 1 { println("AFFINE_PHASE_PARTITION_IDENTITY PASS"); return 0 }
+    println("AFFINE_PHASE_PARTITION_IDENTITY FAIL")
+    1
+}
