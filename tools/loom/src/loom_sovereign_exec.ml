@@ -122,7 +122,8 @@ let load_gate root environment =
     failf "sovereign-authority-runtime-hash-mismatch";
   let frame =
     String.concat " "
-      [ Loom_exec.required semantic "production_mode";
+      [ Loom_exec.required semantic "wire_schema";
+        Loom_exec.required semantic "production_mode";
         Loom_exec.required semantic "production_stage";
         Loom_exec.required semantic "production_word";
         Loom_exec.required semantic "sabotage_count";
