@@ -7,6 +7,7 @@
 
 #include <sys/stat.h>
 #include <sys/prctl.h>
+#include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -16,12 +17,14 @@
 #include <cerrno>
 #include <chrono>
 #include <cctype>
+#include <csignal>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
 #include <initializer_list>
 #include <limits>
 #include <map>
+#include <optional>
 #include <poll.h>
 #include <sstream>
 #include <stdexcept>
@@ -38,10 +41,20 @@ constexpr std::size_t kMaximumStdoutBytes = 1024 * 1024;
 constexpr std::size_t kMaximumStderrBytes = 1024 * 1024;
 constexpr long long kExecutionTimeoutMilliseconds = 15'000;
 constexpr long long kExtinctionTimeoutMilliseconds = 2'000;
+#ifndef LOOM_CAUSAL_BARRIER_HOLD_TIMEOUT_MS
+#define LOOM_CAUSAL_BARRIER_HOLD_TIMEOUT_MS 600000
+#endif
+constexpr long long kBarrierAcquireTimeoutMilliseconds = 5'000;
+constexpr long long kBarrierHoldTimeoutMilliseconds =
+    LOOM_CAUSAL_BARRIER_HOLD_TIMEOUT_MS;
 constexpr auto kExecutionTimeout =
     std::chrono::milliseconds(kExecutionTimeoutMilliseconds);
 constexpr auto kExtinctionTimeout =
     std::chrono::milliseconds(kExtinctionTimeoutMilliseconds);
+constexpr auto kBarrierAcquireTimeout =
+    std::chrono::milliseconds(kBarrierAcquireTimeoutMilliseconds);
+constexpr auto kBarrierHoldTimeout =
+    std::chrono::milliseconds(kBarrierHoldTimeoutMilliseconds);
 constexpr int kCapturePollMilliseconds = 20;
 
 class Error : public std::runtime_error {
@@ -176,8 +189,10 @@ std::string read_small_path(const std::string& path) {
   return read_fd(descriptor.get(), 128 * 1024);
 }
 
-std::uint64_t start_tick() {
-  const std::string value = trim(read_small_path("/proc/self/stat"));
+std::uint64_t process_start_tick(pid_t pid) {
+  const std::string value = trim(read_small_path(
+      pid == getpid() ? "/proc/self/stat"
+                      : "/proc/" + std::to_string(pid) + "/stat"));
   const std::size_t close = value.rfind(')');
   if (close == std::string::npos) throw Error("process stat malformed");
   std::istringstream input(value.substr(close + 2));
@@ -193,10 +208,20 @@ std::uint64_t start_tick() {
   return parsed;
 }
 
-std::string executable_sha256() {
-  Fd descriptor(open("/proc/self/exe", O_RDONLY | O_CLOEXEC));
-  if (descriptor.get() < 0) throw Error("cannot open material cell executable");
+std::string process_executable_sha256(pid_t pid) {
+  const std::string path =
+      pid == getpid() ? "/proc/self/exe"
+                      : "/proc/" + std::to_string(pid) + "/exe";
+  Fd descriptor(open(path.c_str(), O_RDONLY | O_CLOEXEC));
+  if (descriptor.get() < 0) throw Error("cannot open process executable: " + path);
   return file_sha256(descriptor.get());
+}
+
+std::string process_cgroup_sha256(pid_t pid) {
+  const std::string path =
+      pid == getpid() ? "/proc/self/cgroup"
+                      : "/proc/" + std::to_string(pid) + "/cgroup";
+  return sha256(read_small_path(path));
 }
 
 struct Principal {
@@ -218,9 +243,9 @@ Principal principal() {
   if (value.uid == 0 || value.gid == 0) {
     throw Error("root material cell principal refused");
   }
-  value.start = start_tick();
-  value.cgroup_sha256 = sha256(read_small_path("/proc/self/cgroup"));
-  value.executable_sha256 = executable_sha256();
+  value.start = process_start_tick(value.pid);
+  value.cgroup_sha256 = process_cgroup_sha256(value.pid);
+  value.executable_sha256 = process_executable_sha256(value.pid);
   std::ostringstream canonical;
   canonical << "LOOM_CAUSAL_MATERIAL_PRINCIPAL/1"
             << "|pid=" << value.pid << "|start_tick=" << value.start
@@ -318,6 +343,62 @@ std::vector<std::string> words(const std::string& line) {
   return output;
 }
 
+bool lowercase_hex(const std::string& value, std::size_t size) {
+  return value.size() == size &&
+         std::all_of(value.begin(), value.end(), [](unsigned char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
+}
+
+std::string read_protocol_line(
+    const std::string& absent_reason,
+    std::optional<std::chrono::steady_clock::time_point> deadline =
+        std::nullopt) {
+  std::string line;
+  line.reserve(512);
+  for (;;) {
+    if (deadline.has_value()) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= *deadline) throw Error(absent_reason);
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+          *deadline - now);
+      const long long bounded = std::max<long long>(1, remaining.count());
+      struct pollfd candidate {STDIN_FILENO, POLLIN | POLLHUP | POLLERR, 0};
+      const int ready = poll(&candidate, 1, static_cast<int>(
+          std::min<long long>(bounded, std::numeric_limits<int>::max())));
+      if (ready == 0) throw Error(absent_reason);
+      if (ready < 0) {
+        if (errno == EINTR) continue;
+        throw Error("protocol input poll failed");
+      }
+    }
+    char character = 0;
+    const ssize_t count = read(STDIN_FILENO, &character, 1);
+    if (count == 1) {
+      if (character == '\n') return line;
+      if (character == '\0' || line.size() >= kMaximumRecordBytes) {
+        throw Error("protocol line malformed or too large");
+      }
+      line.push_back(character);
+    } else if (count == 0) {
+      throw Error(absent_reason);
+    } else if (errno != EINTR) {
+      throw Error("protocol input read failed");
+    }
+  }
+}
+
+bool protocol_input_pending() {
+  struct pollfd candidate {STDIN_FILENO, POLLIN | POLLHUP | POLLERR, 0};
+  const int ready = poll(&candidate, 1, 0);
+  if (ready < 0) {
+    if (errno == EINTR) return protocol_input_pending();
+    throw Error("protocol input poll failed");
+  }
+  return ready == 1 && (candidate.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+}
+
 std::map<std::string, std::string> record_fields(const std::string& record) {
   if (record.empty() || record.back() != '\n') {
     throw Error("record missing final newline");
@@ -403,6 +484,16 @@ struct Execution {
   int exit_code = 255;
   std::string stdout_text;
   std::string stderr_text;
+  pid_t material_pid = -1;
+  std::uint64_t material_start_tick = 0;
+  std::string material_cgroup_sha256;
+  std::string material_executable_sha256;
+  std::string running_witness_sha256;
+  std::string barrier_nonce_sha256;
+  std::string run_grant_generation;
+  std::string sounio_release_receipt_sha256;
+  bool post_exec_barrier = false;
+  bool release_bound = false;
   bool process_group_owned = false;
   bool process_group_extinct = false;
   bool cell_local_descendants_extinct = false;
@@ -505,7 +596,80 @@ bool reap_execution_leader(pid_t leader, int& status, std::string& failure) {
   return false;
 }
 
-Execution run_artifact(int artifact) {
+struct RunAuthority {
+  std::string ticket_sha256;
+  std::string artifact_sha256;
+  std::string run_grant_generation;
+  std::string barrier_nonce_sha256;
+  std::string guardian_generation;
+  std::string unit;
+  std::string unit_invocation_id;
+  std::string principal_sha256;
+  std::string descriptor_binding_sha256;
+};
+
+std::string running_witness_canonical(const RunAuthority& authority,
+                                      const Execution& execution) {
+  std::ostringstream canonical;
+  canonical << "LOOM_CAUSAL_MATERIAL_RUNNING_IN_EXEC/1"
+            << "|guardian_generation=" << authority.guardian_generation
+            << "|unit=" << authority.unit
+            << "|unit_invocation_id=" << authority.unit_invocation_id
+            << "|material_pid=" << execution.material_pid
+            << "|material_start_tick=" << execution.material_start_tick
+            << "|material_cgroup_sha256="
+            << execution.material_cgroup_sha256
+            << "|run_grant_generation=" << authority.run_grant_generation
+            << "|barrier_nonce_sha256=" << authority.barrier_nonce_sha256
+            << "|run_ticket_sha256=" << authority.ticket_sha256
+            << "|artifact_sha256=" << authority.artifact_sha256
+            << "|principal_sha256=" << authority.principal_sha256
+            << "|descriptor_binding_sha256="
+            << authority.descriptor_binding_sha256;
+  return canonical.str();
+}
+
+int wait_for_tracee(pid_t pid,
+                    std::chrono::steady_clock::time_point deadline,
+                    const std::string& timeout_reason) {
+  for (;;) {
+    int status = 0;
+    const pid_t waited = waitpid(pid, &status, WUNTRACED | WNOHANG);
+    if (waited == pid) return status;
+    if (waited < 0 && errno != EINTR) {
+      throw Error("artifact trace wait failed");
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      throw Error(timeout_reason);
+    }
+    poll(nullptr, 0, 1);
+  }
+}
+
+void terminate_failed_execution(pid_t pid, bool traced) noexcept {
+  try {
+    if (traced) static_cast<void>(ptrace(PTRACE_KILL, pid, nullptr, nullptr));
+    std::string ignored;
+    kill_execution_group(pid, ignored);
+    static_cast<void>(kill(pid, SIGKILL));
+    kill_adopted_descendants(pid, ignored);
+    for (;;) {
+      const pid_t waited = waitpid(pid, nullptr, 0);
+      if (waited == pid || (waited < 0 && errno == ECHILD)) break;
+      if (waited < 0 && errno != EINTR) break;
+    }
+    kill_adopted_descendants(pid, ignored);
+    for (const pid_t child : direct_children()) {
+      if (child == pid) continue;
+      static_cast<void>(kill(child, SIGKILL));
+      while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) {
+      }
+    }
+  } catch (...) {
+  }
+}
+
+Execution run_artifact(int artifact, const RunAuthority& authority) {
   if (prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0) {
     throw Error("cannot become artifact descendant subreaper");
   }
@@ -539,6 +703,8 @@ Execution run_artifact(int artifact) {
     stdout_write = Fd();
     stderr_read = Fd();
     stderr_write = Fd();
+    if (ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) != 0) _exit(125);
+    if (raise(SIGSTOP) != 0) _exit(125);
     char argument[] = "loom-artifact";
     char* arguments[] = {argument, nullptr};
     char lang[] = "LANG=C";
@@ -562,7 +728,103 @@ Execution run_artifact(int artifact) {
   stderr_write = Fd();
 
   Execution result;
+  result.material_pid = pid;
   result.process_group_owned = true;
+  bool tracee_held = false;
+  try {
+    const auto acquire_deadline =
+        std::chrono::steady_clock::now() + kBarrierAcquireTimeout;
+    int trace_status = wait_for_tracee(
+        pid, acquire_deadline, "artifact exec barrier acquisition timed out");
+    if (!WIFSTOPPED(trace_status) || WSTOPSIG(trace_status) != SIGSTOP) {
+      throw Error("artifact initial trace stop invalid");
+    }
+    const long options = PTRACE_O_TRACEEXEC | PTRACE_O_EXITKILL;
+    if (ptrace(PTRACE_SETOPTIONS, pid, nullptr,
+               reinterpret_cast<void*>(options)) != 0 ||
+        ptrace(PTRACE_CONT, pid, nullptr, nullptr) != 0) {
+      throw Error("artifact post-exec barrier unavailable");
+    }
+    for (;;) {
+      trace_status = wait_for_tracee(
+          pid, acquire_deadline, "artifact exec barrier acquisition timed out");
+      if (WIFEXITED(trace_status) || WIFSIGNALED(trace_status)) {
+        throw Error("artifact exited before post-exec barrier");
+      }
+      if (!WIFSTOPPED(trace_status)) {
+        throw Error("artifact trace state invalid before exec barrier");
+      }
+      const unsigned int event = static_cast<unsigned int>(trace_status) >> 16;
+      if (WSTOPSIG(trace_status) == SIGTRAP &&
+          event == PTRACE_EVENT_EXEC) {
+        tracee_held = true;
+        break;
+      }
+      if (ptrace(PTRACE_CONT, pid, nullptr, nullptr) != 0) {
+        throw Error("artifact trace resume failed before exec barrier");
+      }
+    }
+
+    result.material_start_tick = process_start_tick(pid);
+    result.material_cgroup_sha256 = process_cgroup_sha256(pid);
+    result.material_executable_sha256 = process_executable_sha256(pid);
+    if (result.material_executable_sha256 != authority.artifact_sha256) {
+      throw Error("artifact executable changed at post-exec barrier");
+    }
+    result.barrier_nonce_sha256 = authority.barrier_nonce_sha256;
+    result.run_grant_generation = authority.run_grant_generation;
+    result.running_witness_sha256 =
+        sha256(running_witness_canonical(authority, result));
+    result.post_exec_barrier = true;
+    std::cout
+        << "LOOM_CAUSAL_MATERIAL_EXEC_BARRIER_V1 mode=RUN_EXACT"
+        << " semantic_authority=Sounio action=9037"
+        << " state=MATERIAL_RUNNING_IN_EXEC"
+        << " material_pid=" << result.material_pid
+        << " material_start_tick=" << result.material_start_tick
+        << " material_cgroup_sha256=" << result.material_cgroup_sha256
+        << " material_executable_sha256="
+        << result.material_executable_sha256
+        << " run_ticket_sha256=" << authority.ticket_sha256
+        << " artifact_sha256=" << authority.artifact_sha256
+        << " run_grant_generation=" << authority.run_grant_generation
+        << " guardian_generation=" << authority.guardian_generation
+        << " unit=" << authority.unit
+        << " unit_invocation_id=" << authority.unit_invocation_id
+        << " barrier_nonce_sha256=" << authority.barrier_nonce_sha256
+        << " principal_sha256=" << authority.principal_sha256
+        << " descriptor_binding_sha256="
+        << authority.descriptor_binding_sha256
+        << " running_witness_sha256=" << result.running_witness_sha256
+        << " ptrace_event=PTRACE_EVENT_EXEC"
+        << " artifact_instruction_observed=false\n" << std::flush;
+
+    const auto release_deadline =
+        std::chrono::steady_clock::now() + kBarrierHoldTimeout;
+    const auto release = words(read_protocol_line(
+        "RUN_EXACT release frame absent or barrier hold timed out",
+        release_deadline));
+    if (release.size() != 5 || release[0] != "RELEASE" ||
+        release[1] != "RUN_EXACT" || release[2] != result.running_witness_sha256 ||
+        !digest(release[3]) || sha256(release[3]) != authority.barrier_nonce_sha256 ||
+        !digest(release[4])) {
+      throw Error("RUN_EXACT release frame binding invalid");
+    }
+    result.sounio_release_receipt_sha256 = release[4];
+    if (protocol_input_pending()) {
+      throw Error("RUN_EXACT duplicate or early post-release frame refused");
+    }
+    if (process_start_tick(pid) != result.material_start_tick ||
+        process_cgroup_sha256(pid) != result.material_cgroup_sha256 ||
+        process_executable_sha256(pid) != result.material_executable_sha256) {
+      throw Error("artifact identity changed while exec barrier held");
+    }
+    if (ptrace(PTRACE_DETACH, pid, nullptr, nullptr) != 0) {
+      throw Error("artifact exec barrier release failed");
+    }
+    tracee_held = false;
+    result.release_bound = true;
+
   bool stdout_open = true;
   bool stderr_open = true;
   bool stdout_overflowed = false;
@@ -683,12 +945,14 @@ Execution run_artifact(int artifact) {
   result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status)
                                       : 128 + WTERMSIG(status);
   return result;
+  } catch (...) {
+    terminate_failed_execution(pid, tracee_held);
+    throw;
+  }
 }
 
 void close_protocol(const std::string& mode, const std::string& record_sha256) {
-  std::string line;
-  if (!std::getline(std::cin, line)) throw Error("close frame absent");
-  const auto frame = words(line);
+  const auto frame = words(read_protocol_line("close frame absent"));
   if (frame.size() != 3 || frame[0] != "CLOSE" || frame[1] != mode ||
       frame[2] != record_sha256) {
     throw Error("close frame binding invalid");
@@ -719,11 +983,11 @@ int run_cell(const Principal& identity,
             << " descriptor_binding_schema=LOOM_CAUSAL_MATERIAL_DESCRIPTORS/2"
             << " descriptor_binding_sha256=" << descriptor_sha256
             << " inherited_descriptors=true arbitrary_path=false\n" << std::flush;
-  std::string line;
-  if (!std::getline(std::cin, line)) throw Error("RUN_EXACT arm frame absent");
-  const auto frame = words(line);
-  if (frame.size() != 4 || frame[0] != "ARM" || frame[1] != "RUN_EXACT" ||
-      !digest(frame[2]) || !digest(frame[3])) {
+  const auto frame = words(read_protocol_line("RUN_EXACT arm frame absent"));
+  if (frame.size() != 9 || frame[0] != "ARM" || frame[1] != "RUN_EXACT" ||
+      !digest(frame[2]) || !digest(frame[3]) || !digest(frame[4]) ||
+      !digest(frame[5]) || !digest(frame[6]) || !atom(frame[7]) ||
+      !lowercase_hex(frame[8], 32)) {
     throw Error("RUN_EXACT arm frame malformed");
   }
   const std::string ticket = frame[2];
@@ -731,7 +995,18 @@ int run_cell(const Principal& identity,
   if (artifact_sha256 != frame[3]) {
     throw Error("RUN_EXACT artifact handle mismatch");
   }
-  const Execution result = run_artifact(artifact);
+  const RunAuthority authority{
+      .ticket_sha256 = ticket,
+      .artifact_sha256 = artifact_sha256,
+      .run_grant_generation = frame[4],
+      .barrier_nonce_sha256 = frame[5],
+      .guardian_generation = frame[6],
+      .unit = frame[7],
+      .unit_invocation_id = frame[8],
+      .principal_sha256 = identity.sha256,
+      .descriptor_binding_sha256 = descriptor_sha256,
+  };
+  const Execution result = run_artifact(artifact, authority);
   const std::string stdout_sha256 = sha256(result.stdout_text);
   const std::string stderr_sha256 = sha256(result.stderr_text);
   std::ostringstream record;
@@ -739,6 +1014,23 @@ int run_cell(const Principal& identity,
          << "semantic_authority=Sounio\nsemantic_action=9037\n"
          << "mode=RUN_EXACT\nrun_ticket_sha256=" << ticket << '\n'
          << "artifact_sha256=" << artifact_sha256 << '\n'
+         << "run_grant_generation=" << result.run_grant_generation << '\n'
+         << "guardian_generation=" << authority.guardian_generation << '\n'
+         << "unit=" << authority.unit << '\n'
+         << "unit_invocation_id=" << authority.unit_invocation_id << '\n'
+         << "barrier_nonce_sha256=" << result.barrier_nonce_sha256 << '\n'
+         << "running_witness_sha256=" << result.running_witness_sha256 << '\n'
+         << "material_pid=" << result.material_pid << '\n'
+         << "material_start_tick=" << result.material_start_tick << '\n'
+         << "material_cgroup_sha256=" << result.material_cgroup_sha256 << '\n'
+         << "material_executable_sha256="
+         << result.material_executable_sha256 << '\n'
+         << "sounio_release_receipt_sha256="
+         << result.sounio_release_receipt_sha256 << '\n'
+         << "post_exec_barrier="
+         << (result.post_exec_barrier ? "true" : "false") << '\n'
+         << "release_bound=" << (result.release_bound ? "true" : "false")
+         << '\n'
          << "principal_sha256=" << identity.sha256 << '\n'
          << "descriptor_binding_sha256=" << descriptor_sha256 << '\n'
          << "exit_code=" << result.exit_code << '\n'
@@ -752,6 +1044,8 @@ int run_cell(const Principal& identity,
          << kExecutionTimeoutMilliseconds << '\n'
          << "extinction_timeout_milliseconds="
          << kExtinctionTimeoutMilliseconds << '\n'
+         << "barrier_hold_timeout_milliseconds="
+         << kBarrierHoldTimeoutMilliseconds << '\n'
          << "process_group_owned="
          << (result.process_group_owned ? "true" : "false") << '\n'
          << "process_group_extinct="
@@ -770,6 +1064,20 @@ int run_cell(const Principal& identity,
             << " handle=" << handle
             << " handle_sha256=" << sha256(handle)
             << " artifact_sha256=" << artifact_sha256
+            << " run_grant_generation=" << result.run_grant_generation
+            << " guardian_generation=" << authority.guardian_generation
+            << " unit=" << authority.unit
+            << " unit_invocation_id=" << authority.unit_invocation_id
+            << " barrier_nonce_sha256=" << result.barrier_nonce_sha256
+            << " running_witness_sha256=" << result.running_witness_sha256
+            << " material_pid=" << result.material_pid
+            << " material_start_tick=" << result.material_start_tick
+            << " material_cgroup_sha256=" << result.material_cgroup_sha256
+            << " material_executable_sha256="
+            << result.material_executable_sha256
+            << " sounio_release_receipt_sha256="
+            << result.sounio_release_receipt_sha256
+            << " post_exec_barrier=true release_bound=true"
             << " exit_code=" << result.exit_code
             << " stdout_sha256=" << stdout_sha256
             << " stderr_sha256=" << stderr_sha256
@@ -781,6 +1089,8 @@ int run_cell(const Principal& identity,
             << kExecutionTimeoutMilliseconds
             << " extinction_timeout_milliseconds="
             << kExtinctionTimeoutMilliseconds
+            << " barrier_hold_timeout_milliseconds="
+            << kBarrierHoldTimeoutMilliseconds
             << " process_group_owned=true process_group_extinct=true"
             << " cell_local_descendants_extinct=true"
             << " host_cgroup_extinction_measured=false"
@@ -815,9 +1125,7 @@ int attest_cell(const Principal& identity,
             << " descriptor_binding_schema=LOOM_CAUSAL_MATERIAL_DESCRIPTORS/2"
             << " descriptor_binding_sha256=" << descriptor_sha256
             << " inherited_descriptors=true arbitrary_path=false\n" << std::flush;
-  std::string line;
-  if (!std::getline(std::cin, line)) throw Error("ATTEST arm frame absent");
-  const auto frame = words(line);
+  const auto frame = words(read_protocol_line("ATTEST arm frame absent"));
   if (frame.size() != 6 || frame[0] != "ARM" || frame[1] != "ATTEST") {
     throw Error("ATTEST arm frame malformed");
   }
@@ -849,11 +1157,17 @@ int attest_cell(const Principal& identity,
   require_exact_fields(
       result,
       {"schema", "semantic_authority", "semantic_action", "mode",
-       "run_ticket_sha256", "artifact_sha256", "principal_sha256",
+       "run_ticket_sha256", "artifact_sha256", "run_grant_generation",
+       "guardian_generation", "unit", "unit_invocation_id",
+       "barrier_nonce_sha256", "running_witness_sha256", "material_pid",
+       "material_start_tick", "material_cgroup_sha256",
+       "material_executable_sha256", "sounio_release_receipt_sha256",
+       "post_exec_barrier", "release_bound", "principal_sha256",
        "descriptor_binding_sha256", "exit_code", "stdout_sha256",
        "stderr_sha256", "stdout_bytes", "stderr_bytes",
        "stdout_limit_bytes", "stderr_limit_bytes",
        "execution_timeout_milliseconds", "extinction_timeout_milliseconds",
+       "barrier_hold_timeout_milliseconds",
        "process_group_owned", "process_group_extinct",
        "cell_local_descendants_extinct",
        "host_cgroup_extinction_measured"},
@@ -891,6 +1205,22 @@ int attest_cell(const Principal& identity,
       require(result, "mode") != "RUN_EXACT" ||
       require(result, "exit_code") != "0" ||
       !digest(require(result, "run_ticket_sha256")) ||
+      !digest(require(result, "run_grant_generation")) ||
+      !digest(require(result, "guardian_generation")) ||
+      !atom(require(result, "unit")) ||
+      !lowercase_hex(require(result, "unit_invocation_id"), 32) ||
+      !digest(require(result, "barrier_nonce_sha256")) ||
+      !digest(require(result, "running_witness_sha256")) ||
+      !decimal(require(result, "material_pid")) ||
+      require(result, "material_pid") == "0" ||
+      !decimal(require(result, "material_start_tick")) ||
+      require(result, "material_start_tick") == "0" ||
+      !digest(require(result, "material_cgroup_sha256")) ||
+      require(result, "material_executable_sha256") !=
+          require(result, "artifact_sha256") ||
+      !digest(require(result, "sounio_release_receipt_sha256")) ||
+      require(result, "post_exec_barrier") != "true" ||
+      require(result, "release_bound") != "true" ||
       !digest(require(result, "principal_sha256")) ||
       !digest(require(result, "descriptor_binding_sha256")) ||
       !digest(require(result, "stdout_sha256")) ||
@@ -905,6 +1235,8 @@ int attest_cell(const Principal& identity,
           std::to_string(kExecutionTimeoutMilliseconds) ||
       require(result, "extinction_timeout_milliseconds") !=
           std::to_string(kExtinctionTimeoutMilliseconds) ||
+      require(result, "barrier_hold_timeout_milliseconds") !=
+          std::to_string(kBarrierHoldTimeoutMilliseconds) ||
       require(result, "process_group_owned") != "true" ||
       require(result, "process_group_extinct") != "true" ||
       require(result, "cell_local_descendants_extinct") != "true" ||
@@ -940,6 +1272,26 @@ int attest_cell(const Principal& identity,
          << "hardware_record_sha256=" << frame[5] << '\n'
          << "run_ticket_sha256=" << require(result, "run_ticket_sha256")
          << '\n'
+         << "run_grant_generation="
+         << require(result, "run_grant_generation") << '\n'
+         << "guardian_generation=" << require(result, "guardian_generation")
+         << '\n'
+         << "unit=" << require(result, "unit") << '\n'
+         << "unit_invocation_id=" << require(result, "unit_invocation_id")
+         << '\n'
+         << "barrier_nonce_sha256="
+         << require(result, "barrier_nonce_sha256") << '\n'
+         << "running_witness_sha256="
+         << require(result, "running_witness_sha256") << '\n'
+         << "material_pid=" << require(result, "material_pid") << '\n'
+         << "material_start_tick=" << require(result, "material_start_tick")
+         << '\n'
+         << "material_cgroup_sha256="
+         << require(result, "material_cgroup_sha256") << '\n'
+         << "material_executable_sha256="
+         << require(result, "material_executable_sha256") << '\n'
+         << "sounio_release_receipt_sha256="
+         << require(result, "sounio_release_receipt_sha256") << '\n'
          << "run_principal_sha256=" << require(result, "principal_sha256")
          << '\n'
          << "run_descriptor_binding_sha256="
@@ -964,6 +1316,14 @@ int attest_cell(const Principal& identity,
             << " handle_sha256=" << sha256(handle)
             << " artifact_sha256=" << require(compile, "artifact_sha256")
             << " result_record_sha256=" << frame[3]
+            << " running_witness_sha256="
+            << require(result, "running_witness_sha256")
+            << " run_grant_generation="
+            << require(result, "run_grant_generation")
+            << " barrier_nonce_sha256="
+            << require(result, "barrier_nonce_sha256")
+            << " sounio_release_receipt_sha256="
+            << require(result, "sounio_release_receipt_sha256")
             << " semantics_sha256=" << frame[4]
             << " hardware_record_sha256=" << frame[5]
             << " record_bytes=" << record_text.size()
