@@ -266,7 +266,42 @@ The last two are the interesting pair: the identical body is correct as a local
 function and correct as an imported one — the defect needs the *chained
 assignment* specifically.
 
-### The 51 that remain — a SECOND defect, not the same one
+### SECOND DEFECT FIXED — `ocp_mfi_cse` kept its table across basic blocks
+
+The narrowing below reduced the 51 to a two-line reproducer and six dead
+hypotheses. The peel mask then named the culprit in one pass: of the twelve
+peels, disabling **cse** alone restores the correct answer.
+
+`ocp_mfi_cse` matches `(op, src1, src2)` against a table and rewrites a repeat as
+a copy of the earlier result. That is valid only where the defining instruction
+**dominates** the use, and the peel has no dominance information. So
+
+    if a { return f(e) }
+    if b { return f(e) + k }
+
+had the second occurrence rewritten as a copy of the first, whose register is
+never written when the first branch is not taken. The value read was whatever the
+preceding call left there.
+
+`ocp_mfi_dse`, twenty lines above in the same file, already resets its table on
+`IrLabel`/`IrJump`/`IrBranchTrue`/`IrBranchFalse` for exactly this reason. CSE did
+not. Dropping the table at control flow makes it block-local, which is what a peel
+without dominance analysis can honestly claim.
+
+    after the DSE fix     51 diverged   (36 exit-code, 15 output)
+    after the CSE fix     40            (36 exit-code,  4 output)
+    fixed                 11            zero regressions
+
+Both fixes together: **632 -> 40**, 592 programs recovered.
+
+The output-changing class is where this one lived: 15 -> 4. The 36 exit-code
+divergences are untouched by it and remain open.
+
+Guarded by a second fixture in `madaros_opt_chained_call_gate.sh`,
+`opt_cse_branch_dominance_main.sio`, verified to fail on a compiler that carries
+the DSE fix but not this one.
+
+### How the 51 were narrowed — kept for the 40 that remain
 
 The DSE fix removed 587. The remainder splits:
 
@@ -315,8 +350,11 @@ The defect needs the branch chain inside `atan2_f64` AND a preceding `sqrt_f64`.
 Neither alone reproduces. This is not the call_args/DSE fault fixed above -- that
 one is fixed and this survives it.
 
-**Root cause not found.** Recorded at this depth so the next attempt starts from
-a two-line reproducer and six dead hypotheses rather than from 51 files.
+**Root cause found** — see the CSE section above. The narrowing recorded here is
+what led to it: with a stable two-line reproducer, the peel skip-mask named the
+culprit in a single pass. The 40 that remain are 36 exit-code divergences plus
+`gtt_reassignment_topology`, `gum_euler_ode`, `gum_iso_budget_ode` and
+`gum_reporting`, and are not reduced here.
 
 ## What this does NOT establish
 
