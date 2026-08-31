@@ -41,8 +41,16 @@ verify_runtime_root() {
       fail 'fixture-v1 is forbidden in the canonical controller'
   else
     [[ -z "$TEST_MODE" ]] || fail 'unknown test mode'
-    [[ -z "${SOUNIO_SOURCE_ROOT:-}${SOUNIO_SPARK_PAIR_POLICY:-}${SOUNIO_SPARK_PAIR_FREEZE:-}${SOUNIO_SPARK_PAIR_AUTHORITY:-}${SOUNIO_SPARK_PAIR_BUILD:-}${SOUNIO_SPARK_PAIR_BACKEND:-}" ]] || \
+    [[ -z "${SOUNIO_SOURCE_ROOT:-}${SOUNIO_SPARK_PAIR_POLICY:-}${SOUNIO_SPARK_PAIR_FREEZE:-}${SOUNIO_SPARK_PAIR_AUTHORITY:-}${SOUNIO_SPARK_PAIR_BUILD:-}${SOUNIO_SPARK_PAIR_BACKEND:-}${SOUNIO_SPARK_PAIR_COMMAND_TIMEOUT:-}" ]] || \
       fail 'runtime path overrides are forbidden in the canonical controller'
+  fi
+}
+
+configure_command_timeout() {
+  [[ "$COMMAND_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || fail 'controller command timeout must be positive'
+  if [[ "$TEST_MODE" != fixture-v1 ]]; then
+    [[ "$COMMAND_TIMEOUT" == "$(policy_value "$POLICY" controller_command_timeout_seconds)" ]] || \
+      fail 'controller command timeout drifted from material policy'
   fi
 }
 
@@ -84,6 +92,8 @@ verify_frozen_authority() {
   verify_frozen_file material_controller_source material_controller_sha256
   verify_frozen_file material_backend_source material_backend_sha256
   verify_frozen_file admission_manifest_source admission_manifest_sha256
+  verify_frozen_file host_fence_manifest_source host_fence_manifest_sha256
+  verify_frozen_file device_barrier_source device_barrier_source_sha256
   verify_frozen_file installer_source installer_sha256
   verify_frozen_file selftest_source selftest_sha256
   verify_frozen_file mock_backend_source mock_backend_sha256
@@ -240,6 +250,10 @@ action_name() {
     26) printf 'BOOTSTRAP_RESUME_SLURM\n' ;;
     27) printf 'BOOTSTRAP_TAKEOVER\n' ;;
     28) printf 'BOOTSTRAP_INITIALIZE\n' ;;
+    29) printf 'INSTALL_HOST_FENCE\n' ;;
+    30) printf 'FENCE_HOST_PAIR\n' ;;
+    31) printf 'GRANT_HOST_SLURM\n' ;;
+    32) printf 'GRANT_HOST_K8S\n' ;;
     *) fail "unknown action code: $1" ;;
   esac
 }
@@ -264,6 +278,7 @@ write_receipt() {
     printf 'material_policy_sha256=%s\n' "$(sha256_file "$POLICY")"
     printf 'material_backend_sha256=%s\n' "$(sha256_file "$BACKEND")"
     printf 'admission_manifest_sha256=%s\n' "$(policy_value "$FREEZE" admission_manifest_sha256)"
+    printf 'host_fence_manifest_sha256=%s\n' "$(policy_value "$FREEZE" host_fence_manifest_sha256)"
     printf 'toolchain=%s\n' "$toolchain"
     printf 'hardware=%s\n' "$hardware"
     printf 'command=%s %s\n' "$AUTHORITY" "$action"
@@ -279,17 +294,18 @@ write_receipt() {
 }
 
 admit_frame() {
-  local action="$1" expected_state="$2" expected_to="$3" frame="$4" state epoch observed authority_mask slurm_mask k8s_mask result status
+  local action="$1" expected_state="$2" expected_to="$3" frame="$4" state epoch observed authority_mask slurm_mask k8s_mask host_mask result status
   state="$(frame_field "$frame" state)"
   epoch="$(frame_field "$frame" epoch)"
   observed="$(frame_field "$frame" observed_epoch)"
   authority_mask="$(frame_field "$frame" authority_mask)"
   slurm_mask="$(frame_field "$frame" slurm_mask)"
   k8s_mask="$(frame_field "$frame" k8s_mask)"
+  host_mask="$(frame_field "$frame" host_mask)"
   [[ "$state" == "$expected_state" ]] || fail "expected $expected_state, observed $state"
   set +e
-  result="$(timeout "$COMMAND_TIMEOUT" "$AUTHORITY" 9024 "$action" "$(state_number "$state")" \
-    "$epoch" "$observed" "$authority_mask" "$slurm_mask" "$k8s_mask" 2>&1)"
+  result="$(timeout "$COMMAND_TIMEOUT" "$AUTHORITY" 9025 "$action" "$(state_number "$state")" \
+    "$epoch" "$observed" "$authority_mask" "$slurm_mask" "$k8s_mask" "$host_mask" 2>&1)"
   status=$?
   set -e
   write_receipt "$action" "$epoch" "$frame" "$result" "$expected_to"
@@ -334,19 +350,19 @@ rollback_to_slurm() {
   [[ $RECOVERY_ACTIVE -eq 0 ]] || return 1
   RECOVERY_ACTIVE=1
   enter_recovery || return 1
+  authorize_stay 29 RECOVERY_REQUIRED || return 1
+  backend install-host-fence --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null || return 1
   authorize_stay 15 RECOVERY_REQUIRED || return 1
   backend stop-workloads --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null || return 1
   backend delete-reservations --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null || return 1
   authorize_stay 22 RECOVERY_REQUIRED || return 1
   backend drain-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null || return 1
+  authorize_stay 30 RECOVERY_REQUIRED || return 1
+  backend fence-host-pair --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null || return 1
   authorize_stay 20 RECOVERY_REQUIRED || return 1
   backend detach-slurmd --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null || return 1
-  authorize_stay 21 RECOVERY_REQUIRED || return 1
-  backend create-reservations --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null || return 1
-  authorize_stay 16 RECOVERY_REQUIRED || return 1
-  backend probe-clean --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null || return 1
-  authorize_stay 17 RECOVERY_REQUIRED || return 1
-  backend delete-reservations --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null || return 1
+  authorize_stay 31 RECOVERY_REQUIRED || return 1
+  backend grant-host-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null || return 1
   authorize_stay 18 RECOVERY_REQUIRED || return 1
   backend restore-slurmd --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null || return 1
   authorize_stay 19 RECOVERY_REQUIRED || return 1
@@ -362,7 +378,7 @@ rollback_to_slurm() {
 }
 
 acquire_pair() {
-  local lease
+  local lease reserve_receipt reservation_pid grant_heartbeat_pid reserve_status=0
   lease="$(backend lease-acquire --holder "$HOLDER")" || fail 'Lease acquisition refused'
   CURRENT_EPOCH="$(frame_field "$lease" epoch)"
   [[ "$CURRENT_EPOCH" =~ ^[1-9][0-9]*$ ]] || fail 'backend returned an invalid epoch'
@@ -371,20 +387,55 @@ acquire_pair() {
   transition 2 SLURM_OWNED DRAINING_SLURM
   backend drain-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   transition 3 DRAINING_SLURM SLURM_QUIESCENT
+  authorize_stay 30 SLURM_QUIESCENT
+  backend fence-host-pair --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   transition 4 SLURM_QUIESCENT DETACHING_SLURMD
   backend detach-slurmd --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   transition 5 DETACHING_SLURMD K8S_RESERVING
-  backend create-reservations --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
+  reserve_receipt="$LAST_RECEIPT"
+  authorize_stay 32 K8S_RESERVING
+  backend grant-host-k8s --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
+  backend create-reservations --holder "$HOLDER" --epoch "$CURRENT_EPOCH" \
+    --receipt "$reserve_receipt" >/dev/null &
+  reservation_pid=$!
+  reservation_grant_heartbeat_loop &
+  grant_heartbeat_pid=$!
+  while kill -0 "$reservation_pid" >/dev/null 2>&1; do
+    sleep 1
+    if ! kill -0 "$grant_heartbeat_pid" >/dev/null 2>&1; then
+      kill "$reservation_pid" >/dev/null 2>&1 || true
+      wait "$reservation_pid" >/dev/null 2>&1 || true
+      return 42
+    fi
+  done
+  wait "$reservation_pid" || reserve_status=$?
+  kill "$grant_heartbeat_pid" >/dev/null 2>&1 || true
+  wait "$grant_heartbeat_pid" >/dev/null 2>&1 || true
+  [[ $reserve_status -eq 0 ]] || return "$reserve_status"
   transition 6 K8S_RESERVING K8S_OWNED
+}
+
+reservation_grant_heartbeat_loop() {
+  local interval
+  interval="$(policy_value "$POLICY" heartbeat_seconds)"
+  while true; do
+    sleep "$interval"
+    authorize_stay 32 K8S_RESERVING
+    backend grant-host-k8s --holder "$HOLDER" --epoch "$CURRENT_EPOCH" \
+      --receipt "$LAST_RECEIPT" >/dev/null
+  done
 }
 
 release_pair() {
   transition 8 K8S_OWNED K8S_RELEASING
   backend stop-workloads --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
-  backend probe-clean --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
+  authorize_stay 30 K8S_RELEASING
+  backend fence-host-pair --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   transition 9 K8S_RELEASING VERIFYING_GPU_CLEAN
   transition 10 VERIFYING_GPU_CLEAN SLURM_RESTORING
   backend delete-reservations --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
+  authorize_stay 31 SLURM_RESTORING
+  backend grant-host-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   backend restore-slurmd --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   backend resume-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   transition 12 SLURM_RESTORING SLURM_OWNED
@@ -396,6 +447,8 @@ heartbeat_loop() {
   interval="$(policy_value "$POLICY" heartbeat_seconds)"
   while true; do
     sleep "$interval"
+    authorize_stay 32 K8S_OWNED
+    backend grant-host-k8s --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
     admit 7 K8S_OWNED K8S_OWNED
     backend lease-renew --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   done
@@ -440,8 +493,14 @@ usage() {
 bootstrap_sequence() {
   authorize_stay 24 UNINITIALIZED
   backend install-fence --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
+  authorize_stay 29 UNINITIALIZED
+  backend install-host-fence --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   authorize_stay 23 UNINITIALIZED
   backend drain-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
+  authorize_stay 30 UNINITIALIZED
+  backend fence-host-pair --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
+  authorize_stay 31 UNINITIALIZED
+  backend grant-host-slurm --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   authorize_stay 25 UNINITIALIZED
   backend install-gpu-bound-slurmd --holder "$HOLDER" --epoch "$CURRENT_EPOCH" --receipt "$LAST_RECEIPT" >/dev/null
   authorize_stay 26 UNINITIALIZED
@@ -452,15 +511,17 @@ bootstrap_sequence() {
 main() {
   local command="${1:-}" seconds frame state
   verify_runtime_root
+  configure_command_timeout
   verify_frozen_authority
   if [[ "$command" != verify ]]; then init_receipt_dir; fi
   trap on_exit EXIT INT TERM
   case "$command" in
     verify)
-      printf 'SPARK_PAIR_VERIFY_PASS source=%s freeze=%s backend=%s admission=%s\n' \
+      printf 'SPARK_PAIR_VERIFY_PASS source=%s freeze=%s backend=%s admission=%s host_fence=%s\n' \
         "$(policy_value "$FREEZE" authority_sha256)" "$(sha256_file "$FREEZE")" \
         "$(policy_value "$FREEZE" material_backend_sha256)" \
-        "$(policy_value "$FREEZE" admission_manifest_sha256)"
+        "$(policy_value "$FREEZE" admission_manifest_sha256)" \
+        "$(policy_value "$FREEZE" host_fence_manifest_sha256)"
       ;;
     bootstrap-init)
       frame="$(backend prebootstrap-facts --holder "$HOLDER")"

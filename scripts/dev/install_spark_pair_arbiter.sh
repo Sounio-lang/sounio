@@ -33,7 +33,7 @@ slurm_exec() {
 
 preflight() {
   local node_0 node_1 nodeset plugin_0 plugin_1 jobs steps slurm_nodes reservations workloads
-  local slurmd_pods node pod mem_available_mb slurm_line slurm_free_mb slurm_count=0
+  local slurmd_pods node pod mem_available_mb slurm_line slurm_free_mb slurm_count=0 pre_fence_memory_low=0
   "$ARBITER" verify >/dev/null || fail 'frozen arbiter verification failed'
   [[ "$(policy_value "$POLICY" allow_model_download)" == false ]] || fail 'model download must remain disabled'
   [[ "$(policy_value "$POLICY" allow_litellm_change)" == false ]] || fail 'LiteLLM changes must remain disabled'
@@ -67,8 +67,11 @@ preflight() {
   while IFS= read -r slurm_line; do
     slurm_free_mb="$(sed -n 's/.* FreeMem=\([0-9][0-9]*\).*/\1/p' <<<"$slurm_line")"
     [[ "$slurm_free_mb" =~ ^[0-9]+$ ]] || fail 'Slurm FreeMem observation is malformed'
-    (( slurm_free_mb >= $(policy_value "$POLICY" minimum_free_memory_mb) )) || \
-      fail "Slurm FreeMem below safety floor: ${slurm_free_mb}MiB"
+    if (( slurm_free_mb < $(policy_value "$POLICY" minimum_free_memory_mb) )); then
+      pre_fence_memory_low=1
+      printf 'install-spark-pair-arbiter: pre-fence remediation required: Slurm FreeMem=%sMiB\n' \
+        "$slurm_free_mb" >&2
+    fi
     slurm_count=$((slurm_count + 1))
   done <<<"$slurm_nodes"
   [[ $slurm_count -eq 2 ]] || fail 'Slurm did not return exactly two Spark node records'
@@ -95,6 +98,9 @@ preflight() {
     -l "$(policy_value "$POLICY" workload_label)=true" -o json)"
   [[ "$(jq '.items | length' <<<"$reservations")" == 0 ]] || fail 'reservation pods already exist'
   [[ "$(jq '.items | length' <<<"$workloads")" == 0 ]] || fail 'Spark-pair workloads already exist'
+  if [[ $pre_fence_memory_low -eq 1 ]]; then
+    printf 'install-spark-pair-arbiter: host fence must quiesce legacy consumers before action23\n' >&2
+  fi
 }
 
 on_failure() {

@@ -33,7 +33,7 @@ install -m 0755 "$compiled" "$OUTPUT"
 
 # STATUS over a canonical, non-contradictory fact frame. Bootstrap and runtime
 # decisions use stricter action-specific facts inside the Sounio authority.
-probe="$($OUTPUT 9024 14 1 1 1 1017 255 1009)"
+probe="$($OUTPUT 9025 14 1 1 1 1017 255 1009 131071)"
 case "$probe" in
   SOUNIO_SPARK_PAIR_ALLOW*) ;;
   *) fail "native authority failed its probe: $probe" ;;

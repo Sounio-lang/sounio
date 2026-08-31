@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.garde
 
 # Garden Seed: Spark Pair Arbiter
 
-Status: GARDEN
+Status: SEMANTICS_FROZEN; PARITY_OPEN offline gates green; live gate pending
 Date: 2026-08-31
 Owner: Sounio founder direction
 Concept-ID: SOUNIO-SPARK-PAIR-ARBITER
@@ -44,7 +44,11 @@ This seed covers only the Spark Pair Arbiter:
 - one Kubernetes Lease with a monotone fencing epoch;
 - pair-wide Slurm drain and resume;
 - material detachment and restoration of both `slurmd` pods;
-- one Kubernetes GPU reservation and one NVML receipt per Spark;
+- one persistent host watchdog and one boot-bound host receipt per Spark;
+- immutable content-addressed host-fence and reservation-probe programs;
+- one content-addressed C++20 raw-BPF device barrier, compiled on each ARM64
+  Spark as a transient material mechanism rather than semantic authority;
+- one Kubernetes GPU reservation per Spark, with NVML retained as telemetry;
 - heartbeat, rollback, recovery, decision receipts, and negative tests.
 
 It does not:
@@ -69,8 +73,8 @@ The required order is:
 GARDEN
 -> SOUNIO_EXECUTABLE
 -> SEMANTICS_FROZEN
--> MATERIAL_BRIDGE_OPEN
--> MUTUAL_EXCLUSION_GATE
+-> PARITY_OPEN
+-> CLAIM_READY
 ```
 
 ## Material invariant
@@ -95,11 +99,26 @@ node-selector fence to remove or restore both pods.
 - both canonical Slurm nodes drained;
 - zero active Slurm jobs, steps, allocations, prologs, and epilogs;
 - both `slurmd` pods absent;
+- both boot-bound host receipts linked to the current Lease;
+- both local watchdogs bound to the same source, freeze, epoch and owner;
+- the root-cgroup device barrier attached exactly in `FENCED` and detached
+  exactly under a valid `SLURM` or `K8S` grant;
+- one durable Lease intent binding both non-authorizing prepare receipts before
+  either host grant becomes usable;
+- exact known Docker/systemd consumers fenced and managed cgroups empty;
+- protected CPU, network, database and checkpoint resources unchanged;
 - exactly two reservation pods, one on each canonical Kubernetes node;
 - both reservations bound to the current epoch;
 - exactly one GPU allocated per reservation;
-- two clean NVML receipts from the same epoch;
 - one successful Lease compare-and-swap committing the pair.
+
+Every `SANDBOX_READY` Slurm or Pireus Pod must have a canonical CRI identity
+and exactly one cgroup-v2 slice. The fence uses only atomic `cgroup.kill`; a
+missing or ambiguous slice is evidence failure, not permission to enumerate and
+kill PIDs.
+
+NVML UUID, driver, process, MPS, utilisation and unified-memory observations
+remain in receipts, but do not decide ownership on GB10.
 
 TP1 is never a fallback for a failed TP2 acquisition.
 
@@ -134,18 +153,28 @@ Every reservation, workload, decision receipt, drain reason, node label, and
 NVML receipt carries the same epoch. An old holder can remain alive, but its
 Lease CAS must fail and its epoch must not authorize new work.
 
-The material scheduler fence has two sides:
+The material scheduler fence has four sides:
 
 1. under Slurm ownership, the two `slurmd` pods consume the two Kubernetes GPU
    resources;
 2. under Kubernetes ownership, the Slurm nodes remain drained and the
    `slurmd` selector fence removes both pods before reservations begin.
+3. on each host, a persistent systemd watchdog admits only the local grant
+   matching boot, source, freeze, epoch and owner; K8s grants expire against
+   monotonic time and fence locally.
+4. a raw `BPF_CGROUP_DEVICE` program on the root cgroup blocks new GPU-device
+   opens before cleanup and at boot, including host processes outside
+   `kubepods.slice`; existing descriptors still require termination and census.
 
 The Spark nodes also require a dedicated `NoSchedule` taint tolerated only by
 the Slurm workers, arbiter probes, and admitted Spark-pair workloads.
 Creation and update of Pods carrying that toleration or targeting either node
 directly is guarded by a fail-closed `ValidatingAdmissionPolicy`. Phase 1
 admits no user workload role; the future Inkling role remains denied.
+The control policy protects both Node objects and the privileged host-fence
+`pods/exec` bridge as well: non-authority updates
+may change unrelated metadata, but must preserve the Pireus taint, host-fence
+labels and Slurm selector label exactly.
 
 ## Refusal surface
 
@@ -159,18 +188,28 @@ The Sounio policy must refuse at least:
 - partial drain, active job, active step, or nonzero allocation;
 - only one `slurmd` removed or restored;
 - only one reservation, two reservations on one node, or wrong epoch;
-- NVML unavailable, wrong node/UUID, or active GPU process;
+- wrong host boot/receipt, epoch, owner, watchdog, inventory, cgroup or memory;
+- unexpected Docker, systemd, Kubernetes, Slurm or root GPU consumer;
 - live or terminating workload during release;
-- heartbeat loss or incomplete resume.
+- heartbeat loss or incomplete resume;
+- a missing, foreign, stale, or wrongly attached root-cgroup device barrier.
 
 ## Open questions
 
 - The canonical GB10s report `[N/A]` for framebuffer memory because they use
-  unified memory. Phase 1 freezes UUID, product and driver identity and records
-  `UNAVAILABLE_UNIFIED`, while continuing to require clean process, `pmon`, MPS
-  and utilisation evidence before `K8S_OWNED`.
-- Root processes launched outside both Kubernetes and Slurm are outside the
-  initial threat boundary. A later host fence agent would be required for that
-  stronger claim.
+  unified memory. Phase 1 therefore treats NVML as supplementary and proves
+  host ownership from exact process, service, container and cgroup identity.
+- The boot unit is required by `basic.target`, Docker, containerd, and kubelet.
+  It attaches the root-cgroup device barrier before invalidating grants. The
+  continuous watchdog advances its public heartbeat only after a complete
+  successful cycle.
+- `/dev/watchdog` exists on both Sparks, but phase 1 intentionally leaves the
+  hardware watchdog disarmed. Loss of coordination fences GPU access; it does
+  not force a physical reboot of WiFi nodes outside the UPS.
+- A deliberate host administrator can replace the fence and remains outside
+  the boundary. Undeclared root GPU processes are inside it and must be denied.
 - Enabling MIG or device-plugin time sharing invalidates the one-GPU-one-owner
   proof and must fail the preflight gate.
+- Phase 1 has no Sounio-authorized decommission action yet. Deleting the
+  DaemonSet must not silently re-enable legacy GPU services; reversible restore
+  remains an explicit gate before `CLAIM_READY`.

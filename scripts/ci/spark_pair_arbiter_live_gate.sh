@@ -155,6 +155,74 @@ expect_admission_deny() {
   ADMISSION_RESULTS="${ADMISSION_RESULTS};${name}=DENY"
 }
 
+expect_control_deny() {
+  local name="$1" output status
+  shift
+  set +e
+  output="$("$@" 2>&1)"
+  status=$?
+  set -e
+  [[ $status -ne 0 ]] || fail "control probe $name was unexpectedly allowed"
+  [[ "$output" == *'Pireus control objects are writable only by their canonical material authorities'* ||
+     "$output" == *'pireus-spark-pair-control-fence'* ]] || \
+    fail "control probe $name failed for an unrelated reason: $output"
+  ADMISSION_RESULTS="${ADMISSION_RESULTS};${name}=DENY"
+}
+
+expect_control_replace_deny() {
+  local name="$1" object="$2" output status
+  set +e
+  output="$(kubectl --as=system:admin replace --dry-run=server -f - <<<"$object" 2>&1)"
+  status=$?
+  set -e
+  [[ $status -ne 0 ]] || fail "control replace probe $name was unexpectedly allowed"
+  [[ "$output" == *'Pireus control objects are writable only by their canonical material authorities'* ||
+     "$output" == *'pireus-spark-pair-control-fence'* ]] || \
+    fail "control replace probe $name failed for an unrelated reason: $output"
+  ADMISSION_RESULTS="${ADMISSION_RESULTS};${name}=DENY"
+}
+
+verify_control_negatives() {
+  local node pod object
+  node="$(kubectl get node "$(policy_value node_0_k8s)" -o json)"
+  pod="$(kubectl -n "$(policy_value namespace)" get pods \
+    -l 'app.kubernetes.io/name=pireus-spark-host-fence' \
+    -o jsonpath='{.items[0].metadata.name}')"
+  [[ -n "$pod" ]] || fail 'host fence Pod is missing for exec control probe'
+
+  expect_control_deny host-exec kubectl --as=system:admin \
+    -n "$(policy_value namespace)" exec "$pod" -- /bin/true
+  expect_control_replace_deny node-taint-remove "$(jq --arg key "$(policy_value spark_taint_key)" \
+    '.spec.taints = [.spec.taints[] | select(.key != $key)]' <<<"$node")"
+  expect_control_replace_deny node-taint-change "$(jq --arg key "$(policy_value spark_taint_key)" \
+    '(.spec.taints[] | select(.key == $key).value) = "drift"' <<<"$node")"
+  expect_control_replace_deny node-taint-duplicate "$(jq --arg key "$(policy_value spark_taint_key)" \
+    '.spec.taints += [{"key":$key,"value":"reserved","effect":"NoSchedule"}]' <<<"$node")"
+  expect_control_replace_deny node-label-change "$(jq \
+    '.metadata.labels["pireus.sounio.dev/spark-pair-host-fence"] = "drift"' <<<"$node")"
+  expect_control_replace_deny node-label-delete "$(jq \
+    'del(.metadata.labels["pireus.sounio.dev/spark-pair-host-fence"])' <<<"$node")"
+  expect_control_deny node-delete kubectl --as=system:admin delete node \
+    "$(policy_value node_0_k8s)" --dry-run=server
+  expect_control_deny lease-delete kubectl --as=system:admin -n "$(policy_value namespace)" \
+    delete lease "$(policy_value lease_name)" --dry-run=server
+  expect_control_deny host-config-delete kubectl --as=system:admin -n "$(policy_value namespace)" \
+    delete configmap "$(policy_value host_fence_configmap)" --dry-run=server
+  expect_control_deny barrier-config-delete kubectl --as=system:admin -n "$(policy_value namespace)" \
+    delete configmap "$(policy_value host_device_barrier_configmap)" --dry-run=server
+  expect_control_deny host-daemonset-delete kubectl --as=system:admin -n "$(policy_value namespace)" \
+    delete daemonset "$(policy_value host_fence_daemonset)" --dry-run=server
+  expect_control_deny admission-policy-delete kubectl --as=system:admin \
+    delete validatingadmissionpolicy "$(policy_value admission_control_policy)" --dry-run=server
+
+  object="$(kubectl get node "$(policy_value node_0_k8s)" -o json)"
+  kubectl --as="system:node:$(policy_value node_0_k8s)" \
+    --as-group=system:nodes --as-group=system:authenticated \
+    replace --subresource=status --dry-run=server -f - <<<"$object" >/dev/null || \
+    fail 'canonical kubelet status update preserving Pireus fields was denied'
+  ADMISSION_RESULTS="${ADMISSION_RESULTS};kubelet-status-preserved=ALLOW"
+}
+
 verify_admission_negatives() {
   local epoch
   epoch="$(kubectl -n "$(policy_value namespace)" get lease "$(policy_value lease_name)" \
@@ -205,6 +273,7 @@ spec:
   restartPolicy: Never
   containers: [{name: test, image: $(policy_value reservation_image), resources: {limits: {nvidia.com/gpu: "1"}}}]
 EOF
+  verify_control_negatives
 }
 
 check_exclusions() {

@@ -26,6 +26,30 @@ write_value() {
   printf '%s\n' "$2" > "$MOCK_DIR/$1"
 }
 
+write_host_facts() {
+  local value="$1" key
+  for key in \
+    host_fence_pair_exact \
+    host_boot_pair_bound \
+    host_epoch_relation_valid \
+    host_owner_relation_valid \
+    host_deadman_armed \
+    host_runtime_gpu_gate_fail_closed \
+    host_legacy_gpu_inventory_exact \
+    host_managed_gpu_services_quiesced \
+    host_managed_gpu_restarts_blocked \
+    host_active_docker_gpu_claims_zero \
+    host_gpu_consumer_set_exact \
+    host_managed_gpu_cgroups_empty \
+    host_live_memory_floor_met \
+    host_protected_resources_unchanged \
+    host_receipts_two \
+    host_heartbeat_fresh \
+    host_device_barrier_relation_valid; do
+    write_value "$key" "$value"
+  done
+}
+
 arg_value() {
   local wanted="$1"
   shift
@@ -89,7 +113,7 @@ guard() {
 }
 
 facts() {
-  local holder state epoch lease_holder authority=1 slurm=0 k8s=0 live reservations
+  local holder state epoch lease_holder authority=1 slurm=0 k8s=0 host=0 live reservations
   holder="$(arg_value --holder "$@")"
   state="$(read_value state SLURM_OWNED)"
   epoch="$(read_value epoch 1)"
@@ -129,11 +153,31 @@ facts() {
   k8s="$(add_bit "$k8s" 128 "$live")"
   k8s="$(add_bit "$k8s" 512 "${SOUNIO_SPARK_PAIR_MOCK_UNEXPECTED_ZERO:-1}")"
 
+  host="$(add_bit "$host" 1 "${SOUNIO_SPARK_PAIR_MOCK_HOST_FENCE_EXACT:-$(read_value host_fence_pair_exact 0)}")"
+  host="$(add_bit "$host" 2 "${SOUNIO_SPARK_PAIR_MOCK_HOST_BOOT_PAIR_BOUND:-$(read_value host_boot_pair_bound 0)}")"
+  host="$(add_bit "$host" 4 "${SOUNIO_SPARK_PAIR_MOCK_HOST_EPOCH_VALID:-$(read_value host_epoch_relation_valid 0)}")"
+  host="$(add_bit "$host" 8 "${SOUNIO_SPARK_PAIR_MOCK_HOST_OWNER_VALID:-$(read_value host_owner_relation_valid 0)}")"
+  host="$(add_bit "$host" 16 "${SOUNIO_SPARK_PAIR_MOCK_HOST_DEADMAN_ARMED:-$(read_value host_deadman_armed 0)}")"
+  host="$(add_bit "$host" 32 "${SOUNIO_SPARK_PAIR_MOCK_HOST_RUNTIME_GATE_CLOSED:-$(read_value host_runtime_gpu_gate_fail_closed 0)}")"
+  host="$(add_bit "$host" 64 "${SOUNIO_SPARK_PAIR_MOCK_HOST_LEGACY_INVENTORY_EXACT:-$(read_value host_legacy_gpu_inventory_exact 0)}")"
+  host="$(add_bit "$host" 128 "${SOUNIO_SPARK_PAIR_MOCK_HOST_SERVICES_QUIESCED:-$(read_value host_managed_gpu_services_quiesced 0)}")"
+  host="$(add_bit "$host" 256 "${SOUNIO_SPARK_PAIR_MOCK_HOST_RESTARTS_BLOCKED:-$(read_value host_managed_gpu_restarts_blocked 0)}")"
+  host="$(add_bit "$host" 512 "${SOUNIO_SPARK_PAIR_MOCK_HOST_DOCKER_CLAIMS_ZERO:-$(read_value host_active_docker_gpu_claims_zero 0)}")"
+  host="$(add_bit "$host" 1024 "${SOUNIO_SPARK_PAIR_MOCK_HOST_CONSUMERS_EXACT:-$(read_value host_gpu_consumer_set_exact 0)}")"
+  host="$(add_bit "$host" 2048 "${SOUNIO_SPARK_PAIR_MOCK_HOST_CGROUPS_EMPTY:-$(read_value host_managed_gpu_cgroups_empty 0)}")"
+  host="$(add_bit "$host" 4096 "${SOUNIO_SPARK_PAIR_MOCK_HOST_MEMORY_FLOOR_MET:-$(read_value host_live_memory_floor_met 0)}")"
+  host="$(add_bit "$host" 8192 "${SOUNIO_SPARK_PAIR_MOCK_HOST_PROTECTED_UNCHANGED:-$(read_value host_protected_resources_unchanged 0)}")"
+  host="$(add_bit "$host" 16384 "${SOUNIO_SPARK_PAIR_MOCK_HOST_RECEIPTS_TWO:-$(read_value host_receipts_two 0)}")"
+  host="$(add_bit "$host" 32768 "${SOUNIO_SPARK_PAIR_MOCK_HOST_HEARTBEAT_FRESH:-$(read_value host_heartbeat_fresh 0)}")"
+  host="$(add_bit "$host" 65536 "${SOUNIO_SPARK_PAIR_MOCK_HOST_DEVICE_BARRIER_VALID:-$(read_value host_device_barrier_relation_valid 0)}")"
+
   authority="${SOUNIO_SPARK_PAIR_MOCK_AUTHORITY_MASK:-$authority}"
   slurm="${SOUNIO_SPARK_PAIR_MOCK_SLURM_MASK:-$slurm}"
   k8s="${SOUNIO_SPARK_PAIR_MOCK_K8S_MASK:-$k8s}"
-  printf 'state=%s epoch=%s observed_epoch=%s authority_mask=%s slurm_mask=%s k8s_mask=%s\n' \
-    "$state" "$epoch" "${SOUNIO_SPARK_PAIR_MOCK_OBSERVED_EPOCH:-$epoch}" "$authority" "$slurm" "$k8s"
+  host="${SOUNIO_SPARK_PAIR_MOCK_HOST_MASK:-$host}"
+  printf 'state=%s epoch=%s observed_epoch=%s authority_mask=%s slurm_mask=%s k8s_mask=%s host_mask=%s\n' \
+    "$state" "$epoch" "${SOUNIO_SPARK_PAIR_MOCK_OBSERVED_EPOCH:-$epoch}" \
+    "$authority" "$slurm" "$k8s" "$host"
 }
 
 lease_acquire() {
@@ -238,7 +282,7 @@ main() {
   case "$command" in
     prebootstrap-facts)
       [[ ! -f "$MOCK_DIR/state" ]] || fail 'mock Lease already exists'
-      printf 'state=UNINITIALIZED epoch=1 observed_epoch=1 authority_mask=97 slurm_mask=26 k8s_mask=768\n'
+      printf 'state=UNINITIALIZED epoch=1 observed_epoch=1 authority_mask=97 slurm_mask=26 k8s_mask=768 host_mask=0\n'
       ;;
     bootstrap-lease)
       [[ ! -f "$MOCK_DIR/state" ]] || fail 'mock Lease already exists'
@@ -261,6 +305,7 @@ main() {
       write_value nodeset_match 1
       write_value admission_ready 0
       write_value taint_exact 0
+      write_host_facts 0
       if [[ "${SOUNIO_SPARK_PAIR_MOCK_FAIL_AFTER_LEASE:-0}" == 1 ]]; then
         write_value journal 0
         fail 'injected action28 failure after Lease creation'
@@ -283,6 +328,7 @@ main() {
       write_value admission_ready 1
       write_value taint_exact 1
       write_value journal 1
+      write_host_facts 1
       ;;
     fixture-uninitialized)
       write_value state UNINITIALIZED
@@ -300,6 +346,7 @@ main() {
       write_value admission_ready 0
       write_value taint_exact 0
       write_value journal 1
+      write_host_facts 0
       ;;
     facts) facts "$@" ;;
     lease-acquire) lease_acquire "$@" ;;
@@ -324,8 +371,30 @@ main() {
       write_value admission_ready 1
       write_value taint_exact 1
       ;;
+    install-host-fence)
+      guard 29 "$@"
+      printf 'install-host-fence\n' >> "$MOCK_DIR/effects"
+      write_host_facts 1
+      write_value host_grant FENCED
+      ;;
+    fence-host-pair)
+      guard 30 "$@"
+      printf 'fence-host-pair\n' >> "$MOCK_DIR/effects"
+      write_host_facts 1
+      write_value host_grant FENCED
+      ;;
+    grant-host-slurm)
+      guard 31 "$@"
+      printf 'grant-host-slurm\n' >> "$MOCK_DIR/effects"
+      write_value host_grant SLURM
+      ;;
+    grant-host-k8s)
+      guard 32 "$@"
+      printf 'grant-host-k8s\n' >> "$MOCK_DIR/effects"
+      write_value host_grant K8S
+      ;;
     install-gpu-bound-slurmd)
-      guard 25 "$@"
+      guard '25 31' "$@"
       write_value nodeset_generation 2
       write_value nodeset_match 1
       write_value slurmd_absent 0
@@ -333,7 +402,7 @@ main() {
       ;;
     detach-slurmd) guard '4 20' "$@"; write_value slurmd_absent 1; write_value slurmd_bound 0 ;;
     create-reservations)
-      guard '5 21' "$@"
+      guard '5 21 32' "$@"
       if [[ "${SOUNIO_SPARK_PAIR_MOCK_PARTIAL_RESERVATION:-0}" == 1 && \
             ! -f "$MOCK_DIR/partial-reservation-injected" ]]; then
         : > "$MOCK_DIR/partial-reservation-injected"
@@ -351,8 +420,8 @@ main() {
       ;;
     probe-clean) guard '8 16' "$@"; write_value nvml_clean 1 ;;
     delete-reservations) guard '10 15 17' "$@"; write_value reservations 0 ;;
-    restore-slurmd) guard '10 18' "$@"; write_value slurmd_absent 0; write_value slurmd_bound 1 ;;
-    resume-slurm) guard '10 19 26' "$@"; write_value drained 0; write_value resume_verified 1 ;;
+    restore-slurmd) guard '10 18 31' "$@"; write_value slurmd_absent 0; write_value slurmd_bound 1 ;;
+    resume-slurm) guard '10 19 26 31' "$@"; write_value drained 0; write_value resume_verified 1 ;;
     *) fail "unknown command $command" ;;
   esac
 }

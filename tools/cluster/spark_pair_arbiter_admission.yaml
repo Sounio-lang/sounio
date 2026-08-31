@@ -8,6 +8,32 @@ automountServiceAccountToken: false
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: pireus-spark-pair-reservation-probe-bce2666d07f0
+  namespace: beagle
+immutable: true
+data:
+  reservation-probe.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uuid="$(chroot /host /usr/bin/nvidia-smi --query-gpu=uuid --format=csv,noheader | head -n 1)"
+    processes="$(chroot /host /usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader)"
+    test -z "${processes//[[:space:]]/}"
+    pmon="$(chroot /host /usr/bin/nvidia-smi pmon -c 1)"
+    ! awk 'NF >= 3 && $2 ~ /^[0-9]+$/ { found=1 } END { exit found ? 0 : 1 }' <<<"$pmon"
+    ! chroot /host /usr/bin/pgrep -f '[n]vidia-cuda-mps' >/dev/null 2>&1
+    driver="$(chroot /host /usr/bin/nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)"
+    product="$(chroot /host /usr/bin/nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1 | tr ' ' '_')"
+    memory="$(chroot /host /usr/bin/nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1)"
+    if [[ "$memory" == '[N/A]' ]]; then memory=UNAVAILABLE_UNIFIED; fi
+    utilization="$(chroot /host /usr/bin/nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | head -n 1)"
+    printf 'PIREUS_NVML_CLEAN node=%s epoch=%s uuid=%s product=%s driver=%s memory_observation=%s utilization_pct=%s\n' \
+      "$NODE_NAME" "$PIREUS_EPOCH" "$uuid" "$product" "$driver" "$memory" "$utilization"
+    touch /tmp/nvml-clean
+    exec sleep infinity
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: pireus-spark-pair-admission
   namespace: beagle
 data:
@@ -17,6 +43,7 @@ data:
   allowWorkload: "false"
   sounioSourceSha256: REPLACED_BY_INSTALLER
   semanticsFreezeSha256: REPLACED_BY_INSTALLER
+  hostFenceDaemonSetUid: UNBOUND
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -34,6 +61,11 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["pods"]
+        scope: "*"
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["pods/ephemeralcontainers"]
         scope: "*"
   validations:
     - expression: >-
@@ -57,55 +89,209 @@ spec:
           ))
         ) ||
         (
-          (object.metadata.namespace == 'kube-system' &&
-            object.spec.serviceAccountName in [
-              'cilium', 'cilium-envoy', 'coredns', 'multus', 'kube-proxy',
-              'whereabouts'
-            ]) ||
-          (object.metadata.namespace == 'kube-system' &&
-            object.spec.serviceAccountName == 'default' &&
-            object.metadata.ownerReferences.exists(o,
-              o.controller == true && o.kind == 'DaemonSet' &&
-              ((o.name == 'nvidia-device-plugin-3c59' &&
-                o.uid == '67a030e6-0341-4a11-9a9e-b904dcab6db2') ||
-               (o.name == 'nvidia-device-plugin-8e54' &&
-                o.uid == 'c11cc321-3e41-45ba-baf6-69747796b664'))
-            ) &&
-            object.spec.containers.all(c,
-              c.image == 'nvcr.io/nvidia/k8s-device-plugin:v0.18.0')) ||
-          (object.metadata.namespace == 'ceph-csi-cephfs' &&
-            object.spec.serviceAccountName == 'cephfs-csi-nodeplugin') ||
-          (object.metadata.namespace == 'ceph-csi-rbd' &&
-            object.spec.serviceAccountName == 'rbd-csi-nodeplugin') ||
-          (object.metadata.namespace == 'nvidia-network-operator' &&
-            object.spec.serviceAccountName == 'node-feature-discovery') ||
-          (object.metadata.namespace == 'darwin-observability-system' &&
-            object.spec.serviceAccountName == 'darwin-node-exporter')
+          request.userInfo.username == 'system:serviceaccount:kube-system:daemon-set-controller' &&
+          object.metadata.ownerReferences.size() == 1 &&
+          object.metadata.ownerReferences[0].apiVersion == 'apps/v1' &&
+          object.metadata.ownerReferences[0].kind == 'DaemonSet' &&
+          object.metadata.ownerReferences[0].controller == true &&
+          object.metadata.ownerReferences[0].blockOwnerDeletion == true &&
+          object.spec.containers.all(c,
+            !has(c.resources) ||
+            ((!has(c.resources.requests) || !('nvidia.com/gpu' in c.resources.requests)) &&
+             (!has(c.resources.limits) || !('nvidia.com/gpu' in c.resources.limits)))
+          ) &&
+          (!has(object.spec.initContainers) || object.spec.initContainers.all(c,
+            !has(c.resources) ||
+            ((!has(c.resources.requests) || !('nvidia.com/gpu' in c.resources.requests)) &&
+             (!has(c.resources.limits) || !('nvidia.com/gpu' in c.resources.limits)))
+          )) &&
+          (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0) &&
+          (
+            (object.metadata.namespace == 'kube-system' &&
+             object.spec.serviceAccountName == 'cilium' &&
+             object.metadata.ownerReferences[0].name == 'cilium' &&
+             object.metadata.ownerReferences[0].uid == '2a91c8c9-eec2-4012-ac49-23b76ec5d611') ||
+            (object.metadata.namespace == 'kube-system' &&
+             object.spec.serviceAccountName == 'cilium-envoy' &&
+             object.metadata.ownerReferences[0].name == 'cilium-envoy' &&
+             object.metadata.ownerReferences[0].uid == 'a3b6ef25-2f19-4bf5-ae03-f612204a8162') ||
+            (object.metadata.namespace == 'kube-system' &&
+             object.spec.serviceAccountName == 'multus' &&
+             object.metadata.ownerReferences[0].name == 'kube-multus-ds' &&
+             object.metadata.ownerReferences[0].uid == '1876dfb2-3bde-47f0-9b6b-b41482d9c229') ||
+            (object.metadata.namespace == 'kube-system' &&
+             object.spec.serviceAccountName == 'kube-proxy' &&
+             object.metadata.ownerReferences[0].name == 'kube-proxy' &&
+             object.metadata.ownerReferences[0].uid == '0e7c1021-ac50-4fe2-b27b-926f8a5c2843') ||
+            (object.metadata.namespace == 'kube-system' &&
+             object.spec.serviceAccountName == 'whereabouts' &&
+             object.metadata.ownerReferences[0].name == 'whereabouts' &&
+             object.metadata.ownerReferences[0].uid == '37ea2081-fd9c-410b-b93e-c18587025ff3') ||
+            (object.metadata.namespace == 'kube-system' &&
+             object.spec.serviceAccountName == 'default' &&
+             ((object.metadata.ownerReferences[0].name == 'nvidia-device-plugin-3c59' &&
+               object.metadata.ownerReferences[0].uid == '67a030e6-0341-4a11-9a9e-b904dcab6db2') ||
+              (object.metadata.ownerReferences[0].name == 'nvidia-device-plugin-8e54' &&
+               object.metadata.ownerReferences[0].uid == 'c11cc321-3e41-45ba-baf6-69747796b664')) &&
+             object.spec.containers.size() == 1 &&
+             (!has(object.spec.initContainers) || object.spec.initContainers.size() == 0) &&
+             object.spec.containers.all(c,
+               c.image == 'nvcr.io/nvidia/k8s-device-plugin:v0.18.0')) ||
+            (object.metadata.namespace == 'ceph-csi-cephfs' &&
+             object.spec.serviceAccountName == 'cephfs-csi-nodeplugin' &&
+             object.metadata.ownerReferences[0].name == 'csi-cephfsplugin' &&
+             object.metadata.ownerReferences[0].uid == 'f1a670d8-b676-45e1-ac51-abbc7da5b586') ||
+            (object.metadata.namespace == 'ceph-csi-rbd' &&
+             object.spec.serviceAccountName == 'rbd-csi-nodeplugin' &&
+             object.metadata.ownerReferences[0].name == 'csi-rbdplugin' &&
+             object.metadata.ownerReferences[0].uid == '11855b0f-7985-4268-9ae2-3c1c86c72e4b') ||
+            (object.metadata.namespace == 'nvidia-network-operator' &&
+             object.spec.serviceAccountName == 'node-feature-discovery' &&
+             object.metadata.ownerReferences[0].name == 'nvidia-network-operator-node-feature-discovery-worker' &&
+             object.metadata.ownerReferences[0].uid == '90482f9c-1c9a-427f-9c7e-2a853dbbb079') ||
+            (object.metadata.namespace == 'darwin-observability-system' &&
+             object.spec.serviceAccountName == 'darwin-node-exporter' &&
+             object.metadata.ownerReferences[0].name == 'darwin-node-exporter' &&
+             object.metadata.ownerReferences[0].uid == '23c73f2c-8f11-4e3c-9f54-d21734667845')
+          )
         ) ||
         (
+          request.userInfo.username == 'system:serviceaccount:kube-system:replicaset-controller' &&
+          object.metadata.namespace == 'kube-system' &&
+          object.spec.serviceAccountName == 'coredns' &&
+          object.metadata.ownerReferences.size() == 1 &&
+          object.metadata.ownerReferences[0].apiVersion == 'apps/v1' &&
+          object.metadata.ownerReferences[0].kind == 'ReplicaSet' &&
+          object.metadata.ownerReferences[0].controller == true &&
+          object.metadata.ownerReferences[0].blockOwnerDeletion == true &&
+          object.spec.containers.all(c,
+            !has(c.resources) ||
+            ((!has(c.resources.requests) || !('nvidia.com/gpu' in c.resources.requests)) &&
+             (!has(c.resources.limits) || !('nvidia.com/gpu' in c.resources.limits)))
+          ) &&
+          (!has(object.spec.initContainers) || object.spec.initContainers.all(c,
+            !has(c.resources) ||
+            ((!has(c.resources.requests) || !('nvidia.com/gpu' in c.resources.requests)) &&
+             (!has(c.resources.limits) || !('nvidia.com/gpu' in c.resources.limits)))
+          )) &&
+          (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0) &&
+          ((object.metadata.ownerReferences[0].name == 'coredns-3c59-6d444bb9b' &&
+            object.metadata.ownerReferences[0].uid == 'ea2b72e2-e50d-4c89-a2bc-7d88ed7ec145') ||
+           (object.metadata.ownerReferences[0].name == 'coredns-8e54-58cf954b66' &&
+            object.metadata.ownerReferences[0].uid == 'f441a608-8977-43c8-aecb-5d4edc737e9d'))
+        ) ||
+        (
+          request.userInfo.username == 'system:serviceaccount:kube-system:daemon-set-controller' &&
+          object.metadata.namespace == 'beagle' &&
+          object.spec.serviceAccountName == 'pireus-spark-host-fence' &&
+          object.metadata.labels['pireus.sounio.dev/spark-pair-infrastructure'] == 'true' &&
+          'hostFenceDaemonSetUid' in params.data &&
+          params.data.hostFenceDaemonSetUid.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') &&
+          object.metadata.ownerReferences.size() == 1 &&
+          object.metadata.ownerReferences[0].apiVersion == 'apps/v1' &&
+          object.metadata.ownerReferences[0].kind == 'DaemonSet' &&
+          object.metadata.ownerReferences[0].name == 'pireus-spark-host-fence' &&
+          object.metadata.ownerReferences[0].uid == params.data.hostFenceDaemonSetUid &&
+          object.metadata.ownerReferences[0].controller == true &&
+          object.metadata.ownerReferences[0].blockOwnerDeletion == true &&
+          object.spec.hostPID == true &&
+          object.spec.automountServiceAccountToken == false &&
+          object.spec.nodeSelector['pireus.sounio.dev/spark-pair-host-fence'] == 'true' &&
+          object.spec.tolerations.size() == 2 &&
+          object.spec.tolerations.exists(t,
+            t.key == 'pireus.sounio.dev/spark-pair' && t.operator == 'Equal' &&
+            t.value == 'reserved' && t.effect == 'NoSchedule'
+          ) &&
+          object.spec.tolerations.exists(t,
+            t.key == 'sounio.dev/arch' && t.operator == 'Exists' &&
+            t.effect == 'NoSchedule'
+          ) &&
+          object.spec.volumes.size() == 3 &&
+          object.spec.volumes.exists(v,
+            v.name == 'fence-script' &&
+            v.configMap.name == 'pireus-spark-host-fence-7c539ed7beb1' &&
+            v.configMap.defaultMode == 365
+          ) &&
+          object.spec.volumes.exists(v,
+            v.name == 'device-barrier-source' &&
+            v.configMap.name == 'pireus-spark-device-barrier-2bb44ec47f1c' &&
+            v.configMap.defaultMode == 292
+          ) &&
+          object.spec.volumes.exists(v,
+            v.name == 'host-root' && v.hostPath.path == '/' &&
+            v.hostPath.type == 'Directory'
+          ) &&
+          object.spec.containers.size() == 1 &&
+          (!has(object.spec.initContainers) || object.spec.initContainers.size() == 0) &&
+          (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0) &&
+          object.spec.containers[0].name == 'host-fence' &&
+          object.spec.containers[0].image == 'ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517' &&
+          object.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
+          object.spec.containers[0].command == ['/bin/bash', '/fence/host-fence.sh', 'daemonset-agent'] &&
+          (!has(object.spec.containers[0].args) || object.spec.containers[0].args.size() == 0) &&
+          (!has(object.spec.containers[0].envFrom) || object.spec.containers[0].envFrom.size() == 0) &&
+          !has(object.spec.containers[0].lifecycle) &&
+          !has(object.spec.containers[0].livenessProbe) &&
+          !has(object.spec.containers[0].startupProbe) &&
+          object.spec.containers[0].env.size() == 1 &&
+          object.spec.containers[0].env[0].name == 'NODE_NAME' &&
+          object.spec.containers[0].env[0].valueFrom.fieldRef.apiVersion == 'v1' &&
+          object.spec.containers[0].env[0].valueFrom.fieldRef.fieldPath == 'spec.nodeName' &&
+          object.spec.containers[0].securityContext.privileged == true &&
+          object.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
+          object.spec.containers[0].securityContext.allowPrivilegeEscalation == true &&
+          object.spec.containers[0].readinessProbe.exec.command == ['/bin/bash', '/fence/host-fence.sh', 'report'] &&
+          object.spec.containers[0].resources.requests.size() == 2 &&
+          object.spec.containers[0].resources.limits.size() == 2 &&
+          object.spec.containers[0].resources.requests.cpu == quantity('10m') &&
+          object.spec.containers[0].resources.requests.memory == quantity('16Mi') &&
+          object.spec.containers[0].resources.limits.cpu == quantity('250m') &&
+          object.spec.containers[0].resources.limits.memory == quantity('128Mi') &&
+          object.spec.containers[0].volumeMounts.size() == 3 &&
+          object.spec.containers[0].volumeMounts.exists(v,
+            v.name == 'fence-script' && v.mountPath == '/fence' && v.readOnly == true
+          ) &&
+          object.spec.containers[0].volumeMounts.exists(v,
+            v.name == 'device-barrier-source' && v.mountPath == '/barrier' && v.readOnly == true
+          ) &&
+          object.spec.containers[0].volumeMounts.exists(v,
+            v.name == 'host-root' && v.mountPath == '/host'
+          ) &&
+          !('nvidia.com/gpu' in object.spec.containers[0].resources.requests) &&
+          !('nvidia.com/gpu' in object.spec.containers[0].resources.limits)
+        ) ||
+        (
+          request.userInfo.username == 'system:serviceaccount:slurm-pilot:slurm-operator' &&
           object.metadata.namespace == 'slurm-pilot' &&
           object.metadata.labels['app.kubernetes.io/name'] == 'slurmd' &&
           object.metadata.labels['app.kubernetes.io/instance'] == 'slurm-pilot-worker-spark' &&
           object.spec.serviceAccountName == 'default' &&
-          object.metadata.ownerReferences.exists(o,
-            o.controller == true &&
-            o.kind == 'NodeSet' &&
-            o.name == 'slurm-pilot-worker-spark' &&
-            o.uid == 'de6c8806-eaa2-4d6a-9c25-d9c202f298ba'
-          ) &&
-          object.spec.containers.exists(c,
-            c.name == 'slurmd' &&
-            c.image == 'ghcr.io/slinkyproject/slurmd:25.11-ubuntu24.04' &&
-            has(c.resources.requests) && has(c.resources.limits) &&
-            c.resources.requests['nvidia.com/gpu'] == quantity('1') &&
-            c.resources.limits['nvidia.com/gpu'] == quantity('1')
-          ) &&
+          object.spec.automountServiceAccountToken == false &&
+          object.metadata.ownerReferences.size() == 1 &&
+          object.metadata.ownerReferences[0].controller == true &&
+          object.metadata.ownerReferences[0].blockOwnerDeletion == true &&
+          object.metadata.ownerReferences[0].apiVersion == 'slinky.slurm.net/v1beta1' &&
+          object.metadata.ownerReferences[0].kind == 'NodeSet' &&
+          object.metadata.ownerReferences[0].name == 'slurm-pilot-worker-spark' &&
+          object.metadata.ownerReferences[0].uid == 'de6c8806-eaa2-4d6a-9c25-d9c202f298ba' &&
+          object.spec.containers.size() == 1 &&
+          object.spec.containers[0].name == 'slurmd' &&
+          object.spec.containers[0].image == 'ghcr.io/slinkyproject/slurmd:25.11-ubuntu24.04' &&
+          !has(object.spec.containers[0].lifecycle) &&
+          object.spec.containers[0].resources.requests['nvidia.com/gpu'] == quantity('1') &&
+          object.spec.containers[0].resources.limits['nvidia.com/gpu'] == quantity('1') &&
+          object.spec.initContainers.size() == 1 &&
+          object.spec.initContainers[0].name == 'logfile' &&
+          object.spec.initContainers[0].image == 'ghcr.io/slinkyproject/slurmd:25.11-ubuntu24.04' &&
+          !has(object.spec.initContainers[0].lifecycle) &&
+          (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0) &&
           params.data.state in [
             'UNINITIALIZED', 'SLURM_OWNED', 'DRAINING_SLURM', 'SLURM_QUIESCENT',
             'DETACHING_SLURMD', 'SLURM_RESTORING', 'RECOVERY_REQUIRED'
           ]
         ) ||
         (
+          request.userInfo.username == 'system:serviceaccount:beagle:sounio-workspace-admin' &&
           object.metadata.namespace == 'beagle' &&
           object.spec.serviceAccountName == 'pireus-spark-pair-reservation' &&
           object.metadata.name in [
@@ -115,13 +301,50 @@ spec:
           object.metadata.labels['pireus.sounio.dev/spark-pair-reservation'] == 'true' &&
           object.metadata.labels['pireus.sounio.dev/spark-pair-epoch'] == params.data.epoch &&
           object.metadata.annotations['pireus.sounio.dev/spark-pair-holder'] == params.data.holder &&
+          (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences.size() == 0) &&
           ((object.metadata.name == 'pireus-spark-reservation-3c59' &&
             object.spec.nodeSelector['kubernetes.io/hostname'] == 'spark-3c59') ||
            (object.metadata.name == 'pireus-spark-reservation-8e54' &&
             object.spec.nodeSelector['kubernetes.io/hostname'] == 'spark-8e54')) &&
           object.spec.containers.size() == 1 &&
+          object.spec.automountServiceAccountToken == false &&
+          object.spec.restartPolicy == 'Never' &&
+          object.spec.hostPID == true &&
+          object.spec.tolerations.size() == 2 &&
+          object.spec.volumes.size() == 2 &&
+          object.spec.volumes.exists(v,
+            v.name == 'host-root' && v.hostPath.path == '/' && v.hostPath.type == 'Directory'
+          ) &&
+          object.spec.volumes.exists(v,
+            v.name == 'reservation-probe' &&
+            v.configMap.name == 'pireus-spark-pair-reservation-probe-bce2666d07f0' &&
+            v.configMap.defaultMode == 365
+          ) &&
+          (!has(object.spec.initContainers) || object.spec.initContainers.size() == 0) &&
+          (!has(object.spec.ephemeralContainers) || object.spec.ephemeralContainers.size() == 0) &&
           object.spec.containers[0].name == 'reservation' &&
           object.spec.containers[0].image == 'ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517' &&
+          object.spec.containers[0].command == ['/bin/bash', '/probe/reservation-probe.sh'] &&
+          (!has(object.spec.containers[0].args) || object.spec.containers[0].args.size() == 0) &&
+          !has(object.spec.containers[0].lifecycle) &&
+          object.spec.containers[0].env.size() == 2 &&
+          object.spec.containers[0].env.exists(e,
+            e.name == 'NODE_NAME' && e.valueFrom.fieldRef.apiVersion == 'v1' &&
+            e.valueFrom.fieldRef.fieldPath == 'spec.nodeName'
+          ) &&
+          object.spec.containers[0].env.exists(e,
+            e.name == 'PIREUS_EPOCH' && e.value == params.data.epoch
+          ) &&
+          (!has(object.spec.containers[0].envFrom) || object.spec.containers[0].envFrom.size() == 0) &&
+          object.spec.containers[0].volumeMounts.size() == 2 &&
+          object.spec.containers[0].volumeMounts.exists(v,
+            v.name == 'host-root' && v.mountPath == '/host' && v.readOnly == true
+          ) &&
+          object.spec.containers[0].volumeMounts.exists(v,
+            v.name == 'reservation-probe' && v.mountPath == '/probe' && v.readOnly == true
+          ) &&
+          object.spec.containers[0].securityContext.privileged == true &&
+          object.spec.containers[0].readinessProbe.exec.command == ['/usr/bin/test', '-f', '/tmp/nvml-clean'] &&
           object.spec.containers[0].resources.requests['nvidia.com/gpu'] == quantity('1') &&
           object.spec.containers[0].resources.limits['nvidia.com/gpu'] == quantity('1') &&
           params.data.state in [
@@ -171,4 +394,182 @@ metadata:
   name: pireus-spark-pair-binding-fence
 spec:
   policyName: pireus-spark-pair-binding-fence
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: pireus-spark-pair-control-fence
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["configmaps", "serviceaccounts"]
+        scope: "Namespaced"
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CONNECT"]
+        resources: ["pods/exec"]
+        scope: "Namespaced"
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["nodes"]
+        scope: "Cluster"
+      - apiGroups: ["coordination.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["leases"]
+        scope: "Namespaced"
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["daemonsets", "replicasets"]
+        scope: "Namespaced"
+      - apiGroups: ["slinky.slurm.net"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["nodesets"]
+        scope: "Namespaced"
+      - apiGroups: ["admissionregistration.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+        scope: "Cluster"
+  matchConditions:
+    - name: pireus-controlled-object
+      expression: >-
+        (
+          request.resource.group == '' &&
+          request.namespace == 'beagle' &&
+          request.resource.resource == 'pods' &&
+          request.subResource == 'exec' &&
+          request.name.startsWith('pireus-spark-host-fence-')
+        ) ||
+        (request.resource.group == '' &&
+         request.resource.resource == 'nodes' &&
+         (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) in
+           ['spark-3c59', 'spark-8e54']) ||
+        (
+          request.resource.group == '' &&
+          request.namespace == 'beagle' &&
+          request.resource.resource == 'configmaps' &&
+          (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) in [
+            'pireus-spark-pair-admission',
+            'pireus-spark-pair-bootstrap-journal',
+            'pireus-spark-pair-reservation-probe-bce2666d07f0',
+            'pireus-spark-host-fence-7c539ed7beb1',
+            'pireus-spark-device-barrier-2bb44ec47f1c'
+          ]
+        ) ||
+        (
+          request.resource.group == '' &&
+          request.namespace == 'beagle' &&
+          request.resource.resource == 'serviceaccounts' &&
+          (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) in [
+            'pireus-spark-pair-reservation', 'pireus-spark-host-fence'
+          ]
+        ) ||
+        (
+          request.resource.group == 'coordination.k8s.io' &&
+          request.namespace == 'beagle' &&
+          request.resource.resource == 'leases' &&
+          (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) == 'pireus-spark-pair'
+        ) ||
+        (
+          request.resource.group == 'apps' &&
+          request.resource.resource == 'daemonsets' &&
+          ((request.namespace == 'beagle' &&
+            (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) == 'pireus-spark-host-fence') ||
+           (request.namespace in ['kube-system', 'ceph-csi-cephfs', 'ceph-csi-rbd', 'nvidia-network-operator', 'darwin-observability-system'] &&
+            (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) in [
+              'cilium', 'cilium-envoy', 'kube-multus-ds', 'kube-proxy', 'whereabouts',
+              'nvidia-device-plugin-3c59', 'nvidia-device-plugin-8e54',
+              'csi-cephfsplugin', 'csi-rbdplugin',
+              'nvidia-network-operator-node-feature-discovery-worker',
+              'darwin-node-exporter'
+            ]))
+        ) ||
+        (
+          request.resource.group == 'apps' &&
+          request.namespace == 'kube-system' &&
+          request.resource.resource == 'replicasets' &&
+          (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) in [
+            'coredns-3c59-6d444bb9b', 'coredns-8e54-58cf954b66'
+          ]
+        ) ||
+        (
+          request.resource.group == 'slinky.slurm.net' &&
+          request.namespace == 'slurm-pilot' &&
+          request.resource.resource == 'nodesets' &&
+          (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) == 'slurm-pilot-worker-spark'
+        ) ||
+        (
+          request.resource.group == 'admissionregistration.k8s.io' &&
+          request.resource.resource in ['validatingadmissionpolicies', 'validatingadmissionpolicybindings'] &&
+          (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) in [
+            'pireus-spark-pair-fence',
+            'pireus-spark-pair-binding-fence',
+            'pireus-spark-pair-control-fence'
+          ]
+        )
+  validations:
+    - expression: >-
+        request.userInfo.username == 'system:serviceaccount:beagle:sounio-workspace-admin' ||
+        (
+          request.resource.group == 'slinky.slurm.net' &&
+          request.userInfo.username == 'system:serviceaccount:slurm-pilot:slurm-operator'
+        ) ||
+        (
+          request.resource.group == '' &&
+          request.resource.resource == 'nodes' &&
+          request.operation == 'UPDATE' &&
+          (has(object.spec.taints) ?
+            object.spec.taints.filter(t, t.key == 'pireus.sounio.dev/spark-pair') : []) ==
+          (has(oldObject.spec.taints) ?
+            oldObject.spec.taints.filter(t, t.key == 'pireus.sounio.dev/spark-pair') : []) &&
+          (
+            (!has(oldObject.metadata.labels) ||
+             !('pireus.sounio.dev/spark-pair-host-fence' in oldObject.metadata.labels)) ?
+            (!has(object.metadata.labels) ||
+             !('pireus.sounio.dev/spark-pair-host-fence' in object.metadata.labels)) :
+            (has(object.metadata.labels) &&
+             'pireus.sounio.dev/spark-pair-host-fence' in object.metadata.labels &&
+             object.metadata.labels['pireus.sounio.dev/spark-pair-host-fence'] ==
+               oldObject.metadata.labels['pireus.sounio.dev/spark-pair-host-fence'])
+          ) &&
+          (
+            (!has(oldObject.metadata.labels) ||
+             !('pireus.sounio.dev/spark-pair-host-fence-bootstrap' in oldObject.metadata.labels)) ?
+            (!has(object.metadata.labels) ||
+             !('pireus.sounio.dev/spark-pair-host-fence-bootstrap' in object.metadata.labels)) :
+            (has(object.metadata.labels) &&
+             'pireus.sounio.dev/spark-pair-host-fence-bootstrap' in object.metadata.labels &&
+             object.metadata.labels['pireus.sounio.dev/spark-pair-host-fence-bootstrap'] ==
+               oldObject.metadata.labels['pireus.sounio.dev/spark-pair-host-fence-bootstrap'])
+          ) &&
+          (
+            (!has(oldObject.metadata.labels) ||
+             !('pireus.sounio.dev/slurm-enabled' in oldObject.metadata.labels)) ?
+            (!has(object.metadata.labels) ||
+             !('pireus.sounio.dev/slurm-enabled' in object.metadata.labels)) :
+            (has(object.metadata.labels) &&
+             'pireus.sounio.dev/slurm-enabled' in object.metadata.labels &&
+             object.metadata.labels['pireus.sounio.dev/slurm-enabled'] ==
+               oldObject.metadata.labels['pireus.sounio.dev/slurm-enabled'])
+          )
+        )
+      message: Pireus control objects are writable only by their canonical material authorities.
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: pireus-spark-pair-control-fence
+spec:
+  policyName: pireus-spark-pair-control-fence
   validationActions: [Deny]

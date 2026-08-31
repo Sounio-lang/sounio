@@ -34,6 +34,21 @@ fn test_k8s(mask: i64) -> SparkPairK8sFacts with Div {
     )
 }
 
+fn test_host(mask: i64) -> SparkPairHostFacts with Div {
+    admit_spark_pair_host_facts(
+        test_mask_bit(mask, 1), test_mask_bit(mask, 2),
+        test_mask_bit(mask, 4), test_mask_bit(mask, 8),
+        test_mask_bit(mask, 16),
+        test_mask_bit(mask, 32), test_mask_bit(mask, 64),
+        test_mask_bit(mask, 128), test_mask_bit(mask, 256),
+        test_mask_bit(mask, 512), test_mask_bit(mask, 1024),
+        test_mask_bit(mask, 2048), test_mask_bit(mask, 4096),
+        test_mask_bit(mask, 8192), test_mask_bit(mask, 16384),
+        test_mask_bit(mask, 32768),
+        test_mask_bit(mask, 65536),
+    )
+}
+
 fn expect_pair_decision(
     action: i64,
     state: i64,
@@ -51,6 +66,33 @@ fn expect_pair_decision(
         test_authority(authority_mask),
         test_slurm(slurm_mask),
         test_k8s(k8s_mask),
+        test_host(131071),
+    )
+    if spark_pair_decision_allowed(decision) != expected_allowed { return 1 }
+    if spark_pair_decision_next_state(decision) != expected_next { return 1 }
+    if spark_pair_decision_reason(decision) != expected_reason { return 1 }
+    0
+}
+
+fn expect_pair_host_decision(
+    action: i64,
+    state: i64,
+    epoch: i64,
+    observed_epoch: i64,
+    authority_mask: i64,
+    slurm_mask: i64,
+    k8s_mask: i64,
+    host_mask: i64,
+    expected_allowed: bool,
+    expected_next: i64,
+    expected_reason: i64,
+) -> i64 with Div {
+    let decision = decide_spark_pair_transition(
+        action, state, epoch, observed_epoch,
+        test_authority(authority_mask),
+        test_slurm(slurm_mask),
+        test_k8s(k8s_mask),
+        test_host(host_mask),
     )
     if spark_pair_decision_allowed(decision) != expected_allowed { return 1 }
     if spark_pair_decision_next_state(decision) != expected_next { return 1 }
@@ -62,6 +104,7 @@ fn positive_transition_failures() -> i64 with Div {
     var failures: i64 = 0
     failures = failures + expect_pair_decision(28, 0, 1, 1, 97, 26, 768, true, 0, 0)
     failures = failures + expect_pair_decision(24, 0, 1, 1, 249, 26, 1009, true, 0, 0)
+    failures = failures + expect_pair_host_decision(29, 0, 1, 1, 249, 26, 1009, 0, true, 0, 0)
     failures = failures + expect_pair_decision(23, 0, 1, 1, 1017, 26, 1009, true, 0, 0)
     failures = failures + expect_pair_decision(25, 0, 1, 1, 1017, 30, 1009, true, 0, 0)
     failures = failures + expect_pair_decision(26, 0, 1, 1, 1017, 65, 1009, true, 0, 0)
@@ -89,6 +132,15 @@ fn positive_transition_failures() -> i64 with Div {
     failures = failures + expect_pair_decision(20, 10, 2, 2, 1017, 223, 1009, true, 10, 0)
     failures = failures + expect_pair_decision(21, 10, 2, 2, 1017, 191, 1009, true, 10, 0)
     failures = failures + expect_pair_decision(22, 10, 2, 2, 1017, 2, 1009, true, 10, 0)
+    failures = failures + expect_pair_host_decision(29, 10, 2, 2, 1017, 255, 1009, 0, true, 10, 0)
+    failures = failures + expect_pair_host_decision(30, 2, 2, 2, 1017, 255, 1009, 131071, true, 2, 0)
+    failures = failures + expect_pair_host_decision(31, 0, 2, 2, 1017, 255, 1009, 131071, true, 0, 0)
+    failures = failures + expect_pair_host_decision(32, 3, 2, 2, 1017, 255, 1009, 131071, true, 3, 0)
+    // Drain effects remain available while consumers are present. They
+    // establish zero jobs before action 30 is allowed to activate the fence.
+    failures = failures + expect_pair_host_decision(23, 0, 2, 2, 1017, 2, 1009, 90227, true, 0, 0)
+    failures = failures + expect_pair_host_decision(22, 10, 2, 2, 1017, 2, 1009, 90227, true, 10, 0)
+    failures = failures + expect_pair_host_decision(30, 10, 2, 2, 1017, 24, 1009, 90227, true, 10, 0)
     failures
 }
 
@@ -128,11 +180,30 @@ fn material_refusal_failures() -> i64 with Div {
     failures = failures + expect_pair_decision(6, 5, 1, 1, 1017, 255, 765, false, 5, 119)
     failures = failures + expect_pair_decision(6, 5, 1, 1, 1017, 255, 763, false, 5, 119)
     failures = failures + expect_pair_decision(6, 5, 1, 1, 1017, 255, 759, false, 5, 119)
-    failures = failures + expect_pair_decision(6, 5, 1, 1, 1017, 255, 751, false, 5, 120)
+    // NVML is supplementary on unified-memory GB10. Complete host facts,
+    // rather than a driver observation, decide material exclusion.
+    failures = failures + expect_pair_decision(6, 5, 1, 1, 1017, 255, 751, true, 6, 0)
     failures = failures + expect_pair_decision(9, 7, 1, 1, 1017, 255, 735, false, 7, 121)
     failures = failures + expect_pair_decision(9, 7, 1, 1, 1017, 255, 703, false, 7, 121)
     failures = failures + expect_pair_decision(7, 6, 1, 1, 1017, 255, 639, false, 6, 122)
     failures = failures + expect_pair_decision(12, 9, 1, 1, 1017, 127, 1009, false, 9, 123)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 65534, false, 0, 128)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 65533, false, 0, 129)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 65531, false, 0, 130)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 65527, false, 0, 131)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 65519, false, 0, 132)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 65503, false, 0, 133)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 65471, false, 0, 134)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 65407, false, 0, 135)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 65279, false, 0, 136)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 65023, false, 0, 137)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 64511, false, 0, 138)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 63487, false, 0, 139)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 61439, false, 0, 140)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 57343, false, 0, 141)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 49151, false, 0, 142)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 32767, false, 0, 143)
+    failures = failures + expect_pair_host_decision(31, 0, 1, 1, 1017, 26, 1009, 65535, false, 0, 144)
     failures
 }
 
@@ -140,7 +211,7 @@ fn main() -> i64 with IO, Mut, Div {
     let failures = positive_transition_failures() +
         authority_refusal_failures() + material_refusal_failures()
     if failures == 0 {
-        println("SOUNIO_SPARK_PAIR_SELFTEST_PASS vectors=64 authority=Sounio")
+        println("SOUNIO_SPARK_PAIR_SELFTEST_PASS vectors=88 authority=Sounio")
         return 0
     }
     println("SOUNIO_SPARK_PAIR_SELFTEST_FAIL")

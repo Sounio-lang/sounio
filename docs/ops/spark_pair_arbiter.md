@@ -9,8 +9,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ops.spark-pair
 
 # Spark Pair Arbiter
 
-Status: semantics frozen; offline gates required; live installation not yet
-claimed.
+Status: Sounio frame 9025 executable; semantics frozen; offline gates green;
+installation and live exclusion are not yet claimed.
 
 The arbiter gives the two DGX Spark nodes to exactly one scheduler at a time.
 Sounio is the executable transition authority. Bash transports observations and
@@ -24,9 +24,14 @@ owns one Kubernetes GPU per `slurmd` while Slurm is active.
 | `spark-3c59` | `gpuorangefs-multi-spark-3c59` | 1 GB10 |
 | `spark-8e54` | `gpuorangefs-multi-spark-8e54` | 1 GB10 |
 
-The exact node, NodeSet, device-plugin, source, policy, backend, admission and
-native-executable hashes are frozen in
+The exact node, NodeSet, device-plugin, source, policy, backend, admission,
+host-fence manifest and native-executable hashes are frozen in
 `tools/cluster/spark_pair_arbiter.freeze.v1`.
+
+The executable host fence, transient C++ device-barrier source, and reservation
+probe are stored in immutable, content-addressed ConfigMaps. Their names carry
+the first 12 hexadecimal digits of the exact source SHA-256, and the material
+backend recomputes each binding before accepting the objects.
 
 ## Gate order
 
@@ -34,10 +39,12 @@ native-executable hashes are frozen in
 GARDEN
 -> SOUNIO_EXECUTABLE
 -> SEMANTICS_FROZEN
--> OFFLINE_NEGATIVES_GREEN
--> INSTALL_REVIEWED
--> MUTUAL_EXCLUSION_LIVE_GATE
+-> PARITY_OPEN
+-> CLAIM_READY
 ```
+
+`PARITY_OPEN` contains the offline negatives, install review and live
+mutual-exclusion gate. `CLAIM_READY` remains false until all three are green.
 
 Run the non-mutating checks first:
 
@@ -74,13 +81,18 @@ cluster arbitration boundary.
 
 Sounio action 28 first authorizes creation of the `UNINITIALIZED` Lease and then
 the bootstrap journal from a pair-exact, queue-empty prebootstrap frame.
-Actions 24, 23, 25, and 26 then authorize, in order:
+Actions 24, 29, 23, 30, 31, 25, and 26 then authorize, in order:
 
 1. install fail-closed Pod and manual-binding admission, prove that a generic
    GPU Pod is denied, patch device-plugin tolerations, and census existing Pods;
-2. drain both Slurm nodes only after admission and the pair taint are proved;
-3. make the NodeSet request and limit one GPU and bind one `slurmd` per node;
-4. resume Slurm only after both GPU owners are proved.
+2. install the persistent host watchdog in non-mutating `ARMED` mode and bind
+   one cryptographic host receipt per boot to the Lease;
+3. drain both Slurm nodes only after admission and the pair taint are proved;
+4. activate the pair-wide host fence only after zero jobs and allocations are
+   observed on the drained pair;
+5. grant host access to Slurm, make the NodeSet request and limit one GPU, and
+   bind one `slurmd` per node;
+6. resume Slurm only after both GPU owners are proved.
 
 Action 1 finally commits `SLURM_OWNED`. Every material command requires the
 current holder, epoch, Lease state and an action-bound Sounio receipt. A failed
@@ -101,20 +113,42 @@ SOUNIO_SPARK_PAIR_HOLDER="bootstrap-recovery-$(hostname)" \
 
 ## Acquisition and release
 
-Acquisition drains Slurm, proves zero jobs and allocations, removes both
-`slurmd` Pods, creates one exact GPU reservation on each node, and records GPU
-UUID, driver, process, MPS, utilisation and memory evidence before committing
-`K8S_OWNED`.
+Acquisition drains Slurm, proves zero jobs and allocations, activates the local
+fence on both hosts, removes both `slurmd` Pods, grants a 30-second monotonic
+Kubernetes epoch on both hosts, then creates one exact GPU reservation on each
+node before committing `K8S_OWNED`. During `K8S_RESERVING`, the controller
+preserves the `BEGIN_RESERVE` receipt and refreshes the paired host grant with
+new Sounio action-32 receipts. Loss of that refresh aborts acquisition. A
+partial two-host grant revokes both sides and enters recovery.
+
+Each pair grant is a two-phase transaction. Both hosts first emit
+non-authorizing prepare receipts. The controller commits the transaction ID,
+Lease UID, base resource version and both receipts to the Lease before either
+host can activate a grant. Each host recomputes the pair digest and binds its
+grant to the durable intent resource version. A killed controller cannot
+produce scheduler effects from a partial commit; a final CAS conflict requires
+both hosts to report `FENCED` before the operation returns.
 
 The two canonical GB10s expose unified memory and return `[N/A]` for
 `nvidia-smi memory.used`. The frozen policy records this as
 `UNAVAILABLE_UNIFIED` only for the exact two UUIDs, `NVIDIA_GB10` product and
-driver `580.159.03`. It never substitutes for the process, `pmon`, MPS or
-utilisation probes.
+driver `580.159.03`. NVML is supplementary telemetry and is not an ownership
+gate. The material gate uses exact Docker configuration, systemd units, Pod
+UID/cgroup ownership, process sets, memory floor and protected-resource state.
+Every managed `SANDBOX_READY` Pod must have a canonical CRI UID and map to
+exactly one cgroup-v2 slice. Fencing requires the atomic `cgroup.kill` file;
+missing or ambiguous mappings fail closed and there is no PID-by-PID fallback.
+The host fence also attaches a raw `BPF_CGROUP_DEVICE` program to the root
+cgroup before changing the local record to `FENCED`. It denies new opens for
+the exact frozen GPU-related majors, including processes launched outside
+Kubernetes through `systemd-run`. BPF does not revoke descriptors already
+open, so service shutdown, `cgroup.kill`, and the `/proc` descriptor census
+remain independent mandatory gates.
 
-Release stops pair workloads, reprobes both GPUs, deletes the reservations,
-restores both GPU-bound `slurmd` Pods, resumes Slurm, and commits
-`SLURM_OWNED`. Lease expiry never resumes Slurm.
+Release stops pair workloads, fences both hosts, deletes the reservations,
+grants Slurm on both hosts, restores both GPU-bound `slurmd` Pods, resumes
+Slurm, and commits `SLURM_OWNED`. Lease expiry never resumes Slurm. K8s grant
+expiry fences locally even when the control-plane path is unavailable.
 
 Manual recovery is:
 
@@ -130,12 +164,33 @@ the Lease CAS, epoch increment and node annotation update.
 
 Phase 1 denies ordinary Pods using `nodeName`, the dedicated toleration,
 generic GPU requests during bootstrap, manual bindings, stale reservation
-epochs, spoofed scheduler roles, or the future workload role.
+epochs, spoofed scheduler roles, or the future workload role. A persistent
+systemd boot unit attaches the root-cgroup device barrier before `basic.target`;
+Docker, containerd, and kubelet each require that unit. Only then does it
+invalidate any old grant. The continuous watchdog starts after those runtimes are
+observable, refreshes the protected-resource baseline for the current boot,
+and publishes a heartbeat only after a complete successful cycle. It gates the
+known Ollama, Beagle embedding and TEI consumers without restarting those
+runtimes. It never stops `vxlan-cluster`, Docker, containerd, kubelet, the
+Beagle Postgres data path, or the Sounio checkpoint/toolchain paths. The
+hardware watchdog is deliberately not armed in phase 1.
+
 Exact infrastructure service accounts remain admitted so CNI, CSI, metrics and
-device-plugin DaemonSets can operate. A cluster administrator can alter or
-delete admission itself and is outside this phase's threat model. Root GPU
-processes created outside Kubernetes and Slurm are detected at handoff, but a
-persistent host fence agent is required to prevent them proactively.
+device-plugin DaemonSets can operate. Their admitted Pod specs are exact and
+GPU-free except for the two canonical device plugins. A separate fail-closed
+control policy protects the admission objects, Lease, NodeSet, infrastructure
+controllers and the pair Nodes. Non-authority Node updates may change unrelated
+metadata but must preserve the Pireus taint and host/Slurm selector labels.
+The same policy rejects `pods/exec` into the privileged host-fence Pods before
+execution unless the caller is the canonical material controller identity. A
+deliberate host administrator can replace the watchdog binary or kernel state
+and remains outside this phase's threat model; ordinary root GPU consumers are
+inside the root-cgroup barrier.
 
 This phase does not download Inkling, change LiteLLM, run TP2, or change Pireus
 operator semantics.
+
+Removing the DaemonSet is not a decommission procedure. Phase 1 intentionally
+keeps legacy GPU services stopped while either scheduler owns the pair, and no
+unreceipted command may re-enable them. A reversible, Sounio-authorized
+decommission action remains required before `CLAIM_READY` can become true.

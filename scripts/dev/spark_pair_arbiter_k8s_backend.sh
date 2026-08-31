@@ -50,6 +50,8 @@ verify_frozen_material() {
   verify_frozen_file material_policy_source material_policy_sha256
   verify_frozen_file material_backend_source material_backend_sha256
   verify_frozen_file admission_manifest_source admission_manifest_sha256
+  verify_frozen_file host_fence_manifest_source host_fence_manifest_sha256
+  verify_frozen_file device_barrier_source device_barrier_source_sha256
   [[ "$(sha256_file "$POLICY")" == "$(policy_value "$FREEZE" material_policy_sha256)" ]] || fail 'selected policy is not frozen'
   [[ "$(sha256_file "${BASH_SOURCE[0]}")" == "$(policy_value "$FREEZE" material_backend_sha256)" ]] || fail 'running backend is not frozen'
 }
@@ -91,6 +93,7 @@ verify_receipt() {
   [[ "$(receipt_value "$receipt" material_policy_sha256)" == "$(policy_value "$FREEZE" material_policy_sha256)" ]] || fail 'receipt material policy hash mismatch'
   [[ "$(receipt_value "$receipt" material_backend_sha256)" == "$(policy_value "$FREEZE" material_backend_sha256)" ]] || fail 'receipt material backend hash mismatch'
   [[ "$(receipt_value "$receipt" admission_manifest_sha256)" == "$(policy_value "$FREEZE" admission_manifest_sha256)" ]] || fail 'receipt admission manifest hash mismatch'
+  [[ "$(receipt_value "$receipt" host_fence_manifest_sha256)" == "$(policy_value "$FREEZE" host_fence_manifest_sha256)" ]] || fail 'receipt host fence manifest hash mismatch'
   [[ "$(receipt_value "$receipt" epoch)" == "$epoch" ]] || fail 'receipt epoch does not match Lease epoch'
   [[ "$(receipt_value "$receipt" result)" == SOUNIO_SPARK_PAIR_ALLOW* ]] || fail 'receipt does not contain Sounio ALLOW'
   action="$(receipt_value "$receipt" action_code)"
@@ -117,6 +120,8 @@ verify_receipt() {
     14) expected_from="$receipt_from"; expected_to="$receipt_from" ;;
     15|16|17|18|19|20|21|22) expected_from=RECOVERY_REQUIRED; expected_to=RECOVERY_REQUIRED ;;
     23|24|25|26|27|28) expected_from=UNINITIALIZED; expected_to=UNINITIALIZED ;;
+    29) expected_from="$receipt_from"; expected_to="$receipt_from" ;;
+    30|31|32) expected_from="$receipt_from"; expected_to="$receipt_from" ;;
     *) fail "receipt action $action has no material contract" ;;
   esac
   [[ "$receipt_from" == "$expected_from" && "$receipt_to" == "$expected_to" ]] || \
@@ -175,10 +180,23 @@ require_lease_context() {
 
 guard_mutation() {
   local kind="$1" holder="$2" epoch="$3" receipt="$4" state actions=''
-  state="$(require_lease_context "$holder" "$epoch" 'UNINITIALIZED DRAINING_SLURM DETACHING_SLURMD K8S_RESERVING K8S_OWNED K8S_RELEASING SLURM_RESTORING RECOVERY_REQUIRED')"
+  state="$(require_lease_context "$holder" "$epoch" 'UNINITIALIZED SLURM_OWNED DRAINING_SLURM SLURM_QUIESCENT DETACHING_SLURMD K8S_RESERVING K8S_OWNED K8S_RELEASING VERIFYING_GPU_CLEAN SLURM_RESTORING RECOVERY_REQUIRED')"
   case "$kind:$state" in
     drain:UNINITIALIZED) actions=23 ;;
     fence:UNINITIALIZED) actions=24 ;;
+    host-fence:UNINITIALIZED) actions=29 ;;
+    host-fence:RECOVERY_REQUIRED) actions=29 ;;
+    host-pair:UNINITIALIZED) actions=30 ;;
+    host-pair:DRAINING_SLURM) actions=30 ;;
+    host-pair:SLURM_QUIESCENT) actions=30 ;;
+    host-pair:K8S_RELEASING) actions=30 ;;
+    host-pair:VERIFYING_GPU_CLEAN) actions=30 ;;
+    host-pair:RECOVERY_REQUIRED) actions=30 ;;
+    host-grant-slurm:UNINITIALIZED) actions=31 ;;
+    host-grant-slurm:SLURM_RESTORING) actions=31 ;;
+    host-grant-slurm:RECOVERY_REQUIRED) actions=31 ;;
+    host-grant-k8s:K8S_RESERVING) actions=32 ;;
+    host-grant-k8s:K8S_OWNED) actions=32 ;;
     bootstrap-slurmd:UNINITIALIZED) actions=25 ;;
     resume:UNINITIALIZED) actions=26 ;;
     drain:DRAINING_SLURM) actions=2 ;;
@@ -254,18 +272,67 @@ sync_admission_projection() {
 }
 
 admission_fail_closed() {
-  local lease policy binding binding_policy binding_binding config state epoch holder source_hash freeze_hash
+  local lease policy binding binding_policy binding_binding control_policy control_binding config probe_config state epoch holder source_hash freeze_hash
+  local bound_uid daemonset daemonset_uid expected expected_policy expected_binding expected_binding_policy expected_binding_binding expected_control_policy expected_control_binding expected_probe_config expected_probe_sha manifest
   lease="$1"
   policy="$(kubectl get validatingadmissionpolicy "$(policy_value "$POLICY" admission_policy)" -o json 2>/dev/null)" || return 1
   binding="$(kubectl get validatingadmissionpolicybinding "$(policy_value "$POLICY" admission_binding)" -o json 2>/dev/null)" || return 1
   binding_policy="$(kubectl get validatingadmissionpolicy "$(policy_value "$POLICY" admission_binding_policy)" -o json 2>/dev/null)" || return 1
   binding_binding="$(kubectl get validatingadmissionpolicybinding "$(policy_value "$POLICY" admission_binding_binding)" -o json 2>/dev/null)" || return 1
+  control_policy="$(kubectl get validatingadmissionpolicy "$(policy_value "$POLICY" admission_control_policy)" -o json 2>/dev/null)" || return 1
+  control_binding="$(kubectl get validatingadmissionpolicybinding "$(policy_value "$POLICY" admission_control_binding)" -o json 2>/dev/null)" || return 1
   config="$(admission_config_json 2>/dev/null)" || return 1
+  probe_config="$(kubectl -n "$(kube_namespace)" get configmap \
+    "$(policy_value "$POLICY" reservation_probe_configmap)" -o json 2>/dev/null)" || return 1
+  manifest="$(repo_root)/$(policy_value "$POLICY" admission_manifest)"
+  expected="$(kubectl apply --dry-run=server -f "$manifest" -o json 2>/dev/null)" || return 1
+  expected_policy="$(jq -c --arg name "$(policy_value "$POLICY" admission_policy)" \
+    '.items[] | select(.kind == "ValidatingAdmissionPolicy" and .metadata.name == $name)' <<<"$expected")"
+  expected_binding="$(jq -c --arg name "$(policy_value "$POLICY" admission_binding)" \
+    '.items[] | select(.kind == "ValidatingAdmissionPolicyBinding" and .metadata.name == $name)' <<<"$expected")"
+  expected_binding_policy="$(jq -c --arg name "$(policy_value "$POLICY" admission_binding_policy)" \
+    '.items[] | select(.kind == "ValidatingAdmissionPolicy" and .metadata.name == $name)' <<<"$expected")"
+  expected_binding_binding="$(jq -c --arg name "$(policy_value "$POLICY" admission_binding_binding)" \
+    '.items[] | select(.kind == "ValidatingAdmissionPolicyBinding" and .metadata.name == $name)' <<<"$expected")"
+  expected_control_policy="$(jq -c --arg name "$(policy_value "$POLICY" admission_control_policy)" \
+    '.items[] | select(.kind == "ValidatingAdmissionPolicy" and .metadata.name == $name)' <<<"$expected")"
+  expected_control_binding="$(jq -c --arg name "$(policy_value "$POLICY" admission_control_binding)" \
+    '.items[] | select(.kind == "ValidatingAdmissionPolicyBinding" and .metadata.name == $name)' <<<"$expected")"
+  expected_probe_config="$(jq -c --arg name "$(policy_value "$POLICY" reservation_probe_configmap)" \
+    '.items[] | select(.kind == "ConfigMap" and .metadata.name == $name)' <<<"$expected")"
+  [[ -n "$expected_policy" && -n "$expected_binding" && -n "$expected_binding_policy" &&
+      -n "$expected_binding_binding" && -n "$expected_control_policy" &&
+      -n "$expected_control_binding" && -n "$expected_probe_config" ]] || return 1
+  expected_probe_sha="$(jq -j '.data["reservation-probe.sh"] // ""' \
+    <<<"$expected_probe_config" | sha256sum | cut -d ' ' -f 1)"
+  [[ "$(policy_value "$POLICY" reservation_probe_configmap)" == \
+      "pireus-spark-pair-reservation-probe-${expected_probe_sha:0:12}" ]] || return 1
+  [[ "$(jq -S -c '.spec' <<<"$policy")" == "$(jq -S -c '.spec' <<<"$expected_policy")" &&
+      "$(jq -S -c '.spec' <<<"$binding")" == "$(jq -S -c '.spec' <<<"$expected_binding")" &&
+      "$(jq -S -c '.spec' <<<"$binding_policy")" == "$(jq -S -c '.spec' <<<"$expected_binding_policy")" &&
+      "$(jq -S -c '.spec' <<<"$binding_binding")" == "$(jq -S -c '.spec' <<<"$expected_binding_binding")" &&
+      "$(jq -S -c '.spec' <<<"$control_policy")" == "$(jq -S -c '.spec' <<<"$expected_control_policy")" &&
+      "$(jq -S -c '.spec' <<<"$control_binding")" == "$(jq -S -c '.spec' <<<"$expected_control_binding")" ]] || return 1
+  [[ "$(jq -S -c '{immutable,data}' <<<"$probe_config")" == \
+      "$(jq -S -c '{immutable,data}' <<<"$expected_probe_config")" ]] || return 1
   state="$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
   epoch="$(jq -r --arg key "$(policy_value "$POLICY" epoch_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
   holder="$(jq -r '.spec.holderIdentity // ""' <<<"$lease")"
   source_hash="$(policy_value "$FREEZE" authority_sha256)"
   freeze_hash="$(sha256_file "$FREEZE")"
+  bound_uid="$(jq -r '.data.hostFenceDaemonSetUid // ""' <<<"$config")"
+  if [[ "$bound_uid" == UNBOUND ]]; then
+    if kubectl -n "$(kube_namespace)" get daemonset \
+      "$(policy_value "$POLICY" host_fence_daemonset)" >/dev/null 2>&1; then
+      host_fence_staged || return 1
+    fi
+  else
+    [[ "$bound_uid" =~ ^[0-9a-f-]{36}$ ]] || return 1
+    daemonset="$(kubectl -n "$(kube_namespace)" get daemonset \
+      "$(policy_value "$POLICY" host_fence_daemonset)" -o json 2>/dev/null)" || return 1
+    daemonset_uid="$(jq -r '.metadata.uid // ""' <<<"$daemonset")"
+    [[ "$daemonset_uid" == "$bound_uid" ]] || return 1
+  fi
   jq -e '
     .spec.failurePolicy == "Fail" and
     .spec.paramKind.apiVersion == "v1" and
@@ -288,6 +355,15 @@ admission_fail_closed() {
   jq -e --arg policy "$(policy_value "$POLICY" admission_binding_policy)" '
     .spec.policyName == $policy and .spec.validationActions == ["Deny"]
   ' <<<"$binding_binding" >/dev/null || return 1
+  jq -e '
+    .spec.failurePolicy == "Fail" and
+    (.spec.validations | length) == 1 and
+    (.status.observedGeneration == .metadata.generation) and
+    ((.status.typeChecking.expressionWarnings // []) | length) == 0
+  ' <<<"$control_policy" >/dev/null || return 1
+  jq -e --arg policy "$(policy_value "$POLICY" admission_control_policy)" '
+    .spec.policyName == $policy and .spec.validationActions == ["Deny"]
+  ' <<<"$control_binding" >/dev/null || return 1
   jq -e --arg state "$state" --arg epoch "$epoch" --arg holder "$holder" \
     --arg source "$source_hash" --arg freeze "$freeze_hash" '
       .data.state == $state and .data.epoch == $epoch and .data.holder == $holder and
@@ -363,6 +439,10 @@ replace_lease() {
   kubectl -n "$(kube_namespace)" replace -f - >/dev/null
 }
 
+replace_lease_json() {
+  kubectl -n "$(kube_namespace)" replace -f - -o json
+}
+
 slurm_exec() {
   kubectl -n "$(policy_value "$POLICY" slurm_login_namespace)" exec \
     "deploy/$(policy_value "$POLICY" slurm_login_deployment)" -- "$@"
@@ -393,6 +473,314 @@ bit_add() {
   else
     printf '%s\n' "$current"
   fi
+}
+
+host_fence_pods_json() {
+  kubectl -n "$(kube_namespace)" get pods \
+    -l 'app.kubernetes.io/name=pireus-spark-host-fence' -o json
+}
+
+device_barrier_config_json() {
+  local source
+  source="$(repo_root)/$(policy_value "$POLICY" host_device_barrier_source)"
+  kubectl -n "$(kube_namespace)" create configmap \
+    "$(policy_value "$POLICY" host_device_barrier_configmap)" \
+    --from-file="device-barrier.cpp=$source" --dry-run=client -o json | \
+    jq '.immutable = true'
+}
+
+host_fence_pair_exact() {
+  local daemonset pods config barrier_config expected_barrier expected_barrier_sha live_barrier expected_script expected_script_sha live_script daemonset_uid bound_uid expected expected_daemonset manifest selector_key selector_value
+  daemonset="$(kubectl -n "$(kube_namespace)" get daemonset \
+    "$(policy_value "$POLICY" host_fence_daemonset)" -o json 2>/dev/null)" || return 1
+  config="$(kubectl -n "$(kube_namespace)" get configmap \
+    "$(policy_value "$POLICY" host_fence_configmap)" -o json 2>/dev/null)" || return 1
+  barrier_config="$(kubectl -n "$(kube_namespace)" get configmap \
+    "$(policy_value "$POLICY" host_device_barrier_configmap)" -o json 2>/dev/null)" || return 1
+  pods="$(host_fence_pods_json 2>/dev/null)" || return 1
+  manifest="$(repo_root)/$(policy_value "$POLICY" host_fence_manifest)"
+  selector_key="$(policy_value "$POLICY" host_fence_selector_key)"
+  selector_value="$(policy_value "$POLICY" host_fence_selector_value)"
+  expected="$(kubectl apply --dry-run=server -f "$manifest" -o json 2>/dev/null)" || return 1
+  expected_daemonset="$(jq -c --arg key "$selector_key" --arg value "$selector_value" '
+    .items[] | select(.kind == "DaemonSet") |
+    .spec.template.spec.nodeSelector = {($key): $value}
+  ' <<<"$expected")"
+  [[ -n "$expected_daemonset" &&
+      "$(jq -S -c '.spec' <<<"$daemonset")" == "$(jq -S -c '.spec' <<<"$expected_daemonset")" ]] || return 1
+  expected_script="$(awk '
+    /^  host-fence\.sh: \|$/ { in_script=1; next }
+    in_script && /^---$/ { exit }
+    in_script { sub(/^    /, ""); print }
+  ' "$(repo_root)/$(policy_value "$POLICY" host_fence_manifest)")"
+  expected_script_sha="$(jq -j '.items[] | select(.kind == "ConfigMap") | .data["host-fence.sh"] // ""' \
+    <<<"$expected" | sha256sum | cut -d ' ' -f 1)"
+  [[ "$(policy_value "$POLICY" host_fence_configmap)" == \
+      "pireus-spark-host-fence-${expected_script_sha:0:12}" ]] || return 1
+  live_script="$(jq -r '.data["host-fence.sh"] // ""' <<<"$config")"
+  [[ -n "$expected_script" && "$live_script" == "$expected_script" ]] || return 1
+  expected_barrier="$(cat "$(repo_root)/$(policy_value "$POLICY" host_device_barrier_source)")"
+  expected_barrier_sha="$(sha256_file "$(repo_root)/$(policy_value "$POLICY" host_device_barrier_source)")"
+  [[ "$(policy_value "$POLICY" host_device_barrier_configmap)" == \
+      "pireus-spark-device-barrier-${expected_barrier_sha:0:12}" ]] || return 1
+  live_barrier="$(jq -r '.data["device-barrier.cpp"] // ""' <<<"$barrier_config")"
+  [[ -n "$expected_barrier" && "$live_barrier" == "$expected_barrier" ]] || return 1
+  daemonset_uid="$(jq -r '.metadata.uid // ""' <<<"$daemonset")"
+  bound_uid="$(admission_config_json 2>/dev/null | jq -r '.data.hostFenceDaemonSetUid // ""')" || return 1
+  [[ "$daemonset_uid" =~ ^[0-9a-f-]{36}$ && "$bound_uid" == "$daemonset_uid" ]] || return 1
+  jq -e '
+    .immutable == true and
+    (.data | keys) == ["host-fence.sh"]
+  ' <<<"$config" >/dev/null || return 1
+  jq -e '
+    .immutable == true and
+    (.data | keys) == ["device-barrier.cpp"]
+  ' <<<"$barrier_config" >/dev/null || return 1
+  jq -e --arg sa "$(policy_value "$POLICY" host_fence_service_account)" \
+    --arg image "$(policy_value "$POLICY" host_fence_image)" \
+    --arg cm "$(policy_value "$POLICY" host_fence_configmap)" \
+    --arg barrier_cm "$(policy_value "$POLICY" host_device_barrier_configmap)" \
+    --arg selector_key "$(policy_value "$POLICY" host_fence_selector_key)" \
+    --arg selector_value "$(policy_value "$POLICY" host_fence_selector_value)" '
+      .spec.selector.matchLabels == {"app.kubernetes.io/name":"pireus-spark-host-fence"} and
+      .spec.template.metadata.labels["app.kubernetes.io/name"] == "pireus-spark-host-fence" and
+      .spec.template.metadata.labels["pireus.sounio.dev/spark-pair-infrastructure"] == "true" and
+      .spec.template.spec.serviceAccountName == $sa and
+      .spec.template.spec.automountServiceAccountToken == false and
+      .spec.template.spec.hostPID == true and
+      .spec.template.spec.restartPolicy == "Always" and
+      .spec.template.spec.nodeSelector[$selector_key] == $selector_value and
+      (.spec.template.spec.containers | length) == 1 and
+      .spec.template.spec.containers[0].name == "host-fence" and
+      .spec.template.spec.containers[0].image == $image and
+      .spec.template.spec.containers[0].command == ["/bin/bash", "/fence/host-fence.sh", "daemonset-agent"] and
+      .spec.template.spec.containers[0].env == [{"name":"NODE_NAME","valueFrom":{"fieldRef":{"apiVersion":"v1","fieldPath":"spec.nodeName"}}}] and
+      .spec.template.spec.containers[0].securityContext.privileged == true and
+      .spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true and
+      .spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation == true and
+      .spec.template.spec.containers[0].readinessProbe.exec.command == ["/bin/bash", "/fence/host-fence.sh", "report"] and
+      (.spec.template.spec.containers[0].volumeMounts | length) == 3 and
+      any(.spec.template.spec.containers[0].volumeMounts[];
+        .name == "fence-script" and .mountPath == "/fence" and .readOnly == true) and
+      any(.spec.template.spec.containers[0].volumeMounts[];
+        .name == "device-barrier-source" and .mountPath == "/barrier" and .readOnly == true) and
+      any(.spec.template.spec.containers[0].volumeMounts[];
+        .name == "host-root" and .mountPath == "/host") and
+      (.spec.template.spec.volumes | length) == 3 and
+      any(.spec.template.spec.volumes[];
+        .name == "fence-script" and .configMap.name == $cm and .configMap.defaultMode == 365) and
+      any(.spec.template.spec.volumes[];
+        .name == "device-barrier-source" and .configMap.name == $barrier_cm and .configMap.defaultMode == 292) and
+      any(.spec.template.spec.volumes[];
+        .name == "host-root" and .hostPath.path == "/" and .hostPath.type == "Directory")
+    ' <<<"$daemonset" >/dev/null || return 1
+  jq -e --arg n0 "$(node0)" --arg n1 "$(node1)" --arg daemonset_uid "$daemonset_uid" \
+    --arg sa "$(policy_value "$POLICY" host_fence_service_account)" \
+    --arg image "$(policy_value "$POLICY" host_fence_image)" '
+      (.items | length) == 2 and
+      ([.items[].spec.nodeName] | sort) == ([$n0, $n1] | sort) and
+      all(.items[];
+        (.metadata.ownerReferences | length) == 1 and
+        .metadata.ownerReferences[0].apiVersion == "apps/v1" and
+        .metadata.ownerReferences[0].kind == "DaemonSet" and
+        .metadata.ownerReferences[0].name == "pireus-spark-host-fence" and
+        .metadata.ownerReferences[0].uid == $daemonset_uid and
+        .metadata.ownerReferences[0].controller == true and
+        .metadata.ownerReferences[0].blockOwnerDeletion == true and
+        .spec.serviceAccountName == $sa and
+        .spec.automountServiceAccountToken == false and
+        .spec.hostPID == true and
+        (.spec.containers | length) == 1 and
+        .spec.containers[0].image == $image and
+        .spec.containers[0].command == ["/bin/bash", "/fence/host-fence.sh", "daemonset-agent"] and
+        .spec.containers[0].securityContext.privileged == true and
+        .spec.containers[0].securityContext.readOnlyRootFilesystem == true and
+        .spec.containers[0].readinessProbe.exec.command == ["/bin/bash", "/fence/host-fence.sh", "report"] and
+        any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+    ' <<<"$pods" >/dev/null &&
+    jq -e '
+      .status.desiredNumberScheduled == 2 and
+      .status.numberReady == 2 and
+      .status.numberUnavailable == 0
+    ' <<<"$daemonset" >/dev/null
+}
+
+host_fence_exec() {
+  local node="$1" pod
+  shift
+  pod="$(host_fence_pods_json | jq -r --arg node "$node" \
+    '.items[] | select(.spec.nodeName == $node) | .metadata.name')"
+  [[ -n "$pod" && "$pod" != *$'\n'* ]] || return 1
+  kubectl -n "$(kube_namespace)" exec "$pod" -- \
+    /bin/bash /fence/host-fence.sh "$@"
+}
+
+host_fence_report() {
+  host_fence_exec "$1" report
+}
+
+slurm_free_memory_ready() {
+  local nodes="$1" minimum count=0 token value
+  minimum="$(policy_value "$POLICY" minimum_free_memory_mb)"
+  while IFS= read -r token; do
+    value="${token#FreeMem=}"
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    (( value >= minimum )) || return 1
+    count=$((count + 1))
+  done < <(tr ' ' '\n' <<<"$nodes" | sed -n '/^FreeMem=/p')
+  [[ $count -eq 2 ]]
+}
+
+host_mask_from_facts() {
+  local lease="$1" slurm_nodes="$2" holder="$3" epoch="$4"
+  local mask=0 exact=0 report0='' report1='' truth=0 boot0='' boot1='' field_power field power mode0 mode1 source_hash freeze_hash receipt0 receipt1
+  local transaction0 transaction1 decision0 decision1 pair0 pair1 lease_uid lease_rv_bound reported0 reported1 watchdog0 watchdog1 fresh
+  local prepare0 prepare1 base_lease_rv expected_pair
+  source_hash="$(policy_value "$FREEZE" authority_sha256)"
+  freeze_hash="$(sha256_file "$FREEZE")"
+  host_fence_pair_exact && exact=1
+  mask="$(bit_add "$mask" 1 "$exact")"
+  if [[ $exact -eq 1 ]]; then
+    report0="$(host_fence_report "$(node0)" 2>/dev/null || true)"
+    report1="$(host_fence_report "$(node1)" 2>/dev/null || true)"
+  fi
+  if [[ -n "$report0" ]]; then boot0="$(frame_field "$report0" boot_id 2>/dev/null || true)"; fi
+  if [[ -n "$report1" ]]; then boot1="$(frame_field "$report1" boot_id 2>/dev/null || true)"; fi
+
+  truth=0
+  if [[ -n "$boot0" && -n "$boot1" &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_boot_0_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$boot0" &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_boot_1_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$boot1" ]]; then truth=1; fi
+  mask="$(bit_add "$mask" 2 "$truth")"
+  truth=0
+  lease_uid="$(jq -r '.metadata.uid // ""' <<<"$lease")"
+  lease_rv_bound="$(jq -r --arg key "$(policy_value "$POLICY" host_lease_resource_version_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
+  transaction0="$(frame_field "$report0" transaction_id 2>/dev/null || true)"
+  transaction1="$(frame_field "$report1" transaction_id 2>/dev/null || true)"
+  decision0="$(frame_field "$report0" decision_receipt_sha256 2>/dev/null || true)"
+  decision1="$(frame_field "$report1" decision_receipt_sha256 2>/dev/null || true)"
+  pair0="$(frame_field "$report0" pair_digest 2>/dev/null || true)"
+  pair1="$(frame_field "$report1" pair_digest 2>/dev/null || true)"
+  mode0="$(frame_field "$report0" grant_mode 2>/dev/null || true)"
+  mode1="$(frame_field "$report1" grant_mode 2>/dev/null || true)"
+  prepare0="$(jq -r --arg key "$(policy_value "$POLICY" host_prepare_0_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
+  prepare1="$(jq -r --arg key "$(policy_value "$POLICY" host_prepare_1_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
+  base_lease_rv="$(jq -r --arg key "$(policy_value "$POLICY" host_intent_base_rv_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")"
+  expected_pair="$(printf 'transaction_id=%s\nlease_uid=%s\nbase_lease_resource_version=%s\nnode0_prepare=%s\nnode1_prepare=%s\n' \
+    "$transaction0" "$lease_uid" "$base_lease_rv" "$prepare0" "$prepare1" | \
+    sha256sum | cut -d ' ' -f 1)"
+  if [[ "$(frame_field "$report0" grant_epoch 2>/dev/null || true)" == "$epoch" &&
+        "$(frame_field "$report1" grant_epoch 2>/dev/null || true)" == "$epoch" &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_fence_epoch_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$epoch" &&
+        "$(frame_field "$report0" lease_uid 2>/dev/null || true)" == "$lease_uid" &&
+        "$(frame_field "$report1" lease_uid 2>/dev/null || true)" == "$lease_uid" &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_lease_uid_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$lease_uid" &&
+        "$(frame_field "$report0" lease_resource_version 2>/dev/null || true)" == "$lease_rv_bound" &&
+        "$(frame_field "$report1" lease_resource_version 2>/dev/null || true)" == "$lease_rv_bound" &&
+        "$transaction0" =~ ^[0-9a-f]{64}$ && "$transaction1" == "$transaction0" &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_transaction_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$transaction0" &&
+        "$decision0" =~ ^[0-9a-f]{64}$ && "$decision1" == "$decision0" &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_decision_receipt_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$decision0" &&
+        "$pair1" == "$pair0" &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_pair_digest_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$pair0" ]]; then
+    if [[ "$mode0" == FENCED && "$mode1" == FENCED &&
+          "$(frame_field "$report0" grant_valid 2>/dev/null || true)" == 0 &&
+          "$(frame_field "$report1" grant_valid 2>/dev/null || true)" == 0 &&
+          "$pair0" == none && -z "$prepare0" && -z "$prepare1" && -z "$base_lease_rv" ]]; then
+      truth=1
+    elif [[ "$mode0" =~ ^(SLURM|K8S)$ && "$mode1" == "$mode0" &&
+            "$(frame_field "$report0" grant_valid 2>/dev/null || true)" == 1 &&
+            "$(frame_field "$report1" grant_valid 2>/dev/null || true)" == 1 &&
+            "$prepare0" =~ ^[0-9a-f]{64}$ && "$prepare1" =~ ^[0-9a-f]{64}$ &&
+            "$base_lease_rv" =~ ^[1-9][0-9]*$ && "$pair0" == "$expected_pair" ]]; then
+      truth=1
+    fi
+  fi
+  mask="$(bit_add "$mask" 4 "$truth")"
+  truth=0
+  if [[ "$(frame_field "$report0" grant_owner 2>/dev/null || true)" == "$holder" &&
+        "$(frame_field "$report1" grant_owner 2>/dev/null || true)" == "$holder" &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_fence_owner_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$holder" ]]; then truth=1; fi
+  mask="$(bit_add "$mask" 8 "$truth")"
+  truth=0
+  if [[ "$exact" == 1 &&
+        "$(frame_field "$report0" watchdog 2>/dev/null || true)" == 1 &&
+        "$(frame_field "$report1" watchdog 2>/dev/null || true)" == 1 &&
+        "$(frame_field "$report0" source_sha256 2>/dev/null || true)" == "$source_hash" &&
+        "$(frame_field "$report1" source_sha256 2>/dev/null || true)" == "$source_hash" &&
+        "$(frame_field "$report0" freeze_sha256 2>/dev/null || true)" == "$freeze_hash" &&
+        "$(frame_field "$report1" freeze_sha256 2>/dev/null || true)" == "$freeze_hash" ]]; then truth=1; fi
+  mask="$(bit_add "$mask" 16 "$truth")"
+  truth=0
+  if [[ "$(frame_field "$report0" watchdog 2>/dev/null || true)" == 1 &&
+      "$(frame_field "$report1" watchdog 2>/dev/null || true)" == 1 ]] &&
+      admission_fail_closed "$lease" &&
+      [[ "$(policy_value "$POLICY" host_runtime_restart_required)" == false ]]; then truth=1; fi
+  mask="$(bit_add "$mask" 32 "$truth")"
+
+  for field_power in inventory:64 services:128 restarts:256 docker_claims:512 \
+    consumers:1024 cgroups:2048; do
+    field="${field_power%%:*}"
+    power="${field_power#*:}"
+    truth=0
+    if [[ "$(frame_field "$report0" "$field" 2>/dev/null || true)" == 1 &&
+          "$(frame_field "$report1" "$field" 2>/dev/null || true)" == 1 ]]; then truth=1; fi
+    mask="$(bit_add "$mask" "$power" "$truth")"
+  done
+  truth=0
+  if [[ "$(frame_field "$report0" memory 2>/dev/null || true)" == 1 &&
+        "$(frame_field "$report1" memory 2>/dev/null || true)" == 1 ]] &&
+      slurm_free_memory_ready "$slurm_nodes"; then truth=1; fi
+  mask="$(bit_add "$mask" 4096 "$truth")"
+  truth=0
+  if [[ "$(frame_field "$report0" protected 2>/dev/null || true)" == 1 &&
+        "$(frame_field "$report1" protected 2>/dev/null || true)" == 1 ]]; then truth=1; fi
+  mask="$(bit_add "$mask" 8192 "$truth")"
+  truth=0
+  receipt0="$(frame_field "$report0" receipt_sha256 2>/dev/null || true)"
+  receipt1="$(frame_field "$report1" receipt_sha256 2>/dev/null || true)"
+  if [[ "$report0" == "PIREUS_HOST_FACTS node=$(node0) "* &&
+        "$report1" == "PIREUS_HOST_FACTS node=$(node1) "* &&
+        "$receipt0" =~ ^[0-9a-f]{64}$ &&
+        "$receipt1" =~ ^[0-9a-f]{64}$ &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_receipt_0_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$receipt0" &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_receipt_1_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$receipt1" &&
+        "$(frame_field "$report0" source_sha256 2>/dev/null || true)" == "$source_hash" &&
+        "$(frame_field "$report1" source_sha256 2>/dev/null || true)" == "$source_hash" &&
+        "$(frame_field "$report0" freeze_sha256 2>/dev/null || true)" == "$freeze_hash" &&
+        "$(frame_field "$report1" freeze_sha256 2>/dev/null || true)" == "$freeze_hash" &&
+        "$(frame_field "$report0" reported_monotonic 2>/dev/null || true)" =~ ^[0-9]+$ &&
+        "$(frame_field "$report1" reported_monotonic 2>/dev/null || true)" =~ ^[0-9]+$ ]]; then truth=1; fi
+  mask="$(bit_add "$mask" 16384 "$truth")"
+  truth=0
+  reported0="$(frame_field "$report0" reported_monotonic 2>/dev/null || true)"
+  reported1="$(frame_field "$report1" reported_monotonic 2>/dev/null || true)"
+  watchdog0="$(frame_field "$report0" watchdog_monotonic 2>/dev/null || true)"
+  watchdog1="$(frame_field "$report1" watchdog_monotonic 2>/dev/null || true)"
+  fresh="$(policy_value "$POLICY" host_watchdog_fresh_seconds)"
+  if [[ $exact -eq 1 && "$reported0" =~ ^[0-9]+$ && "$reported1" =~ ^[0-9]+$ &&
+        "$watchdog0" =~ ^[0-9]+$ && "$watchdog1" =~ ^[0-9]+$ &&
+        $((reported0 - watchdog0)) -ge 0 && $((reported0 - watchdog0)) -le $fresh &&
+        $((reported1 - watchdog1)) -ge 0 && $((reported1 - watchdog1)) -le $fresh &&
+        "$(frame_field "$report0" watchdog 2>/dev/null || true)" == 1 &&
+        "$(frame_field "$report1" watchdog 2>/dev/null || true)" == 1 ]]; then
+    mode0="$(frame_field "$report0" grant_mode 2>/dev/null || true)"
+    mode1="$(frame_field "$report1" grant_mode 2>/dev/null || true)"
+    if [[ "$mode0" == "$mode1" && "$mode0" != K8S ]] ||
+       [[ "$mode0" == K8S && "$mode1" == K8S &&
+          "$(frame_field "$report0" grant_valid 2>/dev/null || true)" == 1 &&
+          "$(frame_field "$report1" grant_valid 2>/dev/null || true)" == 1 ]]; then truth=1; fi
+  fi
+  mask="$(bit_add "$mask" 32768 "$truth")"
+  truth=0
+  if [[ "$(frame_field "$report0" device_barrier 2>/dev/null || true)" == 1 &&
+        "$(frame_field "$report1" device_barrier 2>/dev/null || true)" == 1 &&
+        "$(frame_field "$report0" device_barrier_source_sha256 2>/dev/null || true)" == "$(policy_value "$FREEZE" device_barrier_source_sha256)" &&
+        "$(frame_field "$report1" device_barrier_source_sha256 2>/dev/null || true)" == "$(policy_value "$FREEZE" device_barrier_source_sha256)" &&
+        "$(frame_field "$report0" device_barrier_binary_sha256 2>/dev/null || true)" =~ ^[0-9a-f]{64}$ &&
+        "$(frame_field "$report1" device_barrier_binary_sha256 2>/dev/null || true)" =~ ^[0-9a-f]{64}$ ]]; then truth=1; fi
+  mask="$(bit_add "$mask" 65536 "$truth")"
+  printf '%s\n' "$mask"
 }
 
 prebootstrap_facts() {
@@ -440,13 +828,13 @@ prebootstrap_facts() {
   unexpected_gpu_consumers_zero "$all_pods" 1 "$holder" && truth=1
   k8s_mask="$(bit_add "$k8s_mask" 512 "$truth")"
   k8s_mask="$(bit_add "$k8s_mask" 256 1)"
-  printf 'state=UNINITIALIZED epoch=1 observed_epoch=1 authority_mask=%s slurm_mask=%s k8s_mask=%s\n' \
+  printf 'state=UNINITIALIZED epoch=1 observed_epoch=1 authority_mask=%s slurm_mask=%s k8s_mask=%s host_mask=0\n' \
     "$authority_mask" "$slurm_mask" "$k8s_mask"
 }
 
 facts() {
   local holder lease nodeset node_0 node_1 plugin_0 plugin_1 plugin_pods slurmd_pods reservations workloads all_pods slurm_nodes slurm_jobs slurm_steps
-  local state epoch observed_epoch authority_mask=1 slurm_mask=0 k8s_mask=0 truth current_generation lease_generation
+  local state epoch observed_epoch authority_mask=1 slurm_mask=0 k8s_mask=0 host_mask=0 truth current_generation lease_generation
   holder="$(arg_value --holder "$@")"
   lease="$(lease_json)"
   verify_lease_freeze_binding "$lease"
@@ -617,8 +1005,10 @@ facts() {
     "$(jq -r '.spec.holderIdentity // ""' <<<"$lease")" && truth=1
   k8s_mask="$(bit_add "$k8s_mask" 512 "$truth")"
 
-  printf 'state=%s epoch=%s observed_epoch=%s authority_mask=%s slurm_mask=%s k8s_mask=%s\n' \
-    "$state" "$epoch" "$observed_epoch" "$authority_mask" "$slurm_mask" "$k8s_mask"
+  host_mask="$(host_mask_from_facts "$lease" "$slurm_nodes" \
+    "$(jq -r '.spec.holderIdentity // ""' <<<"$lease")" "$epoch")"
+  printf 'state=%s epoch=%s observed_epoch=%s authority_mask=%s slurm_mask=%s k8s_mask=%s host_mask=%s\n' \
+    "$state" "$epoch" "$observed_epoch" "$authority_mask" "$slurm_mask" "$k8s_mask" "$host_mask"
 }
 
 lease_acquire() {
@@ -918,6 +1308,13 @@ spec:
   containers:
     - name: reservation
       image: "$image"
+      env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: PIREUS_EPOCH
+          value: "$epoch"
       securityContext:
         privileged: true
       resources:
@@ -925,35 +1322,24 @@ spec:
           nvidia.com/gpu: "1"
         limits:
           nvidia.com/gpu: "1"
-      command: [/bin/bash, -lc]
-      args:
-        - |
-          set -euo pipefail
-          uuid="\$(chroot /host /usr/bin/nvidia-smi --query-gpu=uuid --format=csv,noheader | head -n 1)"
-          processes="\$(chroot /host /usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader)"
-          test -z "\${processes//[[:space:]]/}"
-          pmon="\$(chroot /host /usr/bin/nvidia-smi pmon -c 1)"
-          ! awk 'NF >= 3 && \$2 ~ /^[0-9]+$/ { found=1 } END { exit found ? 0 : 1 }' <<<"\$pmon"
-          ! chroot /host /usr/bin/pgrep -f '[n]vidia-cuda-mps' >/dev/null 2>&1
-          driver="\$(chroot /host /usr/bin/nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)"
-          product="\$(chroot /host /usr/bin/nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1 | tr ' ' '_')"
-          memory="\$(chroot /host /usr/bin/nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1)"
-          if [[ "\$memory" == '[N/A]' ]]; then memory=UNAVAILABLE_UNIFIED; fi
-          utilization="\$(chroot /host /usr/bin/nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | head -n 1)"
-          printf 'PIREUS_NVML_CLEAN node=%s epoch=%s uuid=%s product=%s driver=%s memory_observation=%s utilization_pct=%s\n' \
-            "$node" "$epoch" "\$uuid" "\$product" "\$driver" "\$memory" "\$utilization"
-          touch /tmp/nvml-clean
-          exec sleep infinity
+      command: [/bin/bash, /probe/reservation-probe.sh]
       readinessProbe:
         exec:
           command: [/usr/bin/test, -f, /tmp/nvml-clean]
         periodSeconds: 2
         failureThreshold: 90
       volumeMounts:
+        - name: reservation-probe
+          mountPath: /probe
+          readOnly: true
         - name: host-root
           mountPath: /host
           readOnly: true
   volumes:
+    - name: reservation-probe
+      configMap:
+        name: $(policy_value "$POLICY" reservation_probe_configmap)
+        defaultMode: 0555
     - name: host-root
       hostPath:
         path: /
@@ -1037,7 +1423,9 @@ create_reservations() {
   guard_mutation reserve "$holder" "$epoch" "$receipt"
   create_reservation_pod "$(node0)" 3c59 "$epoch" "$holder"
   create_reservation_pod "$(node1)" 8e54 "$epoch" "$holder"
-  wait_for 'two exact-node GPU reservations' reservations_ready "$holder" "$epoch"
+  # The Sounio controller refreshes the paired K8S host grant while this wait
+  # is active. A second Lease writer here would race that durable 2PC loop.
+  wait_for 'two exact-node GPU reservations' reservations_ready
   record_nvml_receipts "$epoch" "$holder"
 }
 
@@ -1265,6 +1653,395 @@ install_fence() {
   bootstrap_journal_step FENCE_INSTALLED "$holder" "$receipt"
 }
 
+host_fence_staged() {
+  local daemonset pods bootstrap_key bootstrap_value
+  bootstrap_key="$(policy_value "$POLICY" host_fence_bootstrap_selector_key)"
+  bootstrap_value="$(policy_value "$POLICY" host_fence_bootstrap_selector_value)"
+  daemonset="$(kubectl -n "$(kube_namespace)" get daemonset \
+    "$(policy_value "$POLICY" host_fence_daemonset)" -o json 2>/dev/null)" || return 1
+  pods="$(host_fence_pods_json 2>/dev/null)" || return 1
+  jq -e --arg key "$bootstrap_key" --arg value "$bootstrap_value" '
+    .spec.template.spec.nodeSelector == {($key): $value} and
+    (.status.desiredNumberScheduled // 0) == 0 and
+    (.status.currentNumberScheduled // 0) == 0 and
+    (.status.numberReady // 0) == 0
+  ' <<<"$daemonset" >/dev/null &&
+    jq -e '(.items | length) == 0' <<<"$pods" >/dev/null
+}
+
+bind_host_fence_daemonset_uid() {
+  local daemonset config uid current updated
+  host_fence_staged || fail 'host fence DaemonSet is not inert during UID binding'
+  daemonset="$(kubectl -n "$(kube_namespace)" get daemonset \
+    "$(policy_value "$POLICY" host_fence_daemonset)" -o json)"
+  uid="$(jq -r '.metadata.uid // ""' <<<"$daemonset")"
+  [[ "$uid" =~ ^[0-9a-f-]{36}$ ]] || fail 'host fence DaemonSet UID is malformed'
+  config="$(admission_config_json)"
+  current="$(jq -r '.data.hostFenceDaemonSetUid // ""' <<<"$config")"
+  [[ "$current" == UNBOUND || "$current" =~ ^[0-9a-f-]{36}$ ]] || \
+    fail 'host fence admission UID parameter is malformed'
+  updated="$(jq --arg uid "$uid" '.data.hostFenceDaemonSetUid = $uid' <<<"$config")"
+  kubectl -n "$(kube_namespace)" replace -f - <<<"$updated" >/dev/null
+  [[ "$(admission_config_json | jq -r '.data.hostFenceDaemonSetUid // ""')" == "$uid" ]] || \
+    fail 'host fence admission UID CAS did not persist'
+}
+
+activate_host_fence_daemonset() {
+  local daemonset patched selector_key selector_value
+  selector_key="$(policy_value "$POLICY" host_fence_selector_key)"
+  selector_value="$(policy_value "$POLICY" host_fence_selector_value)"
+  daemonset="$(kubectl -n "$(kube_namespace)" get daemonset \
+    "$(policy_value "$POLICY" host_fence_daemonset)" -o json)"
+  patched="$(jq --arg key "$selector_key" --arg value "$selector_value" '
+    .spec.template.spec.nodeSelector = {($key): $value}
+  ' <<<"$daemonset")"
+  kubectl -n "$(kube_namespace)" replace -f - <<<"$patched" >/dev/null
+  kubectl label nodes "$(node0)" "$(node1)" \
+    "$selector_key=$selector_value" --overwrite >/dev/null
+}
+
+install_host_fence() {
+  local holder epoch receipt manifest bootstrap_key bootstrap_value report0 report1 boot0 boot1 host_receipt0 host_receipt1 lease now updated source_hash freeze_hash barrier_hash
+  holder="$(arg_value --holder "$@")"
+  epoch="$(arg_value --epoch "$@")"
+  receipt="$(arg_value --receipt "$@")"
+  guard_mutation host-fence "$holder" "$epoch" "$receipt"
+  [[ "$(policy_value "$POLICY" host_runtime_restart_required)" == false ]] || \
+    fail 'host fence installation would require a forbidden runtime restart'
+  manifest="$(repo_root)/$(policy_value "$POLICY" host_fence_manifest)"
+  bootstrap_key="$(policy_value "$POLICY" host_fence_bootstrap_selector_key)"
+  bootstrap_value="$(policy_value "$POLICY" host_fence_bootstrap_selector_value)"
+  [[ "$(kubectl get nodes -l "$bootstrap_key=$bootstrap_value" -o json | jq '.items | length')" == 0 ]] || \
+    fail 'host fence bootstrap selector unexpectedly matches a live node'
+  device_barrier_config_json | kubectl apply --server-side \
+    --field-manager=pireus-spark-pair-device-barrier -f - >/dev/null
+  kubectl apply --server-side --field-manager=pireus-spark-pair-host-fence \
+    -f "$manifest" >/dev/null
+  wait_for 'inert Spark host fence DaemonSet' host_fence_staged "$holder" "$epoch"
+  bind_host_fence_daemonset_uid
+  admission_fail_closed "$(lease_json)" || \
+    fail 'host fence admission did not bind the inert DaemonSet UID'
+  activate_host_fence_daemonset
+  kubectl -n "$(kube_namespace)" rollout status \
+    daemonset/"$(policy_value "$POLICY" host_fence_daemonset)" \
+    --timeout="$(policy_value "$POLICY" operation_timeout_seconds)s" >/dev/null
+  wait_for 'exact Spark host fence pair' host_fence_pair_exact "$holder" "$epoch"
+  source_hash="$(policy_value "$FREEZE" authority_sha256)"
+  freeze_hash="$(sha256_file "$FREEZE")"
+  barrier_hash="$(policy_value "$FREEZE" device_barrier_source_sha256)"
+  host_fence_exec "$(node0)" capture-baseline
+  host_fence_exec "$(node1)" capture-baseline
+  host_fence_exec "$(node0)" install-watchdog "$source_hash" "$freeze_hash" "$barrier_hash"
+  host_fence_exec "$(node1)" install-watchdog "$source_hash" "$freeze_hash" "$barrier_hash"
+  report0="$(host_fence_report "$(node0)")"
+  report1="$(host_fence_report "$(node1)")"
+  [[ "$report0" == "PIREUS_HOST_FACTS node=$(node0) "* &&
+      "$report1" == "PIREUS_HOST_FACTS node=$(node1) "* ]] || \
+    fail 'host fence did not emit the canonical receipt pair'
+  for field in inventory protected; do
+    [[ "$(frame_field "$report0" "$field")" == 1 &&
+        "$(frame_field "$report1" "$field")" == 1 ]] || \
+      fail "host fence installation field $field is not established on both Sparks"
+  done
+  boot0="$(frame_field "$report0" boot_id)"
+  boot1="$(frame_field "$report1" boot_id)"
+  host_receipt0="$(frame_field "$report0" receipt_sha256)"
+  host_receipt1="$(frame_field "$report1" receipt_sha256)"
+  [[ "$boot0" =~ ^[0-9a-f-]{36}$ && "$boot1" =~ ^[0-9a-f-]{36}$ ]] || \
+    fail 'host fence boot identity is malformed'
+  [[ "$host_receipt0" =~ ^[0-9a-f]{64}$ && "$host_receipt1" =~ ^[0-9a-f]{64}$ ]] || \
+    fail 'host fence receipt digest is malformed'
+  lease="$(lease_json)"
+  require_lease_context "$holder" "$epoch" 'UNINITIALIZED RECOVERY_REQUIRED' >/dev/null
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  updated="$(jq --arg boot0 "$boot0" --arg boot1 "$boot1" \
+    --arg host_receipt0 "$host_receipt0" --arg host_receipt1 "$host_receipt1" \
+    --arg epoch "$epoch" --arg holder "$holder" --arg now "$now" \
+    --arg boot0_key "$(policy_value "$POLICY" host_boot_0_annotation)" \
+    --arg boot1_key "$(policy_value "$POLICY" host_boot_1_annotation)" \
+    --arg receipt0_key "$(policy_value "$POLICY" host_receipt_0_annotation)" \
+    --arg receipt1_key "$(policy_value "$POLICY" host_receipt_1_annotation)" \
+    --arg epoch_key "$(policy_value "$POLICY" host_fence_epoch_annotation)" \
+    --arg owner_key "$(policy_value "$POLICY" host_fence_owner_annotation)" '
+      .metadata.annotations[$boot0_key] = $boot0 |
+      .metadata.annotations[$boot1_key] = $boot1 |
+      .metadata.annotations[$receipt0_key] = $host_receipt0 |
+      .metadata.annotations[$receipt1_key] = $host_receipt1 |
+      .metadata.annotations[$epoch_key] = $epoch |
+      .metadata.annotations[$owner_key] = $holder |
+      .spec.renewTime = $now
+    ' <<<"$lease")"
+  replace_lease <<<"$updated"
+  if [[ "$(jq -r --arg key "$(policy_value "$POLICY" state_annotation)" \
+    '.metadata.annotations[$key]' <<<"$updated")" == UNINITIALIZED ]]; then
+    bootstrap_journal_step HOST_FENCE_INSTALLED "$holder" "$receipt"
+  fi
+}
+
+bind_host_pair_intent() {
+  local holder="$1" epoch="$2" allowed_states="$3" transaction="$4" pair_digest="$5"
+  local lease_uid="$6" base_lease_rv="$7" decision_sha="$8" prepare0="$9" prepare1="${10}"
+  local lease updated persisted now intent_rv
+  lease="$(lease_json)"
+  require_lease_context "$holder" "$epoch" "$allowed_states" >/dev/null
+  [[ "$(jq -r '.metadata.uid' <<<"$lease")" == "$lease_uid" &&
+      "$(jq -r '.metadata.resourceVersion' <<<"$lease")" == "$base_lease_rv" ]] || \
+    fail 'Lease changed before durable host pair intent'
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  updated="$(jq --arg transaction "$transaction" --arg pair "$pair_digest" \
+    --arg decision "$decision_sha" --arg uid "$lease_uid" --arg base_rv "$base_lease_rv" \
+    --arg prepare0 "$prepare0" --arg prepare1 "$prepare1" --arg now "$now" \
+    --arg transaction_key "$(policy_value "$POLICY" host_transaction_annotation)" \
+    --arg pair_key "$(policy_value "$POLICY" host_pair_digest_annotation)" \
+    --arg decision_key "$(policy_value "$POLICY" host_decision_receipt_annotation)" \
+    --arg uid_key "$(policy_value "$POLICY" host_lease_uid_annotation)" \
+    --arg base_rv_key "$(policy_value "$POLICY" host_intent_base_rv_annotation)" \
+    --arg prepare0_key "$(policy_value "$POLICY" host_prepare_0_annotation)" \
+    --arg prepare1_key "$(policy_value "$POLICY" host_prepare_1_annotation)" \
+    --arg receipt0_key "$(policy_value "$POLICY" host_receipt_0_annotation)" \
+    --arg receipt1_key "$(policy_value "$POLICY" host_receipt_1_annotation)" \
+    --arg bound_rv_key "$(policy_value "$POLICY" host_lease_resource_version_annotation)" '
+      .metadata.annotations[$transaction_key] = $transaction |
+      .metadata.annotations[$pair_key] = $pair |
+      .metadata.annotations[$decision_key] = $decision |
+      .metadata.annotations[$uid_key] = $uid |
+      .metadata.annotations[$base_rv_key] = $base_rv |
+      .metadata.annotations[$prepare0_key] = $prepare0 |
+      .metadata.annotations[$prepare1_key] = $prepare1 |
+      del(.metadata.annotations[$receipt0_key]) |
+      del(.metadata.annotations[$receipt1_key]) |
+      del(.metadata.annotations[$bound_rv_key]) |
+      .spec.renewTime = $now
+    ' <<<"$lease")"
+  persisted="$(replace_lease_json <<<"$updated")"
+  intent_rv="$(jq -r '.metadata.resourceVersion // ""' <<<"$persisted")"
+  [[ "$intent_rv" =~ ^[1-9][0-9]*$ ]] || fail 'durable host pair intent lacks a resourceVersion'
+  printf '%s\n' "$intent_rv"
+}
+
+bind_host_commit_receipts() {
+  local holder="$1" epoch="$2" allowed_states="$3" expected_mode="$4" receipt="$5"
+  local transaction="$6" pair_digest="$7" lease_uid="$8" lease_rv="$9"
+  local report0="${10}" report1="${11}" decision_sha source_hash freeze_hash barrier_hash lease updated
+  local host_receipt0 host_receipt1 boot0 boot1 expected_valid
+  decision_sha="$(sha256_file "$receipt")"
+  source_hash="$(policy_value "$FREEZE" authority_sha256)"
+  freeze_hash="$(sha256_file "$FREEZE")"
+  barrier_hash="$(policy_value "$FREEZE" device_barrier_source_sha256)"
+  lease="$(lease_json)"
+  require_lease_context "$holder" "$epoch" "$allowed_states" >/dev/null
+  [[ "$(jq -r '.metadata.uid' <<<"$lease")" == "$lease_uid" &&
+      "$(jq -r '.metadata.resourceVersion' <<<"$lease")" == "$lease_rv" ]] || \
+    fail 'Lease changed during host transaction'
+  if [[ "$expected_mode" != FENCED ]]; then
+    [[ "$(jq -r --arg key "$(policy_value "$POLICY" host_transaction_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$transaction" &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_pair_digest_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$pair_digest" &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_decision_receipt_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$decision_sha" &&
+        "$(jq -r --arg key "$(policy_value "$POLICY" host_lease_uid_annotation)" '.metadata.annotations[$key] // ""' <<<"$lease")" == "$lease_uid" ]] || \
+      fail 'durable host pair intent changed before receipt binding'
+  fi
+  case "$expected_mode" in
+    FENCED) expected_valid=0 ;;
+    SLURM|K8S) expected_valid=1 ;;
+    *) fail "invalid committed host mode: $expected_mode" ;;
+  esac
+  for report in "$report0" "$report1"; do
+    [[ "$(frame_field "$report" grant_mode)" == "$expected_mode" &&
+        "$(frame_field "$report" grant_epoch)" == "$epoch" &&
+        "$(frame_field "$report" grant_owner)" == "$holder" &&
+        "$(frame_field "$report" grant_valid)" == "$expected_valid" &&
+        "$(frame_field "$report" transaction_id)" == "$transaction" &&
+        "$(frame_field "$report" lease_uid)" == "$lease_uid" &&
+        "$(frame_field "$report" lease_resource_version)" == "$lease_rv" &&
+        "$(frame_field "$report" decision_receipt_sha256)" == "$decision_sha" &&
+        "$(frame_field "$report" pair_digest)" == "$pair_digest" &&
+        "$(frame_field "$report" source_sha256)" == "$source_hash" &&
+        "$(frame_field "$report" freeze_sha256)" == "$freeze_hash" &&
+        "$(frame_field "$report" device_barrier)" == 1 &&
+        "$(frame_field "$report" device_barrier_source_sha256)" == "$barrier_hash" &&
+        "$(frame_field "$report" device_barrier_binary_sha256)" =~ ^[0-9a-f]{64}$ ]] || \
+      fail "host report is not bound to the $expected_mode transaction"
+  done
+  host_receipt0="$(frame_field "$report0" receipt_sha256)"
+  host_receipt1="$(frame_field "$report1" receipt_sha256)"
+  boot0="$(frame_field "$report0" boot_id)"
+  boot1="$(frame_field "$report1" boot_id)"
+  [[ "$host_receipt0" =~ ^[0-9a-f]{64}$ && "$host_receipt1" =~ ^[0-9a-f]{64}$ ]] || \
+    fail 'committed host receipt digest is malformed'
+  updated="$(jq --arg boot0 "$boot0" --arg boot1 "$boot1" \
+    --arg receipt0 "$host_receipt0" --arg receipt1 "$host_receipt1" \
+    --arg epoch "$epoch" --arg holder "$holder" --arg transaction "$transaction" \
+    --arg pair_digest "$pair_digest" --arg decision "$decision_sha" \
+    --arg lease_uid "$lease_uid" --arg lease_rv "$lease_rv" \
+    --arg boot0_key "$(policy_value "$POLICY" host_boot_0_annotation)" \
+    --arg boot1_key "$(policy_value "$POLICY" host_boot_1_annotation)" \
+    --arg receipt0_key "$(policy_value "$POLICY" host_receipt_0_annotation)" \
+    --arg receipt1_key "$(policy_value "$POLICY" host_receipt_1_annotation)" \
+    --arg epoch_key "$(policy_value "$POLICY" host_fence_epoch_annotation)" \
+    --arg owner_key "$(policy_value "$POLICY" host_fence_owner_annotation)" \
+    --arg transaction_key "$(policy_value "$POLICY" host_transaction_annotation)" \
+    --arg pair_key "$(policy_value "$POLICY" host_pair_digest_annotation)" \
+    --arg decision_key "$(policy_value "$POLICY" host_decision_receipt_annotation)" \
+    --arg uid_key "$(policy_value "$POLICY" host_lease_uid_annotation)" \
+    --arg rv_key "$(policy_value "$POLICY" host_lease_resource_version_annotation)" \
+    --arg prepare0_key "$(policy_value "$POLICY" host_prepare_0_annotation)" \
+    --arg prepare1_key "$(policy_value "$POLICY" host_prepare_1_annotation)" \
+    --arg base_rv_key "$(policy_value "$POLICY" host_intent_base_rv_annotation)" \
+    --arg expected_mode "$expected_mode" '
+      .metadata.annotations[$boot0_key] = $boot0 |
+      .metadata.annotations[$boot1_key] = $boot1 |
+      .metadata.annotations[$receipt0_key] = $receipt0 |
+      .metadata.annotations[$receipt1_key] = $receipt1 |
+      .metadata.annotations[$epoch_key] = $epoch |
+      .metadata.annotations[$owner_key] = $holder |
+      .metadata.annotations[$transaction_key] = $transaction |
+      .metadata.annotations[$pair_key] = $pair_digest |
+      .metadata.annotations[$decision_key] = $decision |
+      .metadata.annotations[$uid_key] = $lease_uid |
+      .metadata.annotations[$rv_key] = $lease_rv |
+      if $expected_mode == "FENCED" then
+        del(.metadata.annotations[$prepare0_key]) |
+        del(.metadata.annotations[$prepare1_key]) |
+        del(.metadata.annotations[$base_rv_key])
+      else . end
+    ' <<<"$lease")"
+  replace_lease <<<"$updated"
+}
+
+fence_host_pair() {
+  local holder epoch receipt report0 report1 lease source_hash freeze_hash
+  local decision_sha transaction lease_uid lease_rv allowed_states
+  holder="$(arg_value --holder "$@")"
+  epoch="$(arg_value --epoch "$@")"
+  receipt="$(arg_value --receipt "$@")"
+  guard_mutation host-pair "$holder" "$epoch" "$receipt"
+  source_hash="$(policy_value "$FREEZE" authority_sha256)"
+  freeze_hash="$(sha256_file "$FREEZE")"
+  decision_sha="$(sha256_file "$receipt")"
+  allowed_states='UNINITIALIZED SLURM_OWNED DRAINING_SLURM SLURM_QUIESCENT K8S_RELEASING VERIFYING_GPU_CLEAN RECOVERY_REQUIRED'
+  require_lease_context "$holder" "$epoch" "$allowed_states" >/dev/null
+  lease="$(lease_json)"
+  lease_uid="$(jq -r '.metadata.uid' <<<"$lease")"
+  lease_rv="$(jq -r '.metadata.resourceVersion' <<<"$lease")"
+  transaction="$(printf 'mode=FENCED\nepoch=%s\nholder=%s\nlease_uid=%s\nlease_rv=%s\ndecision=%s\n' \
+    "$epoch" "$holder" "$lease_uid" "$lease_rv" "$decision_sha" | sha256sum | cut -d ' ' -f 1)"
+  if ! host_fence_exec "$(node0)" fence "$epoch" "$holder" "$source_hash" "$freeze_hash" \
+    "$transaction" "$lease_uid" "$lease_rv" "$decision_sha"; then
+    host_fence_exec "$(node1)" fence "$epoch" "$holder" "$source_hash" "$freeze_hash" \
+      "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" >/dev/null 2>&1 || true
+    fail 'first Spark host fence failed'
+  fi
+  if ! host_fence_exec "$(node1)" fence "$epoch" "$holder" "$source_hash" "$freeze_hash" \
+    "$transaction" "$lease_uid" "$lease_rv" "$decision_sha"; then
+    host_fence_exec "$(node0)" fence "$epoch" "$holder" "$source_hash" "$freeze_hash" \
+      "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" >/dev/null 2>&1 || true
+    fail 'second Spark host fence failed; first host was re-fenced'
+  fi
+  report0="$(host_fence_report "$(node0)")"
+  report1="$(host_fence_report "$(node1)")"
+  bind_host_commit_receipts "$holder" "$epoch" "$allowed_states" FENCED "$receipt" \
+    "$transaction" none "$lease_uid" "$lease_rv" "$report0" "$report1"
+}
+
+refence_host_pair_transaction() {
+  local holder="$1" epoch="$2" source_hash="$3" freeze_hash="$4"
+  local transaction="$5" lease_uid="$6" lease_rv="$7" decision_sha="$8"
+  local report0 report1 failed=0
+  host_fence_exec "$(node0)" fence "$epoch" "$holder" "$source_hash" "$freeze_hash" \
+    "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" >/dev/null || failed=1
+  host_fence_exec "$(node1)" fence "$epoch" "$holder" "$source_hash" "$freeze_hash" \
+    "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" >/dev/null || failed=1
+  report0="$(host_fence_report "$(node0)" 2>/dev/null || true)"
+  report1="$(host_fence_report "$(node1)" 2>/dev/null || true)"
+  [[ "$(frame_field "$report0" grant_mode 2>/dev/null || true)" == FENCED &&
+      "$(frame_field "$report1" grant_mode 2>/dev/null || true)" == FENCED &&
+      "$(frame_field "$report0" grant_valid 2>/dev/null || true)" == 0 &&
+      "$(frame_field "$report1" grant_valid 2>/dev/null || true)" == 0 ]] || failed=1
+  [[ $failed -eq 0 ]]
+}
+
+grant_host_pair() {
+  local mode="$1" kind holder epoch receipt report0 report1 source_hash freeze_hash
+  local lease lease_uid lease_rv intent_lease_rv decision_sha transaction prepared0 prepared1 prepare_receipt0 prepare_receipt1 pair_digest allowed_states
+  shift
+  holder="$(arg_value --holder "$@")"
+  epoch="$(arg_value --epoch "$@")"
+  receipt="$(arg_value --receipt "$@")"
+  case "$mode" in
+    SLURM) kind=host-grant-slurm ;;
+    K8S) kind=host-grant-k8s ;;
+    *) fail "unknown host grant mode: $mode" ;;
+  esac
+  guard_mutation "$kind" "$holder" "$epoch" "$receipt"
+  source_hash="$(policy_value "$FREEZE" authority_sha256)"
+  freeze_hash="$(sha256_file "$FREEZE")"
+  decision_sha="$(sha256_file "$receipt")"
+  if [[ "$mode" == SLURM ]]; then
+    allowed_states='UNINITIALIZED SLURM_RESTORING RECOVERY_REQUIRED'
+  else
+    allowed_states='SLURM_QUIESCENT DETACHING_SLURMD K8S_RESERVING K8S_OWNED'
+  fi
+  require_lease_context "$holder" "$epoch" "$allowed_states" >/dev/null
+  lease="$(lease_json)"
+  lease_uid="$(jq -r '.metadata.uid' <<<"$lease")"
+  lease_rv="$(jq -r '.metadata.resourceVersion' <<<"$lease")"
+  transaction="$(printf 'mode=%s\nepoch=%s\nholder=%s\nlease_uid=%s\nlease_rv=%s\ndecision=%s\n' \
+    "$mode" "$epoch" "$holder" "$lease_uid" "$lease_rv" "$decision_sha" | sha256sum | cut -d ' ' -f 1)"
+  prepared0="$(host_fence_exec "$(node0)" prepare "$mode" "$epoch" "$holder" \
+    "$source_hash" "$freeze_hash" "$transaction" "$lease_uid" "$lease_rv" "$decision_sha")" || \
+    fail "first Spark rejected $mode prepare"
+  if ! prepared1="$(host_fence_exec "$(node1)" prepare "$mode" "$epoch" "$holder" \
+    "$source_hash" "$freeze_hash" "$transaction" "$lease_uid" "$lease_rv" "$decision_sha")"; then
+    fail "second Spark rejected $mode prepare; no commit was attempted"
+  fi
+  prepare_receipt0="$(frame_field "$prepared0" prepare_receipt_sha256)"
+  prepare_receipt1="$(frame_field "$prepared1" prepare_receipt_sha256)"
+  [[ "$prepared0" == "PIREUS_HOST_PREPARED node=$(node0) "* &&
+      "$prepared1" == "PIREUS_HOST_PREPARED node=$(node1) "* &&
+      "$prepare_receipt0" =~ ^[0-9a-f]{64}$ && "$prepare_receipt1" =~ ^[0-9a-f]{64}$ ]] || \
+    fail 'host prepare receipt pair is malformed'
+  pair_digest="$(printf 'transaction_id=%s\nlease_uid=%s\nbase_lease_resource_version=%s\nnode0_prepare=%s\nnode1_prepare=%s\n' \
+    "$transaction" "$lease_uid" "$lease_rv" "$prepare_receipt0" "$prepare_receipt1" | \
+    sha256sum | cut -d ' ' -f 1)"
+  intent_lease_rv="$(bind_host_pair_intent "$holder" "$epoch" "$allowed_states" \
+    "$transaction" "$pair_digest" "$lease_uid" "$lease_rv" "$decision_sha" \
+    "$prepare_receipt0" "$prepare_receipt1")"
+  if ! host_fence_exec "$(node0)" commit "$mode" "$epoch" "$holder" "$source_hash" \
+    "$freeze_hash" "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" \
+    "$prepare_receipt0" "$prepare_receipt1" "$pair_digest" "$intent_lease_rv"; then
+    refence_host_pair_transaction "$holder" "$epoch" "$source_hash" "$freeze_hash" \
+      "$transaction" "$lease_uid" "$intent_lease_rv" "$decision_sha" || \
+      fail "first Spark rejected $mode activation and pair re-fence could not be proven"
+    fail "first Spark rejected $mode activation; pair is proven fenced"
+  fi
+  if ! host_fence_exec "$(node1)" commit "$mode" "$epoch" "$holder" "$source_hash" \
+    "$freeze_hash" "$transaction" "$lease_uid" "$lease_rv" "$decision_sha" \
+    "$prepare_receipt0" "$prepare_receipt1" "$pair_digest" "$intent_lease_rv"; then
+    refence_host_pair_transaction "$holder" "$epoch" "$source_hash" "$freeze_hash" \
+      "$transaction" "$lease_uid" "$intent_lease_rv" "$decision_sha" || \
+      fail "partial $mode activation and pair re-fence could not be proven"
+    fail "partial $mode activation; pair is proven fenced and recovery is required"
+  fi
+  report0="$(host_fence_report "$(node0)")"
+  report1="$(host_fence_report "$(node1)")"
+  if [[ "$(frame_field "$report0" grant_mode)" != "$mode" ||
+        "$(frame_field "$report1" grant_mode)" != "$mode" ||
+        "$(frame_field "$report0" grant_valid)" != 1 ||
+        "$(frame_field "$report1" grant_valid)" != 1 ]]; then
+    refence_host_pair_transaction "$holder" "$epoch" "$source_hash" "$freeze_hash" \
+      "$transaction" "$lease_uid" "$intent_lease_rv" "$decision_sha" || \
+      fail "$mode activation verification failed and pair re-fence could not be proven"
+    fail "$mode activation verification failed; pair is proven fenced"
+  fi
+  if ! (bind_host_commit_receipts "$holder" "$epoch" "$allowed_states" "$mode" "$receipt" \
+    "$transaction" "$pair_digest" "$lease_uid" "$intent_lease_rv" "$report0" "$report1"); then
+    refence_host_pair_transaction "$holder" "$epoch" "$source_hash" "$freeze_hash" \
+      "$transaction" "$lease_uid" "$intent_lease_rv" "$decision_sha" || \
+      fail "$mode receipt CAS failed and pair re-fence could not be proven"
+    fail "$mode receipt CAS failed; pair is proven fenced"
+  fi
+}
+
 wait_nodeset_observed() {
   local generation observed
   generation="$(kubectl -n "$(policy_value "$POLICY" nodeset_namespace)" get nodeset \
@@ -1412,6 +2189,10 @@ main() {
     lease-renew) lease_renew "$@" ;;
     drain-slurm) drain_slurm "$@" ;;
     install-fence) install_fence "$@" ;;
+    install-host-fence) install_host_fence "$@" ;;
+    fence-host-pair) fence_host_pair "$@" ;;
+    grant-host-slurm) grant_host_pair SLURM "$@" ;;
+    grant-host-k8s) grant_host_pair K8S "$@" ;;
     install-gpu-bound-slurmd) install_gpu_bound_slurmd "$@" ;;
     detach-slurmd) detach_slurmd "$@" ;;
     create-reservations) create_reservations "$@" ;;
@@ -1424,5 +2205,9 @@ main() {
     *) fail "unsupported backend command: $command" ;;
   esac
 }
+
+if [[ "${SOUNIO_SPARK_PAIR_BACKEND_LIBRARY_MODE:-0}" == 1 ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 main "$@"

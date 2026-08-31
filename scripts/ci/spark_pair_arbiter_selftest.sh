@@ -15,6 +15,12 @@ MOCK_BACKEND="$ROOT_DIR/tests/fixtures/spark_pair_arbiter/mock_backend.sh"
 MATERIAL_BACKEND="$ROOT_DIR/scripts/dev/spark_pair_arbiter_k8s_backend.sh"
 POLICY="$ROOT_DIR/tools/cluster/spark_pair_arbiter.policy.v1"
 FREEZE="$ROOT_DIR/tools/cluster/spark_pair_arbiter.freeze.v1"
+HOST_FENCE="$ROOT_DIR/tools/cluster/spark_pair_host_fence.yaml"
+DEVICE_BARRIER="$ROOT_DIR/tools/cluster/pireus_spark_device_barrier.cpp"
+ADMISSION="$ROOT_DIR/tools/cluster/spark_pair_arbiter_admission.yaml"
+HOST_FENCE_UNIT="$ROOT_DIR/tests/fixtures/spark_pair_arbiter/host_fence_unit.sh"
+K8S_BACKEND_TRANSACTION_UNIT="$ROOT_DIR/tests/fixtures/spark_pair_arbiter/k8s_backend_transaction_unit.sh"
+K8S_BACKEND_FENCED_UNIT="$ROOT_DIR/tests/fixtures/spark_pair_arbiter/k8s_backend_fenced_unit.sh"
 TEST_FREEZE=''
 
 fail() {
@@ -30,18 +36,87 @@ ADAPTER="$work/sounio-spark-pair-arbiter"
 TEST_ARBITER="$work/spark-pair-arbiter-fixture"
 MOCK_DIR="$work/mock"
 RECEIPTS="$work/receipts"
+HOST_FENCE_SCRIPT="$work/host-fence.sh"
+RESERVATION_PROBE_SCRIPT="$work/reservation-probe.sh"
+DEVICE_BARRIER_EXECUTABLE="$work/pireus-spark-device-barrier"
+
+awk '
+  /^  host-fence\.sh: \|$/ { in_script=1; next }
+  in_script && /^---$/ { exit }
+  in_script { sub(/^    /, ""); print }
+' "$HOST_FENCE" > "$HOST_FENCE_SCRIPT"
+awk '
+  /^  reservation-probe\.sh: \|$/ { in_script=1; next }
+  in_script && /^---$/ { exit }
+  in_script { sub(/^    /, ""); print }
+' "$ADMISSION" > "$RESERVATION_PROBE_SCRIPT"
+[[ "$(sed -n '1p' "$HOST_FENCE_SCRIPT")" == '#!/usr/bin/env bash' ]] || \
+  fail 'host fence ConfigMap script key or extraction boundary drifted'
+bash -n "$HOST_FENCE_SCRIPT" || fail 'host fence ConfigMap script is not valid Bash'
+c++ -std=c++20 -O2 -Wall -Wextra -Werror "$DEVICE_BARRIER" \
+  -o "$DEVICE_BARRIER_EXECUTABLE"
+[[ "$($DEVICE_BARRIER_EXECUTABLE selftest)" == \
+    'PIREUS_DEVICE_BARRIER_SELFTEST_PASS majors=195,226,247,498,501 default=ALLOW matched=DENY duplicates=REFUSE' ]] || \
+  fail 'device barrier executable selftest failed'
+[[ "$(sed -n '1p' "$RESERVATION_PROBE_SCRIPT")" == '#!/usr/bin/env bash' ]] || \
+  fail 'reservation probe ConfigMap script key or extraction boundary drifted'
+bash -n "$RESERVATION_PROBE_SCRIPT" || fail 'reservation probe ConfigMap script is not valid Bash'
+host_fence_sha="$(sha256sum "$HOST_FENCE_SCRIPT" | cut -d ' ' -f 1)"
+device_barrier_sha="$(sha256sum "$DEVICE_BARRIER" | cut -d ' ' -f 1)"
+reservation_probe_sha="$(sha256sum "$RESERVATION_PROBE_SCRIPT" | cut -d ' ' -f 1)"
+[[ "$(awk -F= '$1 == "host_fence_configmap" { print $2 }' "$POLICY")" == \
+    "pireus-spark-host-fence-${host_fence_sha:0:12}" ]] || \
+  fail 'host fence ConfigMap is not content addressed by its script'
+[[ "$(awk -F= '$1 == "host_device_barrier_configmap" { print $2 }' "$POLICY")" == \
+    "pireus-spark-device-barrier-${device_barrier_sha:0:12}" ]] || \
+  fail 'device barrier ConfigMap is not content addressed by its C++ source'
+[[ "$(awk -F= '$1 == "reservation_probe_configmap" { print $2 }' "$POLICY")" == \
+    "pireus-spark-pair-reservation-probe-${reservation_probe_sha:0:12}" ]] || \
+  fail 'reservation probe ConfigMap is not content addressed by its script'
+grep -Fq 'CRI_RUNTIME_ENDPOINT=unix:///var/run/containerd/containerd.sock' "$HOST_FENCE_SCRIPT" || \
+  fail 'host fence does not pin the kubelet CRI endpoint'
+[[ "$(grep -Fc -- '--runtime-endpoint "$CRI_RUNTIME_ENDPOINT"' "$HOST_FENCE_SCRIPT")" == 1 ]] || \
+  fail 'host fence CRI calls are not routed through the pinned endpoint'
+grep -Fq 'printf '\''1\n'\'' > "$group/cgroup.kill"' "$HOST_FENCE_SCRIPT" || \
+  fail 'host fence lacks cgroup-v2 atomic workload termination'
+grep -Fq 'write_grant_record "$PREPARE_FILE" "PREPARED_$mode"' "$HOST_FENCE_SCRIPT" || \
+  fail 'host fence lacks a non-authorizing prepare record'
+grep -Fq 'Type=notify' "$HOST_FENCE_SCRIPT" || fail 'host fence systemd unit is not notify/watchdog bound'
+grep -Fq '/usr/bin/systemd-notify --pid="$$" WATCHDOG=1' "$HOST_FENCE_SCRIPT" || \
+  fail 'host fence heartbeat is not attributed to the main watchdog PID'
+grep -Fq 'command: [/bin/bash, /fence/host-fence.sh, daemonset-agent]' "$HOST_FENCE" || \
+  fail 'host fence DaemonSet is not a non-mutating exec bridge'
+grep -Fq 'pireus.sounio.dev/spark-pair-host-fence-bootstrap: "unbound"' "$HOST_FENCE" || \
+  fail 'host fence DaemonSet no longer starts with an inert selector'
+grep -Fq 'bind_host_fence_daemonset_uid' "$MATERIAL_BACKEND" || \
+  fail 'material backend does not bind the DaemonSet UID before activation'
+grep -Fq 'request.userInfo.username == '\''system:serviceaccount:kube-system:daemon-set-controller'\''' \
+  "$ROOT_DIR/tools/cluster/spark_pair_arbiter_admission.yaml" || \
+  fail 'host infrastructure admission is not bound to the DaemonSet controller identity'
+host_unit_result="$(bash "$HOST_FENCE_UNIT" "$HOST_FENCE_SCRIPT" "$work/host-unit")"
+[[ "$host_unit_result" == 'HOST_FENCE_UNIT_PASS pair_digest=DENY swapped_receipts=DENY intent_rv=PASS cgroup_mapping=DENY notready_kill=PASS systemd_graph=PASS reboot_baseline=PASS failed_cycle_heartbeat=DENY' ]] || \
+  fail "host fence executable unit failed: $host_unit_result"
+transaction_unit_result="$(bash "$K8S_BACKEND_TRANSACTION_UNIT" "$MATERIAL_BACKEND" "$work/k8s-backend-unit")"
+[[ "$transaction_unit_result" == 'K8S_BACKEND_TRANSACTION_UNIT_PASS kill_after_commit_1=REFENCED kill_after_commit_2=REFENCED cas_conflict=REFENCED persisted_grants=PROVEN' ]] || \
+  fail "Kubernetes backend transaction unit failed: $transaction_unit_result"
+fenced_unit_result="$(bash "$K8S_BACKEND_FENCED_UNIT" "$MATERIAL_BACKEND" "$work/k8s-backend-fenced-unit")"
+[[ "$fenced_unit_result" == 'K8S_BACKEND_FENCED_UNIT_PASS first_bootstrap=PASS stale_intent=CLEARED epoch_relation=PASS' ]] || \
+  fail "Kubernetes backend fenced unit failed: $fenced_unit_result"
 
 sed -n '1,$p' "$MODULE" "$VECTORS" > "$combined"
 SOUNIO_SOUC_ENGINE="$ENGINE" "$SOUC" compile "$combined" -o "$executable"
 result="$($executable)"
-[[ "$result" == 'SOUNIO_SPARK_PAIR_SELFTEST_PASS vectors=64 authority=Sounio' ]] || \
+[[ "$result" == 'SOUNIO_SPARK_PAIR_SELFTEST_PASS vectors=88 authority=Sounio' ]] || \
   fail "Sounio vectors failed: $result"
-[[ "$(grep -Fc "printf 'PIREUS_NVML_CLEAN node=%s epoch=%s uuid=%s product=%s driver=%s memory_observation=%s utilization_pct=%s" "$MATERIAL_BACKEND")" == 2 ]] || \
-  fail 'initial and fresh NVML probes do not share the frozen evidence frame'
-[[ "$(grep -Fc "memory=UNAVAILABLE_UNIFIED" "$MATERIAL_BACKEND")" == 2 ]] || \
-  fail 'initial and fresh NVML probes do not normalize unified memory identically'
-[[ "$(grep -Fc "pgrep -f '[n]vidia-cuda-mps'" "$MATERIAL_BACKEND")" == 2 ]] || \
-  fail 'initial and fresh MPS probes are not protected against self-match'
+[[ "$(grep -Fc "printf 'PIREUS_NVML_CLEAN node=%s epoch=%s uuid=%s product=%s driver=%s memory_observation=%s utilization_pct=%s" "$MATERIAL_BACKEND")" == 1 &&
+   "$(grep -Fc "printf 'PIREUS_NVML_CLEAN node=%s epoch=%s uuid=%s product=%s driver=%s memory_observation=%s utilization_pct=%s" "$ROOT_DIR/tools/cluster/spark_pair_arbiter_admission.yaml")" == 1 ]] || \
+  fail 'immutable initial and fresh NVML probes do not share the frozen evidence frame'
+[[ "$(grep -Fc "memory=UNAVAILABLE_UNIFIED" "$MATERIAL_BACKEND")" == 1 &&
+   "$(grep -Fc "memory=UNAVAILABLE_UNIFIED" "$ROOT_DIR/tools/cluster/spark_pair_arbiter_admission.yaml")" == 1 ]] || \
+  fail 'immutable initial and fresh NVML probes do not normalize unified memory identically'
+[[ "$(grep -Fc "pgrep -f '[n]vidia-cuda-mps'" "$MATERIAL_BACKEND")" == 1 &&
+   "$(grep -Fc "pgrep -f '[n]vidia-cuda-mps'" "$ROOT_DIR/tools/cluster/spark_pair_arbiter_admission.yaml")" == 1 ]] || \
+  fail 'immutable initial and fresh MPS probes are not protected against self-match'
 grep -Fq "lease_is_live \"\$lease\" || fail 'Lease expired before material keepalive'" "$MATERIAL_BACKEND" || \
   fail 'material keepalive can revive an expired Lease'
 grep -Fq "lease_is_live \"\$lease\" || fail 'Lease expired before recording NVML receipts'" "$MATERIAL_BACKEND" || \
@@ -71,13 +146,19 @@ set -e
 [[ $override_status -eq 42 && "$override_output" == *'runtime path overrides are forbidden'* ]] || \
   fail "production root override did not fail closed: status=$override_status output=$override_output"
 set +e
+timeout_override_output="$(SOUNIO_SPARK_PAIR_COMMAND_TIMEOUT=0 "$ARBITER" verify 2>&1)"
+timeout_override_status=$?
+set -e
+[[ $timeout_override_status -eq 42 && "$timeout_override_output" == *'runtime path overrides are forbidden'* ]] || \
+  fail "production timeout override did not fail closed: status=$timeout_override_status output=$timeout_override_output"
+set +e
 fixture_output="$(SOUNIO_SPARK_PAIR_TEST_MODE=fixture-v1 SOUNIO_SOURCE_ROOT="$ROOT_DIR" "$ARBITER" verify 2>&1)"
 fixture_status=$?
 set -e
 [[ $fixture_status -eq 42 && "$fixture_output" == *'fixture-v1 is forbidden in the canonical controller'* ]] || \
   fail "canonical fixture mode did not fail closed: status=$fixture_status output=$fixture_output"
 set +e
-malformed="$($ADAPTER 9024 14 1 1 1 249 255 2>&1)"
+malformed="$($ADAPTER 9024 14 1 1 1 1017 255 1009 65535 2>&1)"
 malformed_status=$?
 set -e
 [[ $malformed_status -eq 64 ]] || fail "malformed frame exited $malformed_status, expected 64"
@@ -130,6 +211,34 @@ expect_refusal() {
   [[ $status -eq 42 ]] || fail "$name exited $status, expected 42: $output"
 }
 
+expect_refusal_reason() {
+  local name="$1" reason="$2"
+  shift 2
+  local output status
+  set +e
+  output="$("$@" 2>&1)"
+  status=$?
+  set -e
+  [[ $status -eq 42 ]] || fail "$name exited $status, expected 42: $output"
+  [[ "$output" == *"reason=$reason"* ]] || fail "$name did not preserve $reason: $output"
+}
+
+host_action_receipt() {
+  local action="$1" state="$2" state_number="$3" host_mask="$4" output receipt
+  output="$("$ADAPTER" 9025 "$action" "$state_number" 1 1 1017 255 1009 "$host_mask")"
+  [[ "$output" == SOUNIO_SPARK_PAIR_ALLOW* ]] || fail "host action $action was not admitted: $output"
+  receipt="$work/host-action-$action.receipt"
+  {
+    printf 'decision_producer_language=Sounio\n'
+    printf 'epoch=1\n'
+    printf 'action_code=%s\n' "$action"
+    printf 'from_state=%s\n' "$state"
+    printf 'expected_to_state=%s\n' "$state"
+  } > "$receipt"
+  sha256sum "$receipt" | cut -d ' ' -f 1 > "$receipt.sha256"
+  printf '%s\n' "$receipt"
+}
+
 reset_mock
 SOUNIO_SPARK_PAIR_HOLDER=holder-positive "$ARBITER" hold 1 >/dev/null
 [[ "$(sed -n '1p' "$MOCK_DIR/state")" == SLURM_OWNED ]] || fail 'positive hold did not return the pair to Slurm'
@@ -138,8 +247,28 @@ reset_empty
 SOUNIO_SPARK_PAIR_HOLDER=bootstrap-old "$ARBITER" bootstrap-init >/dev/null
 [[ "$(sed -n '1p' "$MOCK_DIR/state")" == SLURM_OWNED ]] || fail 'happy bootstrap did not establish Slurm ownership'
 [[ "$(sed -n '1p' "$MOCK_DIR/nodeset_generation")" == 2 ]] || fail 'happy bootstrap did not refresh NodeSet generation'
-[[ "$(sed -n '1,2p' "$MOCK_DIR/effects")" == $'install-fence\ndrain-slurm' ]] || \
-  fail 'bootstrap did not install the admission fence before draining Slurm'
+[[ "$(sed -n '1,4p' "$MOCK_DIR/effects")" == \
+   $'install-fence\ninstall-host-fence\ndrain-slurm\nfence-host-pair' ]] || \
+  fail 'bootstrap did not arm admission and host fences before draining and activating the host fence'
+
+reset_bootstrap
+receipt="$(host_action_receipt 29 UNINITIALIZED 0 0)"
+"$MOCK_BACKEND" --policy "$POLICY" --freeze "$TEST_FREEZE" install-host-fence \
+  --holder bootstrap-old --epoch 1 --receipt "$receipt"
+receipt="$(host_action_receipt 30 UNINITIALIZED 0 131071)"
+"$MOCK_BACKEND" --policy "$POLICY" --freeze "$TEST_FREEZE" fence-host-pair \
+  --holder bootstrap-old --epoch 1 --receipt "$receipt"
+receipt="$(host_action_receipt 31 UNINITIALIZED 0 131071)"
+"$MOCK_BACKEND" --policy "$POLICY" --freeze "$TEST_FREEZE" grant-host-slurm \
+  --holder bootstrap-old --epoch 1 --receipt "$receipt"
+printf 'SLURM_QUIESCENT\n' > "$MOCK_DIR/state"
+receipt="$(host_action_receipt 32 SLURM_QUIESCENT 3 131071)"
+"$MOCK_BACKEND" --policy "$POLICY" --freeze "$TEST_FREEZE" grant-host-k8s \
+  --holder bootstrap-old --epoch 1 --receipt "$receipt"
+[[ "$(sed -n '1,4p' "$MOCK_DIR/effects")" == \
+   $'install-host-fence\nfence-host-pair\ngrant-host-slurm\ngrant-host-k8s' ]] || \
+  fail 'host action receipts were not bound to their material effects'
+[[ "$(sed -n '1p' "$MOCK_DIR/host_grant")" == K8S ]] || fail 'host K8s grant effect was not recorded'
 
 reset_empty
 expect_refusal action28-post-lease-crash env \
@@ -167,7 +296,8 @@ expect_refusal bootstrap-journal-freeze-drift env \
   SOUNIO_SPARK_PAIR_MOCK_JOURNAL_BOUND=0 \
   SOUNIO_SPARK_PAIR_HOLDER=bootstrap-journal-drift "$ARBITER" bootstrap-recover
 
-for bootstrap_failure in drain-slurm install-fence install-gpu-bound-slurmd resume-slurm; do
+for bootstrap_failure in drain-slurm install-fence install-host-fence fence-host-pair \
+  grant-host-slurm install-gpu-bound-slurmd resume-slurm; do
   reset_bootstrap
   expect_refusal "bootstrap-$bootstrap_failure" env \
     SOUNIO_SPARK_PAIR_MOCK_FAIL="$bootstrap_failure" \
@@ -218,6 +348,32 @@ expect_refusal persisted-freeze-drift env SOUNIO_SPARK_PAIR_MOCK_FREEZE_BOUND=0 
   SOUNIO_SPARK_PAIR_HOLDER=holder-freeze-drift "$ARBITER" hold 1
 
 reset_mock
+expect_refusal_reason host-legacy-consumers HOST_LEGACY_INVENTORY env \
+  SOUNIO_SPARK_PAIR_MOCK_HOST_LEGACY_INVENTORY_EXACT=0 \
+  SOUNIO_SPARK_PAIR_HOLDER=holder-host-legacy "$ARBITER" hold 1
+
+reset_mock
+expect_refusal_reason host-restart-armed HOST_RESTARTS_ARMED env \
+  SOUNIO_SPARK_PAIR_MOCK_HOST_RESTARTS_BLOCKED=0 \
+  SOUNIO_SPARK_PAIR_HOLDER=holder-host-restart "$ARBITER" hold 1
+
+reset_mock
+expect_refusal_reason host-boot-mismatch HOST_BOOT_PAIR env \
+  SOUNIO_SPARK_PAIR_MOCK_HOST_BOOT_PAIR_BOUND=0 \
+  SOUNIO_SPARK_PAIR_HOLDER=holder-host-boot "$ARBITER" hold 1
+
+reset_mock
+expect_refusal_reason host-memory-low HOST_MEMORY_FLOOR env \
+  SOUNIO_SPARK_PAIR_MOCK_HOST_MEMORY_FLOOR_MET=0 \
+  SOUNIO_SPARK_PAIR_HOLDER=holder-host-memory "$ARBITER" hold 1
+
+reset_mock
+printf '1\n' > "$MOCK_DIR/nvml_clean"
+expect_refusal_reason nvml-clean-host-dirty HOST_GPU_CGROUP env \
+  SOUNIO_SPARK_PAIR_MOCK_HOST_CGROUPS_EMPTY=0 \
+  SOUNIO_SPARK_PAIR_HOLDER=holder-host-dirty "$ARBITER" hold 1
+
+reset_mock
 expect_refusal drain-failure env SOUNIO_SPARK_PAIR_MOCK_FAIL=drain-slurm \
   SOUNIO_SPARK_PAIR_HOLDER=holder-drain "$ARBITER" hold 1
 [[ "$(sed -n '1p' "$MOCK_DIR/state")" == SLURM_OWNED ]] || fail 'drain rollback did not restore Slurm'
@@ -255,4 +411,4 @@ awk -F= '$1 == "decision_receipt_sha256" && $2 ~ /^[0-9a-f]+$/ && length($2) == 
 
 printf '%s\n' "$result"
 printf 'SPARK_PAIR_ADAPTER_NEGATIVE_PASS reason=MALFORMED_FRAME status=64\n'
-printf 'SPARK_PAIR_MATERIAL_SELFTEST_PASS positive=8 negative=21 freeze_drift=DENY persisted_freeze=DENY journal_freeze=DENY root_override=DENY canonical_fixture=DENY python_oracle=DENY direct_backend=DENY concurrency=DENY bootstrap_recovery=PASS action28_crash_recovery=PASS bootstrap_fence_first=PASS material_keepalive_expiry=DENY material_receipts=PASS nvml_formats=PASS\n'
+printf 'SPARK_PAIR_MATERIAL_SELFTEST_PASS positive=12 negative=30 freeze_drift=DENY persisted_freeze=DENY journal_freeze=DENY root_override=DENY timeout_override=DENY canonical_fixture=DENY python_oracle=DENY direct_backend=DENY concurrency=DENY bootstrap_recovery=PASS action28_crash_recovery=PASS bootstrap_fence_first=PASS host_actions=PASS host_dirty=DENY recovery_drain_before_fence=PASS material_keepalive_expiry=DENY material_receipts=PASS nvml_formats=PASS host_fence_unit=PASS transaction_kill=REFENCED transaction_cas=REFENCED device_barrier=PASS\n'
