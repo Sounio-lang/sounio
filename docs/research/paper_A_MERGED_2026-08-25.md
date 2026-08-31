@@ -715,6 +715,7 @@ operator reached during evaluation. ∎
 | Lemma 1 in **general form** (all affine forms, not Int witnesses; Mathlib-free) | ✅ mechanized — `trueVar_append`, `trueVar_mul` (delta method), `inner_disjoint` |
 | Exactness preservation: reported variance = true first-order variance along every step | ✅ mechanized — `exact_preservation`: under the premise the defective `gAddMeta`/`gMulMeta` are exact |
 | **Theorem 6.4** — no reached independence-assuming operator has correlated operands | ✅ mechanized — `typed_agfree`, `soundness_star` (along `⇒*`) |
+| **Partition lemma** — a decomposition invariant to its shared sources has `Cov ≤ 0`; the independence-assuming add is then conservative (`x − x` end: `Cov = −Var a`) | ✅ mechanized — `partition_iff`, `inner_nonpos_of_partition`, `naive_add_conservative_of_partition`, `inner_eq_neg_var_of_full_partition`; with `naive_add_understates_iff` (anti-garbling ⟺ `Cov > 0`) |
 | Sabotage witness in the kernel: `x+x` steps to an inexact value and is untypable for **every** `N`; `measure s + measure s` and the shared-variable `let x = measure s in x + x` untypable at source level; `x + opaque(y)` rejected purely by the ⊤ clause (with `x+y` admitted); `x+y` stays exact | ✅ kernel-checked — `x_plus_x_understates`, `x_plus_x_untypable`, `measure_plus_measure_untypable`, `let_x_plus_x_untypable`, `x_plus_top_untypable`, `x_plus_y_exact` |
 
 Every ingredient of the theorem now carries a machine proof (`formal/lean4/EpistemicEffectsNS.lean`,
@@ -1026,7 +1027,12 @@ terms Lemma 1 gives exactly half the variance (the √2 contraction of §8.1), a
 true WARN in three. **A is an honest null in the feared direction** — and a finding: the phase
 covariance is *negative* in 5,000/5,000 patients, because AUC is invariant to Q and Vp and the
 decomposition into phases is a partition of that invariant — whatever Q and Vp move into one
-phase they move out of the other. There the independence-assuming add *over*-states variance,
+phase they move out of the other. This is now a theorem of the calculus, not an observation:
+`inner_nonpos_of_partition` — if every shared source of a sum is a *partition source* (the sum is
+invariant to it: `coeff (a ++ b) s = 0`, equivalently `coeff b s = −coeff a s`, `partition_iff`),
+then `⟨a,b⟩ ≤ 0` and the independence-assuming add is conservative
+(`naive_add_conservative_of_partition`); at the fully-partitioned end `⟨a,b⟩ = −Var a`. The sign of
+the harm is predictable from the model's invariances alone, before any coefficient is computed. There the independence-assuming add *over*-states variance,
 and across the whole chain the over-statement compounds to 300×: garbling rather than
 anti-garbling, and a different clinical harm (alarm fatigue: 1,894 spurious WARNs) from the same
 defect. The sign of the covariance decides which harm you get; the discipline does not need to

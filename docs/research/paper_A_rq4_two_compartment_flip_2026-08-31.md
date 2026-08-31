@@ -116,6 +116,8 @@ bin/souc run docs/research/sounio/rq4_vanco_two_compartment_flip.sio   # exit 0;
 ```
 Determinism: two consecutive runs on 2026-08-31 produced byte-identical `RQ4_FLIP` lines.
 
+**Partition lemma (same day):** the negative-covariance mechanism is proved in `EpistemicEffectsNS.lean` — `partition_iff`, `inner_nonpos_of_partition`, `naive_add_conservative_of_partition`, `inner_eq_neg_var_of_full_partition` (gate: 16 theorems).
+
 **Adequacy (same day):** a Monte Carlo of the same cohort (`rq4_vanco_mc_adequacy.sio`, 1 000
 draws per patient) gives Var_MC/Var_T = 0.999 (0.857–1.158), the same WARN decision on 99.4 % of
 patients, and Var_N/Var_MC = 300.9 — see `paper_A_rq4_mc_adequacy_2026-08-31.md`.

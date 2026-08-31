@@ -70,6 +70,7 @@ adversarial gates.
 | same receipt, engine-portable (Madaros + lean_single): CrCl 52.08±5.26, CL 2.22±0.22, AUC 450.07±44.44, CI [361.2, 539.0], WARN | `examples/vancomycin_auc_affine.sio` (`stdlib/epistemic/affine`) | run-pass on both engines, 2026-08-31 |
 | **RQ4 two-compartment flip rate**: interval sum ρ=1 silences 311/909 true WARNs (34.2 %), Var ratio 0.500; phase decomposition Cov<0 silences 0, chain over-states 300× (1,894 spurious) | `docs/research/sounio/rq4_vanco_two_compartment_flip.sio` (5,000-patient deterministic cohort, Madaros v0.80.0) | **measured 2026-08-31**, deterministic, identity check error 0 |
 | **RQ4 Monte Carlo adequacy**: Var_MC/Var_T = 0.999 (0.857–1.158); WARN agreement 99.4 % (±2σ rule), 94.8 % vs true quantile; Var_N/Var_MC = 300.9 | `docs/research/sounio/rq4_vanco_mc_adequacy.sio` (5 000 × 1 000 draws; Madaros + lean_single byte-identical) | **measured 2026-08-31** |
+| **Partition lemma**: invariance of a sum to its shared sources ⟹ `Cov ≤ 0` ⟹ naive add conservative; full partition ⟹ `Cov = −Var a` | `formal/lean4/EpistemicEffectsNS.lean` (`inner_nonpos_of_partition` …; gate 16 theorems) | mechanized 2026-08-31 |
 | 2-compartment (shared-source sum) is future | `stdlib/clinical/vancomycin_pbpk.sio:49,52` | stubbed |
 | compiler wire (E230, `noise_sets.sio`, N1–N4) | integration commit `4ac63da51f` (base `06e85a6ada`) | **landed + source-verified** (Madaros v0.80.0); four controls + both gates green; xai+zai reviewed |
 

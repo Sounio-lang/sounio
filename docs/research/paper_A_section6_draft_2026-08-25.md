@@ -145,6 +145,7 @@ operator reached during evaluation. ∎
 | Lemma 1 in **general form** (all affine forms, not Int witnesses; Mathlib-free) | ✅ mechanized — `trueVar_append`, `trueVar_mul` (delta method), `inner_disjoint` |
 | Exactness preservation: reported variance = true first-order variance along every step | ✅ mechanized — `exact_preservation`: under the premise the defective `gAddMeta`/`gMulMeta` are exact |
 | **Theorem 6.4** — no reached independence-assuming operator has correlated operands | ✅ mechanized — `typed_agfree`, `soundness_star` (along `⇒*`) |
+| **Partition lemma** — a decomposition invariant to its shared sources has `Cov ≤ 0`; the independence-assuming add is then conservative (`x − x` end: `Cov = −Var a`) | ✅ mechanized — `partition_iff`, `inner_nonpos_of_partition`, `naive_add_conservative_of_partition`, `inner_eq_neg_var_of_full_partition`; with `naive_add_understates_iff` (anti-garbling ⟺ `Cov > 0`) |
 | Sabotage witness in the kernel: `x+x` steps to an inexact value and is untypable for **every** `N`; `measure s + measure s` and the shared-variable `let x = measure s in x + x` untypable at source level; `x + opaque(y)` rejected purely by the ⊤ clause (with `x+y` admitted); `x+y` stays exact | ✅ kernel-checked — `x_plus_x_understates`, `x_plus_x_untypable`, `measure_plus_measure_untypable`, `let_x_plus_x_untypable`, `x_plus_top_untypable`, `x_plus_y_exact` |
 
 Every ingredient of the theorem now carries a machine proof (`formal/lean4/EpistemicEffectsNS.lean`,

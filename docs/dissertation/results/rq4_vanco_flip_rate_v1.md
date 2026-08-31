@@ -45,6 +45,8 @@ desvio-padrão — e **silencia 311 dos 909 WARNs verdadeiros (34,2 %)**: um ale
 e o paciente lê "terapêutico". Na decomposição da AUC em fases, A/α + B/β, a covariância entre as
 fases é **negativa em 5 000 de 5 000 pacientes** — porque a AUC é invariante a Q e Vp e a
 decomposição é uma partição desse invariante: o que Q e Vp movem para uma fase retiram da outra —
+— agora um teorema do cálculo mecanizado (`inner_nonpos_of_partition`: toda fonte de partição
+contribui `−(∂a/∂ε)² ≤ 0` à covariância; `partition_iff`) —
 e a mesma hipótese de independência erra na direção oposta: sobrestima a variância em 20 % na soma
 final e em **300 vezes** ao longo da cadeia inteira, produzindo **1 894 WARNs espúrios (38 % da
 coorte)** e silenciando nenhum. É o outro dano clínico, a fadiga de alarme, produzido pelo mesmo
