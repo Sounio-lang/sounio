@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.paper-a-ns-metatheory-mechanized-2026-08-30
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -138,6 +139,12 @@ leak — the footprint proves it.
 6. **Algebraic, not distributional.** `trueVar a = ⟨a,a⟩` is the variance of `Σ c_s ε_s` under
    independent unit-variance symbols *by definition*; no sampling/distributional adequacy is
    modelled or claimed (Grok 4.6 rounds 2–3).
+
+7. **Reals are `Int`; `Exact` is a hypothesis.** The mechanization is ring algebra over integer
+   "reals" (exact for first-order propagation; no ℝ measure theory claimed), `Knowledge⟨T,N⟩` is
+   generic (non-numeric payload metadata is inert — arithmetic is `treal`-only), and Theorem 6.4
+   assumes the initial term is `Exact` — a source-level `kraw` literal can fabricate metadata
+   (Kimi K3 independent review 2026-08-31, items 8–9).
 
 ## 5. Reproduce
 

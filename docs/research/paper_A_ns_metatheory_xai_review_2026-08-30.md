@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.paper-a-ns-metatheory-xai-review-2026-08-30
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -205,3 +206,64 @@ Cumulative: **0 unsound findings**; every [FAIL]/[TIGHTENABLE] either closed by 
 `let_x_plus_x_untypable`) or converted into an explicitly stated boundary (honest labelling,
 algebraic scope, first-order). Independent second-vendor opinion (Z.AI) still pending on
 operator account action.
+
+---
+
+## Independent second vendor — **Kimi K3** (Moonshot), 2026-08-31
+
+**Route:** the Kimi Code K3 lane (`fleet:10`, kimi-cli2 auth) via tmux dispatch — `kimi-code
+0.38.0 -p` crashes on any tool-using prompt, and the `api.moonshot.ai` key is not provisioned;
+Z.AI remained locked (1313). Same packet as round 3 (file as merged to `main` `cd325f66fc`,
+12 items; item 12 = "you are the independent vendor, no xAI text provided"). The referee
+confirms in item 12 that no prior review content was visible.
+
+**Verdict:** 10 × [OK], 2 × [TIGHTENABLE], **0 × [FAIL]**. Round-2/3 fixes: [OK]. Leftovers:
+source-level witness [CLOSED], genuine ⊤ witness [CLOSED], `AGFree` wording [CLOSED],
+probabilistic adequacy [OPEN — "a scoped gap rather than a defect"].
+
+### Referee report (verbatim)
+
+
+1. [OK] — `inner a b` sums `c · coeff b s` per entry; grouping duplicate entries of `a` by `s` gives `Σ_s coeff a s · coeff b s` since `coeff b s` is fixed within each group; the bilinearity/commutativity the file actually consumes (`inner_append_left/right`, `inner_comm`) are proved, and `trueVar a = ⟨a,a⟩` is exactly the declared unit-variance-independent model.
+
+2. [OK] — membership-based `Covers` is strictly *stronger* than coefficient-based containment (zero-coefficient entries still force membership), which is the safe direction: it can only over-reject, never under-reject; `covers_coeff` discharges the bridge to Lemma 2's "actually carries uncertainty" wording. No unsoundness direction. Residual completeness cost (not a flaw): `scale 0 b` from a zero payload yields phantom `(s,0)` entries that stay in the tracked set and can block later disjoint sums whose true covariance is genuinely 0.
+
+3. [OK] — two physically correlated sites are treated as disjoint only by violating the declared honest-labelling axiom (distinct labels); the file states this and the under-approximation direction explicitly (§6.4 residual iv). Not circular: `Covers` as a `t_kraw` premise is the invariant, `support_over_approx` just extracts it; ⊤-coverage is admissible but self-defeating since ⊤ is never disjoint. Nice corroboration that laundering is blocked: `t_certain`/`t_measure` require `emptyE` subterms, so `certain (measure …)` is untypable — the effect discipline closes the obvious evasion. (Edge: source-level `kraw` literals can fabricate metadata — covered by Theorem 6.4's stated Exact hypothesis.)
+
+4. [OK] — `Exact` is an explicit hypothesis of `soundness_star` (= the paper's "initially report their true variance"), not smuggled into `t_kraw` (which requires only `Covers` + `kvalid`); `exact_subst`/`exact_shift` close substitution/shifting; `kvalue_red` unwraps with `Exact v` preserved; `kunc_red`/`kconf_red` exit to bare `lit_real` — no metadata channel survives, and what they read out equals the true variance precisely because `Exact` held pre-step.
+
+5. [OK] — `kadd_red`/`kmul_red` fire only on `kraw (lit_real _)` operands, and well-typedness forces `nsDisjoint` on the annotations, which via `Covers` + `inner_disjoint` yields `inner = 0` exactly at the redex; the vacuous window (reached operator, operands not yet values) is benign because computation requires values and `soundness_star` re-establishes `AGFree` on every reduct. Additionally: the AGFree obligation for non-`lit_real` payloads is vacuous but unreachable, since `t_kadd`/`t_kmul` force `tknow treal` and `canon_real` collapses payloads to `lit_real`.
+
+6. [OK] — `scale y a ++ scale x b` is the correct first-order delta form of the product at the observed point `(x,y)` (gradient `(y,x)`), and `trueVar_mul` gives `y²Var a + x²Var b + 2xy⟨a,b⟩` with `gMulMeta` dropping exactly the `2xy` term; linearization at the pre-step payloads is the right point.
+
+7. [OK] — `x_plus_x_untypable : ∀ Γ T E, ¬ HasTy Γ (kadd xk xk) T E` quantifies over *all derivations*, and every admissible annotation must cover source 0 (`support_over_approx`), so both operands always share 0 — including ⊤, handled by the `none` cases of `nsDisjoint_of_shared`; "for every annotation N" is fully captured. The Bool `nsDisjoint` premise is the decidable form of (Add-Indep); Lemma 2 is what makes the checked form imply the paper's rule.
+
+8. [TIGHTENABLE] — progress and preservation both hold (`t_sub` is effects-only, no N-subsumption anywhere; `weakening`/`substClosed` are the standard development; `canon_know`+`canon_real` close the kadd/kmul value cases; `kadd` of non-real Knowledge is ill-typed rather than stuck). But `meas_red`/`t_measure` accept payloads of *any* type, including arrows: `measure (lam …)` steps to a `kraw`-wrapped lambda whose "variance" `c²` is formally exact and semantically meaningless. Harmless to every proved theorem; a one-line payload restriction (`treal`/`tnat`) would align the calculus with §6's intent.
+
+9. [TIGHTENABLE] — Not proved (named, all honestly scoped in-file): (i) `treal` is modelled by `Int` — the mechanization is ring algebra over integer "reals"; the paper's prose must not claim ℝ-valued measure theory; (ii) "true variance" is the algebraic `⟨a,a⟩` under declared independent unit-variance symbols — no sampling/distributional semantics (declared in the design notes; keep the qualifier in §6.4 prose); (iii) Theorem 6.4's Exact hypothesis is load-bearing against fabricated source-level `kraw` literals — do not drop the hypothesis when citing. No overclaim found in the file: the `AGFree` value-restriction and the labelling axiom are both disclosed.
+
+10. (a) [OK] — `opaque_red` preservation re-types at ⊤ via `covers_top`, sound since `Exact`/`AGFree` are N-independent and both recurse through `opaque` unchanged; no new stuck state (`canon_know` + progress); no annotation shrink is possible — `invOpaque` forces `nsTop` and `t_sub` cannot touch `T`. `x_plus_top_untypable` is a genuine ⊤-clause witness: both controls are present (`x_plus_y_typable` admits the un-opaqued sum, `opaque_y_typable` types `opaque yk` alone), so the rejection is attributable to the ⊤ clause of (Add-Indep) alone (`nsDisjoint_top_right`). (b) [OK] — `invMeasure` is complete: only `t_measure`/`t_sub` derive `measure` terms and `t_sub` preserves `T`, and the system has no N-widening rule, so a `measure` term can carry no annotation other than `{s}`; with `measure_plus_measure_untypable` and `let_x_plus_x_untypable` (the shared-de-Bruijn-variable control), the source-level witnesses match §8.2's "x + x flagged" at program-text level.
+
+11. source-level witness: [CLOSED] (`measure_plus_measure_untypable`, `let_x_plus_x_untypable`, both `∀ Γ T E`). genuine ⊤ witness: [CLOSED] (`x_plus_top_untypable` with both controls). probabilistic adequacy: [OPEN] — still no distributional semantics; variance is the declared algebraic proxy; correctly labelled in-file, so a scoped gap rather than a defect. `AGFree` wording: [CLOSED] — header discloses the value restriction and `soundness_star` re-establishes it per step.
+
+12. [OK] — verdicts above were derived from the packet alone; no xAI review text was provided or consulted (the file's own comments attribute earlier fixes to prior rounds, but no review content was visible).
+
+### Disposition
+
+| # | Finding | Action |
+|---|---|---|
+| 8 | `measure`/`meas_red` accept payloads of any type, including arrows; a `kraw`-wrapped lambda has a formally exact but meaningless variance | **Kept generic, documented.** `Knowledge⟨T,N⟩` is generic by design (parity with V2's `Knowledge<T>` and the paper's §5.1); `kadd`/`kmul` are typed at `treal` only, so non-numeric metadata is inert — it can never enter an arithmetic redex. Stated in the header. |
+| 9 (i) | `treal` is modelled by `Int`: ring algebra over integer "reals" | **Boundary (vi), stated** in the header and §6.4: no ℝ-valued measure theory is claimed; first-order propagation is a polynomial identity, for which `Int` is exact. |
+| 9 (ii) | variance is the algebraic `⟨a,a⟩` under declared independent unit-variance symbols | already boundary (v); kept. |
+| 9 (iii) | Theorem 6.4's `Exact` hypothesis is load-bearing against fabricated source-level `kraw` literals | **Stated** in the header: `Exact` is a hypothesis of `soundness_star`, not a theorem — do not drop it when citing. |
+| 2 (residual) | `scale 0 b` leaves phantom `(s, 0)` monomials that stay in the tracked set and can block a later genuinely-disjoint sum | completeness cost, not soundness; noted. `covers_coeff` is the direction that matters. |
+| 3 (corroboration) | `t_certain`/`t_measure` require `emptyE` subterms, so `certain (measure …)` is untypable — the effect discipline closes the laundering evasion | recorded as an observation we had not made ourselves. |
+
+Gate after the header edit: `NS_METATHEORY_LEAN_GATE_PASS`, 13 theorems.
+
+**External-review status, final for this cycle:** four adversarial reads — xAI Grok 4.5, Grok
+4.6, Grok 4.6-on-fixes, and **Kimi K3 as the independent second vendor**. Cumulative: **0 unsound
+findings**; every [FAIL]/[TIGHTENABLE] closed by a theorem (`covers_coeff`, `opaque` +
+`x_plus_top_untypable`, `measure_plus_measure_untypable`, `let_x_plus_x_untypable`) or stated as an
+explicit boundary (honest labelling; algebraic scope; first order; `Int` reals; generic payloads;
+`Exact` as hypothesis). The two-vendor policy of `.claude/AGENT_OFFLOAD_POLICY.md` is satisfied.
