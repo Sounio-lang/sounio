@@ -32,8 +32,9 @@ What is mechanized here, and how it composes into Paper A's Theorem 6.4
 * **The sabotage witness, in the kernel.** `x + x` on one source: the (unchanged,
   defective) operational semantics steps from an exact term to an inexact one
   (`x_plus_x_understates`, gap `= 2⟨x,x⟩`), and the NS type system rejects that very
-  term for *every* annotation `N` (`x_plus_x_untypable`); `x + ⊤` is rejected
-  (`x_plus_top_untypable`); `x + y` on disjoint sources is admitted and stays exact.
+  term for *every* annotation `N` (`x_plus_x_untypable`); `x + opaque(y)` is rejected purely by the ⊤ clause
+  (`x_plus_top_untypable`, with `x + y` itself admitted); `measure s + measure s` is untypable at
+  source level (`measure_plus_measure_untypable`); `x + y` on disjoint sources stays exact.
 
 The operational semantics is **deliberately the defective one** (`gAddMeta` = `ep_add`,
 `gMulMeta` = `ep_mul`, no covariance term): the discipline lives entirely in the types.
@@ -341,6 +342,7 @@ inductive Expr where
   | app      : Expr → Expr → Expr
   | measure  : Expr → Int → Int → Nat → Expr
   | certain  : Expr → Expr
+  | opaque   : Expr → Expr
   | kvalue   : Expr → Expr
   | kunc     : Expr → Expr
   | kconf    : Expr → Expr
@@ -375,6 +377,11 @@ inductive HasTy : TyCtx → Expr → Ty → EffectSet → Prop where
   /-- (Exact): a constant carries the empty source-set. -/
   | t_certain  : ∀ Γ T e,
       HasTy Γ e T emptyE → HasTy Γ (.certain e) (.tknow T nsEmpty) emptyE
+  /-- (Opaque): provenance erased — the result is typed at ⊤, the conservative top. This is
+      the paper's `opaque_knowledge()` fixture; ⊤ is never disjoint, so `x + opaque(y)` is
+      rejected even when `y`'s true source is disjoint from `x`'s. -/
+  | t_opaque   : ∀ Γ T N E e,
+      HasTy Γ e (.tknow T N) E → HasTy Γ (.opaque e) (.tknow T nsTop) E
   | t_kvalue   : ∀ Γ T N E e,
       HasTy Γ e (.tknow T N) E → HasTy Γ (.kvalue e) T E
   | t_kunc     : ∀ Γ T N E e,
@@ -431,6 +438,7 @@ def shift (cutoff : Nat) (d : Int) : Expr → Expr
   | .app f a => .app (shift cutoff d f) (shift cutoff d a)
   | .measure e c cf s => .measure (shift cutoff d e) c cf s
   | .certain e => .certain (shift cutoff d e)
+  | .opaque e => .opaque (shift cutoff d e)
   | .kvalue e => .kvalue (shift cutoff d e)
   | .kunc e => .kunc (shift cutoff d e)
   | .kconf e => .kconf (shift cutoff d e)
@@ -447,6 +455,7 @@ def subst (n : Nat) (w : Expr) : Expr → Expr
   | .app f a => .app (subst n w f) (subst n w a)
   | .measure e c cf s => .measure (subst n w e) c cf s
   | .certain e => .certain (subst n w e)
+  | .opaque e => .opaque (subst n w e)
   | .kvalue e => .kvalue (subst n w e)
   | .kunc e => .kunc (subst n w e)
   | .kconf e => .kconf (subst n w e)
@@ -469,6 +478,9 @@ inductive Step : Expr → Expr → Prop where
   | meas_arg   : Step e e' → Step (.measure e c cf s) (.measure e' c cf s)
   | cert_red   : IsValue v → Step (.certain v) (.kraw v ⟨0, 1000⟩ [])
   | cert_arg   : Step e e' → Step (.certain e) (.certain e')
+  /-- Erasing provenance is a no-op on the value; only the TYPE forgets. -/
+  | opaque_red : Step (.opaque (.kraw v m a)) (.kraw v m a)
+  | opaque_arg : Step e e' → Step (.opaque e) (.opaque e')
   | kvalue_red : Step (.kvalue (.kraw v m a)) v
   | kvalue_arg : Step e e' → Step (.kvalue e) (.kvalue e')
   | kunc_red   : Step (.kunc (.kraw v m a)) (.lit_real m.gumVar)
@@ -509,6 +521,7 @@ def Exact : Expr → Prop
   | .app f a => Exact f ∧ Exact a
   | .measure e _ _ _ => Exact e
   | .certain e => Exact e
+  | .opaque e => Exact e
   | .kvalue e => Exact e
   | .kunc e => Exact e
   | .kconf e => Exact e
@@ -533,6 +546,7 @@ def AGFree : Expr → Prop
   | .app f a => AGFree f ∧ AGFree a
   | .measure e _ _ _ => AGFree e
   | .certain e => AGFree e
+  | .opaque e => AGFree e
   | .kvalue e => AGFree e
   | .kunc e => AGFree e
   | .kconf e => AGFree e
@@ -650,6 +664,12 @@ theorem progress' {Γ e T E} (h : HasTy Γ e T E) (hΓ : Γ = []) :
     rcases ihe rfl with hv | ⟨e', he'⟩
     · exact Or.inr ⟨_, .cert_red hv⟩
     · exact Or.inr ⟨_, .cert_arg he'⟩
+  | t_opaque Γ T N E e he ihe =>
+    subst hΓ
+    rcases ihe rfl with hv | ⟨e', he'⟩
+    · rcases canon_know hv he with ⟨w, m, a, rfl⟩
+      exact Or.inr ⟨_, .opaque_red⟩
+    · exact Or.inr ⟨_, .opaque_arg he'⟩
   | t_kvalue Γ T N E e he ihe =>
     subst hΓ
     rcases ihe rfl with hv | ⟨e', he'⟩
@@ -787,6 +807,7 @@ theorem wellScoped {Γ e T E} (h : HasTy Γ e T E) :
     intro c d hc; simp [shift, ihf c d hc, iha c d hc]
   | t_measure Γ T e cc cf s _ _ _ ih => intro c d hc; simp [shift, ih c d hc]
   | t_certain Γ T e _ ih => intro c d hc; simp [shift, ih c d hc]
+  | t_opaque Γ T N E e _ ih => intro c d hc; simp [shift, ih c d hc]
   | t_kvalue Γ T N E e _ ih => intro c d hc; simp [shift, ih c d hc]
   | t_kunc Γ T N E e _ ih => intro c d hc; simp [shift, ih c d hc]
   | t_kconf Γ T N E e _ ih => intro c d hc; simp [shift, ih c d hc]
@@ -849,6 +870,7 @@ theorem weakening {Γ e T E} (h : HasTy Γ e T E) :
   | t_measure Γ T e cc cf s _ h1 h2 ih =>
     intro k τ; exact .t_measure _ _ _ _ _ _ (ih k τ) h1 h2
   | t_certain Γ T e _ ih => intro k τ; exact .t_certain _ _ _ (ih k τ)
+  | t_opaque Γ T N E e _ ih => intro k τ; exact .t_opaque _ _ _ _ _ (ih k τ)
   | t_kvalue Γ T N E e _ ih => intro k τ; exact .t_kvalue _ _ _ _ _ (ih k τ)
   | t_kunc Γ T N E e _ ih => intro k τ; exact .t_kunc _ _ _ _ _ (ih k τ)
   | t_kconf Γ T N E e _ ih => intro k τ; exact .t_kconf _ _ _ _ _ (ih k τ)
@@ -939,6 +961,7 @@ theorem substClosed {v σ} (hv : HasTy [] v σ emptyE) {Γ0 e T E} (h : HasTy Γ
   | t_measure Γ' T e cc cf s he h1 h2 ih =>
     intro Δ hΓ; subst hΓ; exact .t_measure _ _ _ _ _ _ (ih Δ rfl) h1 h2
   | t_certain Γ' T e _ ih => intro Δ hΓ; subst hΓ; exact .t_certain _ _ _ (ih Δ rfl)
+  | t_opaque Γ' T N E e _ ih => intro Δ hΓ; subst hΓ; exact .t_opaque _ _ _ _ _ (ih Δ rfl)
   | t_kvalue Γ' T N E e _ ih => intro Δ hΓ; subst hΓ; exact .t_kvalue _ _ _ _ _ (ih Δ rfl)
   | t_kunc Γ' T N E e _ ih => intro Δ hΓ; subst hΓ; exact .t_kunc _ _ _ _ _ (ih Δ rfl)
   | t_kconf Γ' T N E e _ ih => intro Δ hΓ; subst hΓ; exact .t_kconf _ _ _ _ _ (ih Δ rfl)
@@ -994,6 +1017,15 @@ theorem preservation' {Γ e T E} (h : HasTy Γ e T E) :
       have hk : kvalid ⟨0, 1000⟩ := ⟨Int.le_refl 0, by decide, by decide⟩
       exact .t_kraw _ _ _ _ _ _ he hv hk covers_empty
     | cert_arg he' => exact .t_certain _ _ _ (ihe he' rfl)
+  | t_opaque Γ T N E e he ihe =>
+    intro e' hs hΓ; subst hΓ
+    cases hs with
+    | opaque_red =>
+      rcases invKraw he rfl with ⟨T', N', hT, hwty, hwval, hk, _⟩
+      injection hT with hT1 hT2; subst hT1
+      exact .t_sub _ _ _ _ _ (.t_kraw _ _ _ _ _ _ hwty hwval hk (covers_top _))
+        (Sounio.EpistemicEffects.emptyE_sub _)
+    | opaque_arg he' => exact .t_opaque _ _ _ _ _ (ihe he' rfl)
   | t_kvalue Γ T N E e he ihe =>
     intro e' hs hΓ; subst hΓ
     cases hs with
@@ -1072,6 +1104,7 @@ theorem exact_shift {e} (h : Exact e) : ∀ c d, Exact (shift c d e) := by
   | app f a ihf iha => intro c d; exact ⟨ihf h.1 c d, iha h.2 c d⟩
   | measure e cc cf s ih => intro c d; exact ih h c d
   | certain e ih => intro c d; exact ih h c d
+  | «opaque» e ih => intro c d; exact ih h c d
   | kvalue e ih => intro c d; exact ih h c d
   | kunc e ih => intro c d; exact ih h c d
   | kconf e ih => intro c d; exact ih h c d
@@ -1093,6 +1126,7 @@ theorem exact_subst {e} (h : Exact e) : ∀ n w, Exact w → Exact (subst n w e)
   | app f a ihf iha => intro n w hw; exact ⟨ihf h.1 n w hw, iha h.2 n w hw⟩
   | measure e cc cf s ih => intro n w hw; exact ih h n w hw
   | certain e ih => intro n w hw; exact ih h n w hw
+  | «opaque» e ih => intro n w hw; exact ih h n w hw
   | kvalue e ih => intro n w hw; exact ih h n w hw
   | kunc e ih => intro n w hw; exact ih h n w hw
   | kconf e ih => intro n w hw; exact ih h n w hw
@@ -1132,6 +1166,11 @@ theorem exact_preservation' {Γ e T E} (h : HasTy Γ e T E) :
     cases hs with
     | cert_red hv => exact ⟨hx, rfl⟩
     | cert_arg he' => have hh := ihe he' rfl hx; exact hh
+  | t_opaque Γ T N E e he ihe =>
+    intro e' hs hΓ hx; subst hΓ
+    cases hs with
+    | opaque_red => exact hx
+    | opaque_arg he' => have hh := ihe he' rfl hx; exact hh
   | t_kvalue Γ T N E e he ihe =>
     intro e' hs hΓ hx; subst hΓ
     cases hs with
@@ -1203,6 +1242,7 @@ theorem typed_agfree {Γ e T E} (h : HasTy Γ e T E) : AGFree e := by
   | t_app Γ T₁ T₂ Ef Ec Ecaller f a _ _ _ _ ihf iha => exact ⟨ihf, iha⟩
   | t_measure Γ T e c cf s _ _ _ ih => exact ih
   | t_certain Γ T e _ ih => exact ih
+  | t_opaque Γ T N E e _ ih => exact ih
   | t_kvalue Γ T N E e _ ih => exact ih
   | t_kunc Γ T N E e _ ih => exact ih
   | t_kconf Γ T N E e _ ih => exact ih
@@ -1248,8 +1288,8 @@ theorem soundness_star {e T E} (h : HasTy [] e T E) (hx : Exact e) {e'} (hs : e 
 def xk : Expr := .kraw (.lit_real 10) ⟨1, 1000⟩ [(0, 1)]
 /-- `y`: an independent measurement on source 1. -/
 def yk : Expr := .kraw (.lit_real 20) ⟨4, 1000⟩ [(1, 2)]
-/-- `u`: a Knowledge value of UNKNOWN provenance — typed only at ⊤. -/
-def uk : Expr := .kraw (.lit_real 5) ⟨1, 1000⟩ [(0, 1)]
+/-- `mx`: the SOURCE-LEVEL measurement term (not yet reduced) on source 0. -/
+def mx : Expr := .measure (.lit_real 10) 1 1000 0
 
 theorem xk_exact : Exact xk := by simp [xk, Exact, trueVar, inner, coeff]
 theorem yk_exact : Exact yk := by simp [yk, Exact, trueVar, inner, coeff]
@@ -1287,21 +1327,63 @@ theorem x_plus_x_untypable' {Γ e T E} (h : HasTy Γ e T E) (he : e = .kadd xk x
 theorem x_plus_x_untypable : ∀ Γ T E, ¬ HasTy Γ (.kadd xk xk) T E :=
   fun _ _ _ h => x_plus_x_untypable' h rfl
 
-/-- `x + u` with `u` of unknown source-set: rejected (⊤ is never disjoint), whatever `x`'s
-    own annotation. Stated for the operand typed at ⊤ on the right. -/
-theorem x_plus_top_untypable' {Γ e T E} (h : HasTy Γ e T E) (he : e = .kadd xk uk) : False := by
+theorem invOpaque {Γ e T E} (h : HasTy Γ e T E) {u} (he : e = .opaque u) :
+    ∃ T', T = .tknow T' nsTop := by
   induction h with
-  | t_kadd Γ Na Nb E₁ E₂ a b ha hb hd _ _ =>
-    injection he with hea heb; subst hea; subst heb
-    have ma : nsMem 0 Na := support_over_approx ha (0, 1) (by simp [xk])
-    have mb : nsMem 0 Nb := support_over_approx hb (0, 1) (by simp [uk])
-    have := nsDisjoint_of_shared ma mb
-    rw [this] at hd; exact Bool.noConfusion hd
+  | t_opaque Γ' T' N E' e' _ _ => exact ⟨T', rfl⟩
   | t_sub _ _ _ _ _ _ _ ih => exact ih he
   | _ => exact Expr.noConfusion he
 
-theorem x_plus_top_untypable : ∀ Γ T E, ¬ HasTy Γ (.kadd xk uk) T E :=
+/-- **The ⊤ clause in isolation.** `x + opaque(y)`: `y` is on source 1, DISJOINT from `x`'s
+    source 0 — `x + y` itself is admitted (`x_plus_y_typable`) — but `opaque` erases `y`'s
+    provenance to ⊤, and ⊤ is never disjoint. Rejected purely by the ⊤ clause of
+    (Add-Indep). (Grok 4.6 review 2026-08-31, items 7/9.) -/
+theorem x_plus_top_untypable' {Γ e T E} (h : HasTy Γ e T E) (he : e = .kadd xk (.opaque yk)) :
+    False := by
+  induction h with
+  | t_kadd Γ Na Nb E₁ E₂ a b ha hb hd _ _ =>
+    injection he with hea heb; subst hea; subst heb
+    rcases invOpaque hb rfl with ⟨Tb, hTb⟩
+    injection hTb with hTb1 hTb2; subst hTb2
+    have hf : nsDisjoint Na nsTop = false := nsDisjoint_top_right Na
+    rw [hf] at hd; exact Bool.noConfusion hd
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+theorem x_plus_top_untypable : ∀ Γ T E, ¬ HasTy Γ (.kadd xk (.opaque yk)) T E :=
   fun _ _ _ h => x_plus_top_untypable' h rfl
+
+/-- …while `opaque(y)` alone is perfectly well-typed (at ⊤), so the rejection is the sum's. -/
+theorem opaque_y_typable : HasTy [] (.opaque yk) (.tknow .treal nsTop) emptyE :=
+  .t_opaque _ _ _ _ _ (.t_kraw _ _ _ _ _ _ (.t_lit_real _ _) (.v_real _) ⟨by decide, by decide, by decide⟩ (covers_single 1 2))
+
+theorem invMeasure {Γ e T E} (h : HasTy Γ e T E) {u c cf s} (he : e = .measure u c cf s) :
+    ∃ T', T = .tknow T' (nsSingle s) := by
+  induction h with
+  | t_measure Γ' T' e' c' cf' s' _ _ _ _ =>
+    injection he with h1 h2 h3 h4; subst h4; exact ⟨T', rfl⟩
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+/-- **Source-level E230.** `measure(·, s) + measure(·, s)` — the unreduced program text, not a
+    runtime value — is untypable: both operands are forced to `{s}` by (Measure), and
+    `{s}` is not disjoint from itself. (Grok 4.6 review 2026-08-31, item 9.) -/
+theorem measure_plus_measure_untypable' {Γ e T E} (h : HasTy Γ e T E) (he : e = .kadd mx mx) :
+    False := by
+  induction h with
+  | t_kadd Γ Na Nb E₁ E₂ a b ha hb hd _ _ =>
+    injection he with hea heb; subst hea; subst heb
+    rcases invMeasure ha rfl with ⟨Ta, hTa⟩
+    injection hTa with hTa1 hTa2; subst hTa2
+    rcases invMeasure hb rfl with ⟨Tb, hTb⟩
+    injection hTb with hTb1 hTb2; subst hTb2
+    have hf : nsDisjoint (nsSingle 0) (nsSingle 0) = false := by decide
+    rw [hf] at hd; exact Bool.noConfusion hd
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+theorem measure_plus_measure_untypable : ∀ Γ T E, ¬ HasTy Γ (.kadd mx mx) T E :=
+  fun _ _ _ h => measure_plus_measure_untypable' h rfl
 
 /-- `x + y` on disjoint sources: admitted, with result set `{0} ∪ {1}`. -/
 theorem x_plus_y_typable :
@@ -1343,4 +1425,6 @@ end Sounio.EpistemicEffectsNS
 #print axioms Sounio.EpistemicEffectsNS.typed_agfree
 #print axioms Sounio.EpistemicEffectsNS.soundness_star
 #print axioms Sounio.EpistemicEffectsNS.x_plus_x_untypable
+#print axioms Sounio.EpistemicEffectsNS.x_plus_top_untypable
+#print axioms Sounio.EpistemicEffectsNS.measure_plus_measure_untypable
 #print axioms Sounio.EpistemicEffectsNS.x_plus_x_understates
