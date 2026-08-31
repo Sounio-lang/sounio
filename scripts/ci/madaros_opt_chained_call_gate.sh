@@ -34,13 +34,15 @@ cd "$ROOT_DIR"
 
 MADAROS="${MADAROS_RAW_BIN:-${MADAROS_BIN:-$ROOT_DIR/artifacts/self-hosted/madaros}}"
 CASES="$ROOT_DIR/tests/multimodule"
-ENTRY="opt_chained_call_accumulator_main.sio"
-WANT="OPT_CHAINED_CALL_ACCUMULATOR_OK"
+
+# entry|expected-token. One line per defect this gate has caught.
+FIXTURES="opt_chained_call_accumulator_main.sio|OPT_CHAINED_CALL_ACCUMULATOR_OK
+opt_cse_branch_dominance_main.sio|OPT_CSE_BRANCH_DOMINANCE_OK"
 
 fail() { echo "MADAROS_OPT_CHAINED_CALL_FAIL: $*" >&2; exit 1; }
 
 [[ -x "$MADAROS" ]] || { echo "madaros-opt-chained-call: no raw Madaros at $MADAROS -- skipping"; exit 0; }
-[[ -f "$CASES/$ENTRY" ]] || fail "fixture missing: $CASES/$ENTRY"
+
 
 run_one() {  # run_one <label> <flag...>
   local label="$1"; shift
@@ -60,20 +62,31 @@ run_one() {  # run_one <label> <flag...>
   printf '%s' "$out"
 }
 
-plain="$(run_one "without -O")"
-opt="$(run_one "with -O" -O)"
+checked=0
+while IFS='|' read -r ENTRY WANT; do
+  [[ -n "$ENTRY" ]] || continue
+  [[ -f "$CASES/$ENTRY" ]] || fail "fixture missing: $CASES/$ENTRY"
 
-# Control: the fixture must PASS without -O. If it does not, the fixture is
-# broken and a match between the two columns would prove nothing.
-[[ "$plain" == *"$WANT"* ]] || fail "the fixture does not pass without -O (got: ${plain:-<empty>}) -- comparing the two builds would be vacuous"
+  plain="$(run_one "$ENTRY without -O")"
+  opt="$(run_one "$ENTRY with -O" -O)"
 
-[[ "$opt" == *"$WANT"* ]] || fail "with -O the fixture printed: ${opt:-<empty>}
-  A chained assignment lost its accumulator. See ocp_mfi_dse in
-  self-hosted/ir/opt_cleanup.sio: a call must be a barrier there, because its
-  argument reads live in instr.call_args and the SRC1/SRC2 scan cannot see them."
+  # Control: the fixture must PASS without -O. If it does not, the fixture is
+  # broken and a match between the two columns would prove nothing.
+  [[ "$plain" == *"$WANT"* ]] || fail "$ENTRY does not pass without -O (got: ${plain:-<empty>}) -- comparing the two builds would be vacuous"
 
-[[ "$plain" == "$opt" ]] || fail "the two builds printed different text
+  [[ "$opt" == *"$WANT"* ]] || fail "$ENTRY with -O printed: ${opt:-<empty>}
+  Both defects this gate guards live in self-hosted/ir/opt_cleanup.sio and share a
+  shape: a peel carrying state across a boundary it cannot see past.
+    ocp_mfi_dse must treat a CALL as a barrier -- its argument reads live in
+      instr.call_args and the SRC1/SRC2 scan cannot see them.
+    ocp_mfi_cse must drop its table at a BASIC-BLOCK boundary -- it has no
+      dominance information, so a match from another block is not substitutable."
+
+  [[ "$plain" == "$opt" ]] || fail "$ENTRY: the two builds printed different text
   without -O: $plain
   with    -O: $opt"
 
-echo "madaros-opt-chained-call: -O preserved the program's output (control: the fixture passes without -O too)."
+  checked=$((checked + 1))
+done <<< "$FIXTURES"
+
+echo "madaros-opt-chained-call: -O preserved the output of $checked fixture(s) (control: each passes without -O too)."
