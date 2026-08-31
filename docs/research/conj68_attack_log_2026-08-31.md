@@ -448,6 +448,42 @@ com status por claim ([T]/[K]/[M]/[L]), todas as provas das rodadas 4-11,
 o argumento de obstrução, o Technical Lemma L com a evidência, o apêndice de
 artefatos e as retratações registradas como parte do método.
 
+## Rodada 13: o locus não se dissolve — ele CARREGA a prova
+
+**Seis relações novas descobertas** (0 violações em 2397 amostras de
+configuração, `conj68_loci_probe.sio` DEEPCAND): ⟨T,[u,x,x]⟩ = ⟨T,[u,x̃,x̃]⟩ =
+⟨T,[w,x′,x′]⟩ = ⟨T,[w,x̃′,x̃′]⟩ = ⟨T,[u,w,x′]⟩ = ⟨T,[u,w,x̃′]⟩ = 0 (e as
+espelhadas [w,x,x], [u,x′,x′], [u,w,x], [u,w,x̃] NÃO são relações — assimetria
+interessante). Provas pendentes; violação exata zero.
+
+**O swap falhou** (SWAP_HIST idêntico: 85 drops nos paralelos): a troca
+σ₁ → P([u,x̃,x̃]) não remove o locus porque **[x,x̃,x̃] = 0** — computado na
+Table 2: (x,x̃) geram com f₀,f̃₀ uma subálgebra associativa do hexágono; todo
+candidato u-linear construído dos vetores do próprio hexágono morre em u=x.
+
+**A descoberta topológica da rodada (feita à mão):** na sequência
+H⁷(B, B∖Z) → H⁷(B) → H⁷(B∖Z), a imagem do primeiro mapa (classes de Thom,
+normal trivial) é α⁴·H³(ℝP⁴) ⊕ β⁴·H³(ℝP⁴) = **span{α⁴β³, α³β⁴} — exatamente
+w₇**. Ou seja: w₇ morre em H⁷(B∖Z); **a obstrução é inteiramente suportada
+no locus**. Não é patologia — é o mecanismo: os zeros forçados vivem perto de
+Z, onde a seção degenera CANONICAMENTE ao pullback
+(T(x+εq, w) = T(x,w) + ε·T(q,w), bilinearidade — q-independente em ordem
+dominante).
+
+**O endgame reformulado com precisão:** M = B ∖ N(Z), bordo
+∂M ≅ ℝP⁴×S³ ⊔ S³×ℝP⁴; a trivialização de bordo de s é homotópica ao pullback
+de T(x,·) pelo fator w (4-complexo ⟹ as classes de diferença em grau ≥ 5
+morrem por dimensão). A conjectura segue de:
+
+> **e_rel(E₇⊗γ₁γ₂; s₀-pullback) ≠ 0 em H⁷(M, ∂M)** — equivalentemente, a
+> contagem mod 2 dos zeros de QUALQUER seção que estenda o dado canônico de
+> bordo é 1. Computável com uma seção-modelo explícita cujos zeros se contam
+> à mão.
+
+O plano da próxima sessão: construir a seção-modelo (candidata: interpolação
+linear entre T e uma seção algébrica com zeros conhecidos nos pares de base,
+onde D3EXACT já deu os witnesses inteiros) e computar e_rel.
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD

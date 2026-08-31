@@ -406,6 +406,11 @@ fn main() with IO, Mut, Panic, Div {
     var hist = [0; 10]
     var drop_par = 0      // drops where u ~ x or w ~ x'
     var drop_other = 0
+    var deep_viol = [0; 12]
+    var deep_n = [0; 12]
+    var hist_swap = [0; 10]
+    var swap_drop_par = 0
+    var swap_drop_other = 0
     var targeted_ok = 1
     while trial < 4000 && npairs < 40 {
         trial = trial + 1
@@ -516,6 +521,135 @@ fn main() with IO, Mut, Panic, Div {
                             if rk2 > rk { rk = rk2 }
                         }
                         hist[rk as usize] = hist[rk as usize] + 1
+                        // ---- DEEP HUNT (R13): configuration-aware relation candidates.
+                        // For each V, test <[u,w], V> = 0 exactly; count violations.
+                        // Fixed vectors: x1, xt1, x2, xt2 available.
+                        var tcm = [0; 16]
+                        var q5 = 0
+                        while q5 < 16 { tcm[q5 as usize] = uw[q5 as usize] - wu[q5 as usize]; q5 = q5 + 1 }
+                        // helper-free inline: V1 = [u,x,x] = (ux)x - u(xx)
+                        var vv = 0
+                        while vv < 12 {
+                            var pvec = [0; 16]
+                            var qvec = [0; 16]
+                            // choose (P,Q) so V = [P,Q,Q] = (PQ)Q - P(QQ)  for vv<8,
+                            // or V = [u,w,Q] = (uw)Q - u(wQ) for vv>=8
+                            var isuw = 0
+                            if vv < 8 {
+                                if (vv % 2) == 0 {
+                                    q5 = 0
+                                    while q5 < 16 { pvec[q5 as usize] = u16[q5 as usize]; q5 = q5 + 1 }
+                                } else {
+                                    q5 = 0
+                                    while q5 < 16 { pvec[q5 as usize] = w16[q5 as usize]; q5 = q5 + 1 }
+                                }
+                                let which = vv / 2
+                                q5 = 0
+                                while q5 < 16 {
+                                    if which == 0 { qvec[q5 as usize] = x1[q5 as usize] }
+                                    if which == 1 { qvec[q5 as usize] = xt1[q5 as usize] }
+                                    if which == 2 { qvec[q5 as usize] = x2[q5 as usize] }
+                                    if which == 3 { qvec[q5 as usize] = xt2[q5 as usize] }
+                                    q5 = q5 + 1
+                                }
+                            } else {
+                                isuw = 1
+                                let which2 = vv - 8
+                                q5 = 0
+                                while q5 < 16 {
+                                    if which2 == 0 { qvec[q5 as usize] = x1[q5 as usize] }
+                                    if which2 == 1 { qvec[q5 as usize] = xt1[q5 as usize] }
+                                    if which2 == 2 { qvec[q5 as usize] = x2[q5 as usize] }
+                                    if which2 == 3 { qvec[q5 as usize] = xt2[q5 as usize] }
+                                    q5 = q5 + 1
+                                }
+                            }
+                            var vres = [0; 16]
+                            if isuw == 0 {
+                                // [P,Q,Q] = (PQ)Q - P(QQ)
+                                var pq = [0; 16]
+                                smul_i(&pvec, &qvec, &!pq)
+                                var pqq = [0; 16]
+                                smul_i(&pq, &qvec, &!pqq)
+                                var qq = [0; 16]
+                                smul_i(&qvec, &qvec, &!qq)
+                                var pqq2 = [0; 16]
+                                smul_i(&pvec, &qq, &!pqq2)
+                                q5 = 0
+                                while q5 < 16 { vres[q5 as usize] = pqq[q5 as usize] - pqq2[q5 as usize]; q5 = q5 + 1 }
+                            } else {
+                                // [u,w,Q] = (uw)Q - u(wQ)
+                                var uwq = [0; 16]
+                                smul_i(&uw, &qvec, &!uwq)
+                                var wq = [0; 16]
+                                smul_i(&w16, &qvec, &!wq)
+                                var uwq2 = [0; 16]
+                                smul_i(&u16, &wq, &!uwq2)
+                                q5 = 0
+                                while q5 < 16 { vres[q5 as usize] = uwq[q5 as usize] - uwq2[q5 as usize]; q5 = q5 + 1 }
+                            }
+                            var dsum = 0
+                            q5 = 0
+                            while q5 < 16 { dsum = dsum + tcm[q5 as usize] * vres[q5 as usize]; q5 = q5 + 1 }
+                            if dsum != 0 { deep_viol[vv as usize] = deep_viol[vv as usize] + 1 }
+                            deep_n[vv as usize] = deep_n[vv as usize] + 1
+                            vv = vv + 1
+                        }
+                        // ---- THE SWAP TEST (R13): replace u -> [u,xt,xt] and
+                        // w -> [w,xt',xt'] in the constraint stack; if rank 9
+                        // EVERYWHERE (including u=x / w=x'), the locus vanishes
+                        // and the w7 argument closes without blow-up.
+                        var vxt = [0; 16]
+                        var vxtp = [0; 16]
+                        // [u, xt1, xt1] = (u xt)xt - u(xt xt)
+                        var uxt = [0; 16]
+                        smul_i(&u16, &xt1, &!uxt)
+                        var uxtxt = [0; 16]
+                        smul_i(&uxt, &xt1, &!uxtxt)
+                        var xtxt = [0; 16]
+                        smul_i(&xt1, &xt1, &!xtxt)
+                        var uxtxt2 = [0; 16]
+                        smul_i(&u16, &xtxt, &!uxtxt2)
+                        var q6 = 0
+                        while q6 < 16 { vxt[q6 as usize] = uxtxt[q6 as usize] - uxtxt2[q6 as usize]; q6 = q6 + 1 }
+                        // [w, xt2, xt2]
+                        var wxt = [0; 16]
+                        smul_i(&w16, &xt2, &!wxt)
+                        var wxtxt = [0; 16]
+                        smul_i(&wxt, &xt2, &!wxtxt)
+                        var xtxt2 = [0; 16]
+                        smul_i(&xt2, &xt2, &!xtxt2)
+                        var wxtxt2 = [0; 16]
+                        smul_i(&w16, &xtxt2, &!wxtxt2)
+                        q6 = 0
+                        while q6 < 16 { vxtp[q6 as usize] = wxtxt[q6 as usize] - wxtxt2[q6 as usize]; q6 = q6 + 1 }
+                        var stack2 = [0; 144]
+                        q6 = 0
+                        while q6 < 16 {
+                            stack2[q6 as usize] = if q6 == 0 { 1 } else { 0 }
+                            stack2[(16 + q6) as usize] = x1[q6 as usize]
+                            stack2[(32 + q6) as usize] = xt1[q6 as usize]
+                            stack2[(48 + q6) as usize] = x2[q6 as usize]
+                            stack2[(64 + q6) as usize] = xt2[q6 as usize]
+                            stack2[(80 + q6) as usize] = vxt[q6 as usize]
+                            stack2[(96 + q6) as usize] = vxtp[q6 as usize]
+                            stack2[(112 + q6) as usize] = stack[(112 + q6) as usize]
+                            stack2[(128 + q6) as usize] = stack[(128 + q6) as usize]
+                            q6 = q6 + 1
+                        }
+                        var rk_s = rank9_mod_p(&stack2, 9, 2147483647)
+                        if rk_s < 9 {
+                            let rk_s2 = rank9_mod_p(&stack2, 9, 2147483629)
+                            if rk_s2 > rk_s { rk_s = rk_s2 }
+                        }
+                        hist_swap[rk_s as usize] = hist_swap[rk_s as usize] + 1
+                        if rk_s < 9 {
+                            if upar == 1 || wpar == 1 {
+                                swap_drop_par = swap_drop_par + 1
+                            } else {
+                                swap_drop_other = swap_drop_other + 1
+                            }
+                        }
                         if rk < 9 {
                             if upar == 1 || wpar == 1 {
                                 drop_par = drop_par + 1
@@ -559,5 +693,34 @@ fn main() with IO, Mut, Panic, Div {
     print("\n")
     print("TARGETED_DEGENERATE ")
     if targeted_ok == 1 { println("CONFIRMED") } else { println("UNEXPECTED_FULLRANK") }
+    // deep-hunt legend: vv<8: V=[P,Q,Q], P = u (even vv) / w (odd vv),
+    // Q = x (vv/2=0), xt (1), x' (2), xt' (3); vv>=8: V=[u,w,Q], Q by vv-8.
+    var dv = 0
+    while dv < 12 {
+        print("DEEPCAND ")
+        print_int(dv)
+        print(" viol ")
+        print_int(deep_viol[dv as usize])
+        print(" / ")
+        print_int(deep_n[dv as usize])
+        print("\n")
+        dv = dv + 1
+    }
+    var hs = 0
+    while hs < 10 {
+        if hist_swap[hs as usize] > 0 {
+            print("SWAP_HIST ")
+            print_int(hs)
+            print(" N ")
+            print_int(hist_swap[hs as usize])
+            print("\n")
+        }
+        hs = hs + 1
+    }
+    print("SWAP_DROPS: at_parallel ")
+    print_int(swap_drop_par)
+    print("  other ")
+    print_int(swap_drop_other)
+    print("\n")
     println("CONJ68_LOCI_PROBE DONE")
 }
