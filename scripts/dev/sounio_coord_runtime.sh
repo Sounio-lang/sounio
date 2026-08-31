@@ -52,6 +52,8 @@ Commands:
                                  retire a native hook attestation
   hook-capability-status --agent ID --lane ID
                                  inspect native hook eligibility
+  hook-caller-attest --agent ID
+                                 attest the native hook's exact provider caller
   recover [--agent ID --lane ID] [--all]
                                  reconstruct one lane or audit the fleet after a crash
   obligation-open --agent ID --lane ID --message ID
@@ -1620,6 +1622,40 @@ native_hook_caller_matches_presence() {
   else
     [[ "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 ]]
   fi
+}
+
+hook_caller_attest_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" harness
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      *) die "unknown hook-caller-attest option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "hook-caller-attest requires --agent or SOUNIO_AGENT_ID"
+  validate_value agent "$agent"
+  harness="$(
+    case "$agent" in
+      codex*) printf codex ;;
+      claude*) printf claude ;;
+      cursor*) printf cursor ;;
+      grok*) printf grok ;;
+      *) die "unsupported native hook caller: $agent" ;;
+    esac
+  )"
+  native_hook_parent_identity ||
+    die "native hook caller attestation requires the matching OCaml runtime parent"
+  if ((NATIVE_HOOK_WAKE_ELIGIBLE)); then
+    native_hook_caller_is_exact_harness "$harness" ||
+      die "native hook caller does not match provider $harness"
+  else
+    [[ "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 ]] ||
+      die "native hook caller selftest attestation is disabled"
+  fi
+  printf 'HOOK_CALLER_ATTESTED agent=%s harness=%s caller_pid=%s caller_pid_start=%s caller_sha256=%s runtime_id=%s source_sha=%s\n' \
+    "$agent" "$harness" "$NATIVE_HOOK_CALLER_PID" \
+    "$NATIVE_HOOK_CALLER_PID_START" "$NATIVE_HOOK_CALLER_SHA256" \
+    "$NATIVE_HOOK_RUNTIME_ID" "$NATIVE_HOOK_SOURCE_SHA"
 }
 
 native_hook_wake_selftest_fixture() {
@@ -4784,6 +4820,7 @@ case "$command" in
   hook-capability-register) hook_capability_register_command "$@" ;;
   hook-capability-unregister) hook_capability_unregister_command "$@" ;;
   hook-capability-status) hook_capability_status_command "$@" ;;
+  hook-caller-attest) hook_caller_attest_command "$@" ;;
   recover) recover_command "$@" ;;
   obligation-open) coord_obligation_open_command "$@" ;;
   obligation-consume) coord_obligation_recipient_command consume "$@" ;;
@@ -4819,5 +4856,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, hook-capability-register, hook-capability-unregister, hook-capability-status, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, wake-reconcile, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, hook-capability-register, hook-capability-unregister, hook-capability-status, hook-caller-attest, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, wake-reconcile, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, injected, ack, message-status, wait, or prune)" ;;
 esac

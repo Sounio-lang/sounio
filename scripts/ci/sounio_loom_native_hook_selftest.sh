@@ -285,6 +285,14 @@ if SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
   --agent codex --lane "$SESSION_LANE" >/dev/null 2>&1; then
   fail 'SessionEnd left a native hook capability behind'
 fi
+run_hook "$session_end"
+[[ "$HOOK_RC" -eq 0 ]] ||
+  fail "duplicate native SessionEnd was not idempotent: rc=$HOOK_RC output=$HOOK_OUTPUT"
+if SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" hook-capability-status \
+  --agent codex --lane "$SESSION_LANE" >/dev/null 2>&1; then
+  fail 'duplicate SessionEnd recreated a native hook capability'
+fi
 
 [[ -f "$DECISION_LOG" ]] || fail "native hook omitted its decision log"
 grep -Fq $'decision=ALLOW\treason=SOUNIO_NATIVE_HOOK_CUTOVER HOOK_EVENT_ADMIT semantic_authority=Sounio action=9045' \
@@ -506,4 +514,4 @@ SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
   --reason 'native tmux fixture complete' >/dev/null
 
 printf '%s\n' \
-  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio action=9045 session=roundtrip hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused cutover_policy_missing=refused cutover_policy_tamper=refused cutover_runtime_tamper=refused log_redirect=refused providers=codex,claude,cursor,grok dialect_mismatch=refused config_missing=refused config_non_native=refused decision_receipt=complete python=not-executed rust=not-executed'
+  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio action=9045 session=roundtrip duplicate_session_end=idempotent hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused cutover_policy_missing=refused cutover_policy_tamper=refused cutover_runtime_tamper=refused log_redirect=refused providers=codex,claude,cursor,grok dialect_mismatch=refused config_missing=refused config_non_native=refused decision_receipt=complete python=not-executed rust=not-executed'

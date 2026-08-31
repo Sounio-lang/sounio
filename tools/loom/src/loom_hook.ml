@@ -1284,6 +1284,12 @@ let coord_ok root worktree arguments =
     failf "coordination-failed:rc=%d:%s" result.code (trim result.output);
   trim result.output
 
+let claim_missing agent lane result =
+  let expected = "error: claim not found: " ^ agent ^ "--" ^ lane in
+  result.code <> 0
+  && (String.split_on_char '\n' result.output
+      |> List.exists (fun line -> trim line = expected))
+
 let scope_arguments agent lane intent =
   [ "--agent"; agent; "--lane"; lane; "--intent"; intent ]
 
@@ -1410,6 +1416,22 @@ let refresh_presence tool_root process_root claim_root agent lane raw_session_id
   in
   if result.code <> 0 then
     failf "process-presence-refused:%s" (trim result.output)
+
+let refresh_presence_for_close tool_root process_root agent lane raw_session_id =
+  let harness = harness_of_agent agent in
+  let pid, pid_start, boot_id, pid_namespace, host = process_identity () in
+  let ttl = Option.value ~default:"1800" (Sys.getenv_opt "SOUNIO_COORD_HOOK_TTL_SECONDS") in
+  let result =
+    run_coord tool_root process_root
+      [ "presence-register"; "--agent"; agent; "--lane"; lane;
+        "--harness"; harness; "--session-id"; raw_session_id; "--pid";
+        string_of_int pid; "--pid-start"; pid_start; "--boot-id"; boot_id;
+        "--pid-namespace"; pid_namespace; "--host"; host; "--ttl-seconds";
+        ttl ]
+  in
+  if result.code = 0 then true
+  else if claim_missing agent lane result then false
+  else failf "process-presence-refused:%s" (trim result.output)
 
 let refresh_hook_capability tool_root process_root agent lane raw_session_id =
   ignore
@@ -1545,21 +1567,34 @@ let execute_event tool_root root event agent lane raw_session_id
   in
   if event_name = "SessionEnd" && not coordination_enabled then None
   else if event_name = "SessionEnd" then (
-    refresh_presence tool_root presence_root root agent lane raw_session_id;
     ignore
       (coord_ok tool_root presence_root
-         [ "hook-capability-unregister"; "--agent"; agent; "--lane"; lane;
-           "--session-id"; raw_session_id ]);
-    ignore
-      (run_coord tool_root presence_root
-         [ "endpoint-unregister"; "--agent"; agent; "--lane"; lane ]);
-    ignore
-      (run_coord tool_root presence_root
-         [ "presence-unregister"; "--agent"; agent; "--lane"; lane ]);
-    ignore
-      (coord_ok tool_root root
-         [ "release"; "--agent"; agent; "--lane"; lane; "--reason";
-           "agent session ended" ]);
+         [ "hook-caller-attest"; "--agent"; agent ]);
+    let heartbeat =
+      run_coord tool_root root [ "heartbeat"; "--agent"; agent; "--lane"; lane ]
+    in
+    if heartbeat.code <> 0 && not (claim_missing agent lane heartbeat) then
+      failf "coordination-close-refused:%s" (trim heartbeat.output);
+    if heartbeat.code = 0
+       && refresh_presence_for_close tool_root presence_root agent lane raw_session_id
+    then (
+      ignore
+        (coord_ok tool_root presence_root
+           [ "hook-capability-unregister"; "--agent"; agent; "--lane"; lane;
+             "--session-id"; raw_session_id ]);
+      ignore
+        (run_coord tool_root presence_root
+           [ "endpoint-unregister"; "--agent"; agent; "--lane"; lane ]);
+      ignore
+        (run_coord tool_root presence_root
+           [ "presence-unregister"; "--agent"; agent; "--lane"; lane ]);
+      let release =
+        run_coord tool_root root
+          [ "release"; "--agent"; agent; "--lane"; lane; "--reason";
+            "agent session ended" ]
+      in
+      if release.code <> 0 && not (claim_missing agent lane release) then
+        failf "coordination-close-refused:%s" (trim release.output));
     None)
   else if event_name = "PreToolUse" then (
     let paths = extract_paths event in
