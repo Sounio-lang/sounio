@@ -345,7 +345,7 @@ require_line "${ROOT}/${CERTIFICATE_REL}" 'theorem admitted_probe_streaming_mini
 require_line "${ROOT}/${CERTIFICATE_REL}" 'theorem admitted_probe_declared_canonical_eq_packaged_canonical :'
 require_line "${ROOT}/${CERTIFICATE_REL}" '  , generalExecutedSounioStreamingEqualityProved := false'
 require_line "${ROOT}/${CERTIFICATE_REL}" '  , formalParityClosed := false'
-require_line "${ROOT}/${CERTIFICATE_REL}" '  , claimReady := false'
+require_line "${ROOT}/${CERTIFICATE_REL}" '  , claimReady := false }'
 [[ "$(grep -ho 'native_decide' "${ROOT}/${BASE_REL}" "${BLOCK_RELS[@]/#/${ROOT}/}" "${ROOT}/${CERTIFICATE_REL}" | wc -l | tr -d ' ')" -eq 71 ]] || fail 'source native_decide count drift'
 [[ "$(grep -Eh '\bsorry\b|sorryAx' "${ROOT}/${BASE_REL}" "${BLOCK_RELS[@]/#/${ROOT}/}" "${ROOT}/${CERTIFICATE_REL}" "${ROOT}/${CHECK_REL}" || true)" == '' ]] || fail 'source sorry marker drift'
 
