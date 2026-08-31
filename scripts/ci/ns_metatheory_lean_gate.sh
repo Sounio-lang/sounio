@@ -70,9 +70,9 @@ echo "C2 PASS: sorry-free"
 
 # ---- C3: axiom footprint ----------------------------------------------------------------
 AXLINES="$(grep 'depends on axioms' "${OUT}" || true)"
-[[ -n "${AXLINES}" ]] || fail "no '#print axioms' output captured (expected ≥ 10 lines)"
+[[ -n "${AXLINES}" ]] || fail "no '#print axioms' output captured (expected ≥ 12 lines)"
 NAX="$(printf '%s\n' "${AXLINES}" | wc -l | tr -d ' ')"
-[[ "${NAX}" -ge 10 ]] || fail "expected ≥ 10 axiom reports, got ${NAX}"
+[[ "${NAX}" -ge 12 ]] || fail "expected ≥ 12 axiom reports, got ${NAX}"
 while IFS= read -r line; do
     axs="$(printf '%s' "${line}" | sed -E 's/.*\[(.*)\].*/\1/' | tr ',' ' ')"
     for ax in ${axs}; do
@@ -88,7 +88,8 @@ echo "C3 PASS: axiom footprint ⊆ {${ALLOWED_AXIOMS}} across ${NAX} theorems"
 for thm in trueVar_append trueVar_mul inner_disjoint covers_union covers_scale \
            support_over_approx covers_coeff inner_zero_of_ns progress preservation \
            exact_preservation typed_agfree soundness_star \
-           x_plus_x_understates x_plus_x_untypable x_plus_top_untypable x_plus_y_exact; do
+           x_plus_x_understates x_plus_x_untypable x_plus_top_untypable x_plus_y_exact \
+           measure_plus_measure_untypable opaque_y_typable; do
     grep -qE "^theorem ${thm}\b" "${LEAN_FILE}" || fail "theorem ${thm} not found"
 done
 echo "C4 PASS: all load-bearing theorems present"
