@@ -695,6 +695,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.hypercomplex-zero-divisor-evidence | repo_only | docs/internal/concepts/hypercomplex-zero-divisor-evidence.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.justification | repo_only | docs/internal/concepts/justification.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.loom-causal-workflow-kernel | repo_only | docs/internal/concepts/loom-causal-workflow-kernel.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.loom-causal-workflow-mid-exec | repo_only | docs/internal/concepts/loom-causal-workflow-mid-exec.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.loom-exec-intent-envelope | repo_only | docs/internal/concepts/loom-exec-intent-envelope.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.loom-exec-operation-catalog | repo_only | docs/internal/concepts/loom-exec-operation-catalog.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.loom-exec-result-handle | repo_only | docs/internal/concepts/loom-exec-result-handle.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
