@@ -48,7 +48,15 @@ correlated sites given distinct labels — the calculus under-approximates the t
 and every theorem below is relative to the axiom (Paper A §6.4 residual (iv)). The type
 system tracks sources; it does not discover them. **Scope:** `trueVar a = ⟨a,a⟩` is the
 variance of `Σ c_s ε_s` under independent unit-variance symbols *by definition*; no
-distributional / sampling semantics is modelled — Lemma 1 and Theorem 6.4 are algebraic. `Aff` allows
+distributional / sampling semantics is modelled — Lemma 1 and Theorem 6.4 are algebraic.
+**Reals are `Int`:** `treal` payloads and coefficients are integers, so every identity here is
+ring algebra over integer "reals" — no claim about ℝ-valued measure theory is made or needed
+(first-order propagation is a polynomial identity). **Payloads are generic:** `measure`/`kraw`
+wrap any `T` (parity with V2's `Knowledge<T>`); the metadata of a non-numeric payload (a
+lambda, say) is inert, because `kadd`/`kmul` are typed at `treal` only. **`Exact` is a
+hypothesis, not a theorem:** a source-level `kraw` literal can fabricate metadata; Theorem
+6.4 (`soundness_star`) assumes the initial term is exact — do not drop that hypothesis when
+citing. (Kimi K3 independent review 2026-08-31, items 8–9.) `Aff` allows
 duplicate sources — `coeff` sums them — so `a ++ b` is exact affine addition and no
 canonical form is needed. Nothing in this file is `noncomputable`; every witness is `decide`.
 
@@ -139,6 +147,23 @@ theorem trueVar_append (a b : Aff) :
   unfold trueVar
   rw [inner_append_left, inner_append_right, inner_append_right, inner_comm b a]
   omega
+
+/-- **The sign of the harm (Paper A §8.4, measured 2026-08-31).** The independence-assuming
+    add reports `Var a + Var b`; by `trueVar_append` it UNDER-states the true variance exactly
+    when the covariance is positive (anti-garbling — precision manufactured) and OVER-states it
+    when the covariance is negative (garbling — information lost). Sets of sources cannot see
+    the sign; coefficients can. -/
+theorem naive_add_understates_iff (a b : Aff) :
+    trueVar a + trueVar b < trueVar (a ++ b) ↔ 0 < inner a b := by
+  rw [trueVar_append]; omega
+
+theorem naive_add_conservative_of_cov_nonpos (a b : Aff) (h : inner a b ≤ 0) :
+    trueVar (a ++ b) ≤ trueVar a + trueVar b := by
+  rw [trueVar_append]; omega
+
+theorem naive_add_exact_iff (a b : Aff) :
+    trueVar (a ++ b) = trueVar a + trueVar b ↔ inner a b = 0 := by
+  rw [trueVar_append]; omega
 
 theorem coeff_scale (k : Int) (a : Aff) (s : Nat) : coeff (scale k a) s = k * coeff a s := by
   induction a with
@@ -1468,6 +1493,7 @@ end Sounio.EpistemicEffectsNS
 -- Axiom footprint (reproduce: `lake env lean EpistemicEffectsNS.lean`)
 -- ================================================================
 #print axioms Sounio.EpistemicEffectsNS.trueVar_append
+#print axioms Sounio.EpistemicEffectsNS.naive_add_understates_iff
 #print axioms Sounio.EpistemicEffectsNS.inner_zero_of_ns
 #print axioms Sounio.EpistemicEffectsNS.covers_coeff
 #print axioms Sounio.EpistemicEffectsNS.progress
