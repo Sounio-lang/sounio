@@ -193,6 +193,48 @@ commitment, not an observable — and the paper must not blur that.
    counterexample showing it does not. The annihilation boundary takes the role that the
    solvability function $s_i$ plays in Luce's Theorem 5. This is the step, and it is open.
    >
+   > ### 🟢 The lemma has a proof, and the mechanism is identified
+   >
+   > **Proposition.** Let $\mathcal{X} = \langle X, \succsim, \circ, z\rangle$ satisfy
+   > A1–A10, and suppose the annihilation boundary meets the diagonal in a unique point
+   > $a^\ast$ (i.e. $a^\ast \circ a^\ast = z$ has exactly one solution). Then
+   > $\mathrm{Aut}(\mathcal{X}) = \{\iota\}$.
+   >
+   > *Proof sketch.* (i) Every automorphism $\alpha$ fixes $z$ (it is singular) and therefore
+   > preserves the annihilation set: $a \circ b = z \iff \alpha(a)\circ\alpha(b) = z$.
+   > (ii) Hence $\alpha(a^\ast) \circ \alpha(a^\ast) = z$, and by uniqueness of the diagonal
+   > solution, $\alpha(a^\ast) = a^\ast$ — **the boundary supplies a fixed point**.
+   > (iii) Restricted to $X^\ast$ with the operation restricted to compositions landing in
+   > $X^\ast$, the structure is a **positive concatenation structure** in the sense of
+   > Narens & Luce (1976, Def. 2.1) — positive, monotone, restrictedly solvable, Archimedean,
+   > with a partial operation, and *without* associativity, which a PCS never assumed.
+   > (iv) Cohen & Narens (1979, Thm 2.1(i)): an automorphism of a PCS with a fixed point is the
+   > identity. Therefore $\alpha = \iota$ on $X^\ast$, and $\alpha(z) = z$. $\square$
+   >
+   > **This is the substitute for Luce's coupling.** In his Theorem 5 the solvability function
+   > $s_i$ transports information across $z$ and forces the power law between the two dilation
+   > constants. Here compositions touching $z$ carry no information — but they do not need to:
+   > **the annihilation boundary itself pins a fixed point, and interior PCS rigidity finishes
+   > the job.** The boundary replaces the coupling, exactly as conjectured in §6.2.
+   >
+   > **Verified in the witness model** (`tests/run-pass/automorfismos_do_modelo.sio`): the
+   > diagonal has exactly **1** crossing ($a^\ast = 0.400$ at $\varepsilon = 1$); **14 of 14**
+   > non-unit dilations break the ceiling — homogeneity of degree 1 makes
+   > $\alpha(a^\ast)\circ\alpha(a^\ast) = \lambda \neq 1$; and **0 of 5** non-linear
+   > order-automorphism families preserve $\circ$.
+   >
+   > ⚠️ **What is verified and what is proved.** The numerical run tests *families* of candidate
+   > automorphisms and finds none; it is not a rigidity proof. The rigidity *proof* is the four
+   > steps above, and its one load-bearing step is (iii) — that the interior really is a PCS.
+   > That should be checked line by line against NL1976 Def. 2.1 before publication, since the
+   > whole uniqueness result rests on it.
+   >
+   > **Consequence for the paper.** Rigidity is a double-edged result: it gives uniqueness, but a
+   > trivial automorphism group means the structure is **1-point unique at best** and admits no
+   > interesting scale type in the Luce–Narens classification. Whether that is a feature (the
+   > representation is absolutely determined) or a defect (no meaningful invariance group, hence
+   > no *meaningfulness* theory) is a modelling question that must be faced, not buried.
+
    Related open problem: Luce & Narens (1994), **Problem 11** — *"What structures are there …
    for which homogeneity fails at selected points?"*
 3. **That the target algebra must be 16-dimensional.** Nothing above forces $\mathbb{S}$. The
