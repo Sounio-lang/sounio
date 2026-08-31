@@ -90,6 +90,45 @@ documentado para o futuro sweep racional denso). Isso também aponta o caminho
 da prova: um certificado FINITO e combinatório por classe de pares — formato
 ideal para Lean.
 
+## Rodada 3 (mesmo dia): sweep racional off-basis — leis de posto
+
+Runner: `examples/research/conj68_rational_sweep.sio` (100 % Sounio, i64 +
+triagem f64 portada; mod-p só para postos, com direção de erro favorável:
+posto 10 mod p CERTIFICA posto exato 10).
+
+ZDs inteiros aleatórios x′ = (k·a, a·t), n(t) = k² (parametrização densa da
+variedade; entradas pequenas por limite de i64 — declarado, não silencioso).
+**Forma fechada do ortogonalizador descoberta e verificada: os parceiros de
+(A,B) são (N·c, c·z), z = AB, N = n(A), c ⊥ {1,A,B,z}** — FORMULA_FAIL = 0
+em 60/60 (verificação por aniquilação bilateral exata, não assunção).
+
+```
+SWEEP 60  D1 0 D2 2 W1 0 W2 8 W3 4 UNRES 46
+WFLOAT 46 CAND_D4 0            ← todos os UNRES têm witness contínuo
+RANKT 11 ALL 58 UNRES 46       ← rank(T) = 11 UNIFORME (ker dim 14)
+RANKT44 7 N 7 · RANKT44 9 N 51 ← setor O×O: posto ≤ 9, bimodal {7,9}
+```
+
+Três fatos novos:
+
+1. **O fenômeno inteiro ±1 NÃO persiste off-basis** (46/60 sem combo pequena) —
+   witnesses genéricos são contínuos/algébricos. A estrutura inteira da base
+   era o caso especial, não a regra.
+2. **Conjecture 6.8 sobrevive 145/145** (85 base + 60 racionais): nenhum
+   candidato a d=4.
+3. **Lei de posto**: rank(T) = 11 em todos os pares d≥3 amostrados; o quociente
+   é um mapa bilinear ℝ⁵×ℝ⁵ → ℝ¹¹. Deficit de Segre = 3 nos dois setores.
+   Stiefel–Hopf NÃO obstrui mapas nonsingulares 5×5→11 (intervalo da condição
+   binomial é vazio), logo o posto baixo sozinho não basta: a conjectura
+   equivale a (a) provar rank(T) ≤ 11 estruturalmente (candidato: identidades
+   de flexibilidade/Moufang da recursão CD) e (b) provar que ESTE quociente
+   sempre tem zero real não-trivial — as "3 degenerescências escondidas" são o
+   coração do problema. Formato ideal: (a) é álgebra linear mecanizável em
+   Lean; (b) é um lema de topologia real sobre uma família explícita.
+
+Sub-pergunta aberta interna: caracterizar os 7 pares com rank(T|₄ₓ₄) = 7
+(mais degenerados; provável relação com subálgebras quaterniônicas comuns).
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD
