@@ -1,0 +1,75 @@
+//@ run-pass
+//@ requires: madaros
+// Counterpart to u64_unsigned_shr_divmod_witness.sio: i64 must keep signed
+// semantics for >>, /, %. If a refactor accidentally makes signed operands go
+// through the unsigned path, this fixture detects it.
+//
+// Signed semantics (truncation toward zero; sign of quotient follows dividend):
+//   - -7_i64 / 2 = -3 (truncate toward zero, not floor)
+//   - -7_i64 % 2 = -1 (sign matches dividend)
+//   - -1_i64 >> 1 = -1 (arithmetic shift keeps sign)
+//   - -8_i64 >> 1 = -4 (arithmetic shift, sign-preserving)
+//   - IntMin / -1 is UB; we do not test it (avoid divide exception).
+
+fn main() -> i64 with IO, Div {
+    let a: i64 = -7
+    if a / 2 != -3 { return 1 }
+    if a % 2 != -1 { return 2 }
+
+    let b: i64 = -8
+    if b / 4 != -2 { return 3 }
+    if b % 3 != -2 { return 4 }     // -8 = (-2)*3 + -2
+
+    let c: i64 = -1
+    if (c >> 1) != -1 { return 5 }   // sar keeps sign: all-ones stays all-ones
+    if (c >> 63) != -1 { return 6 }
+
+    let d: i64 = -1024
+    if (d >> 1) != -512 { return 7 } // sar: -1024 / 2 = -512
+    if (d >> 10) != -1 { return 8 }  // sar: -1024 / 1024 = -1
+
+    // Positive operands: signed and unsigned agree exactly; this proves the
+    // refactor did not break the path that worked on main.
+    let e: i64 = 123456789
+    if e / 7 != 17636684 { return 9 }
+    if e % 100 != 89 { return 10 }
+    if (e >> 3) != 15432098 { return 11 }
+
+    // -1 / 1 = -1; -1 % 1 = 0. (Trivial but exercises idiv with sign-mismatch.)
+    let one: i64 = 1
+    if c / one != -1 { return 12 }
+    if c % one != 0 { return 13 }
+
+    // Regression for PR #2286 review (agourakis82): a signed LHS paired with
+    // a let-annotated unsigned-typed shift-amount or divisor must NOT flip to
+    // the unsigned IR op. The (0-8) is unary-minus-on-intlit, which is an
+    // ExprUnary (not ExprIntLit), so the contextual literal promotion does
+    // not apply -- and the typed-operand-only branch must not silently flip
+    // signed ops either.
+    //
+    // Before the fix (guard collapsed to "either operand is unsigned"):
+    //   let sh: u8 = 1; (0-8) >> sh   ->  9223372036854775804 (wrong)
+    // After the fix:
+    //   let sh: u8 = 1; (0-8) >> sh   ->  -4 (sar preserves sign)
+    let sh: u8 = 1
+    if (0 - 8) >> sh != -4 { return 14 }
+
+    // Same shape, larger shift-amount type (usize).
+    let sh_big: usize = 2
+    if (0 - 9) >> sh_big != -3 { return 15 }   // sar: -9 >> 2 = -3
+
+    // Divisor case: signed LHS / unsigned-typed divisor.
+    let n: usize = 2
+    if (0 - 9) / n != -4 { return 16 }         // -9 / 2 = -4 (truncate toward zero)
+    if (0 - 9) % n != -1 { return 17 }         // -9 % 2 = -1 (sign follows dividend)
+
+    // Sanity: the unsigned-promotion rule still fires for the bare-literal
+    // pair (`let m: u64 = ...; m / 2`) -- here the second operand IS an
+    // ExprIntLit, so the literal-promotion rule applies. Without it, this
+    // would silently go through sar and give 0 for 0x8000_0000_0000_0001/2.
+    let m: u64 = 9223372036854775809          // 0x8000_0000_0000_0001
+    if m / 2 != 4611686018427387904 { return 18 }   // 0x4000_0000_0000_0000
+
+    println("i64 >>, /, % keep signed semantics")
+    0
+}

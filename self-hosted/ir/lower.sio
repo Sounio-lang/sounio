@@ -39,6 +39,12 @@ struct LowerLocalStack {
     array_copy_word_scalar: Box<LowerLocalI64Slots>,
     wide_bits: Box<LowerLocalI64Slots>,
     wide_signed: Box<LowerLocalI64Slots>,
+    // Findings 11 (#2084): 1 when a local/param is a non-wide unsigned integer
+    // (u8/u16/u32/u64/usize). Used by lower_binary_expr_ref to flip the IR
+    // bin_op to OpUDiv/OpURem/OpUShr before emitting the Sar/Idiv path.
+    // wide_signed only fires for bits>64, so this field is the separate
+    // per-slot tracker for the standard 8/16/32/64-bit unsigned widths.
+    is_unsigned_int: Box<LowerLocalI64Slots>,
     global_bss_offsets: Box<LowerLocalI64Slots>,
     global_bss_sizes: Box<LowerLocalI64Slots>,
     is_global: Box<LowerLocalI64Slots>,
@@ -113,6 +119,8 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         array_copy_word_scalar: lowerer_box_local_i64_slots(0),
         wide_bits: lowerer_box_local_i64_slots(0),
         wide_signed: lowerer_box_local_i64_slots(0),
+        // Findings 11 (#2084): see the is_unsigned_int field comment above.
+        is_unsigned_int: lowerer_box_local_i64_slots(0),
         global_bss_offsets: lowerer_box_local_i64_slots(0),
         global_bss_sizes: lowerer_box_local_i64_slots(0),
         is_global: lowerer_box_local_i64_slots(0),
@@ -4325,11 +4333,15 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).array_copy_word_scalar).values[idx as usize] = 0
         (*(*locals_box).wide_bits).values[idx as usize] = 0
         (*(*locals_box).wide_signed).values[idx as usize] = 0
+        // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
+        (*(*locals_box).is_unsigned_int).values[idx as usize] = 0
         (*(*locals_box).global_bss_offsets).values[idx as usize] = 0
         (*(*locals_box).global_bss_sizes).values[idx as usize] = 0
         (*(*locals_box).is_global).values[idx as usize] = 0
         (*(*locals_box).is_ref).values[idx as usize] = 0
         (*(*locals_box).scalar_kind).values[idx as usize] = 0
+        // Post-#2084: tuple0_array_elem_layout was added on main to track when a
+        // tuple slot-0 is a fixed array, which gates the aggregate-shallow-copy path.
         (*(*locals_box).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
         (*(*locals_box).variance_regs).values[idx as usize] = -1
         // Explicit -1: the locals stack is REUSED across functions (count is
@@ -5589,6 +5601,54 @@ fn lower_name_is_integer_type(n: Name) -> bool with Div {
         return suffix && (n.buf[0] == 105 as i8 || n.buf[0] == 117 as i8)
     }
     false
+}
+
+// Findings 11 (#2084): the unsigned-restricted variant of
+// lower_name_is_integer_type. Selects u8/u16/u32/u64/usize; rejects every
+// signed integer, float, string, bool, char, named struct. Used by
+// lower_binary_expr_ref to detect u8/u16/u32/u64 operands so the IR bin_op
+// can be flipped to OpUDiv/OpURem/OpUShr before emitting the signed
+// Sar/Idiv path. Without this, u64 `>>`/`/`/`%` above bit 63 silently use
+// signed semantics.
+fn lower_name_is_unsigned_int_type(n: Name) -> bool with Div {
+    if n.len == 2 {
+        // u8 only (i8 is excluded).
+        return n.buf[0] == 117 as i8 && n.buf[1] == 56 as i8
+    }
+    if n.len == 3 {
+        // u16 / u32 / u64 (i-prefixed names are excluded).
+        if n.buf[0] != 117 as i8 { return false }
+        let is_16 = n.buf[1] == 49 as i8 && n.buf[2] == 54 as i8
+        let is_32 = n.buf[1] == 51 as i8 && n.buf[2] == 50 as i8
+        let is_64 = n.buf[1] == 54 as i8 && n.buf[2] == 52 as i8
+        return is_16 || is_32 || is_64
+    }
+    if n.len == 5 {
+        // usize only (isize is excluded).
+        let suffix = n.buf[1] == 115 as i8 && n.buf[2] == 105 as i8
+            && n.buf[3] == 122 as i8 && n.buf[4] == 101 as i8
+        return suffix && n.buf[0] == 117 as i8
+    }
+    false
+}
+
+fn lower_type_expr_is_unsigned_int(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeNamed { return false }
+    lower_name_is_unsigned_int_type(ir_path_first_name((*te).path))
+}
+
+fn lower_opt_type_is_unsigned_int(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_is_unsigned_int(&(*te)),
+        None => false,
+    }
+}
+
+fn lower_cast_type_is_unsigned_int(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ct {
+        Some(te) => lower_type_expr_is_unsigned_int(&(*te)),
+        None => false,
+    }
 }
 
 fn lower_type_expr_is_string(te: &TypeExpr) -> bool with Mut, Panic, Div {
@@ -8356,6 +8416,8 @@ impl Lowerer {
                 (*(*stk).array_copy_word_scalar).values[idx as usize] = 0
                 (*(*stk).wide_bits).values[idx as usize] = 0
                 (*(*stk).wide_signed).values[idx as usize] = 0
+                // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
+                (*(*stk).is_unsigned_int).values[idx as usize] = 0
                 (*(*stk).is_ref).values[idx as usize] = 0
                 // Explicit 0: slot may be reused after scope-pop restores count.
                 // Callers that know a positive kind (for-IV int, float local) re-bind.
@@ -8714,6 +8776,22 @@ impl Lowerer {
         false
     }
 
+    // Findings 11 (#2084): look up the per-slot unsigned-int bit set when the
+    // local/param was bound with a u8/u16/u32/u64/usize type annotation.
+    // Default 0 (signed-or-unknown), so i64-style locals stay in the signed
+    // path. Drives the OpDiv→OpUDiv / OpRem→OpURem / OpShr→OpUShr rewrite in
+    // lower_binary_expr_ref.
+    fn lookup_local_is_unsigned_int(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).is_unsigned_int).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
     fn bind_local_scalar_kind(self, name: Name, kind: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         var stk = lo.locals
@@ -8721,6 +8799,27 @@ impl Lowerer {
         while i >= 0 {
             if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
                 (*(*stk).scalar_kind).values[i as usize] = kind
+                lo.locals = stk
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    // Findings 11 (#2084): stamp is_unsigned_int=1 on the local whose
+    // type annotation is u8/u16/u32/u64/usize. Drives the per-binary rewrite
+    // in lower_binary_expr_ref. Walks the local stack from the top so an
+    // inner-shadowing binding (let n: u64 = ... ; { let n = ... ; ... })
+    // is correctly marked or unmarked. No-op for names not yet bound
+    // (forward reference cases).
+    fn bind_local_is_unsigned_int(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                (*(*stk).is_unsigned_int).values[i as usize] = 1
                 lo.locals = stk
                 return lo
             }
@@ -13361,6 +13460,55 @@ impl Lowerer {
         }
     }
 
+    // Findings 11 (#2084): `opt_expr_is_unsigned_int_ref` walks an expression to
+    // determine whether it is a u8/u16/u32/u64/usize-typed result. Used as one
+    // half of the "both operands unsigned?" gate in lower_binary_expr_ref that
+    // decides whether to emit OpUDiv/OpURem/OpUShr instead of OpDiv/OpRem/OpShr.
+    //
+    // Coverage matrix mirrors the cases of expr_result_is_float_ref:
+    //   - ExprCast with cast_type = u8/u16/u32/u64/usize → true
+    //   - ExprIdent whose local was bound with such a type        → true
+    //   - ExprBinary                                            → propagate from left
+    //   - everything else (IntLit, FloatLit, BoolLit, StringLit) → false
+    //
+    // A boolean-literal, integer-literal, or float-literal CANNOT carry
+    // width+sign info at this lowering level — the only way a literal
+    // becomes unsigned is via an enclosing `as u64` cast, which lowers to
+    // the ExprCast case above.
+    fn opt_expr_is_unsigned_int_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(expr) => self.expr_is_unsigned_int_ref(&(*expr)),
+            None => false,
+        }
+    }
+
+    fn expr_is_unsigned_int_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprCast {
+            return lower_cast_type_is_unsigned_int(&(*e).cast_type)
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_is_unsigned_int((*e).name) == 1
+        }
+        // An integer literal standing alone has no width/sign of its own; the
+        // textual parser writes ExprIntLit with no typed annotation. We leave
+        // this case as `false` here and let the binary-op call site ASK the
+        // contextual question ("is the OTHER operand unsigned, and this is a
+        // bare integer literal?") -- that is handled in
+        // lower_binary_expr_ref via expr_is_int_literal_ref and the
+        // `is_unsigned_or_intlit_paired_with_unsigned` semantics applied
+        // there. Returning false here keeps the helper from overclaiming on
+        // expressions that have no operand context at all.
+        if (*e).kind == ExprKind::ExprBinary {
+            // The result of an integer binary expression on unsigned operands is
+            // unsigned (modulo a signed widening cast on a sibling — out of
+            // scope for now since the unsigned flag we track propagates from
+            // the literal binding via let-typed locals; a nested let n: u64 =
+            // foo() + bar() will be re-tagged when the inner if-let lands).
+            return self.opt_expr_is_unsigned_int_ref(&(*e).left)
+        }
+        false
+    }
+
     fn expr_result_is_float_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprIntLit {
             return false
@@ -14600,6 +14748,8 @@ impl Lowerer {
                         (*(*locals).array_copy_word_scalar).values[idx as usize] = if param_word_scalar { 1 } else { 0 }
                         (*(*locals).wide_bits).values[idx as usize] = 0
                         (*(*locals).wide_signed).values[idx as usize] = 0
+                        // Findings 11 (#2084): stamp is_unsigned_int=1 when the param is u8/u16/u32/u64/usize.
+                        (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).is_ref).values[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).box_inner_layout).values[idx as usize] = if lower_type_expr_is_box(&(*list).head.ty) { lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_inner_type_name(&(*list).head.ty)) } else { 0 - 1 }
                         if lower_type_expr_is_box(&(*list).head.ty) && str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
@@ -15866,6 +16016,18 @@ impl Lowerer {
                 }
                 _ => {}
             }
+        }
+        // Findings 11 (#2084): if the let type annotation is u8/u16/u32/u64/usize,
+        // stamp the local so lower_binary_expr_ref can flip the IR bin_op to
+        // OpUDiv/OpURem/OpUShr before signed Sar/Idiv emission. Re-uses the
+        // LowerLocalStack.is_unsigned_int slot reserved near wide_signed.
+        match s.ty {
+            Some(ann_ty_unsigned) => {
+                if lower_type_expr_is_unsigned_int(&(*ann_ty_unsigned)) {
+                    lo = lo.bind_local_is_unsigned_int(s.name)
+                }
+            }
+            _ => {}
         }
         // Annotation TypeKnowledge[T] → bind local as Knowledge for FO GUM field/variance paths
         match s.ty {
@@ -18873,7 +19035,60 @@ impl Lowerer {
                 return (lo3.emit(ir_wide_cmp(dst, lhs, rhs, limbs, cmp_op)), dst)
             }
         }
-        let lo4 = lo3.emit(ir_binop_typed(dst, lhs, e.bin_op, rhs, lhs_expr_is_float, rhs_expr_is_float))
+        // Findings 11 (#2084): if BOTH operands of a /, %, or >> binary op
+        // resolve to a u8/u16/u32/u64/usize-typed expression, flip the IR
+        // bin_op to the unsigned counterpart BEFORE emitting
+        // ir_binop_typed. The signed Sar/Idiv path would otherwise give
+        // silently wrong magnitudes on operands with bit 63 set
+        // (0xFFFF...FFFF >> 1 = 0xFFFF...FFFF under sar; / 2 = 0 under
+        // idiv). Wide ops (bits>64) are handled separately by the
+        // ir_wide_* path above.
+        //
+        // Extension (covers `let n: u64 = 0x8000...; n / 2`): an integer
+        // literal on the RHS (or LHS) that fits in 64 bits adopts the
+        // unsigned interpretation of its sibling -- the textual parser
+        // cannot tag a bare `2` as u64, so without this promotion the most
+        // common u64 shift/divmod patterns would silently stay signed.
+        //
+        // Guard is `(both-typed-unsigned) || (literal paired with typed
+        // unsigned)`. Two literals with neither typed stay signed (no
+        // disjunct fires). One typed unsigned + one signed-expression
+        // (e.g. `let sh: u8 = 1; (0-8) >> sh`) also stays signed -- the
+        // typed operand alone does NOT flip the op; the contextual
+        // promotion only applies to bare literals. Mixing two typed
+        // operands of disagreeing signedness is left to the const-prop /
+        // checker layer, not silently coerced here. (Review by
+        // agourakis82 on PR #2286: the prior form
+        // `either_unsigned_p && (rhs_unsigned_p || lhs_unsigned_p || ...)`
+        // collapsed to `either_unsigned_p` and broke signed shifts whose
+        // shift-amount was a u8/usize local.)
+        var final_op = e.bin_op
+        let lhs_unsigned_p = lo3.opt_expr_is_unsigned_int_ref(&e.left)
+        let rhs_unsigned_p = match e.right {
+            Some(rbox) => lo3.expr_is_unsigned_int_ref(&(*rbox)),
+            None => false,
+        }
+        let lhs_is_intlit_p = match e.left {
+            Some(lbox) => (*lbox).kind == ExprKind::ExprIntLit,
+            None => false,
+        }
+        let rhs_is_intlit_p = match e.right {
+            Some(rbox) => (*rbox).kind == ExprKind::ExprIntLit,
+            None => false,
+        }
+        let both_typed_unsigned_p = lhs_unsigned_p && rhs_unsigned_p
+        let literal_pair_with_unsigned_p =
+            (lhs_is_intlit_p && rhs_unsigned_p) || (rhs_is_intlit_p && lhs_unsigned_p)
+        if both_typed_unsigned_p || literal_pair_with_unsigned_p {
+            if e.bin_op == BinaryOp::OpDiv {
+                final_op = BinaryOp::OpUDiv
+            } else if e.bin_op == BinaryOp::OpRem {
+                final_op = BinaryOp::OpURem
+            } else if e.bin_op == BinaryOp::OpShr {
+                final_op = BinaryOp::OpUShr
+            }
+        }
+        let lo4 = lo3.emit(ir_binop_typed(dst, lhs, final_op, rhs, lhs_expr_is_float, rhs_expr_is_float))
         (lo4, dst)
     }
 
