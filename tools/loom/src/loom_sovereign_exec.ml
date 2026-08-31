@@ -3,7 +3,7 @@ open Unix
 exception Error of string
 
 let semantic_manifest_sha256 =
-  "11a9099d8870646afc3b38302cbc98a257eb284784375cb4011be30214b42f71"
+  "966f022c98bc7df89ce40a90ede9ec8a9a726499baec0fd21e72f327f286a176"
 
 let material_manifest_sha256 =
   "2045439f1a07d737a0cb8370ad080a80cd0715db2966863539f3c0794d14d7e3"

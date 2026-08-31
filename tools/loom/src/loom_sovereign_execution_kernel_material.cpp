@@ -37,7 +37,7 @@ extern char** environ;
 namespace {
 
 constexpr std::string_view kFrozenSemanticManifestSha256 =
-    "11a9099d8870646afc3b38302cbc98a257eb284784375cb4011be30214b42f71";
+    "966f022c98bc7df89ce40a90ede9ec8a9a726499baec0fd21e72f327f286a176";
 constexpr std::string_view kFrozenPeerJudgmentSha256 =
     "f7adafcd1c79364b75ebe48b66999ec2d7b82a12d6b8e45d9c1cc4637a4ca9ca";
 constexpr auto kDeadline = std::chrono::seconds(5);
