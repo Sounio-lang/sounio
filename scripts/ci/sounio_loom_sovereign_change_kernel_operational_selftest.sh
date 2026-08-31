@@ -8,6 +8,7 @@ POLICY_ROOT="${SOUNIO_LOOM_TEST_POLICY_ROOT:-$ROOT_DIR}"
 LANGUAGE_AUTHORITY_ROOT="${SOUNIO_LOOM_TEST_LANGUAGE_AUTHORITY_ROOT:-$ROOT_DIR}"
 MANIFEST="$POLICY_ROOT/tools/loom/sovereign_change_kernel.freeze.v1"
 MATERIAL_MANIFEST="$POLICY_ROOT/tools/loom/sovereign_material_change.freeze.v2"
+NATIVE_HOOK_MANIFEST="$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1"
 LOOM="${SOUNIO_LOOM_TEST_RUNTIME:-$ROOT_DIR/tools/loom/_build/default/src/loom.exe}"
 FIXTURE="$ROOT_DIR/tools/loom/_build/default/src/loom_change_provider_fixture.exe"
 AUTHORITY="${SOUNIO_LOOM_TEST_CHANGE_AUTHORITY:-$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-sovereign-change-kernel}"
@@ -16,6 +17,8 @@ CI_ADMIT="${SOUNIO_LOOM_TEST_CI_ADMIT:-$ROOT_DIR/scripts/ci/sounio_loom_sovereig
 EXPECTED_MANIFEST_SHA256=c84c5e7ff608f86ac51872de143516b0feb0981d0ee962583e2c62f66cbbacfb
 EXPECTED_MATERIAL_MANIFEST_SHA256=662e01af4aed45ab22a0cfce283fd7aa9ec8775a65a2fb5a7a94a02c2c174c00
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-native-hook.XXXXXX")"
+NATIVE_HOOK_AUTHORITY="$TEST_ROOT/sounio-loom-native-hook-cutover"
+NATIVE_HOOK_TOOLCHAIN="$TEST_ROOT/native-hook-toolchain"
 STATE_DIR="$TEST_ROOT/state"
 COORD_DIR="$TEST_ROOT/coord"
 ORACLE_DIR="$TEST_ROOT/no-oracle"
@@ -133,6 +136,13 @@ SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_sovereign_change_kernel.sh" >/dev/null
 SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_sovereign_material_change.sh" >/dev/null
+native_hook_executable_commit="$(sed -n 's/^sounio_executable_commit=//p' "$NATIVE_HOOK_MANIFEST")"
+mkdir -p "$NATIVE_HOOK_TOOLCHAIN"
+git -C "$ROOT_DIR" archive "$native_hook_executable_commit" \
+  bin/souc bin/souc-lean-single-x86_64 | tar -x -C "$NATIVE_HOOK_TOOLCHAIN"
+SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_SOUC="$NATIVE_HOOK_TOOLCHAIN/bin/souc" \
+  SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_OUTPUT="$NATIVE_HOOK_AUTHORITY" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_cutover.sh" >/dev/null
 
 [[ -x "$LOOM" && -x "$FIXTURE" && -x "$AUTHORITY" && -x "$MATERIAL_AUTHORITY" &&
    -x "$CI_ADMIT" ]] ||
@@ -152,6 +162,9 @@ env -u BASH_ENV -u ENV \
   SOUNIO_LOOM_SOVEREIGN_CHANGE_MEDIATED=1 \
   SOUNIO_LOOM_SOVEREIGN_CHANGE_ROOT="$POLICY_ROOT" \
   SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT="$LANGUAGE_AUTHORITY_ROOT" \
+  SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_ROOT="$ROOT_DIR" \
+  SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_RUNTIME="$NATIVE_HOOK_AUTHORITY" \
+  SOUNIO_LOOM_NATIVE_HOOK_CONFIG="$ROOT_DIR/.codex/hooks.json" \
   SOUNIO_LOOM_TOOL_ROOT="$ROOT_DIR" \
   SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$TEST_ROOT/language-authority.tsv" \
   SOUNIO_LOOM_COORD_AUTO=0 \
