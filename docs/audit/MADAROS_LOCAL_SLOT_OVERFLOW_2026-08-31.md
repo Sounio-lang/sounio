@@ -104,6 +104,7 @@ Re-measured against the compilers that actually exist:
 | committed prebuilts `518006cc` (08-17), `a76d6ec5` (08-24), `956d1dc6` (08-29) | 4634 / 8046 | | | | |
 | committed prebuilt `bf1fe608` (`main` since #2302) | 4634 / 8046 | 4634 / 8046 | 4634 / 8046 | 4634 / 8046 | 4634 / 8046 |
 | fresh source build of `main` 8bf30533f4 (`md5=297f956c`) | 4634 / 8046 | 4634 / 8046 | 4634 / 8046 | 4634 / 8046 | 4634 / 8046 |
+| fresh source build of `main` 8140c47f8c, after #2319 (`md5=3e166b64`) | 4634 / 8046 | 4634 / 8046 | | 4634 / 8046 | 4634 / 8046 |
 | lean_single (`SOUNIO_SOUC_ENGINE=lean_single`) | 4634 / 8046 | 4634 / 8046 | | 4634 / 8046 | 4634 / 8046 |
 
 So the defect was never on `main`: the prebuilt committed the day *before* the stale build
