@@ -674,7 +674,7 @@ activate_runtime() {
     ensure_output="$(
       SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$control_state" \
         "$version_dir/bin/sounio-coord-runtime" obligation-supervisor-ensure \
-        --interval-seconds 2 9>&- 2>&1
+        --interval-seconds 2 --timeout-seconds 180 9>&- 2>&1
     )"
     ensure_rc=$?
     set -e

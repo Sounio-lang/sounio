@@ -73,7 +73,7 @@ Commands:
   obligation-supervise [--once] [--interval-seconds N]
   obligation-supervisor-status
                                  run or inspect the tmux-independent replay supervisor
-  obligation-supervisor-ensure [--interval-seconds N]
+  obligation-supervisor-ensure [--interval-seconds N] [--timeout-seconds N]
   obligation-supervisor-stop [--timeout-seconds N]
                                  idempotently start or stop the detached control service
   wake    --agent ID --lane ID --message MESSAGE_ID
@@ -3525,7 +3525,7 @@ coord_obligation_supervisor_owned_pids() {
 
 coord_obligation_supervisor_service_command() {
   local action="$1"; shift
-  local interval=2 timeout=30 lock_file="$STATE_DIR/.obligation-supervisor-bootstrap.lock"
+  local interval=2 timeout=120 lock_file="$STATE_DIR/.obligation-supervisor-bootstrap.lock"
   local leader_lock="$STATE_DIR/.obligation-supervisor-leader.lock"
   local runtime_self log_file attempt previous_pid='' previous_start=''
   local expected_loom='' actual_loom='' ensured_state=started state_live=0 pid
@@ -3538,7 +3538,6 @@ coord_obligation_supervisor_service_command() {
         require_arg "$1" "$2"; interval="$2"; shift 2
         ;;
       --timeout-seconds)
-        [[ "$action" == stop ]] || die "$1 is only valid for obligation-supervisor-stop"
         require_arg "$1" "$2"; timeout="$2"; shift 2
         ;;
       -h|--help) usage; return 0 ;;
@@ -3547,8 +3546,8 @@ coord_obligation_supervisor_service_command() {
   done
   [[ "$interval" =~ ^[1-9][0-9]*$ ]] && ((interval <= 60)) ||
     die "obligation supervisor interval must be between 1 and 60 seconds"
-  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] && ((timeout <= 60)) ||
-    die "obligation supervisor timeout must be between 1 and 60 seconds"
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] && ((timeout <= 300)) ||
+    die "obligation supervisor timeout must be between 1 and 300 seconds"
   mkdir -p "$STATE_DIR"
   exec 6>"$lock_file"
   flock 6

@@ -797,8 +797,18 @@ output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-
 grep -q '"count":2,"unclosed":2' <<< "$output" || \
   fail 'post-activation stale request was not imported or historical control leaked in'
 
+set +e
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
-  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
+  bin/sounio-coord obligation-supervisor-ensure --timeout-seconds 301 2>&1)"
+supervisor_timeout_status=$?
+set -e
+((supervisor_timeout_status != 0)) && \
+  grep -q 'obligation supervisor timeout must be between 1 and 300 seconds' \
+    <<< "$output" ||
+  fail 'out-of-range supervisor takeover timeout was not refused'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1 \
+    --timeout-seconds 30)"
 grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=started ' <<< "$output" || \
   fail 'control-service ensure did not start the obligation supervisor'
 supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
