@@ -48,7 +48,15 @@ correlated sites given distinct labels — the calculus under-approximates the t
 and every theorem below is relative to the axiom (Paper A §6.4 residual (iv)). The type
 system tracks sources; it does not discover them. **Scope:** `trueVar a = ⟨a,a⟩` is the
 variance of `Σ c_s ε_s` under independent unit-variance symbols *by definition*; no
-distributional / sampling semantics is modelled — Lemma 1 and Theorem 6.4 are algebraic. `Aff` allows
+distributional / sampling semantics is modelled — Lemma 1 and Theorem 6.4 are algebraic.
+**Reals are `Int`:** `treal` payloads and coefficients are integers, so every identity here is
+ring algebra over integer "reals" — no claim about ℝ-valued measure theory is made or needed
+(first-order propagation is a polynomial identity). **Payloads are generic:** `measure`/`kraw`
+wrap any `T` (parity with V2's `Knowledge<T>`); the metadata of a non-numeric payload (a
+lambda, say) is inert, because `kadd`/`kmul` are typed at `treal` only. **`Exact` is a
+hypothesis, not a theorem:** a source-level `kraw` literal can fabricate metadata; Theorem
+6.4 (`soundness_star`) assumes the initial term is exact — do not drop that hypothesis when
+citing. (Kimi K3 independent review 2026-08-31, items 8–9.) `Aff` allows
 duplicate sources — `coeff` sums them — so `a ++ b` is exact affine addition and no
 canonical form is needed. Nothing in this file is `noncomputable`; every witness is `decide`.
 
