@@ -602,3 +602,54 @@ Conjectura dos próprios autores (grupo ativo, Moscou). Nosso diferencial:
 certificados exatos nos degraus lineares + perna mecanizável em Lean. Mesmo se
 a prova clássica deles sair primeiro, a infraestrutura ataca o alvo #2 do scan
 (componentes de Γ_O(M₅), genuinamente aberto).
+
+## Rodada 17: O PÊNCIL É ARTEFATO DE SIMETRIA — genericidade mata a reta
+
+O revisor forte apontou o buraco antes de eu ajustar qualquer dicionário: toda a
+decomposição em retas (R14 censo, R15 anatomia, R16 pêncil) foi medida numa
+ÚNICA config — CONF#1 = `(e₁,e₂)`, a MAIS simétrica da família (a=e₁, b=e₂,
+z=ab=e₃ todos alinhados à base Cayley–Dickson ⟹ maior estabilizador). Reducibilidade
+de uma (4,4) NÃO é genérica; uma (4,4) irredutível é. Retas sinalizam simetria extra
+do ponto especial. Alvo do programa ("toda config admite pêncil") tinha suporte n=1.
+
+**Correções do revisor incorporadas (2 erros meus):**
+- O "peso 2" no cross e o "6" de Möbius são GAUGE, não sinal: pondo v₀=2ŵ₀ as três
+  identidades viram a forma simétrica [u₀,v₀]=[u₁,ŵ₁]=0, [u₀,ŵ₁]+[u₁,v₀]=0; toda
+  (1,1)-curva é grafo de Möbius por definição (PGL₂ automático). Fork "gerador do
+  pêncil" morto.
+- O conteúdo invariante de um pêncil não é o vetor u₀ (definido a menos de GL₂ na
+  reta) mas os 2-planos U⊂Im C(x), W⊂Im C(x′) e a iso ψ:U→W. dim(U∩O(x))=1 NÃO é
+  informativo (2-plano em ℝ⁵ ∩ hiperplano = 1-dim genericamente).
+
+**Experimento (witness_count.sio estendido para bateria; 1 config/processo por causa
+do vazamento de handles 2²² nas funções quentes do trace):**
+- CONTROLE POSITIVO — a config EXATA das retas do R16 (x1=(e₁,e₂),
+  x2=(−2e₂, e₃+e₄−e₆−e₇)): traçador reproduz a anatomia R15 EXATA — COMP#1
+  KRANK=MRANK=2 CROSS(1,1) [RETA], COMP#2 KRANK=MRANK=3 CROSS(2,2) [CÔNICA],
+  COMP#3 KRANK=MRANK=2 [RETA] = duas retas + uma cônica. Máquina VALIDADA: sabe
+  achar reta quando existe.
+- 8 CONFIGS GENÉRICAS (ambos ZD amostrados), ~24 componentes traçadas:
+  **0 componentes (1,1) genuínas (KRANK=2 MRANK=2); 20 cônicas (KRANK=MRANK=3).**
+  Única exceção — seed 12345678 (a=2e₃−2e₄, só 13 witnesses) — deu componentes
+  DEGENERADAS (2,1)/(1,2): rank-2 num fator, rank-1 (ponto FIXO) no outro = "reta
+  de u com w fixo", não pêncil (1,1). CROSS é probe ruidoso (KRANK é o detector
+  confiável: u(t)=u₀+tu₁ ⟹ rank afim exatamente 2; rank 3 ⟹ cônica).
+
+**VEREDITO:** o pêncil linear do R16 é a DEGENERAÇÃO cônica→par-de-retas no ponto de
+simetria máxima. Genericamente as componentes ímpares do curve de witnesses são
+CÔNICAS, não retas. O programa "provar existência de pêncil" está mal-fundado como
+enunciado — mais uma rota de forma-fechada-linear morta pelos próprios dados.
+
+**O que sobrevive:** witnesses existem em TODA config testada (40,13,37,40,… sempre
+>0) — a conjectura continua de pé empiricamente. Mas o objeto uniforme não é uma reta:
+ou é uma CÔNICA de witnesses (o pêncil sendo seu limite degenerado), ou — seguindo a
+necessidade MÍNIMA da conjectura (UM witness, não uma família) — um único witness
+algébrico de grau 2 sobre o corpo da configuração (consistente com os k da classe 3:
+−0.7794,−0.1183,0.3879,0.4776, candidatos a PSLQ/quadráticos).
+
+**Próximo degrau (a decidir):** (a) caçar a CÔNICA uniforme — relação quadrática
+(u(t),w(t)) grau 2 — e ler sua forma octoniônica; ou (b) abandonar a família e
+atacar UM witness via forma fechada grau-2 + PSLQ dos k. A obstrução topológica
+(w₇=α⁴β³+α³β⁴, R11/Teorema 6.1) continua sendo a única prova de EXISTÊNCIA que não
+depende de construção — o manuscrito §6 já a carrega; a Lemma L(iii) (excisão
+relativa codim-4) é o gargalo formal restante, independente do colapso do pêncil.

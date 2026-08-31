@@ -122,6 +122,31 @@ A nonzero primary obstruction forces every section to vanish somewhere —
 i.e., every configuration admits a witness — PROVIDED the bundle E₇ is
 honest over the relevant skeleton. This is the content of:
 
+**Remark 6.1a (reconciliation of w₇ ≠ 0 with [Γ] = 0).** A measured fact must
+be reconciled with Theorem 6.1: tracing the witness curve Γ and reading its
+orientation signs gives [Γ] = 0 in H₁(B; ℤ/2) = ℤ/2⟨[ℝP¹×pt], [pt×ℝP¹]⟩
+(census (a,b) = (0,0)). Under Poincaré duality these generators map to
+{α³β⁴, α⁴β³}, so a *naïve* reading would demand [Γ]₂ = w₇ = α⁴β³+α³β⁴ ≠ 0 — a
+contradiction. The resolution is that **E₇ is not honest over Z**: the four
+constraint projections drop from rank 4 to rank 3 on the parallel locus (§4,
+measured in R12), so s is not a transverse section of a global rank-7 bundle
+and the identity e(E₇) = PD[Z(s)] fails globally. Instead
+e(E₇ ⊗ γ₁γ₂) = [Γ] + excess(Z) with [Γ] = 0 and excess(Z) = w₇. The obstruction
+is **relative** (a class in H⁷(B, N(Z))), supported on the codimension-4 locus
+the census cannot see (Γ ∩ Z = ∅ is a theorem). Thus [Γ] = 0 (Γ non-empty but
+null-homologous) and w₇ ≠ 0 (relative obstruction, Z-supported) coexist without
+contradiction; R14's "falsified PD prediction" falsified the wrong prediction.
+
+**Proposition 6.1b (Thom description of the obstruction) [T].** The normal
+bundle of Z₁ = {[x]}×ℝP⁴ (resp. Z₂) in B has rank 4 with mod-2 Thom class α⁴
+(resp. β⁴). The Thom isomorphism gives H⁷(B, B∖Z) ≅ H³(Z₁) ⊕ H³(Z₂) =
+ℤ/2⟨β³⟩ ⊕ ℤ/2⟨α³⟩, and the pushforward to H⁷(B) sends β³ ↦ α⁴β³, α³ ↦ α³β⁴.
+Hence im(H⁷(B, B∖Z) → H⁷(B)) = span{α⁴β³, α³β⁴} — matching the exact
+computation of R13 — and this map is injective (2-dim onto 2-dim). Therefore
+**w₇ = α⁴β³ + α³β⁴ is exactly the sum of the two Thom pushforwards of the
+fundamental classes [Z₁], [Z₂]**, and the relative primary obstruction, if it
+equals w₇, is uniquely determined.
+
 **Technical Lemma L** [L]. Let Z = Z₁ ∪ Z₂ with Z₁ = {[x]} × ℝP⁴,
 Z₂ = ℝP⁴ × {[x′]} (each ≅ ℝP⁴, codimension 4 in B). Then
 (i) off Z the four constraint projections are independent in W₁₁ (measured:
@@ -131,10 +156,19 @@ exactly one [M]);
 (ii) on Z the local rank is 8 = dim B, and the section s is canonically
 nonvanishing near Z whenever d(x,x′) ≥ 3 (s(x,w) = [x,w] = 0 would give
 w ∈ Im C(x) ∩ Im C(x′), i.e. d ≤ 2);
-(iii) [in preparation] a nowhere-zero section over B would yield a nowhere-
-zero section of the honest rank-7 bundle over B ∖ N(Z) whose relative primary
-obstruction class maps onto w₇ under H⁷(B, N(Z)) → H⁷(B), using (ii) and the
-codimension-4 excision exact sequence.
+(iii) [in preparation — reduced to a local degree] By (ii), s is nowhere zero
+on a tubular neighbourhood N(Z), so it defines a nowhere-zero section over
+∂N(Z); a global nowhere-zero section would extend it over all of B. The
+obstruction to that extension is the relative primary class in
+H⁷(B, N(Z)) ≅ H³(Z₁) ⊕ H³(Z₂) (Prop 6.1b), whose image in H⁷(B) is
+Σᵢ deg_local(s; Zᵢ) · (Thom pushforward of [Zᵢ]). By Prop 6.1b the two
+pushforwards are α⁴β³ and α³β⁴, so this image equals w₇ = α⁴β³ + α³β⁴ **iff
+the local degree of s on a normal 4-slice to each Zᵢ is odd.** The single
+remaining computation is therefore: **deg_local(s; Z₁) ≡ deg_local(s; Z₂) ≡ 1
+(mod 2)** — the winding of T on a small 3-sphere linking the parallel locus
+u ∥ x. R12's measurement (local rank 8 = dim B near Z, every drop by exactly
+one) is the codimension-1 shadow of an odd local degree; the exact mod-2 degree
+is the content in preparation.
 
 **Corollary 6.2** (conditional on L(iii)). Every pair of zero divisors admits
 a length-≤3 commuting path: **diam Γ_C^Z(𝕊) = 3**, proving the GZ conjecture.
@@ -152,6 +186,18 @@ a length-≤3 commuting path: **diam Γ_C^Z(𝕊) = 3**, proving the GZ conjectu
 - The complex structure R (right multiplication by (0,1); GZ Lemma 3.6)
   preserves every O(x) (143/143) but does not intertwine T: four candidate
   equivariance identities fail outside 6 degenerate configurations [M].
+- **The linear pencil is a symmetry artifact, not a general construction** [M].
+  At the maximally symmetric config (e₁,e₂) (a, b, ab = e₁, e₂, e₃ all
+  basis-aligned) the odd components of the (4,4) witness curve are two (1,1)
+  projective lines — a 1-parameter *pencil* of witnesses in closed integer form
+  (verified exactly in ℤ). But a genericity sweep (8 configurations, both zero
+  divisors sampled, one per process; tracer validated on the (e₁,e₂) config as a
+  positive control reproducing 2 lines + 1 conic) found **0 line components
+  (KRANK = MRANK = 2) and 20 conic components (KRANK = MRANK = 3)**: generically
+  the odd components are conics, and the pencil is the split-conic degeneration
+  at the symmetric point. Consequently a witness-existence proof cannot rest on
+  a uniform linear pencil; it must rest on the obstruction argument (§6), which
+  never required one. (This is why §6, not a construction, carries the theorem.)
 
 ## Appendix: verification artifacts (this repository)
 
