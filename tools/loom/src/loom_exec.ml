@@ -58,7 +58,13 @@ let read_file ?(limit = max_file_bytes) path =
       in
       loop 0)
 
-let sha256_file path = sha256 (read_file path)
+let sha256_file path =
+  let stat = Unix.lstat path in
+  if stat.st_kind <> S_REG then failf "file-not-regular:%s" path;
+  let channel = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+      Cryptokit.hash_channel (Cryptokit.Hash.sha256 ()) channel
+      |> Cryptokit.transform_string (Cryptokit.Hexa.encode ()))
 
 let write_all descriptor value =
   let rec loop offset =
