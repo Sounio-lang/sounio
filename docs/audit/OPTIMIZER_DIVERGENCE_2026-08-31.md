@@ -173,6 +173,59 @@ The two manifestations also differ in sentinel: the lorenz functions return `-1`
 `qd_mul` returns `0`. That is consistent with one optimiser fault surfacing in two
 ways, and equally consistent with two faults. This audit does not decide which.
 
+### ROOT CAUSE — `-O` does not propagate a variable between successive calls
+
+The lorenz reduction reached bottom. Six lines, in a module, called from `main`:
+
+    pub fn rp_add(a: i64, b: i64) -> i64 { return a + b }
+
+    pub fn rp_chain3() -> i64 {
+        var x: i64 = 0
+        x = rp_add(x, 1)      // 1
+        x = rp_add(x, 10)     // 11
+        x = rp_add(x, 100)    // 111
+        return x
+    }
+
+    without -O   111    correct
+    with    -O   100
+
+Not "the later calls are dropped". **Every call reads the ORIGINAL `x`, and only
+the last assignment survives**: `rp_add(0, 100) = 100`. Two shorter cases confirm
+the same reading:
+
+    x=3; x = rp_add(x,5); x = rp_add(x,5)     without -O 13   with -O 8   = add(3,5)
+    x=3; x = rp_mul(x,5); x = rp_mul(x,5)     without -O 75   with -O 15  = mul(3,5)
+    x=3; x = rp_mul(x,5)                      without -O 15   with -O 15  correct
+
+One call is fine; two or more in sequence lose the accumulation. It is not
+arithmetic — `+` and `*` behave identically — and it is not the values.
+
+### Why this explains the family
+
+`lorenz_i256_step1_taylor2_proof_trace_skeleton_instance_fingerprint` chains
+**seventeen** calls to `lorenz_i256_cert_mix`, accumulating into `fp`. Under `-O`
+only the last one takes effect, so the fingerprint is wrong, and the caller's
+`if artifact_fp != <expected>` returns `-1`. Lengthening the chain in a probe
+moved the `-O` result by small increments — 191, 192, 194, 198, 202, 207 for
+chains of 1, 2, 4, 8, 12, 17 — exactly what a single surviving call produces.
+
+### What the reduction ruled out on the way down
+
+Recorded because each was a plausible cause that cost a measurement:
+
+    arity                 probes at 9, 10, 12, 14 and 17 imported args all agree
+    argument marshalling  echo9 and sum9 return correct values under -O
+    the `Mod` effect      qd128 carries none and breaks anyway
+    the guard chain       removing all 17 early-return guards changes nothing
+    nested cross-module   a module-to-module call, one deep, agrees
+    the arithmetic        the same mix chain written locally agrees at length 17
+    the flag block        the same 60-line flag body, local AND imported, agrees
+
+The last two are the interesting pair: the identical body is correct as a local
+function and correct as an imported one — the defect needs the *chained
+assignment* specifically.
+
 ## What this does NOT establish
 
 **Where the defect is.** 632 programs is not 632 bugs — the corpus gate's own
