@@ -19414,6 +19414,46 @@ impl Lowerer {
                 if (*recv).kind == ExprKind::ExprFieldAccess {
                     return self.expr_receiver_struct_type_ref(&(*recv))
                 }
+                // `(*p).method()`. There was no ExprUnary case at all, so a deref
+                // receiver came back empty and the call went to the BARE method
+                // name -- which invents a body-less function, exactly as the
+                // comment above this one warns. Measured on a gen2 self-compile:
+                // 40 such sites, and the bucket did not move at all when the
+                // ident and field shapes were fixed, so it is a cause of its own.
+                //
+                // 47 occurrences in check.sio and lower.sio, all `(*lo).emit(...)`
+                // / `(*c).check_items(...)`: a `&! T` parameter dereferenced to
+                // call a method. lower_param_struct_type_name already unwraps
+                // TypeReference/TypeRefMut, so the operand's own struct type IS
+                // the answer -- except for a Box, where the literal "Box" names no
+                // layout and the inner T has to come from box_inner_layout.
+                //
+                // Read through the locals Box, not a by-value `self` lookup: the
+                // same discipline lower_lookup_box_inner_layout exists for.
+                if (*recv).kind == ExprKind::ExprUnary && (*recv).un_op == UnaryOp::OpDeref {
+                    match (*recv).left {
+                        Some(operand) => {
+                            if (*operand).kind == ExprKind::ExprIdent {
+                                let ost = self.lookup_local_struct_type((*operand).name)
+                                if ir_name_is_box(ost) {
+                                    let bl = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*operand).name)
+                                    if bl >= 0 && bl < (*self.struct_layouts).count {
+                                        return (*self.struct_layouts).entries[bl as usize].type_name
+                                    }
+                                    return ir_empty_name()
+                                }
+                                if ost.len > 0 {
+                                    return ost
+                                }
+                            }
+                            if (*operand).kind == ExprKind::ExprFieldAccess {
+                                return self.expr_receiver_struct_type_ref(&(*operand))
+                            }
+                        }
+                        _ => {}
+                    }
+                    return ir_empty_name()
+                }
                 // Root 2 chain residual: method call on a method result.
                 // `a.add(&b).get()` — outer mangling needs the inner method's
                 // return_struct_name (E), not an empty name that invents bare "get".
