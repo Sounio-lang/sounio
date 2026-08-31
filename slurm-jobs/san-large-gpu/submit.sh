@@ -36,6 +36,8 @@ echo "Staging payload to ${PAYLOAD_DIR}..."
 kubectl -n "${NS}" exec "${LOGIN_POD}" -- mkdir -p "${PAYLOAD_DIR}" "${OUT_DIR}"
 kubectl cp "${ROOT_DIR}/scripts/research/suffering_aware_large_architecture.py" \
   "${NS}/${LOGIN_POD}:${PAYLOAD_DIR}/suffering_aware_large_architecture.py"
+kubectl cp "${ROOT_DIR}/scripts/research/suffering_aware_large_architecture_v2.py" \
+  "${NS}/${LOGIN_POD}:${PAYLOAD_DIR}/suffering_aware_large_architecture_v2.py"
 kubectl cp "${ROOT_DIR}/slurm-jobs/san-large-gpu/run_gpu_worker.sh" \
   "${NS}/${LOGIN_POD}:${PAYLOAD_DIR}/run_gpu_worker.sh"
 if [[ -f "${ROOT_DIR}/artifacts/san_large/corpus_snapshot_v2000.npz" ]]; then
@@ -59,12 +61,23 @@ export SAN_LARGE_ONLY=${LEG}
 export SAN_LARGE_DATASET=${SAN_LARGE_DATASET:-cifar10}
 export SAN_LARGE_OUT=${OUT_ROOT}
 export RUN_ID=${RUN_ID}
+export SAN_LARGE_N_TRAIN=${SAN_LARGE_N_TRAIN:-4000}
+export SAN_LARGE_N_VAL=${SAN_LARGE_N_VAL:-1000}
+export SAN_LARGE_EPOCHS_RESNET=${SAN_LARGE_EPOCHS_RESNET:-8}
+export SAN_LARGE_EPOCHS_VIT=${SAN_LARGE_EPOCHS_VIT:-10}
+export SAN_LARGE_EPOCHS_GPT=${SAN_LARGE_EPOCHS_GPT:-10}
 export SAN_LARGE_DELTA_RESNET=${SAN_LARGE_DELTA_RESNET:-0.55}
 export SAN_LARGE_DELTA_VIT=${SAN_LARGE_DELTA_VIT:-0.45}
 export SAN_LARGE_DELTA_GPT=${SAN_LARGE_DELTA_GPT:-0.31}
 export SAN_LARGE_TAU_RESNET=${SAN_LARGE_TAU_RESNET:-0.34}
 export SAN_LARGE_TAU_VIT=${SAN_LARGE_TAU_VIT:-0.251}
 export SAN_LARGE_TAU_GPT=${SAN_LARGE_TAU_GPT:-0.165}
+export SAN_LARGE_SEED=${SAN_LARGE_SEED:-17}
+export SAN_LARGE_BATCH=${SAN_LARGE_BATCH:-128}
+export SAN_LARGE_GRAD_ACCUM=${SAN_LARGE_GRAD_ACCUM:-1}
+export SAN_LARGE_GRAD_ANALYSIS=${SAN_LARGE_GRAD_ANALYSIS:-0}
+export SAN_LARGE_DISTILLW=${SAN_LARGE_DISTILLW:-0.5}
+export SAN_LARGE_V2=${SAN_LARGE_V2:-0}
 bash ${PAYLOAD_DIR}/run_gpu_worker.sh
 EOF
 

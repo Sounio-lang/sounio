@@ -1,0 +1,166 @@
+// stdlib/dialogue/bracket.sio
+//
+// Bracket-sensitive composition of dialogue turns over the octonions.
+//
+// Context: the SBMP battery (datasets/sounio-ai-bracketing) measured that
+// current LLMs are not bracket-steerable — their effective turn composition
+// is fold-left, and the associator
+//
+//     [u1,u2,u3] = μ(μ(u1,u2),u3) − μ(u1,μ(u2,u3))
+//
+// exists as variance but not as steering. This module is the constructive
+// counterpart: a composition where bracketing is a first-class, measurable
+// object, with the algebraic laws that make it testable.
+//
+// The octonion product supplies the canonical non-associative μ. Its
+// associator is *alternating* and *alternative*:
+//
+//   (anti-symmetry)  [a,b,c] = −[b,a,c]      — swapping the first two turns
+//                                            flips the sign of the grouping
+//                                            effect
+//   (alternativity)  [a,a,b] = 0             — repeating a turn against
+//                                            itself carries no grouping
+//                                            ambiguity
+//
+// In the dialogue reading: turn meanings are octonion-embedded; composing a
+// trajectory left-to-right vs right-to-left yields genuinely different
+// composite meanings, and the associator measures exactly how different.
+// This is the semantics the O-CSSM functor line
+// (stdlib/dialogue/trajectory.sio) folds over; bracket.sio exposes the
+// bracketing as the variable the functor must respect.
+
+use algebra::octonion::{oct_mul, oct_associator, oct_norm_sq}
+
+// --- the two bracketings of a three-turn composite --------------------------
+
+// ((u1 ∘ u2) ∘ u3) — left bracketing: the first exchange settles, then the
+// third turn continues it.
+pub fn bracket_left(
+    u1: &[f64; 8], u2: &[f64; 8], u3: &[f64; 8], out: &![f64; 8]
+) with Mut, Div, NonAssoc {
+    var tmp: [f64; 8] = [0.0; 8]
+    oct_mul(u1, u2, &!tmp)
+    oct_mul(&tmp, u3, out)
+}
+
+// (u1 ∘ (u2 ∘ u3)) — right bracketing: turns 2–3 form an exchange that then
+// relates back to turn 1.
+pub fn bracket_right(
+    u1: &[f64; 8], u2: &[f64; 8], u3: &[f64; 8], out: &![f64; 8]
+) with Mut, Div, NonAssoc {
+    var tmp: [f64; 8] = [0.0; 8]
+    oct_mul(u2, u3, &!tmp)
+    oct_mul(u1, &tmp, out)
+}
+
+// --- the associator, in the dialogue reading --------------------------------
+
+// grouping_effect(u1,u2,u3) = bracket_left − bracket_right
+// = (u1∘u2)∘u3 − u1∘(u2∘u3) — nonzero exactly where the grouping changes
+// the composite meaning.
+pub fn grouping_effect(
+    u1: &[f64; 8], u2: &[f64; 8], u3: &[f64; 8], out: &![f64; 8]
+) with Mut, Div, NonAssoc {
+    oct_associator(u1, u2, u3, out)
+}
+
+// Scalar magnitude of the grouping effect: ‖[u1,u2,u3]‖².
+pub fn grouping_magnitude_sq(
+    u1: &[f64; 8], u2: &[f64; 8], u3: &[f64; 8]
+) -> f64 with Mut, Div, NonAssoc {
+    var a: [f64; 8] = [0.0; 8]
+    oct_associator(u1, u2, u3, &!a)
+    oct_norm_sq(&a)
+}
+
+// --- the two testable laws, exposed as predicates ---------------------------
+
+// Anti-symmetry: [a,b,c] + [b,a,c] = 0 (each component within tol).
+// Dialogue reading: swapping the first two turns flips the sign of the
+// grouping effect — the SBMP alternativity prediction.
+pub fn associator_antisymmetric(
+    a: &[f64; 8], b: &[f64; 8], c: &[f64; 8], tol: f64
+) -> bool with Mut, Div, NonAssoc {
+    var abc: [f64; 8] = [0.0; 8]
+    var bac: [f64; 8] = [0.0; 8]
+    oct_associator(a, b, c, &!abc)
+    oct_associator(b, a, c, &!bac)
+    var i: i64 = 0
+    while i < 8 {
+        var d: f64 = abc[i] + bac[i]
+        if d < 0.0 { d = 0.0 - d }
+        if d > tol { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Alternativity: [a,a,b] vanishes (norm within tol²).
+// Dialogue reading: a turn repeated against itself carries no grouping
+// ambiguity.
+pub fn associator_alternative(
+    a: &[f64; 8], b: &[f64; 8], tol: f64
+) -> bool with Mut, Div, NonAssoc {
+    let m: f64 = grouping_magnitude_sq(a, a, b)
+    return m < tol * tol
+}
+
+// ============================================================================
+// TRAJECTORY BRIDGE — the O-CSSM functor F evaluated under both bracketings
+// ============================================================================
+//
+// trajectory.sio folds a Trajectory to a single octonion; the SBMP result is
+// that fold-left is the *only* bracketing current models realise. The bridge
+// below makes the functor bracket-aware: the same three turns map to two
+// different octonions under the two bracketings, and
+// `traj_bracket_sensitivity3` is exactly ‖[F(u1),F(u2),F(u3)]‖² — the
+// functor-level grouping effect, measured through the whole pipeline
+// (flat-array trajectory → payload projection → octonion product).
+
+use dialogue::trajectory::{traj_payload_at, traj_len}
+
+// Project turn i's 16-dim payload to an octonion: out[k] = p[k] − p[k+8].
+// A fixed linear projection — any fold of the payload width preserves the
+// algebra; this one is sign-sensitive so distinct payloads stay distinct.
+pub fn traj_turn_oct(t: &Trajectory, i: i64, out: &![f64; 8]) with Mut {
+    var k: i64 = 0
+    while k < 8 {
+        out[k] = traj_payload_at(t, i, k) - traj_payload_at(t, i, k + 8)
+        k = k + 1
+    }
+}
+
+// F over the first three turns, left bracketing ((u1∘u2)∘u3).
+pub fn traj_fold3_left(t: &Trajectory, out: &![f64; 8]) with Mut, Div, NonAssoc {
+    var u1: [f64; 8] = [0.0; 8]
+    var u2: [f64; 8] = [0.0; 8]
+    var u3: [f64; 8] = [0.0; 8]
+    traj_turn_oct(t, 0, &!u1)
+    traj_turn_oct(t, 1, &!u2)
+    traj_turn_oct(t, 2, &!u3)
+    bracket_left(&u1, &u2, &u3, out)
+}
+
+// F over the first three turns, right bracketing (u1∘(u2∘u3)).
+pub fn traj_fold3_right(t: &Trajectory, out: &![f64; 8]) with Mut, Div, NonAssoc {
+    var u1: [f64; 8] = [0.0; 8]
+    var u2: [f64; 8] = [0.0; 8]
+    var u3: [f64; 8] = [0.0; 8]
+    traj_turn_oct(t, 0, &!u1)
+    traj_turn_oct(t, 1, &!u2)
+    traj_turn_oct(t, 2, &!u3)
+    bracket_right(&u1, &u2, &u3, out)
+}
+
+// ‖[F(u1),F(u2),F(u3)]‖² through the full trajectory pipeline. Zero iff the
+// three turns' projections associate (e.g. a Fano triple); positive exactly
+// when the grouping changes the composite meaning.
+pub fn traj_bracket_sensitivity3(t: &Trajectory) -> f64 with Mut, Div, NonAssoc {
+    var u1: [f64; 8] = [0.0; 8]
+    var u2: [f64; 8] = [0.0; 8]
+    var u3: [f64; 8] = [0.0; 8]
+    traj_turn_oct(t, 0, &!u1)
+    traj_turn_oct(t, 1, &!u2)
+    traj_turn_oct(t, 2, &!u3)
+    grouping_magnitude_sq(&u1, &u2, &u3)
+}

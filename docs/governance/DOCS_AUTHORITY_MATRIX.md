@@ -95,6 +95,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.bucket-d-script-hardening-2026-06-21 | repo_only | docs/audit/BUCKET_D_SCRIPT_HARDENING_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.canonical-compiler-gate-structural-cost-2026-08-18 | repo_only | docs/audit/CANONICAL_COMPILER_GATE_STRUCTURAL_COST_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.capacity-validator-positive-control-2026-08-19 | repo_only | docs/audit/CAPACITY_VALIDATOR_POSITIVE_CONTROL_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.chaotic-native-bridge-repro-2026-08-30 | repo_only | docs/audit/CHAOTIC_NATIVE_BRIDGE_REPRO_2026-08-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.checker-guard-wiring-dispatch-2026-07-11 | repo_only | docs/audit/CHECKER_GUARD_WIRING_DISPATCH_2026-07-11.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.chi5-real-axiom-audit-2026-05-30 | repo_only | docs/audit/CHI5_REAL_AXIOM_AUDIT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ci-absence-as-success-contract-2026-08-17 | repo_only | docs/audit/CI_ABSENCE_AS_SUCCESS_CONTRACT_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -137,6 +138,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.effects-layer-cost-2026-08-19 | repo_only | docs/audit/EFFECTS_LAYER_COST_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.effects-two-natures-2026-08-19 | repo_only | docs/audit/EFFECTS_TWO_NATURES_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.eisa-origin-gum-2026-08-20 | repo_only | docs/audit/EISA_ORIGIN_GUM_2026-08-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.engine-divergence-corpus-2026-08-30 | repo_only | docs/audit/ENGINE_DIVERGENCE_CORPUS_2026-08-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.engine-divergence-e221-refinements-2026-08-30 | repo_only | docs/audit/ENGINE_DIVERGENCE_E221_REFINEMENTS_2026-08-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.engine-parity-adjudication-2026-08-02 | repo_only | docs/audit/ENGINE_PARITY_ADJUDICATION_2026-08-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.engine-parity-cutover-decomposition-2026-08-23 | repo_only | docs/audit/ENGINE_PARITY_CUTOVER_DECOMPOSITION_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.enir-mir-disconnect-cost-2026-08-19 | repo_only | docs/audit/ENIR_MIR_DISCONNECT_COST_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -290,6 +293,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-imported-pbpk28-cn-sigsegv-2026-08-16 | repo_only | docs/audit/MADAROS_IMPORTED_PBPK28_CN_SIGSEGV_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-indirect-call-argc-cap-2026-08-18 | repo_only | docs/audit/MADAROS_INDIRECT_CALL_ARGC_CAP_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-ir-capacity-object-design-dispatch-2026-08-18 | repo_only | docs/audit/MADAROS_IR_CAPACITY_OBJECT_DESIGN_DISPATCH_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-local-slot-overflow-2026-08-31 | repo_only | docs/audit/MADAROS_LOCAL_SLOT_OVERFLOW_2026-08-31.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-match-guards-2026-06-24 | repo_only | docs/audit/MADAROS_MATCH_GUARDS_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-method-call-sigsegv-2026-06-20 | repo_only | docs/audit/MADAROS_METHOD_CALL_SIGSEGV_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-multimodule-fallback-segfault-2026-06-30 | repo_only | docs/audit/MADAROS_MULTIMODULE_FALLBACK_SEGFAULT_2026-06-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -409,6 +413,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.sedenion-ker-basis-2026-08-23 | repo_only | docs/audit/SEDENION_KER_BASIS_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-ker-intersect-2026-08-23 | repo_only | docs/audit/SEDENION_KER_INTERSECT_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-ker-lw-2026-08-23 | repo_only | docs/audit/SEDENION_KER_LW_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.sedenion-ker-lw-basis-2026-08-24 | repo_only | docs/audit/SEDENION_KER_LW_BASIS_2026-08-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-ker-lz-2026-08-23 | repo_only | docs/audit/SEDENION_KER_LZ_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-zd-action-2026-08-23 | repo_only | docs/audit/SEDENION_ZD_ACTION_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-zd-twosided-moufang-2026-08-23 | repo_only | docs/audit/SEDENION_ZD_TWOSIDED_MOUFANG_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -432,6 +437,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.surgical-calculus-disjoint-union-2026-08-19 | repo_only | docs/audit/SURGICAL_CALCULUS_DISJOINT_UNION_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.token-ceiling-blocked-runpass-census-2026-08-17 | repo_only | docs/audit/TOKEN_CEILING_BLOCKED_RUNPASS_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.token-table-ceiling-refusal-2026-08-17 | repo_only | docs/audit/TOKEN_TABLE_CEILING_REFUSAL_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.tolerated-buckets-remeasured-2026-08-31 | repo_only | docs/audit/TOLERATED_BUCKETS_REMEASURED_2026-08-31.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.type-archaeology-family-b-2026-08-19 | repo_only | docs/audit/TYPE_ARCHAEOLOGY_FAMILY_B_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.type-archaeology-family-g-2026-08-19 | repo_only | docs/audit/TYPE_ARCHAEOLOGY_FAMILY_G_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.type-enum-denominator-2026-08-19 | repo_only | docs/audit/TYPE_ENUM_DENOMINATOR_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -506,6 +512,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.decisions.adr-005-algebra-keyword-compiler-infrastructure | repo_only | docs/decisions/adr-005-algebra-keyword-compiler-infrastructure.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.decisions.adr-006-fixed-point-trust-anchor | repo_only | docs/decisions/adr-006-fixed-point-trust-anchor.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.decisions.adr-007-second-order-compilation | repo_only | docs/decisions/adr-007-second-order-compilation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.decisions.adr-008-claim-oracle-semantic-clock | repo_only | docs/decisions/adr-008-claim-oracle-semantic-clock.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.decisions.claim-oracle-inventory.schema | repo_only | docs/decisions/claim_oracle_inventory.schema.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.decisions.readme | repo_only | docs/decisions/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.design.epistemic-tensor-core-gum-turing | repo_only | docs/design/EPISTEMIC_TENSOR_CORE_GUM_TURING.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.design.gpu-rendering-roadmap | repo_only | docs/design/gpu_rendering_roadmap.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -559,6 +567,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.ecosystem.physical-extraction-canonical-cutover-execution | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-canonical-production-gap-assessment | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_ASSESSMENT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-canonical-production-mapping-decision | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_MAPPING_DECISION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.ecosystem.physical-extraction-canonical-production-repository-catalog | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_REPOSITORY_CATALOG.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-inventory | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-materialization | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-source-removal-authorization | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -887,6 +896,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.mercyful-learning-medical-paper-2026-07-26 | repo_only | docs/papers/mercyful_learning_medical_paper_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.mercyful-learning-paradigm-2026-07-26 | repo_only | docs/papers/mercyful_learning_paradigm_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.mercyful-learning-preprint-2026-07-26 | repo_only | docs/papers/mercyful_learning_preprint_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.ontology-frontiers-technical-note-2026-08-05 | repo_only | docs/papers/ontology_frontiers_technical_note_2026-08-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.oopsla2027.outline | repo_only | docs/papers/oopsla2027/outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.oopsla2027.paper | repo_only | docs/papers/oopsla2027/paper.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.paper | repo_only | docs/papers/paper.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -940,6 +950,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.2026-07-19-stats-dist-parity | historical | docs/research/2026-07-19-stats-dist-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ade-wildgen-mckay-spec-2026-07-26 | historical | docs/research/ade_wildgen_mckay_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.align-curve-and-target | historical | docs/research/align-curve-and-target.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.antigarbling-completeness-2026-08-23 | historical | docs/research/ANTIGARBLING_COMPLETENESS_2026-08-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.antigarbling-completeness-proof-2026-08-23 | historical | docs/research/ANTIGARBLING_COMPLETENESS_PROOF_2026-08-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.associator-spectral-bound-status | historical | docs/research/associator_spectral_bound_status.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ast-native-claims-falsifiers-2026-07-25 | historical | docs/research/ast_native_claims_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ast-native-claims-spec-2026-07-25 | historical | docs/research/ast_native_claims_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -1162,6 +1174,9 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.octonion-validation-report | historical | docs/research/OCTONION_VALIDATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.onn-benchmark-analysis | historical | docs/research/ONN_BENCHMARK_ANALYSIS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ontology-elplus-complete-universe-open-question-2026-08-03 | historical | docs/research/ontology_elplus_complete_universe_open_question_2026-08-03.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-ns-metatheory-mechanized-2026-08-30 | historical | docs/research/paper_A_ns_metatheory_mechanized_2026-08-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-ns-metatheory-xai-review-2026-08-30 | historical | docs/research/paper_A_ns_metatheory_xai_review_2026-08-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-rq4-two-compartment-flip-2026-08-31 | historical | docs/research/paper_A_rq4_two_compartment_flip_2026-08-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-e175-1627-close-2026-08-06 | historical | docs/research/particle_e175_1627_close_2026-08-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-e175-amp-import-2026-08-05 | historical | docs/research/particle_e175_amp_import_2026-08-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-e175-trilogy-2026-08-06 | historical | docs/research/particle_e175_trilogy_2026-08-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

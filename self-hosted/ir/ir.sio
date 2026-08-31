@@ -1416,6 +1416,8 @@ pub let IR_ARENA_VIOLATION_ARG_POOL: i64 = 5
 // 2048 vregs and SILENTLY drops the typing above it, which is the same silent
 // miscompile-in-waiting; this makes it a refusal.
 pub let IR_ARENA_VIOLATION_FLOAT_SET: i64 = 6
+pub let IR_ARENA_VIOLATION_FN_TABLE_INDEX: i64 = 7
+pub let IR_ARENA_VIOLATION_FN_TABLE_ALLOC: i64 = 8
 
 fn ir_arena_latch(kind: i64, r: IrInstrRegion) with Mut, Panic, Div {
     if IR_ARENA_VIOLATION == 0 {
@@ -1456,6 +1458,20 @@ pub fn ir_arena_report_violation() -> bool with IO, Mut, Panic, Div {
         print_int(IR_ARG_POOL_LEN)
         print(" of ")
         print_int(ir_arg_pool_capacity())
+        print("\n")
+        return true
+    } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_FN_TABLE_INDEX {
+        print("IR module function table index is out of range -- refusing to read or write an empty function")
+        print(") index ")
+        print_int(IR_ARENA_VIOLATION_SLOT)
+        print(" limit ")
+        print_int(IR_MAX_FUNCS)
+        print("\n")
+        return true
+    } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_FN_TABLE_ALLOC {
+        print("IR module function table allocation failed -- refusing to drop a function write")
+        print(") chunk ")
+        print_int(IR_ARENA_VIOLATION_SLOT)
         print("\n")
         return true
     } else {
@@ -1508,7 +1524,7 @@ pub fn ir_region_slot_r(r: IrInstrRegion, idx: i64) -> i64 with Mut, Panic, Div 
 // and the handle stores the SLOT, not the base -- so every copy of a handle sees
 // the new base through the same indirection and growth cannot make a copy stale.
 // That is also what keeps this callable from the ~1425 write sites: `&!` through
-// a chain like `module.functions[0].region` does not typecheck.
+// a chain like `ir_fn_get(&module, 0).region` does not typecheck.
 //
 // A region is NOT allocated here. Writing into a function that was never given
 // one is a bug in the caller, and it is latched as a violation rather than
@@ -1716,12 +1732,12 @@ pub fn ir_region_seal(r: &IrInstrRegion) -> i64 with Mut, Panic, Div {
 //
 // Returns the number of regions sealed. Regions that are not live (an empty
 // function never given one) are skipped rather than treated as an error.
-pub fn ir_module_seal_functions(module: &IrModule) -> i64 with Mut, Panic, Div {
+pub fn ir_module_seal_functions(module: &IrModule) -> i64 with Mut, Panic, Div, Alloc {
     var sealed: i64 = 0
     var i: i64 = 0
     while i < (*module).fn_count && i < IR_MAX_FUNCS {
         // Hoist the handle before taking its address. Do not "simplify" this
-        // back to `ir_region_seal(&(*module).functions[i as usize].region)`:
+        // back to `ir_region_seal(&ir_fn_get(&(*module), i as usize).region)`:
         // that is what the first version did, and it sealed ZERO of seven
         // regions in a real compile while reporting nothing.
         //
@@ -1738,7 +1754,7 @@ pub fn ir_module_seal_functions(module: &IrModule) -> i64 with Mut, Panic, Div {
         //
         // Sealing writes IR_REGION_STATE, a global, so a copy of the handle is
         // all this needs -- nothing has to be written back to the module.
-        var r = (*module).functions[i as usize].region
+        var r = ir_fn_region(module, i as usize)
         if ir_region_seal(&r) == IR_ARENA_OK {
             sealed = sealed + 1
         }
@@ -3266,8 +3282,23 @@ pub fn ir_empty_epistemic_section_boxed() -> Box<IrEpistemicSection> with Alloc,
     Box::new(ep)
 }
 
+// #1729: keep the function table out of IrModule's value representation. Each
+// module owns a small header and grows through heap chunks, so copying a module
+// handle cannot materialize tens of MiB on the stack.
+pub struct IrFunctionChunk {
+    pub entries: [IrFunction; 512],
+    pub next: *mut IrFunctionChunk,
+}
+
+pub struct IrFunctionTable {
+    pub head: *mut IrFunctionChunk,
+    pub chunks: [i64; 32],
+    pub chunk_count: i64,
+    pub status: i64,
+}
+
 pub struct IrModule {
-    pub functions: [IrFunction; 16384],
+    pub functions: *mut IrFunctionTable,
     pub fn_count: i64,
     pub string_table: [Name; 16384],
     pub string_count: i64,
@@ -5267,7 +5298,7 @@ pub fn ir_module_count_float_bits_untouched(module: &IrModule, n: i64) -> i64 wi
         if slot >= IR_MAX_FUNCS { return total }
         // Same hoist as the live counter: a reference into a boxed array element
         // reads a wrong address under the seed. See the commit that measured it.
-        var uslot = (*module).functions[slot as usize]
+        var uslot = ir_fn_get(&(*module), slot as usize)
         var r: i64 = 0
         while r < ir_float_bits_capacity() {
             if ir_float_bits_get(&uslot, r) { total = total + 1 }
@@ -5286,14 +5317,14 @@ pub fn ir_module_count_float_bits(module: &IrModule) -> i64 with Mut, Panic, Div
     var fi: i64 = 0
     while fi < (*module).fn_count && fi < IR_MAX_FUNCS {
         // Hoist the element to a local BEFORE taking a reference to it. Taking
-        // &(*module).functions[i] directly is the same shape that made
+        // &ir_fn_get(&(*module), i) directly is the same shape that made
         // ir_region_seal silently seal 0 of 7 regions until it was hoisted; that
         // fix worked but its mechanism was never explained. This is the probe
         // that explains it -- if the hoisted count differs from the in-place one,
         // the reference-into-a-boxed-array-element is computing a wrong address,
         // and every reading in this investigation came from a broken instrument
         // rather than from broken storage.
-        var fslot = (*module).functions[fi as usize]
+        var fslot = ir_fn_get(&(*module), fi as usize)
         var r: i64 = 0
         while r < ir_float_bits_capacity() {
             if ir_float_bits_get(&fslot, r) { total = total + 1 }
@@ -5414,9 +5445,180 @@ pub fn ir_reset_function_in_place(f: &! IrFunction, name: Name) with Mut, Panic,
     }
 }
 
-pub fn ir_empty_module() -> IrModule {
+pub let IR_FN_TABLE_OK: i64 = 0
+pub let IR_FN_TABLE_ERR_INDEX: i64 = 1
+pub let IR_FN_TABLE_ERR_ALLOC: i64 = 2
+
+fn ir_fn_table_alloc() -> *mut IrFunctionTable with Alloc {
+    heap_alloc(512) as *mut IrFunctionTable
+}
+
+fn ir_fn_chunk_alloc() -> *mut IrFunctionChunk with Alloc, Mut, Panic, Div {
+    // heap_alloc is zeroed, but region slot 0 is quarantine rather than empty.
+    let p = heap_alloc(4194304) as *mut IrFunctionChunk
+    if p == (0 as *mut IrFunctionChunk) { return p }
+    (*p).next = 0 as *mut IrFunctionChunk
+    let empty = ir_empty_function()
+    var i: i64 = 0
+    while i < 512 {
+        (*p).entries[i as usize] = empty
+        i = i + 1
+    }
+    p
+}
+
+fn ir_fn_table_latch(t: *mut IrFunctionTable, status: i64, detail: i64) with Mut, Panic, Div {
+    if t != (0 as *mut IrFunctionTable) && (*t).status == IR_FN_TABLE_OK {
+        (*t).status = status
+    }
+    if IR_ARENA_VIOLATION == 0 {
+        IR_ARENA_VIOLATION_KIND = if status == IR_FN_TABLE_ERR_INDEX { IR_ARENA_VIOLATION_FN_TABLE_INDEX } else { IR_ARENA_VIOLATION_FN_TABLE_ALLOC }
+        IR_ARENA_VIOLATION_SLOT = detail
+        IR_ARENA_VIOLATION_GEN = -1
+    }
+    IR_ARENA_VIOLATION = 1
+}
+
+fn ir_fn_table_chunk_for(t: *mut IrFunctionTable, gi: i64) -> *mut IrFunctionChunk with Mut, Panic, Div, Alloc {
+    if t == (0 as *mut IrFunctionTable) { return 0 as *mut IrFunctionChunk }
+    if gi < 0 || gi >= IR_MAX_FUNCS {
+        ir_fn_table_latch(t, IR_FN_TABLE_ERR_INDEX, gi)
+        return 0 as *mut IrFunctionChunk
+    }
+    let chunk_no = gi / 512
+    if chunk_no >= 32 {
+        ir_fn_table_latch(t, IR_FN_TABLE_ERR_INDEX, gi)
+        return 0 as *mut IrFunctionChunk
+    }
+    if (*t).head == (0 as *mut IrFunctionChunk) {
+        (*t).head = ir_fn_chunk_alloc()
+        if (*t).head == (0 as *mut IrFunctionChunk) {
+            ir_fn_table_latch(t, IR_FN_TABLE_ERR_ALLOC, 0)
+            return 0 as *mut IrFunctionChunk
+        }
+        (*t).chunks[0] = (*t).head as i64
+        (*t).chunk_count = 1
+    }
+    let indexed = (*t).chunks[chunk_no as usize] as *mut IrFunctionChunk
+    if indexed != (0 as *mut IrFunctionChunk) { return indexed }
+    var next_no = (*t).chunk_count
+    var prev = (*t).chunks[(next_no - 1) as usize] as *mut IrFunctionChunk
+    while next_no <= chunk_no {
+        let fresh = ir_fn_chunk_alloc()
+        if fresh == (0 as *mut IrFunctionChunk) {
+            ir_fn_table_latch(t, IR_FN_TABLE_ERR_ALLOC, next_no)
+            return 0 as *mut IrFunctionChunk
+        }
+        (*prev).next = fresh
+        (*t).chunks[next_no as usize] = fresh as i64
+        (*t).chunk_count = next_no + 1
+        prev = fresh
+        next_no = next_no + 1
+    }
+    (*t).chunks[chunk_no as usize] as *mut IrFunctionChunk
+}
+
+fn ir_fn_table_chunk_at(t: *mut IrFunctionTable, gi: i64) -> *mut IrFunctionChunk with Mut, Panic, Div {
+    if t == (0 as *mut IrFunctionTable) { return 0 as *mut IrFunctionChunk }
+    if gi < 0 || gi >= IR_MAX_FUNCS {
+        ir_fn_table_latch(t, IR_FN_TABLE_ERR_INDEX, gi)
+        return 0 as *mut IrFunctionChunk
+    }
+    let chunk_no = gi / 512
+    (*t).chunks[chunk_no as usize] as *mut IrFunctionChunk
+}
+
+pub fn ir_fn_pool_ensure(m: &IrModule, i: i64) with Mut, Panic, Div, Alloc {
+    let _chunk = ir_fn_table_chunk_for((*m).functions, i)
+}
+
+// Reads are intentionally shallow, matching the old inline-array value read.
+// Deep ownership transfer is explicit through ir_module_clone.
+pub fn ir_fn_get(m: &IrModule, i: i64) -> IrFunction with Mut, Panic, Div {
+    let chunk = ir_fn_table_chunk_at((*m).functions, i)
+    if chunk == (0 as *mut IrFunctionChunk) { return ir_empty_function() }
+    (*chunk).entries[(i % 512) as usize]
+}
+
+pub fn ir_function_name_at(m: &IrModule, i: i64) -> Name with Mut, Panic, Div {
+    let chunk = ir_fn_table_chunk_at((*m).functions, i)
+    if chunk == (0 as *mut IrFunctionChunk) { return ir_empty_name() }
+    (*chunk).entries[(i % 512) as usize].name
+}
+
+pub fn ir_fn_instr_count(m: &IrModule, i: i64) -> i64 with Mut, Panic, Div {
+    let chunk = ir_fn_table_chunk_at((*m).functions, i)
+    if chunk == (0 as *mut IrFunctionChunk) { return 0 }
+    (*chunk).entries[(i % 512) as usize].instr_count
+}
+
+pub fn ir_fn_region(m: &IrModule, i: i64) -> IrInstrRegion with Mut, Panic, Div {
+    let chunk = ir_fn_table_chunk_at((*m).functions, i)
+    if chunk == (0 as *mut IrFunctionChunk) { return ir_region_invalid() }
+    (*chunk).entries[(i % 512) as usize].region
+}
+
+// Growth is explicit so ordinary updates retain their pre-existing effect set.
+pub fn ir_fn_set(m: &! IrModule, i: i64, f: IrFunction) with Mut, Panic, Div {
+    let chunk = ir_fn_table_chunk_at((*m).functions, i)
+    if chunk == (0 as *mut IrFunctionChunk) { return }
+    (*chunk).entries[(i % 512) as usize] = f
+}
+
+pub fn ir_module_fn_get(m: &IrModule, i: i64) -> IrFunction with Mut, Panic, Div {
+    ir_fn_get(m, i)
+}
+
+pub fn ir_module_fn_set(m: &! IrModule, i: i64, f: IrFunction) with Mut, Panic, Div, Alloc {
+    ir_fn_pool_ensure(m, i)
+    ir_fn_set(m, i, f)
+}
+
+pub fn ir_module_fn_storage_status(m: &IrModule) -> i64 {
+    if (*m).functions == (0 as *mut IrFunctionTable) { return IR_FN_TABLE_ERR_ALLOC }
+    (*(*m).functions).status
+}
+
+pub fn ir_module_clone(src: &IrModule) -> IrModule with Mut, Panic, Div, Alloc {
+    var out = ir_empty_module()
+    out.fn_count = (*src).fn_count
+    out.string_table = (*src).string_table
+    out.string_count = (*src).string_count
+    out.epistemic = (*src).epistemic
+    out.algebras = (*src).algebras
+    out.ontologies = (*src).ontologies
+    out.prof_counters = (*src).prof_counters
+    out.prof_counter_count = (*src).prof_counter_count
+    out.export_names = (*src).export_names
+    out.export_count = (*src).export_count
+    out.bss_total_size = (*src).bss_total_size
+    var i: i64 = 0
+    while i < (*src).fn_count && i < IR_MAX_FUNCS {
+        let got = ir_fn_get(src, i)
+        ir_fn_pool_ensure(&out, i)
+        ir_fn_set(&! out, i, ir_function_clone(&got))
+        i = i + 1
+    }
+    out
+}
+
+pub fn ir_module_fn(m: &IrModule, i: i64) -> IrFunction with Mut, Panic, Div {
+    ir_fn_get(m, i)
+}
+
+pub fn ir_empty_module() -> IrModule with Mut, Panic, Div, Alloc {
+    let table = ir_fn_table_alloc()
+    if table != (0 as *mut IrFunctionTable) {
+        (*table).head = ir_fn_chunk_alloc()
+        if (*table).head != (0 as *mut IrFunctionChunk) {
+            (*table).chunks[0] = (*table).head as i64
+            (*table).chunk_count = 1
+        } else {
+            (*table).status = IR_FN_TABLE_ERR_ALLOC
+        }
+    }
     IrModule {
-        functions: [ir_empty_function(); 16384],
+        functions: table,
         fn_count: 0,
         string_table: [ir_empty_name(); 16384],
         string_count: 0,
@@ -5435,9 +5637,9 @@ pub fn ir_empty_module() -> IrModule {
 // BSS global-variable tracking (mirrors lean_single GL table)
 // ============================================================================
 
-// BSS globals occupy the same fixed IrModule.functions storage as functions.
-// A native entry module needs one shared slot for main, so this is the
-// executable global boundary enforced by the module frontend.
+// BSS globals occupy the same fixed IrModule function-table storage as
+// functions. A native entry module needs one shared slot for main, so this is
+// the executable global boundary enforced by the module frontend.
 // Keep this aligned with IR_MAX_FUNCS = 8192; global initializers in the
 // bootstrap compiler do not evaluate a reference-plus-arithmetic expression.
 pub let BSS_MAX_GLOBALS: i64 = 8191

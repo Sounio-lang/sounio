@@ -669,6 +669,15 @@ lean_lib «EpistemicEffects» where
 @[default_target]
 lean_lib «EpistemicEffectsV2» where
 
+-- NS-extended calculus: `Knowledge⟨T, N⟩` with a noise-symbol source-set and the
+-- E230 disjointness premise on kadd/kmul (Paper A §5–§6). Runtime values carry their
+-- true affine form; proves Lemma 1 (general, Mathlib-free), Lemma 2 (support
+-- over-approximation), NS progress + preservation, exactness preservation, and
+-- Theorem 6.4 (no reached operator is an anti-garbling); x+x sabotage witness in
+-- the kernel. No sorry; axioms ⊆ {propext, Quot.sound, Classical.choice}.
+@[default_target]
+lean_lib «EpistemicEffectsNS» where
+
 -- First Lean importer of V2: the V1 `preservation_is_false` witness,
 -- inverted. `measure (lit_nat 0)` stays `Knowledge<Nat>` after reduction.
 @[default_target]
@@ -749,3 +758,12 @@ lean_lib «SounioFoMultimodFragment» where
 -- `lean_lib «SounioCDTowerAutomorphism»`, but `formal/lean4/SounioCDTowerAutomorphism.lean`
 -- exists on neither `origin/main` nor this PR head. The registration was dangling
 -- (non-default target, so `lake build` never surfaced it) and is dropped here.
+--
+-- NOTE (merge 2026-08-30): the #1580-split block that stood here also registered
+-- «SounioCDCoreLaw» and «SounioSeamFlip». Both landed on `origin/main`
+-- independently and are registered above; re-adding them here would declare the
+-- same target twice. Only «SounioZDChi» is still carried by this branch alone --
+-- formal/lean4/SounioZDChi.lean exists on neither `origin/main` nor any other
+-- lane -- so it keeps its entry, or the file would sit in the tree unbuilt.
+@[default_target]
+lean_lib «SounioZDChi» where

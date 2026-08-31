@@ -26,6 +26,7 @@
 #   scripts/dev/souc-build-remote.sh --gate full           # + madaros_full_gate.sh
 #   scripts/dev/souc-build-remote.sh --gate corpus         # + corpus regression gate
 #   scripts/dev/souc-build-remote.sh --gate check          # + gen1 typechecks main.sio
+#   scripts/dev/souc-build-remote.sh --gate stack-floor    # + <=32 MiB compiler stack gate
 #   SOUNIO_WITNESS_GLOB='tests/compiler/foo/*.sio' \
 #     scripts/dev/souc-build-remote.sh --gate witness      # + task witness gate
 #   scripts/dev/souc-build-remote.sh --gate full --gate corpus
@@ -143,6 +144,25 @@ for g in $GATES; do
       fi
       tail -3 "\$W/fpcheck.log" | sed 's/^/REMOTE: /'
       if [ \$fp_rc -ne 0 ] || [ "\${fp_err:-0}" -gt 0 ]; then exit 1; fi
+      ;;
+    stack-floor)
+      echo "REMOTE: --- Madaros stack-floor gate ---"
+      MADAROS_RAW_BIN="\$W/madaros.elf" \
+        bash scripts/dev/measure_madaros_stack_floor.sh --reps 10 \
+        > "\$W/stack-floor.csv" 2>&1
+      stack_rc=\$?
+      sed 's/^/REMOTE: /' "\$W/stack-floor.csv"
+      if [ \$stack_rc -ne 0 ]; then
+        echo "REMOTE: stack_floor rc=\$stack_rc"
+        exit \$stack_rc
+      fi
+      for expected in 'minimal,32,0,10' 'helper,32,0,10'; do
+        if ! grep -Fxq "\$expected" "\$W/stack-floor.csv"; then
+          echo "REMOTE: stack_floor FAIL missing=\$expected"
+          exit 1
+        fi
+      done
+      echo "REMOTE: stack_floor PASS stack_mib=32 reps=10/10 programs=2/2"
       ;;
     silent)
       echo "REMOTE: --- silent verdict measurement ---"

@@ -1,5 +1,10 @@
 # Rodada 13 — fecho EL+ role-aware em MÚLTIPLAS raízes GO e novas ontologias OBO
 
+> **Round 15 (2026-08-06):** ChEBI (H=218 253) + PATO (H=1 887) closed under
+> the same self-validating sparse multi-target engine — see
+> [`CHEBI_PATO_RESULTS.md`](CHEBI_PATO_RESULTS.md). Gate driver:
+> `chebi_pato_elplus_driver.sio`.
+
 **Data:** 2026-08-05 · **Lane:** `kimi-cli2/elplus-scale-multi-20260805`
 · **Compilador:** `bin/souc` (Madaros), branch
 `research/zd-fiber-antisymmetry-lemma-20260731`.
