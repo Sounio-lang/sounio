@@ -207,6 +207,87 @@ theorem inner_disjoint (a b : Aff) (h : ∀ p ∈ a, ∀ q ∈ b, p.1 ≠ q.1) :
     have hc : coeff b s = 0 := coeff_absent b s (fun q hq => (h (s, c) (by simp) q hq).symm)
     simp [inner, hc]; exact ih (fun p hp q hq => h p (by simp [hp]) q hq)
 
+-- ── The partition theorem (Paper A §8.4, measured; here proved) ──────────────────────────
+-- A source `s` is a PARTITION SOURCE of the sum `a + b` when the sum is invariant to it:
+-- `coeff (a ++ b) s = 0`, i.e. whatever `s` moves into `a` it moves out of `b`. Its contribution
+-- to the covariance is then `−(coeff a s)² ≤ 0`. So a decomposition of a quantity that is
+-- invariant to its shared sources (the two-compartment phase sum, invariant to Q and Vp) has
+-- NEGATIVE covariance, and the independence-assuming add can only over-state — garbling, never
+-- anti-garbling. Sets of sources cannot see this; coefficients can.
+
+/-- Invariance of the sum to `s` ⟺ the two coefficients cancel. -/
+theorem partition_iff (a b : Aff) (s : Nat) : coeff (a ++ b) s = 0 ↔ coeff b s = -coeff a s := by
+  rw [coeff_append]; omega
+
+theorem mul_neg_self_nonpos (c : Int) : c * -c ≤ 0 := by
+  rw [Int.mul_neg]
+  have h : 0 ≤ c * c := by
+    rcases Int.le_total 0 c with hc | hc
+    · exact Int.mul_nonneg hc hc
+    · have h2 : 0 ≤ -c := by omega
+      have h3 := Int.mul_nonneg h2 h2
+      rwa [Int.neg_mul_neg] at h3
+  omega
+
+/-- On a duplicate-free form, a monomial's coefficient IS the form's coefficient at its source. -/
+theorem coeff_of_nodup {a : Aff} (hnd : (a.map Prod.fst).Nodup) {p : Nat × Int} (hp : p ∈ a) :
+    coeff a p.1 = p.2 := by
+  induction a with
+  | nil => simp at hp
+  | cons q r ih =>
+    cases q with | mk t c =>
+    simp only [List.map_cons, List.nodup_cons] at hnd
+    rcases List.mem_cons.mp hp with rfl | hp'
+    · have hz : coeff r t = 0 := coeff_absent r t (fun q hq h => hnd.1 (by
+        rw [← h]; exact List.mem_map.mpr ⟨q, hq, rfl⟩))
+      simp [coeff, hz]
+    · have hts : t ≠ p.1 := by
+        intro h; apply hnd.1; rw [h]; exact List.mem_map.mpr ⟨p, hp', rfl⟩
+      simp only [coeff, hts, if_false, Int.zero_add]
+      exact ih hnd.2 hp'
+
+/-- **Partition ⟹ Cov ≤ 0.** If every monomial `(s, c)` of `a` is either a partition source of
+    `a + b` (`coeff b s = −c`) or absent from `b` (`coeff b s = 0`), the covariance is ≤ 0. -/
+theorem inner_nonpos_of_partition (a b : Aff)
+    (h : ∀ p ∈ a, coeff b p.1 = -p.2 ∨ coeff b p.1 = 0) : inner a b ≤ 0 := by
+  induction a with
+  | nil => simp [inner]
+  | cons q r ih =>
+    cases q with | mk s c =>
+    have hr : inner r b ≤ 0 := ih (fun p hp => h p (List.mem_cons_of_mem _ hp))
+    have hq : coeff b s = -c ∨ coeff b s = 0 := h (s, c) List.mem_cons_self
+    simp only [inner]
+    rcases hq with hq | hq
+    · rw [hq]; have := mul_neg_self_nonpos c; omega
+    · rw [hq]; simp; exact hr
+
+/-- The clinical corollary: on a partition, the independence-assuming add is CONSERVATIVE —
+    it over-states the true variance (garbling), it cannot understate it (anti-garbling). -/
+theorem naive_add_conservative_of_partition (a b : Aff)
+    (h : ∀ p ∈ a, coeff b p.1 = -p.2 ∨ coeff b p.1 = 0) :
+    trueVar (a ++ b) ≤ trueVar a + trueVar b :=
+  naive_add_conservative_of_cov_nonpos a b (inner_nonpos_of_partition a b h)
+
+/-- A FULLY partitioned pair (every source of `a` cancels in the sum), duplicate-free:
+    `⟨a,b⟩ = −Var a` — the `x − x` end of the spectrum. -/
+theorem inner_eq_neg_var_of_full_partition (a b : Aff) (hnd : (a.map Prod.fst).Nodup)
+    (h : ∀ p ∈ a, coeff b p.1 = -p.2) : inner a b = -trueVar a := by
+  unfold trueVar
+  induction a with
+  | nil => simp [inner]
+  | cons q r ih =>
+    cases q with | mk s c =>
+    simp only [List.map_cons, List.nodup_cons] at hnd
+    have hs0 : coeff r s = 0 := coeff_absent r s (fun q hq hh => hnd.1 (by
+      rw [← hh]; exact List.mem_map.mpr ⟨q, hq, rfl⟩))
+    have hb : coeff b s = -c := h (s, c) List.mem_cons_self
+    have hrr : inner r ((s, c) :: r) = inner r r := by
+      have e : (s, c) :: r = [(s, c)] ++ r := rfl
+      rw [e, inner_append_right, inner_single_right, hs0]; simp
+    have ihr := ih hnd.2 (fun p hp => h p (List.mem_cons_of_mem _ hp))
+    simp [inner, coeff, hb, hrr, hs0, ihr, Int.mul_neg]
+    all_goals omega
+
 -- ================================================================
 -- §B. The noise-set lattice  L = 𝒫(S) ∪ {⊤}  and the abstraction `Covers`
 -- ================================================================
@@ -1494,6 +1575,8 @@ end Sounio.EpistemicEffectsNS
 -- ================================================================
 #print axioms Sounio.EpistemicEffectsNS.trueVar_append
 #print axioms Sounio.EpistemicEffectsNS.naive_add_understates_iff
+#print axioms Sounio.EpistemicEffectsNS.inner_nonpos_of_partition
+#print axioms Sounio.EpistemicEffectsNS.inner_eq_neg_var_of_full_partition
 #print axioms Sounio.EpistemicEffectsNS.inner_zero_of_ns
 #print axioms Sounio.EpistemicEffectsNS.covers_coeff
 #print axioms Sounio.EpistemicEffectsNS.progress
