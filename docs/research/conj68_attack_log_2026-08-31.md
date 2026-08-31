@@ -484,6 +484,43 @@ O plano da próxima sessão: construir a seção-modelo (candidata: interpolaç�
 linear entre T e uma seção algébrica com zeros conhecidos nos pares de base,
 onde D3EXACT já deu os witnesses inteiros) e computar e_rel.
 
+## Rodada 14: a curva medida, o invariante real morto, e a rota COMPLEXA
+
+`conj68_witness_count.sio` (novo): caça exaustiva + clustering + Jacobiano +
+traçador de curva por continuação (tangente = autovetor mínimo de JᵀJ +
+penalidade nas escalas; passo + re-polimento GN) + censo de componentes.
+
+**Leis novas medidas:**
+1. **A variedade de witnesses é SEMPRE uma curva**: Jacobiano de posto
+   exatamente 7 (= posto do fibrado — transversalidade genérica!) em 320/320
+   witnesses de 8 configurações genéricas; nulidade 3 = 2 escalas + 1 tangente.
+2. **Γ ∩ Z = ∅ rigorosamente** (u=x ⟹ T(x,w)=0 ⟹ w ∈ ImC(x)∩V = 0 p/ d≥3 —
+   uma linha de álgebra, agora teorema).
+3. **Censo de componentes da CONF#1**: 3 componentes fechadas, classes
+   (−,−), (+,+), (−,−) no double cover — **TOTAL [Γ] = 0 em H₁**. A predição
+   PD [Γ] = a+b FALSIFICADA (como devia: E₇ não é fibrado sobre B todo; e
+   H₁(B∖Z) → H₁(B) é iso, então o cobordismo em B∖Z não obstrui nada).
+   Terceiro invariante topológico real a morrer no dia.
+
+**A ROTA COMPLEXA (o programa correto, nascido das cinzas):**
+- Sobre ℂ, as 4 relações pontuais são identidades algébricas ⟹ a variedade
+  de witnesses complexa Γ_ℂ ⊂ ℂP⁴×ℂP⁴ tem dim_ℂ ≥ 1 e é **não-vazia por
+  teoria de dimensão** — a existência complexa é de graça.
+- Γ_ℂ é conjugação-invariante (equações reais). **Se o bidegree (d_a, d_b)
+  de Γ_ℂ for ímpar em um slot, cortar com um hiperplano REAL genérico dá um
+  0-ciclo conjugação-invariante ímpar ⟹ ponto fixo real ⟹ WITNESS REAL.**
+  Argumento clássico, sem topologia real sutil.
+- A parte ingênua do bidegree: c₇((E₇)_ℂ(1,1)) — nossa w₇ = α⁴β³+α³β⁴ é a
+  sombra mod 2 ⟹ **naive degree ímpar nos dois slots** ✓ já computado.
+- Falta UMA peça: a paridade da **correção de excesso** (Fulton) suportada
+  em Z_ℂ = duas cópias de ℂP⁴ com normal trivial — computação finita de
+  interseção excedente. Se a correção for PAR ⟹ bidegree ímpar ⟹ conjectura.
+
+O dia terminou com o problema transposto do mundo real-topológico (onde três
+invariantes morreram) para o algébrico-complexo (onde a não-vacuidade é grátis
+e falta uma paridade de classe de Segre). É a formulação mais promissora até
+agora — e a mais computável.
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD

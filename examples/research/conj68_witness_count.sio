@@ -1,0 +1,1470 @@
+// Conjecture 6.8 — SYLVESTER ANSATZ scan for the final real-zero lemma.
+// See attack log Rodadas 6-7.
+//
+// Target lemma: the explicit sector map T̄ (u,w) = [u,w], u ∈ O(x), w ∈ O(x'),
+// has a nontrivial zero for every pair.  Observed mechanism (integer witnesses
+// of the hard pairs): the witness satisfies  c ⊥ z'  and  g ⊥ z  — exactly the
+// associative-model Sylvester solvability condition for E2: (gz')c = (cz)g
+// (cz ~ z'c conjugate in a quaternion algebra iff equal traces, and
+// Re(cz) = 0 = Re(z'c) iff c ⊥ z, z' — the first is free, the second is the
+// ansatz).
+//
+// This probe measures, per generic pair:
+//   RES_FULL: min over random c ∈ W (4-dim) of sigma_min(M(c)),
+//   RES_PERP: same but c restricted to W ∩ z'^⊥ (3-dim),
+// where M(c) is the 16×4 matrix g ↦ [u(c), w(g)] over the O(x') frame.
+// sigma_min → 0 means: that c admits a g-kernel = sector witness.
+// If RES_PERP → 0 for all pairs, the Sylvester ansatz is confirmed and the
+// existence proof reduces to: (i) the g-system is singular somewhere on the
+// 3-space (one determinantal condition), (ii) associator control.
+// Search: random directions + local jitter descent (f64), exact frames.
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+
+fn sed_sigma(a: i64, b: i64) -> i64 with Mut, Panic, Div { cd_sigma_c(a, b, 4) }
+
+// f64 sedenion multiply (structure constants exact, coefficients f64)
+fn smul_f(x: &[f64; 16], y: &[f64; 16], out: &![f64; 16]) with Mut, Panic, Div {
+    var k = 0
+    while k < 16 { out[k as usize] = 0.0; k = k + 1 }
+    var i = 0
+    while i < 16 {
+        if x[i as usize] != 0.0 {
+            var j = 0
+            while j < 16 {
+                if y[j as usize] != 0.0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + (sed_sigma(i, j) as f64) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn smul_i(x: &[i64; 16], y: &[i64; 16], out: &![i64; 16]) with Mut, Panic, Div {
+    var k = 0
+    while k < 16 { out[k as usize] = 0; k = k + 1 }
+    var i = 0
+    while i < 16 {
+        if x[i as usize] != 0 {
+            var j = 0
+            while j < 16 {
+                if y[j as usize] != 0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + sed_sigma(i, j) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn omul_i(x: &[i64; 8], y: &[i64; 8], out: &![i64; 8]) with Mut, Panic, Div {
+    var k = 0
+    while k < 8 { out[k as usize] = 0; k = k + 1 }
+    var i = 0
+    while i < 8 {
+        if x[i as usize] != 0 {
+            var j = 0
+            while j < 8 {
+                if y[j as usize] != 0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + sed_sigma(i, j) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn is_zero16(v: &[i64; 16]) -> bool with Mut {
+    var k = 0
+    while k < 16 {
+        if v[k as usize] != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+
+fn annihilates_both(x: &[i64; 16], y: &[i64; 16]) -> bool with Mut, Panic, Div {
+    var p = [0; 16]
+    smul_i(x, y, &!p)
+    if !is_zero16(&p) { return false }
+    smul_i(y, x, &!p)
+    is_zero16(&p)
+}
+
+fn gcd_i(a0: i64, b0: i64) -> i64 with Mut, Div, Panic {
+    var a = if a0 < 0 { 0 - a0 } else { a0 }
+    var b = if b0 < 0 { 0 - b0 } else { b0 }
+    while b != 0 {
+        let t = a % b
+        a = b
+        b = t
+    }
+    a
+}
+
+fn isqrt_exact(n: i64) -> i64 with Mut, Div, Panic {
+    if n < 0 { return 0 - 1 }
+    var k = 0
+    while k * k < n { k = k + 1 }
+    if k * k == n { k } else { 0 - 1 }
+}
+
+fn lehmer_next(state: i64) -> i64 with Mut, Div, Panic {
+    (state * 48271) % 2147483647
+}
+
+fn fabs_(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn fsqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = if x > 1.0 { x } else { 1.0 }
+    var it = 0
+    while it < 40 {
+        y = 0.5 * (y + x / y)
+        it = it + 1
+    }
+    y
+}
+
+fn perp_basis3(r1: &[i64; 8], r2: &[i64; 8], r3: &[i64; 8], out: &![i64; 32]) -> i64 with Mut, Panic, Div {
+    var m = [0; 21]
+    var c = 0
+    while c < 7 {
+        m[c as usize] = r1[(c + 1) as usize]
+        m[(7 + c) as usize] = r2[(c + 1) as usize]
+        m[(14 + c) as usize] = r3[(c + 1) as usize]
+        c = c + 1
+    }
+    var piv_col = [0; 3]
+    var rank = 0
+    var col = 0
+    while col < 7 && rank < 3 {
+        var pr = 0 - 1
+        var r = rank
+        while r < 3 {
+            if m[(r * 7 + col) as usize] != 0 { pr = r; r = 3 } else { r = r + 1 }
+        }
+        if pr >= 0 {
+            if pr != rank {
+                var c1 = 0
+                while c1 < 7 {
+                    let t = m[(rank * 7 + c1) as usize]
+                    m[(rank * 7 + c1) as usize] = m[(pr * 7 + c1) as usize]
+                    m[(pr * 7 + c1) as usize] = t
+                    c1 = c1 + 1
+                }
+            }
+            let piv = m[(rank * 7 + col) as usize]
+            var r2i = 0
+            while r2i < 3 {
+                if r2i != rank {
+                    let f = m[(r2i * 7 + col) as usize]
+                    if f != 0 {
+                        var c2 = 0
+                        while c2 < 7 {
+                            m[(r2i * 7 + c2) as usize] = piv * m[(r2i * 7 + c2) as usize] - f * m[(rank * 7 + c2) as usize]
+                            c2 = c2 + 1
+                        }
+                        var g = 0
+                        var c3 = 0
+                        while c3 < 7 { g = gcd_i(g, m[(r2i * 7 + c3) as usize]); c3 = c3 + 1 }
+                        var gd = 1
+                        if g > 1 { gd = g }
+                        if gd > 1 {
+                            c3 = 0
+                            while c3 < 7 { m[(r2i * 7 + c3) as usize] = m[(r2i * 7 + c3) as usize] / gd; c3 = c3 + 1 }
+                        }
+                    }
+                }
+                r2i = r2i + 1
+            }
+            piv_col[rank as usize] = col
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    var nout = 0
+    var fc = 0
+    while fc < 7 {
+        var isp = 0
+        var q = 0
+        while q < rank {
+            if piv_col[q as usize] == fc { isp = 1 }
+            q = q + 1
+        }
+        if isp == 0 && nout < 4 {
+            var v = [0; 8]
+            var prodp = 1
+            q = 0
+            while q < rank { prodp = prodp * m[(q * 7 + piv_col[q as usize]) as usize]; q = q + 1 }
+            v[(fc + 1) as usize] = prodp
+            q = 0
+            while q < rank {
+                let pc = piv_col[q as usize]
+                var piv = 1
+                if m[(q * 7 + pc) as usize] != 0 { piv = m[(q * 7 + pc) as usize] }
+                v[(pc + 1) as usize] = (0 - m[(q * 7 + fc) as usize]) * (prodp / piv)
+                q = q + 1
+            }
+            var g2 = 0
+            var c4 = 0
+            while c4 < 8 { g2 = gcd_i(g2, v[c4 as usize]); c4 = c4 + 1 }
+            var g2d = 1
+            if g2 > 1 { g2d = g2 }
+            if g2d > 1 {
+                c4 = 0
+                while c4 < 8 { v[c4 as usize] = v[c4 as usize] / g2d; c4 = c4 + 1 }
+            }
+            c4 = 0
+            while c4 < 8 { out[(nout * 8 + c4) as usize] = v[c4 as usize]; c4 = c4 + 1 }
+            nout = nout + 1
+        }
+        fc = fc + 1
+    }
+    nout
+}
+
+fn build_o_frame(xp: &[i64; 16], grows: &![i64; 64]) -> i64 with Mut, Panic, Div {
+    var arow8 = [0; 8]
+    var brow8 = [0; 8]
+    var q = 0
+    while q < 8 {
+        arow8[q as usize] = xp[q as usize]
+        brow8[q as usize] = xp[(8 + q) as usize]
+        q = q + 1
+    }
+    var z8 = [0; 8]
+    omul_i(&arow8, &brow8, &!z8)
+    var cb = [0; 32]
+    let nc = perp_basis3(&arow8, &brow8, &z8, &!cb)
+    if nc != 4 { return 0 }
+    var nA = 0
+    q = 0
+    while q < 8 { nA = nA + arow8[q as usize] * arow8[q as usize]; q = q + 1 }
+    var gj = 0
+    while gj < 4 {
+        var cj = [0; 8]
+        var c6 = 0
+        while c6 < 8 { cj[c6 as usize] = cb[(gj * 8 + c6) as usize]; c6 = c6 + 1 }
+        var dj = [0; 8]
+        omul_i(&cj, &z8, &!dj)
+        var cand = [0; 16]
+        c6 = 0
+        while c6 < 8 {
+            cand[c6 as usize] = nA * cj[c6 as usize]
+            cand[(8 + c6) as usize] = dj[c6 as usize]
+            c6 = c6 + 1
+        }
+        var okg = annihilates_both(xp, &cand)
+        if !okg {
+            c6 = 0
+            while c6 < 8 { cand[(8 + c6) as usize] = 0 - dj[c6 as usize]; c6 = c6 + 1 }
+            okg = annihilates_both(xp, &cand)
+        }
+        if !okg { return 0 }
+        var g3 = 0
+        c6 = 0
+        while c6 < 16 { g3 = gcd_i(g3, cand[c6 as usize]); c6 = c6 + 1 }
+        var g3d = 1
+        if g3 > 1 { g3d = g3 }
+        if g3d > 1 {
+            c6 = 0
+            while c6 < 16 { cand[c6 as usize] = cand[c6 as usize] / g3d; c6 = c6 + 1 }
+        }
+        c6 = 0
+        while c6 < 16 { grows[(gj * 16 + c6) as usize] = cand[c6 as usize]; c6 = c6 + 1 }
+        gj = gj + 1
+    }
+    1
+}
+
+fn sample_zd(seed_in: i64, xp: &![i64; 16], seed_out: &![i64; 1]) -> i64 with Mut, Panic, Div {
+    var seed = seed_in
+    var a8 = [0; 8]
+    seed = lehmer_next(seed)
+    let i1 = 1 + (seed % 7)
+    seed = lehmer_next(seed)
+    let i2 = 1 + (seed % 7)
+    seed = lehmer_next(seed)
+    a8[i1 as usize] = if (seed % 2) == 0 { 1 } else { 0 - 1 }
+    seed = lehmer_next(seed)
+    if i2 != i1 && (seed % 3) != 0 {
+        seed = lehmer_next(seed)
+        a8[i2 as usize] = if (seed % 2) == 0 { 1 } else { 0 - 1 }
+    }
+    var t0 = [0; 8]
+    var q = 1
+    while q < 8 {
+        seed = lehmer_next(seed)
+        let r3 = seed % 3
+        t0[q as usize] = if r3 == 0 { 0 } else { if r3 == 1 { 1 } else { 0 - 1 } }
+        q = q + 1
+    }
+    seed_out[0] = seed
+    var na = 0
+    var dta = 0
+    q = 0
+    while q < 8 {
+        na = na + a8[q as usize] * a8[q as usize]
+        dta = dta + t0[q as usize] * a8[q as usize]
+        q = q + 1
+    }
+    if na == 0 { return 0 }
+    var tp = [0; 8]
+    var nz = 0
+    q = 0
+    while q < 8 {
+        tp[q as usize] = na * t0[q as usize] - dta * a8[q as usize]
+        if tp[q as usize] != 0 { nz = 1 }
+        q = q + 1
+    }
+    if nz == 0 { return 0 }
+    var gg = 0
+    q = 0
+    while q < 8 { gg = gcd_i(gg, tp[q as usize]); q = q + 1 }
+    var ggd = 1
+    if gg > 1 { ggd = gg }
+    if ggd > 1 {
+        q = 0
+        while q < 8 { tp[q as usize] = tp[q as usize] / ggd; q = q + 1 }
+    }
+    var ntp = 0
+    q = 0
+    while q < 8 { ntp = ntp + tp[q as usize] * tp[q as usize]; q = q + 1 }
+    let kk = isqrt_exact(ntp)
+    if kk <= 0 { return 0 }
+    var b8 = [0; 8]
+    omul_i(&a8, &tp, &!b8)
+    q = 0
+    while q < 8 {
+        xp[q as usize] = kk * a8[q as usize]
+        xp[(8 + q) as usize] = b8[q as usize]
+        q = q + 1
+    }
+    1
+}
+
+// sigma_min^2 of a 16x4 f64 matrix (columns m0..m3): smallest eigenvalue of
+// the 4x4 Gram via inverse power iteration with tiny ridge.
+fn sigmin2_16x4(m: &[f64; 64]) -> f64 with Mut, Panic, Div {
+    var g = [0.0; 16]
+    var i = 0
+    while i < 4 {
+        var j = 0
+        while j < 4 {
+            var s = 0.0
+            var r = 0
+            while r < 16 {
+                s = s + m[(r * 4 + i) as usize] * m[(r * 4 + j) as usize]
+                r = r + 1
+            }
+            g[(i * 4 + j) as usize] = s
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // inverse power iteration: solve (G + eps I) y = v
+    var v = [0.5; 4]
+    var lam = 1e300
+    var it = 0
+    while it < 60 {
+        // solve 4x4 via Gaussian elimination each iteration (small)
+        var a = [0.0; 16]
+        var b = [0.0; 4]
+        var t = 0
+        while t < 16 { a[t as usize] = g[t as usize]; t = t + 1 }
+        t = 0
+        while t < 4 { a[(t * 4 + t) as usize] = a[(t * 4 + t) as usize] + 1e-18; b[t as usize] = v[t as usize]; t = t + 1 }
+        var col = 0
+        while col < 4 {
+            var pr = col
+            var best = fabs_(a[(col * 4 + col) as usize])
+            var r2 = col + 1
+            while r2 < 4 {
+                let vv = fabs_(a[(r2 * 4 + col) as usize])
+                if vv > best { best = vv; pr = r2 }
+                r2 = r2 + 1
+            }
+            if pr != col {
+                var c2 = 0
+                while c2 < 4 {
+                    let tt = a[(col * 4 + c2) as usize]
+                    a[(col * 4 + c2) as usize] = a[(pr * 4 + c2) as usize]
+                    a[(pr * 4 + c2) as usize] = tt
+                    c2 = c2 + 1
+                }
+                let tb = b[col as usize]
+                b[col as usize] = b[pr as usize]
+                b[pr as usize] = tb
+            }
+            var piv = a[(col * 4 + col) as usize]
+            if fabs_(piv) < 1e-300 { piv = 1e-300 }
+            r2 = col + 1
+            while r2 < 4 {
+                let f = a[(r2 * 4 + col) as usize] / piv
+                var c3 = col
+                while c3 < 4 {
+                    a[(r2 * 4 + c3) as usize] = a[(r2 * 4 + c3) as usize] - f * a[(col * 4 + c3) as usize]
+                    c3 = c3 + 1
+                }
+                b[r2 as usize] = b[r2 as usize] - f * b[col as usize]
+                r2 = r2 + 1
+            }
+            col = col + 1
+        }
+        var y = [0.0; 4]
+        var rr = 3
+        while rr >= 0 {
+            var s2 = b[rr as usize]
+            var c4 = rr + 1
+            while c4 < 4 {
+                s2 = s2 - a[(rr * 4 + c4) as usize] * y[c4 as usize]
+                c4 = c4 + 1
+            }
+            var piv2 = a[(rr * 4 + rr) as usize]
+            if fabs_(piv2) < 1e-300 { piv2 = 1e-300 }
+            y[rr as usize] = s2 / piv2
+            rr = rr - 1
+        }
+        var ny = 0.0
+        var t2 = 0
+        while t2 < 4 { ny = ny + y[t2 as usize] * y[t2 as usize]; t2 = t2 + 1 }
+        ny = fsqrt(ny)
+        if ny < 1e-300 { return 0.0 }
+        t2 = 0
+        while t2 < 4 { v[t2 as usize] = y[t2 as usize] / ny; t2 = t2 + 1 }
+        // Rayleigh quotient
+        var rq = 0.0
+        var i2 = 0
+        while i2 < 4 {
+            var acc = 0.0
+            var j2 = 0
+            while j2 < 4 { acc = acc + g[(i2 * 4 + j2) as usize] * v[j2 as usize]; j2 = j2 + 1 }
+            rq = rq + v[i2 as usize] * acc
+            i2 = i2 + 1
+        }
+        lam = rq
+        it = it + 1
+    }
+    lam
+}
+
+fn solve5(a_in: &[f64; 25], b_in: &[f64; 5], y: &![f64; 5]) with Mut, Panic, Div {
+    var a = [0.0; 25]
+    var b = [0.0; 5]
+    var i = 0
+    while i < 25 { a[i as usize] = a_in[i as usize]; i = i + 1 }
+    i = 0
+    while i < 5 { b[i as usize] = b_in[i as usize]; i = i + 1 }
+    var col = 0
+    while col < 5 {
+        var pr = col
+        var best = fabs_(a[(col * 5 + col) as usize])
+        var r = col + 1
+        while r < 5 {
+            let v = fabs_(a[(r * 5 + col) as usize])
+            if v > best { best = v; pr = r }
+            r = r + 1
+        }
+        if pr != col {
+            var c = 0
+            while c < 5 {
+                let t = a[(col * 5 + c) as usize]
+                a[(col * 5 + c) as usize] = a[(pr * 5 + c) as usize]
+                a[(pr * 5 + c) as usize] = t
+                c = c + 1
+            }
+            let tb = b[col as usize]
+            b[col as usize] = b[pr as usize]
+            b[pr as usize] = tb
+        }
+        var piv = a[(col * 5 + col) as usize]
+        if fabs_(piv) < 1e-300 { piv = 1e-300 }
+        r = col + 1
+        while r < 5 {
+            let f = a[(r * 5 + col) as usize] / piv
+            var c = col
+            while c < 5 {
+                a[(r * 5 + c) as usize] = a[(r * 5 + c) as usize] - f * a[(col * 5 + c) as usize]
+                c = c + 1
+            }
+            b[r as usize] = b[r as usize] - f * b[col as usize]
+            r = r + 1
+        }
+        col = col + 1
+    }
+    var rr = 4
+    while rr >= 0 {
+        var s = b[rr as usize]
+        var c = rr + 1
+        while c < 5 {
+            s = s - a[(rr * 5 + c) as usize] * y[c as usize]
+            c = c + 1
+        }
+        var piv = a[(rr * 5 + rr) as usize]
+        if fabs_(piv) < 1e-300 { piv = 1e-300 }
+        y[rr as usize] = s / piv
+        rr = rr - 1
+    }
+}
+
+fn solve10(a_in: &[f64; 100], b_in: &[f64; 10], y: &![f64; 10]) with Mut, Panic, Div {
+    var a = [0.0; 100]
+    var b = [0.0; 10]
+    var i = 0
+    while i < 100 { a[i as usize] = a_in[i as usize]; i = i + 1 }
+    i = 0
+    while i < 10 { b[i as usize] = b_in[i as usize]; i = i + 1 }
+    var col = 0
+    while col < 10 {
+        var pr = col
+        var best = fabs_(a[(col * 10 + col) as usize])
+        var r = col + 1
+        while r < 10 {
+            let v = fabs_(a[(r * 10 + col) as usize])
+            if v > best { best = v; pr = r }
+            r = r + 1
+        }
+        if pr != col {
+            var c = 0
+            while c < 10 {
+                let t = a[(col * 10 + c) as usize]
+                a[(col * 10 + c) as usize] = a[(pr * 10 + c) as usize]
+                a[(pr * 10 + c) as usize] = t
+                c = c + 1
+            }
+            let tb = b[col as usize]
+            b[col as usize] = b[pr as usize]
+            b[pr as usize] = tb
+        }
+        var piv = a[(col * 10 + col) as usize]
+        if fabs_(piv) < 1e-300 { piv = 1e-300 }
+        r = col + 1
+        while r < 10 {
+            let f = a[(r * 10 + col) as usize] / piv
+            var c = col
+            while c < 10 {
+                a[(r * 10 + c) as usize] = a[(r * 10 + c) as usize] - f * a[(col * 10 + c) as usize]
+                c = c + 1
+            }
+            b[r as usize] = b[r as usize] - f * b[col as usize]
+            r = r + 1
+        }
+        col = col + 1
+    }
+    var rr = 9
+    while rr >= 0 {
+        var s = b[rr as usize]
+        var c = rr + 1
+        while c < 10 {
+            s = s - a[(rr * 10 + c) as usize] * y[c as usize]
+            c = c + 1
+        }
+        var piv = a[(rr * 10 + rr) as usize]
+        if fabs_(piv) < 1e-300 { piv = 1e-300 }
+        y[rr as usize] = s / piv
+        rr = rr - 1
+    }
+}
+
+fn residual_of(c: &[f64; 400], k: &[f64; 5], m: &[f64; 5]) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var cc = 0
+    while cc < 16 {
+        var acc = 0.0
+        var i = 0
+        while i < 5 {
+            var j = 0
+            while j < 5 {
+                acc = acc + k[i as usize] * m[j as usize] * c[(cc * 25 + i * 5 + j) as usize]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        s = s + acc * acc
+        cc = cc + 1
+    }
+    fsqrt(s)
+}
+
+// strong hunt (alternating inverse power + Gauss-Newton), lock0 optional;
+// returns residual and the witness in kout/mout.
+fn hunt_once(c: &[f64; 400], seed: i64, alt_iters: i64, gn_iters: i64, lock0: i64,
+             kout: &![f64; 5], mout: &![f64; 5]) -> f64 with Mut, Div, Panic {
+    var st = seed
+    var k = [0.0; 5]
+    var m = [0.0; 5]
+    var i = 0
+    while i < 5 {
+        st = lehmer_next(st)
+        m[i as usize] = (st as f64) / 2147483647.0 - 0.5
+        i = i + 1
+    }
+    var nm = 0.0
+    i = 0
+    while i < 5 { nm = nm + m[i as usize] * m[i as usize]; i = i + 1 }
+    nm = fsqrt(nm)
+    if nm < 1e-12 { m[0] = 1.0; nm = 1.0 }
+    i = 0
+    while i < 5 { m[i as usize] = m[i as usize] / nm; i = i + 1 }
+    if lock0 == 1 { m[0] = 0.0 }
+    i = 0
+    while i < 5 { k[i as usize] = 0.0; i = i + 1 }
+    if lock0 == 1 { k[1] = 1.0 } else { k[0] = 1.0 }
+    var it = 0
+    while it < alt_iters {
+        var g = [0.0; 25]
+        var i2 = 0
+        while i2 < 5 {
+            var j2 = 0
+            while j2 < 5 {
+                var s = 0.0
+                var cc = 0
+                while cc < 16 {
+                    var ai = 0.0
+                    var aj = 0.0
+                    var jj = 0
+                    while jj < 5 {
+                        ai = ai + m[jj as usize] * c[(cc * 25 + i2 * 5 + jj) as usize]
+                        aj = aj + m[jj as usize] * c[(cc * 25 + j2 * 5 + jj) as usize]
+                        jj = jj + 1
+                    }
+                    s = s + ai * aj
+                    cc = cc + 1
+                }
+                g[(i2 * 5 + j2) as usize] = s
+                j2 = j2 + 1
+            }
+            i2 = i2 + 1
+        }
+        i2 = 0
+        while i2 < 5 { g[(i2 * 5 + i2) as usize] = g[(i2 * 5 + i2) as usize] + 1e-14; i2 = i2 + 1 }
+        if lock0 == 1 {
+            var q0 = 0
+            while q0 < 5 { g[q0 as usize] = 0.0; g[(q0 * 5) as usize] = 0.0; q0 = q0 + 1 }
+            g[0] = 1.0
+        }
+        var y = [0.0; 5]
+        solve5(&g, &k, &!y)
+        var ny = 0.0
+        i2 = 0
+        while i2 < 5 { ny = ny + y[i2 as usize] * y[i2 as usize]; i2 = i2 + 1 }
+        ny = fsqrt(ny)
+        if ny > 1e-300 {
+            i2 = 0
+            while i2 < 5 { k[i2 as usize] = y[i2 as usize] / ny; i2 = i2 + 1 }
+        }
+        var h = [0.0; 25]
+        i2 = 0
+        while i2 < 5 {
+            var j2 = 0
+            while j2 < 5 {
+                var s = 0.0
+                var cc = 0
+                while cc < 16 {
+                    var bi = 0.0
+                    var bj = 0.0
+                    var ii = 0
+                    while ii < 5 {
+                        bi = bi + k[ii as usize] * c[(cc * 25 + ii * 5 + i2) as usize]
+                        bj = bj + k[ii as usize] * c[(cc * 25 + ii * 5 + j2) as usize]
+                        ii = ii + 1
+                    }
+                    s = s + bi * bj
+                    cc = cc + 1
+                }
+                h[(i2 * 5 + j2) as usize] = s
+                j2 = j2 + 1
+            }
+            i2 = i2 + 1
+        }
+        i2 = 0
+        while i2 < 5 { h[(i2 * 5 + i2) as usize] = h[(i2 * 5 + i2) as usize] + 1e-14; i2 = i2 + 1 }
+        if lock0 == 1 {
+            var q1 = 0
+            while q1 < 5 { h[q1 as usize] = 0.0; h[(q1 * 5) as usize] = 0.0; q1 = q1 + 1 }
+            h[0] = 1.0
+        }
+        var y2 = [0.0; 5]
+        solve5(&h, &m, &!y2)
+        var ny2 = 0.0
+        i2 = 0
+        while i2 < 5 { ny2 = ny2 + y2[i2 as usize] * y2[i2 as usize]; i2 = i2 + 1 }
+        ny2 = fsqrt(ny2)
+        if ny2 > 1e-300 {
+            i2 = 0
+            while i2 < 5 { m[i2 as usize] = y2[i2 as usize] / ny2; i2 = i2 + 1 }
+        }
+        it = it + 1
+    }
+    var gn = 0
+    while gn < gn_iters {
+        var jt_j = [0.0; 100]
+        var jt_f = [0.0; 10]
+        var z = 0
+        while z < 100 { jt_j[z as usize] = 0.0; z = z + 1 }
+        z = 0
+        while z < 10 { jt_f[z as usize] = 0.0; z = z + 1 }
+        var cc = 0
+        while cc < 16 {
+            var arow = [0.0; 10]
+            var i3 = 0
+            while i3 < 5 {
+                var ai = 0.0
+                var jj = 0
+                while jj < 5 {
+                    ai = ai + m[jj as usize] * c[(cc * 25 + i3 * 5 + jj) as usize]
+                    jj = jj + 1
+                }
+                arow[i3 as usize] = ai
+                i3 = i3 + 1
+            }
+            var j3 = 0
+            while j3 < 5 {
+                var bj = 0.0
+                var ii = 0
+                while ii < 5 {
+                    bj = bj + k[ii as usize] * c[(cc * 25 + ii * 5 + j3) as usize]
+                    ii = ii + 1
+                }
+                arow[(5 + j3) as usize] = bj
+                j3 = j3 + 1
+            }
+            var fval = 0.0
+            var i4 = 0
+            while i4 < 5 { fval = fval + arow[i4 as usize] * k[i4 as usize]; i4 = i4 + 1 }
+            var p = 0
+            while p < 10 {
+                var q = 0
+                while q < 10 {
+                    jt_j[(p * 10 + q) as usize] = jt_j[(p * 10 + q) as usize] + arow[p as usize] * arow[q as usize]
+                    q = q + 1
+                }
+                jt_f[p as usize] = jt_f[p as usize] + arow[p as usize] * fval
+                p = p + 1
+            }
+            cc = cc + 1
+        }
+        var p2 = 0
+        while p2 < 10 {
+            jt_j[(p2 * 10 + p2) as usize] = jt_j[(p2 * 10 + p2) as usize] + 1e-16
+            jt_f[p2 as usize] = 0.0 - jt_f[p2 as usize]
+            p2 = p2 + 1
+        }
+        if lock0 == 1 {
+            var q2 = 0
+            while q2 < 10 {
+                jt_j[q2 as usize] = 0.0
+                jt_j[(q2 * 10) as usize] = 0.0
+                jt_j[(50 + q2) as usize] = 0.0
+                jt_j[(q2 * 10 + 5) as usize] = 0.0
+                q2 = q2 + 1
+            }
+            jt_j[0] = 1.0
+            jt_j[55] = 1.0
+            jt_f[0] = 0.0
+            jt_f[5] = 0.0
+        }
+        var delta = [0.0; 10]
+        solve10(&jt_j, &jt_f, &!delta)
+        var i5 = 0
+        while i5 < 5 {
+            k[i5 as usize] = k[i5 as usize] + delta[i5 as usize]
+            m[i5 as usize] = m[i5 as usize] + delta[(5 + i5) as usize]
+            i5 = i5 + 1
+        }
+        var nk = 0.0
+        var nm2 = 0.0
+        i5 = 0
+        while i5 < 5 {
+            nk = nk + k[i5 as usize] * k[i5 as usize]
+            nm2 = nm2 + m[i5 as usize] * m[i5 as usize]
+            i5 = i5 + 1
+        }
+        nk = fsqrt(nk)
+        nm2 = fsqrt(nm2)
+        if nk < 1e-9 || nm2 < 1e-9 { return 1e9 }
+        i5 = 0
+        while i5 < 5 {
+            k[i5 as usize] = k[i5 as usize] / nk
+            m[i5 as usize] = m[i5 as usize] / nm2
+            i5 = i5 + 1
+        }
+        gn = gn + 1
+    }
+    var i6 = 0
+    while i6 < 5 { kout[i6 as usize] = k[i6 as usize]; mout[i6 as usize] = m[i6 as usize]; i6 = i6 + 1 }
+    residual_of(c, &k, &m)
+}
+
+// integer basis of the perp of 4 pure octonion rows inside Im(O): 3 vectors
+fn perp_basis4(r1: &[i64; 8], r2: &[i64; 8], r3: &[i64; 8], r4: &[i64; 8], out: &![i64; 24]) -> i64 with Mut, Panic, Div {
+    var m = [0; 28]
+    var c = 0
+    while c < 7 {
+        m[c as usize] = r1[(c + 1) as usize]
+        m[(7 + c) as usize] = r2[(c + 1) as usize]
+        m[(14 + c) as usize] = r3[(c + 1) as usize]
+        m[(21 + c) as usize] = r4[(c + 1) as usize]
+        c = c + 1
+    }
+    var piv_col = [0; 4]
+    var rank = 0
+    var col = 0
+    while col < 7 && rank < 4 {
+        var pr = 0 - 1
+        var r = rank
+        while r < 4 {
+            if m[(r * 7 + col) as usize] != 0 { pr = r; r = 4 } else { r = r + 1 }
+        }
+        if pr >= 0 {
+            if pr != rank {
+                var c1 = 0
+                while c1 < 7 {
+                    let t = m[(rank * 7 + c1) as usize]
+                    m[(rank * 7 + c1) as usize] = m[(pr * 7 + c1) as usize]
+                    m[(pr * 7 + c1) as usize] = t
+                    c1 = c1 + 1
+                }
+            }
+            let piv = m[(rank * 7 + col) as usize]
+            var r2i = 0
+            while r2i < 4 {
+                if r2i != rank {
+                    let f = m[(r2i * 7 + col) as usize]
+                    if f != 0 {
+                        var c2 = 0
+                        while c2 < 7 {
+                            m[(r2i * 7 + c2) as usize] = piv * m[(r2i * 7 + c2) as usize] - f * m[(rank * 7 + c2) as usize]
+                            c2 = c2 + 1
+                        }
+                        var g = 0
+                        var c3 = 0
+                        while c3 < 7 { g = gcd_i(g, m[(r2i * 7 + c3) as usize]); c3 = c3 + 1 }
+                        var gd = 1
+                        if g > 1 { gd = g }
+                        if gd > 1 {
+                            c3 = 0
+                            while c3 < 7 { m[(r2i * 7 + c3) as usize] = m[(r2i * 7 + c3) as usize] / gd; c3 = c3 + 1 }
+                        }
+                    }
+                }
+                r2i = r2i + 1
+            }
+            piv_col[rank as usize] = col
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    var nout = 0
+    var fc = 0
+    while fc < 7 {
+        var isp = 0
+        var q = 0
+        while q < rank {
+            if piv_col[q as usize] == fc { isp = 1 }
+            q = q + 1
+        }
+        if isp == 0 && nout < 3 {
+            var v = [0; 8]
+            var prodp = 1
+            q = 0
+            while q < rank { prodp = prodp * m[(q * 7 + piv_col[q as usize]) as usize]; q = q + 1 }
+            v[(fc + 1) as usize] = prodp
+            q = 0
+            while q < rank {
+                let pc = piv_col[q as usize]
+                var piv = 1
+                if m[(q * 7 + pc) as usize] != 0 { piv = m[(q * 7 + pc) as usize] }
+                v[(pc + 1) as usize] = (0 - m[(q * 7 + fc) as usize]) * (prodp / piv)
+                q = q + 1
+            }
+            var g2 = 0
+            var c4 = 0
+            while c4 < 8 { g2 = gcd_i(g2, v[c4 as usize]); c4 = c4 + 1 }
+            var g2d = 1
+            if g2 > 1 { g2d = g2 }
+            if g2d > 1 {
+                c4 = 0
+                while c4 < 8 { v[c4 as usize] = v[c4 as usize] / g2d; c4 = c4 + 1 }
+            }
+            c4 = 0
+            while c4 < 8 { out[(nout * 8 + c4) as usize] = v[c4 as usize]; c4 = c4 + 1 }
+            nout = nout + 1
+        }
+        fc = fc + 1
+    }
+    nout
+}
+
+fn omul_f(x: &[f64; 8], y: &[f64; 8], out: &![f64; 8]) with Mut, Panic, Div {
+    var k = 0
+    while k < 8 { out[k as usize] = 0.0; k = k + 1 }
+    var i = 0
+    while i < 8 {
+        if x[i as usize] != 0.0 {
+            var j = 0
+            while j < 8 {
+                if y[j as usize] != 0.0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + (sed_sigma(i, j) as f64) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Jacobian of T at (k,m): 16 x 10; numeric rank with relative pivot threshold.
+fn jac_rank(c: &[f64; 400], k: &[f64; 5], m: &[f64; 5]) -> i64 with Mut, Panic, Div {
+    var j = [0.0; 160]
+    var maxa = 0.0
+    var cc = 0
+    while cc < 16 {
+        var i = 0
+        while i < 5 {
+            var ai = 0.0
+            var bj = 0.0
+            var t = 0
+            while t < 5 {
+                ai = ai + m[t as usize] * c[(cc * 25 + i * 5 + t) as usize]
+                bj = bj + k[t as usize] * c[(cc * 25 + t * 5 + i) as usize]
+                t = t + 1
+            }
+            j[(cc * 10 + i) as usize] = ai
+            j[(cc * 10 + 5 + i) as usize] = bj
+            if fabs_(ai) > maxa { maxa = fabs_(ai) }
+            if fabs_(bj) > maxa { maxa = fabs_(bj) }
+            i = i + 1
+        }
+        cc = cc + 1
+    }
+    if maxa < 1e-300 { return 0 }
+    let thresh = 0.0000001 * maxa
+    var rank = 0
+    var col = 0
+    while col < 10 && rank < 16 {
+        var pr = 0 - 1
+        var best = thresh
+        var r = rank
+        while r < 16 {
+            if fabs_(j[(r * 10 + col) as usize]) > best { best = fabs_(j[(r * 10 + col) as usize]); pr = r }
+            r = r + 1
+        }
+        if pr >= 0 {
+            if pr != rank {
+                var c2 = 0
+                while c2 < 10 {
+                    let tt = j[(rank * 10 + c2) as usize]
+                    j[(rank * 10 + c2) as usize] = j[(pr * 10 + c2) as usize]
+                    j[(pr * 10 + c2) as usize] = tt
+                    c2 = c2 + 1
+                }
+            }
+            let piv = j[(rank * 10 + col) as usize]
+            var r2 = rank + 1
+            while r2 < 16 {
+                let f = j[(r2 * 10 + col) as usize] / piv
+                var c3 = col
+                while c3 < 10 {
+                    j[(r2 * 10 + c3) as usize] = j[(r2 * 10 + c3) as usize] - f * j[(rank * 10 + c3) as usize]
+                    c3 = c3 + 1
+                }
+                r2 = r2 + 1
+            }
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    rank
+}
+
+// tangent to the witness curve at (k,m): smallest eigenvector of
+// J^T J + LAM*(kk^T (+) mm^T-block) via inverse power iteration (10-dim).
+fn curve_tangent(c: &[f64; 400], k: &[f64; 5], m: &[f64; 5], t: &![f64; 10]) with Mut, Panic, Div {
+    // build G = J^T J (10x10) from the 16x10 jacobian
+    var j = [0.0; 160]
+    var cc = 0
+    while cc < 16 {
+        var i = 0
+        while i < 5 {
+            var ai = 0.0
+            var bj = 0.0
+            var q = 0
+            while q < 5 {
+                ai = ai + m[q as usize] * c[(cc * 25 + i * 5 + q) as usize]
+                bj = bj + k[q as usize] * c[(cc * 25 + q * 5 + i) as usize]
+                q = q + 1
+            }
+            j[(cc * 10 + i) as usize] = ai
+            j[(cc * 10 + 5 + i) as usize] = bj
+            i = i + 1
+        }
+        cc = cc + 1
+    }
+    var g = [0.0; 100]
+    var p = 0
+    while p < 10 {
+        var q2 = 0
+        while q2 < 10 {
+            var s = 0.0
+            cc = 0
+            while cc < 16 { s = s + j[(cc * 10 + p) as usize] * j[(cc * 10 + q2) as usize]; cc = cc + 1 }
+            g[(p * 10 + q2) as usize] = s
+            q2 = q2 + 1
+        }
+        p = p + 1
+    }
+    // penalty for scaling directions (k,0)/|k| and (0,m)/|m|
+    var nk = 0.0
+    var nm = 0.0
+    p = 0
+    while p < 5 { nk = nk + k[p as usize] * k[p as usize]; nm = nm + m[p as usize] * m[p as usize]; p = p + 1 }
+    if nk < 1e-300 { nk = 1.0 }
+    if nm < 1e-300 { nm = 1.0 }
+    p = 0
+    while p < 5 {
+        var q3 = 0
+        while q3 < 5 {
+            g[(p * 10 + q3) as usize] = g[(p * 10 + q3) as usize] + 100.0 * k[p as usize] * k[q3 as usize] / nk
+            g[((5 + p) * 10 + 5 + q3) as usize] = g[((5 + p) * 10 + 5 + q3) as usize] + 100.0 * m[p as usize] * m[q3 as usize] / nm
+            q3 = q3 + 1
+        }
+        p = p + 1
+    }
+    p = 0
+    while p < 10 { g[(p * 10 + p) as usize] = g[(p * 10 + p) as usize] + 1e-14; p = p + 1 }
+    // inverse power iteration with previous t as seed (orientation continuity)
+    var v = [0.0; 10]
+    var nv0 = 0.0
+    p = 0
+    while p < 10 { v[p as usize] = t[p as usize]; nv0 = nv0 + v[p as usize] * v[p as usize]; p = p + 1 }
+    if nv0 < 1e-12 { v[1] = 1.0 }
+    var it = 0
+    while it < 40 {
+        var y = [0.0; 10]
+        solve10(&g, &v, &!y)
+        var ny = 0.0
+        p = 0
+        while p < 10 { ny = ny + y[p as usize] * y[p as usize]; p = p + 1 }
+        ny = fsqrt(ny)
+        if ny < 1e-300 { it = 40 } else {
+            p = 0
+            while p < 10 { v[p as usize] = y[p as usize] / ny; p = p + 1 }
+        }
+        it = it + 1
+    }
+    // orient along previous t
+    var dt = 0.0
+    p = 0
+    while p < 10 { dt = dt + v[p as usize] * t[p as usize]; p = p + 1 }
+    if dt < 0.0 {
+        p = 0
+        while p < 10 { v[p as usize] = 0.0 - v[p as usize]; p = p + 1 }
+    }
+    p = 0
+    while p < 10 { t[p as usize] = v[p as usize]; p = p + 1 }
+}
+
+// Gauss-Newton re-polish onto the curve from a nearby point (no restarts).
+fn polish_on(c: &[f64; 400], k: &![f64; 5], m: &![f64; 5]) -> f64 with Mut, Panic, Div {
+    var gn = 0
+    while gn < 25 {
+        var jt_j = [0.0; 100]
+        var jt_f = [0.0; 10]
+        var cc = 0
+        while cc < 16 {
+            var arow = [0.0; 10]
+            var i3 = 0
+            while i3 < 5 {
+                var ai = 0.0
+                var jj = 0
+                while jj < 5 { ai = ai + m[jj as usize] * c[(cc * 25 + i3 * 5 + jj) as usize]; jj = jj + 1 }
+                arow[i3 as usize] = ai
+                i3 = i3 + 1
+            }
+            var j3 = 0
+            while j3 < 5 {
+                var bj = 0.0
+                var ii = 0
+                while ii < 5 { bj = bj + k[ii as usize] * c[(cc * 25 + ii * 5 + j3) as usize]; ii = ii + 1 }
+                arow[(5 + j3) as usize] = bj
+                j3 = j3 + 1
+            }
+            var fval = 0.0
+            var i4 = 0
+            while i4 < 5 { fval = fval + arow[i4 as usize] * k[i4 as usize]; i4 = i4 + 1 }
+            var p = 0
+            while p < 10 {
+                var q = 0
+                while q < 10 {
+                    jt_j[(p * 10 + q) as usize] = jt_j[(p * 10 + q) as usize] + arow[p as usize] * arow[q as usize]
+                    q = q + 1
+                }
+                jt_f[p as usize] = jt_f[p as usize] + arow[p as usize] * fval
+                p = p + 1
+            }
+            cc = cc + 1
+        }
+        var p2 = 0
+        while p2 < 10 {
+            jt_j[(p2 * 10 + p2) as usize] = jt_j[(p2 * 10 + p2) as usize] + 1e-14
+            jt_f[p2 as usize] = 0.0 - jt_f[p2 as usize]
+            p2 = p2 + 1
+        }
+        var delta = [0.0; 10]
+        solve10(&jt_j, &jt_f, &!delta)
+        var i5 = 0
+        while i5 < 5 {
+            k[i5 as usize] = k[i5 as usize] + delta[i5 as usize]
+            m[i5 as usize] = m[i5 as usize] + delta[(5 + i5) as usize]
+            i5 = i5 + 1
+        }
+        var nk = 0.0
+        var nm = 0.0
+        i5 = 0
+        while i5 < 5 {
+            nk = nk + k[i5 as usize] * k[i5 as usize]
+            nm = nm + m[i5 as usize] * m[i5 as usize]
+            i5 = i5 + 1
+        }
+        nk = fsqrt(nk)
+        nm = fsqrt(nm)
+        if nk < 1e-9 || nm < 1e-9 { return 1e9 }
+        i5 = 0
+        while i5 < 5 {
+            k[i5 as usize] = k[i5 as usize] / nk
+            m[i5 as usize] = m[i5 as usize] / nm
+            i5 = i5 + 1
+        }
+        gn = gn + 1
+    }
+    residual_of(c, k, m)
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // e_rel mod 2 = parity of the number of projective witnesses of a generic
+    // configuration (T extends its own canonical boundary data; nondegenerate
+    // zeros count 1 each).  Exhaustive hunt + projective clustering.
+    var x1 = [0; 16]
+    x1[1] = 1
+    x1[10] = 1
+    var g1 = [0; 64]
+    if build_o_frame(&x1, &!g1) == 0 { println("X1 FAIL"); return }
+    var u5 = [0; 160]
+    var t0i = 0
+    while t0i < 16 { u5[t0i as usize] = x1[t0i as usize]; t0i = t0i + 1 }
+    var gi0 = 0
+    while gi0 < 4 {
+        t0i = 0
+        while t0i < 16 { u5[((gi0 + 1) * 16 + t0i) as usize] = g1[(gi0 * 16 + t0i) as usize]; t0i = t0i + 1 }
+        gi0 = gi0 + 1
+    }
+    var seed = 31415927
+    var nconf = 0
+    var trial = 0
+    var parity_even = 0
+    var parity_odd = 0
+    var degen_total = 0
+    var maxed_out = 0
+    while trial < 6000 && nconf < 1 {
+        trial = trial + 1
+        var x2 = [0; 16]
+        var so = [0; 1]
+        let ok2 = sample_zd(seed, &!x2, &!so)
+        seed = so[0]
+        if ok2 == 1 && (x2[1] != 0 || x2[2] != 0) {
+            // genericity filter: exclude the A ⊥ span{e1,e2} special stratum
+            var g2 = [0; 64]
+            if build_o_frame(&x2, &!g2) == 1 {
+                nconf = nconf + 1
+                var v5 = [0; 160]
+                var t5 = 0
+                while t5 < 16 { v5[t5 as usize] = x2[t5 as usize]; t5 = t5 + 1 }
+                var gi5 = 0
+                while gi5 < 4 {
+                    t5 = 0
+                    while t5 < 16 { v5[((gi5 + 1) * 16 + t5) as usize] = g2[(gi5 * 16 + t5) as usize]; t5 = t5 + 1 }
+                    gi5 = gi5 + 1
+                }
+                var cten = [0.0; 400]
+                var maxa = 0.0
+                var it5 = 0
+                while it5 < 5 {
+                    var uu5 = [0; 16]
+                    t5 = 0
+                    while t5 < 16 { uu5[t5 as usize] = u5[(it5 * 16 + t5) as usize]; t5 = t5 + 1 }
+                    var jt5 = 0
+                    while jt5 < 5 {
+                        var ww5 = [0; 16]
+                        t5 = 0
+                        while t5 < 16 { ww5[t5 as usize] = v5[(jt5 * 16 + t5) as usize]; t5 = t5 + 1 }
+                        var p15 = [0; 16]
+                        var p25 = [0; 16]
+                        smul_i(&uu5, &ww5, &!p15)
+                        smul_i(&ww5, &uu5, &!p25)
+                        t5 = 0
+                        while t5 < 16 {
+                            let cv = (p15[t5 as usize] - p25[t5 as usize]) as f64
+                            cten[(t5 * 25 + it5 * 5 + jt5) as usize] = cv
+                            if fabs_(cv) > maxa { maxa = fabs_(cv) }
+                            t5 = t5 + 1
+                        }
+                        jt5 = jt5 + 1
+                    }
+                    it5 = it5 + 1
+                }
+                if maxa < 1e-300 { maxa = 1.0 }
+                t5 = 0
+                while t5 < 400 { cten[t5 as usize] = cten[t5 as usize] / maxa; t5 = t5 + 1 }
+                // exhaustive hunt
+                var wit = [0.0; 400]      // up to 40 witnesses x (5+5)
+                var nwit = 0
+                var degen = 0
+                var jrhist = [0; 11]
+                var ktmp = [0.0; 5]
+                var mtmp = [0.0; 5]
+                var rs = 0
+                var sd = 271828 + nconf * 9973
+                while rs < 400 {
+                    sd = lehmer_next(sd + rs)
+                    let r = hunt_once(&cten, sd, 50, 40, 0, &!ktmp, &!mtmp)
+                    if r < 1e-10 {
+                        // canonicalize signs: largest |k| positive, largest |m| positive
+                        var imax = 0
+                        var vmax = 0.0
+                        var q = 0
+                        while q < 5 {
+                            if fabs_(ktmp[q as usize]) > vmax { vmax = fabs_(ktmp[q as usize]); imax = q }
+                            q = q + 1
+                        }
+                        if ktmp[imax as usize] < 0.0 {
+                            q = 0
+                            while q < 5 { ktmp[q as usize] = 0.0 - ktmp[q as usize]; q = q + 1 }
+                        }
+                        imax = 0
+                        vmax = 0.0
+                        q = 0
+                        while q < 5 {
+                            if fabs_(mtmp[q as usize]) > vmax { vmax = fabs_(mtmp[q as usize]); imax = q }
+                            q = q + 1
+                        }
+                        if mtmp[imax as usize] < 0.0 {
+                            q = 0
+                            while q < 5 { mtmp[q as usize] = 0.0 - mtmp[q as usize]; q = q + 1 }
+                        }
+                        var found = 0
+                        var wi = 0
+                        while wi < nwit {
+                            var d = 0.0
+                            q = 0
+                            while q < 5 {
+                                let dk = ktmp[q as usize] - wit[(wi * 10 + q) as usize]
+                                let dm = mtmp[q as usize] - wit[(wi * 10 + 5 + q) as usize]
+                                d = d + dk * dk + dm * dm
+                                q = q + 1
+                            }
+                            if d < 0.000001 { found = 1; wi = nwit } else { wi = wi + 1 }
+                        }
+                        if found == 0 {
+                            if nwit < 40 {
+                                q = 0
+                                while q < 5 {
+                                    wit[(nwit * 10 + q) as usize] = ktmp[q as usize]
+                                    wit[(nwit * 10 + 5 + q) as usize] = mtmp[q as usize]
+                                    q = q + 1
+                                }
+                                let jr = jac_rank(&cten, &ktmp, &mtmp)
+                                if jr < 8 { degen = degen + 1 }
+                                jrhist[jr as usize] = jrhist[jr as usize] + 1
+                                nwit = nwit + 1
+                            } else {
+                                maxed_out = maxed_out + 1
+                            }
+                        }
+                    }
+                    rs = rs + 1
+                }
+                print("CONF#")
+                print_int(nconf)
+                print(" WITNESSES ")
+                print_int(nwit)
+                print(" PARITY ")
+                print_int(nwit % 2)
+                print(" DEGEN ")
+                print_int(degen)
+                print(" JR:")
+                var jh = 0
+                while jh < 11 {
+                    if jrhist[jh as usize] > 0 {
+                        print(" r")
+                        print_int(jh)
+                        print("x")
+                        print_int(jrhist[jh as usize])
+                    }
+                    jh = jh + 1
+                }
+                print(" A=[")
+                var pz = 0
+                while pz < 8 { print_int(x2[pz as usize]); print(" "); pz = pz + 1 }
+                print("]\n")
+                if (nwit % 2) == 0 { parity_even = parity_even + 1 } else { parity_odd = parity_odd + 1 }
+                degen_total = degen_total + degen
+                // ---- COMPONENT CENSUS (R14): trace the witness curve from
+                // every not-yet-visited witness of CONF#1; each closed
+                // component contributes (eps_u, eps_w); the cobordism argument
+                // needs the TOTAL class of one configuration to be nonzero.
+                if nwit > 0 && nconf == 1 {
+                    var visited = [0; 40]
+                    var cla = 0
+                    var clb = 0
+                    var ncomp = 0
+                    var comp = 0
+                    while comp < 6 {
+                        // first unvisited witness
+                        var start = 0 - 1
+                        var wi2 = 0
+                        while wi2 < nwit {
+                            if visited[wi2 as usize] == 0 { start = wi2; wi2 = nwit } else { wi2 = wi2 + 1 }
+                        }
+                        if start < 0 { comp = 6 } else {
+                            ncomp = ncomp + 1
+                            visited[start as usize] = 1
+                            var kc = [0.0; 5]
+                            var mc = [0.0; 5]
+                            var k0v = [0.0; 5]
+                            var m0v = [0.0; 5]
+                            var q7 = 0
+                            while q7 < 5 {
+                                kc[q7 as usize] = wit[(start * 10 + q7) as usize]
+                                mc[q7 as usize] = wit[(start * 10 + 5 + q7) as usize]
+                                k0v[q7 as usize] = kc[q7 as usize]
+                                m0v[q7 as usize] = mc[q7 as usize]
+                                q7 = q7 + 1
+                            }
+                            var tg = [0.0; 10]
+                            var step = 0
+                            var closed = 0
+                            var eps_u = 0
+                            var eps_w = 0
+                            while step < 2400 && closed == 0 {
+                                curve_tangent(&cten, &kc, &mc, &!tg)
+                                q7 = 0
+                                while q7 < 5 {
+                                    kc[q7 as usize] = kc[q7 as usize] + 0.045 * tg[q7 as usize]
+                                    mc[q7 as usize] = mc[q7 as usize] + 0.045 * tg[(5 + q7) as usize]
+                                    q7 = q7 + 1
+                                }
+                                let rres = polish_on(&cten, &!kc, &!mc)
+                                if rres > 0.000001 { step = 2400 } else {
+                                    // mark visited witnesses near the current point (either lift)
+                                    var wv = 0
+                                    while wv < nwit {
+                                        if visited[wv as usize] == 0 {
+                                            var dp2 = 0.0
+                                            var dm2b = 0.0
+                                            var q8 = 0
+                                            while q8 < 5 {
+                                                let a1 = kc[q8 as usize] - wit[(wv * 10 + q8) as usize]
+                                                let a2 = kc[q8 as usize] + wit[(wv * 10 + q8) as usize]
+                                                let b1 = mc[q8 as usize] - wit[(wv * 10 + 5 + q8) as usize]
+                                                let b2 = mc[q8 as usize] + wit[(wv * 10 + 5 + q8) as usize]
+                                                dp2 = dp2 + a1 * a1 + b1 * b1
+                                                dm2b = dm2b + a2 * a2 + b2 * b2
+                                                q8 = q8 + 1
+                                            }
+                                            if dp2 < 0.004 || dm2b < 0.004 { visited[wv as usize] = 1 }
+                                        }
+                                        wv = wv + 1
+                                    }
+                                    if step > 20 {
+                                        var dpp = 0.0
+                                        var dpm = 0.0
+                                        var dmp = 0.0
+                                        var dmm = 0.0
+                                        q7 = 0
+                                        while q7 < 5 {
+                                            let dk1 = kc[q7 as usize] - k0v[q7 as usize]
+                                            let dk2 = kc[q7 as usize] + k0v[q7 as usize]
+                                            let dm1 = mc[q7 as usize] - m0v[q7 as usize]
+                                            let dm2 = mc[q7 as usize] + m0v[q7 as usize]
+                                            dpp = dpp + dk1 * dk1 + dm1 * dm1
+                                            dpm = dpm + dk1 * dk1 + dm2 * dm2
+                                            dmp = dmp + dk2 * dk2 + dm1 * dm1
+                                            dmm = dmm + dk2 * dk2 + dm2 * dm2
+                                            q7 = q7 + 1
+                                        }
+                                        if dpp < 0.001 { closed = 1; eps_u = 1; eps_w = 1 }
+                                        if dpm < 0.001 { closed = 1; eps_u = 1; eps_w = 0 - 1 }
+                                        if dmp < 0.001 { closed = 1; eps_u = 0 - 1; eps_w = 1 }
+                                        if dmm < 0.001 { closed = 1; eps_u = 0 - 1; eps_w = 0 - 1 }
+                                    }
+                                }
+                                step = step + 1
+                            }
+                            print("  COMP#")
+                            print_int(ncomp)
+                            print(" steps ")
+                            print_int(step)
+                            if closed == 1 {
+                                print(" CLOSED eps_u ")
+                                print_int(eps_u)
+                                print(" eps_w ")
+                                print_int(eps_w)
+                                if eps_u < 0 { cla = 1 - cla }
+                                if eps_w < 0 { clb = 1 - clb }
+                            } else {
+                                print(" NOT_CLOSED")
+                            }
+                            print("\n")
+                            comp = comp + 1
+                        }
+                    }
+                    print("  TOTAL_CLASS a ")
+                    print_int(cla)
+                    print(" b ")
+                    print_int(clb)
+                    print(" components ")
+                    print_int(ncomp)
+                    print("\n")
+                }
+            }
+        }
+    }
+    print("CONFIGS ")
+    print_int(nconf)
+    print("  PARITY_ODD ")
+    print_int(parity_odd)
+    print("  PARITY_EVEN ")
+    print_int(parity_even)
+    print("  DEGEN_TOTAL ")
+    print_int(degen_total)
+    print("  MAXED ")
+    print_int(maxed_out)
+    print("\n")
+    println("CONJ68_WITNESS_COUNT DONE")
+}
