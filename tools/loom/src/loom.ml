@@ -8419,6 +8419,9 @@ let serve_http cli =
                  http_response "200 OK" "application/json" (sessions_json root)
                else if path = "/api/fleet" then
                  http_response "200 OK" "application/json" (fleet_json root cwd)
+               else if path = "/api/hook-generation-drain" then
+                 http_response "200 OK" "application/json"
+                   (Loom_hook_generation_drain.live_json ~cwd)
                else if path = "/api/events" then
                  http_response "200 OK" "application/json" (events_json root)
                else if path = "/api/events.arrow" then
@@ -13576,6 +13579,8 @@ let main () =
       durable_lane_canary_child ()
     else if command = "agent-hook" then
       Loom_hook.run (arguments_after_command ())
+    else if command = "hook-generation-drain-snapshot" then
+      Loom_hook_generation_drain.run (arguments_after_command ())
     else if command = "exec-capability" then
       Loom_exec.run (arguments_after_command ())
     else
