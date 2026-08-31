@@ -1,6 +1,7 @@
 /-
-  Concrete FORMAL_PARITY finite action for the frozen Pireus V13 outer
-  canonicalizer.
+  Concrete declared-action quotient witness for the frozen Pireus V13 outer
+  canonicalizer.  This module proves the local finite-action and declared-orbit
+  obligations; it does not close the remaining executable parity boundary.
 
   A state is the exact big-endian BitVec 256 encoding of a sign table in the
   proved 11-bit direct gauge section.  Each analytic GL(4,F2) x input-swap
@@ -245,7 +246,7 @@ structure ConcreteQuotientBoundary where
   concreteQuotientActionLawsProved : Bool
   concreteQuotientCanonicalIffOrbitProved : Bool
   executedSounioStreamingMinimumEqualityProved : Bool
-  concreteCanonicalEqualityIffFullDeclaredOrbitProved : Bool
+  concreteCanonicalEqualityIffDeclaredLinearSwapGaugeOrbitProved : Bool
   formalTarget03Closed : Bool
   formalParityClosed : Bool
   claimReady : Bool
@@ -258,22 +259,22 @@ def concreteQuotientBoundary : ConcreteQuotientBoundary :=
   , concreteQuotientActionLawsProved := true
   , concreteQuotientCanonicalIffOrbitProved := true
   , executedSounioStreamingMinimumEqualityProved := false
-  , concreteCanonicalEqualityIffFullDeclaredOrbitProved := true
+  , concreteCanonicalEqualityIffDeclaredLinearSwapGaugeOrbitProved := true
   , formalTarget03Closed := true
   , formalParityClosed := false
   , claimReady := false }
 
 theorem concrete_quotient_closes_target03_without_claim_promotion :
-    concreteQuotientBoundary.exactLexBitVecRepresentationProved &&
+    (concreteQuotientBoundary.exactLexBitVecRepresentationProved &&
       concreteQuotientBoundary.analytic40320ActionClosureProved &&
       concreteQuotientBoundary.gaugeNormalizationAbsorptionProved &&
       concreteQuotientBoundary.concreteQuotientActionLawsProved &&
       concreteQuotientBoundary.concreteQuotientCanonicalIffOrbitProved &&
       !concreteQuotientBoundary.executedSounioStreamingMinimumEqualityProved &&
-      concreteQuotientBoundary.concreteCanonicalEqualityIffFullDeclaredOrbitProved &&
+      concreteQuotientBoundary.concreteCanonicalEqualityIffDeclaredLinearSwapGaugeOrbitProved &&
       concreteQuotientBoundary.formalTarget03Closed &&
       !concreteQuotientBoundary.formalParityClosed &&
-      !concreteQuotientBoundary.claimReady := by
+      !concreteQuotientBoundary.claimReady) = true := by
   decide
 
 end SounioPireusConcreteQuotientAction
