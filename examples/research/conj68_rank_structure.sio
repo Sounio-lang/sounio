@@ -487,11 +487,26 @@ fn build_v_frame(xp: &[i64; 16], vrow: &![i64; 160]) -> i64 with Mut, Panic, Div
     1
 }
 
+// global complex structure R: (p,q) |-> (-q, p)  (right mult by (0,1); the
+// tilde of Lemma 3.6 / Theorem 5.2 -- R^2 = -1, preserves every O(x)).
+fn rmap(v: &[i64; 16], out: &![i64; 16]) with Mut {
+    var k = 0
+    while k < 8 {
+        out[k as usize] = 0 - v[(8 + k) as usize]
+        out[(8 + k) as usize] = v[k as usize]
+        k = k + 1
+    }
+}
+
 // enumerate small integer vectors v (support<=4) with v _|_ all 25 commutator
 // columns -- prints the image-complement lattice points for pattern reading.
-fn scan_small_complement(tten: &[i64; 400], tag: i64) with IO, Mut, Panic, Div {
+// sector = 1 restricts to the O x O block (i,j >= 1): the rank-9 sector whose
+// 7-dim complement holds the 3 extra hidden relations.
+fn scan_small_complement(tten: &[i64; 400], tag: i64, sector: i64) with IO, Mut, Panic, Div {
     print("COMPLEMENT_SCAN t=")
     print_int(tag)
+    print(" sector=")
+    print_int(sector)
     print("\n")
     var printed = 0
     // stratified: support 1; support 2 (s1<s2, cs2 in {+-1,+-2}); support 3
@@ -526,7 +541,7 @@ fn scan_small_complement(tten: &[i64; 400], tag: i64) with IO, Mut, Panic, Div {
                 v[s2 as usize] = cs2
                 valid = 1
             }
-        } else {
+        } else if pat < 16 + 120 * 16 + 560 * 16 {
             // support 3: triples s1<s2<s3 (560) x 16 coeff pats (cs2,cs3 in 4 vals)
             let q3 = pat - (16 + 120 * 16)
             if q3 < 560 * 16 {
@@ -559,12 +574,47 @@ fn scan_small_complement(tten: &[i64; 400], tag: i64) with IO, Mut, Panic, Div {
                     valid = 1
                 }
             }
+        } else {
+            // support 4: quadruples s1<s2<s3<s4 (1820) x 8 sign pats (+-1)
+            let q4 = pat - (16 + 120 * 16 + 560 * 16)
+            if q4 < 1820 * 8 {
+                let quadix = q4 / 8
+                let sp = q4 % 8
+                var s1 = 0
+                var s2 = 1
+                var s3 = 2
+                var s4 = 3
+                var cnt4 = 0
+                var fnd4 = 0
+                while s1 < 16 && fnd4 == 0 {
+                    s2 = s1 + 1
+                    while s2 < 16 && fnd4 == 0 {
+                        s3 = s2 + 1
+                        while s3 < 16 && fnd4 == 0 {
+                            s4 = s3 + 1
+                            while s4 < 16 && fnd4 == 0 {
+                                if cnt4 == quadix { fnd4 = 1 } else { cnt4 = cnt4 + 1; s4 = s4 + 1 }
+                            }
+                            if fnd4 == 0 { s3 = s3 + 1 }
+                        }
+                        if fnd4 == 0 { s2 = s2 + 1 }
+                    }
+                    if fnd4 == 0 { s1 = s1 + 1 }
+                }
+                if fnd4 == 1 {
+                    v[s1 as usize] = 1
+                    v[s2 as usize] = if (sp & 1) == 0 { 1 } else { 0 - 1 }
+                    v[s3 as usize] = if (sp & 2) == 0 { 1 } else { 0 - 1 }
+                    v[s4 as usize] = if (sp & 4) == 0 { 1 } else { 0 - 1 }
+                    valid = 1
+                }
+            }
         }
         if valid == 1 {
             var okc = 1
-            var pi2 = 0
+            var pi2 = sector
             while pi2 < 5 && okc == 1 {
-                var pj2 = 0
+                var pj2 = sector
                 while pj2 < 5 && okc == 1 {
                     var s = 0
                     var cc = 0
@@ -624,6 +674,16 @@ fn main() with IO, Mut, Panic, Div {
     var p_no7 = 0
     var np_r7 = 0
     var np_no7 = 0
+    var h_r7 = 0
+    var h_r9 = 0
+    var noh_r7 = 0
+    var noh_r9 = 0
+    var r_preserves = 0
+    var n_i1 = 0
+    var n_i2 = 0
+    var n_i3 = 0
+    var n_i4 = 0
+    var n_pairs_tested = 0
 
     // pair loop: tgt 0..83 basis (skip x0 itself and non-frames), then 60 rational
     var seed = 987654321
@@ -763,9 +823,60 @@ fn main() with IO, Mut, Panic, Div {
                     it2 = it2 + 1
                 }
                 let rkt = rank_t_mod_p(&tten, 2147483647)
-                if t == 4 || t == 14 || t == 36 {
-                    scan_small_complement(&tten, t)
+                if t == 4 || t == 14 || t == 28 || t == 36 {
+                    scan_small_complement(&tten, t, 0)
+                    scan_small_complement(&tten, t, 1)
                 }
+                // R-equivariance tests on the O x O frames (rows 1..4):
+                //   I1: [Ru,Rw] + [u,w] = 0    I2: [Ru,Rw] - [u,w] = 0
+                //   I3: [Ru,w] - [u,Rw] = 0    I4: [Ru,w] + [u,Rw] = 0
+                // plus sanity: R preserves O(x) frames (Ru annihilates x0).
+                var i1ok = 1
+                var i2ok = 1
+                var i3ok = 1
+                var i4ok = 1
+                var rk_pres = 1
+                var fi = 1
+                while fi < 5 {
+                    var uu = [0; 16]
+                    var cz2 = 0
+                    while cz2 < 16 { uu[cz2 as usize] = urow[(fi * 16 + cz2) as usize]; cz2 = cz2 + 1 }
+                    var ru = [0; 16]
+                    rmap(&uu, &!ru)
+                    if !annihilates_both(&x0, &ru) { rk_pres = 0 }
+                    var fj = 1
+                    while fj < 5 {
+                        var ww = [0; 16]
+                        cz2 = 0
+                        while cz2 < 16 { ww[cz2 as usize] = vrow[(fj * 16 + cz2) as usize]; cz2 = cz2 + 1 }
+                        var rw = [0; 16]
+                        rmap(&ww, &!rw)
+                        var cuw = [0; 16]
+                        var cruw = [0; 16]
+                        var crurw = [0; 16]
+                        var curw = [0; 16]
+                        comm_into(&uu, &ww, &!cuw)
+                        comm_into(&ru, &ww, &!cruw)
+                        comm_into(&ru, &rw, &!crurw)
+                        comm_into(&uu, &rw, &!curw)
+                        cz2 = 0
+                        while cz2 < 16 {
+                            if crurw[cz2 as usize] + cuw[cz2 as usize] != 0 { i1ok = 0 }
+                            if crurw[cz2 as usize] - cuw[cz2 as usize] != 0 { i2ok = 0 }
+                            if cruw[cz2 as usize] - curw[cz2 as usize] != 0 { i3ok = 0 }
+                            if cruw[cz2 as usize] + curw[cz2 as usize] != 0 { i4ok = 0 }
+                            cz2 = cz2 + 1
+                        }
+                        fj = fj + 1
+                    }
+                    fi = fi + 1
+                }
+                if rk_pres == 1 { r_preserves = r_preserves + 1 }
+                if i1ok == 1 { n_i1 = n_i1 + 1 }
+                if i2ok == 1 { n_i2 = n_i2 + 1 }
+                if i3ok == 1 { n_i3 = n_i3 + 1 }
+                if i4ok == 1 { n_i4 = n_i4 + 1 }
+                n_pairs_tested = n_pairs_tested + 1
                 if rkt == 11 {
                     n11 = n11 + 1
                     // ---- candidates
@@ -878,6 +989,43 @@ fn main() with IO, Mut, Panic, Div {
                 let rk44 = rank_t44_mod_p(&tten, 2147483647)
                 hist44[rk44 as usize] = hist44[rk44 as usize] + 1
                 let predP = if xp[1] == 0 && xp[2] == 0 { 1 } else { 0 }
+                // hold(z+z') law vs rank44: candidates (z+z',0),(0,z+z') with
+                // z = e3 (from x0), z' = A'B' from xp halves; dots against the
+                // sector commutators already in tten.
+                var ax8 = [0; 8]
+                var bx8 = [0; 8]
+                var qz = 0
+                while qz < 8 {
+                    ax8[qz as usize] = xp[qz as usize]
+                    bx8[qz as usize] = xp[(8 + qz) as usize]
+                    qz = qz + 1
+                }
+                var zp8 = [0; 8]
+                omul_i(&ax8, &bx8, &!zp8)
+                var hold_zz = 1
+                var pi3 = 1
+                while pi3 < 5 && hold_zz == 1 {
+                    var pj3 = 1
+                    while pj3 < 5 && hold_zz == 1 {
+                        var s1v = 0
+                        var s2v = 0
+                        qz = 0
+                        while qz < 8 {
+                            let zsum = (if qz == 3 { 1 } else { 0 }) + zp8[qz as usize]
+                            s1v = s1v + tten[(qz * 25 + pi3 * 5 + pj3) as usize] * zsum
+                            s2v = s2v + tten[((8 + qz) * 25 + pi3 * 5 + pj3) as usize] * zsum
+                            qz = qz + 1
+                        }
+                        if s1v != 0 || s2v != 0 { hold_zz = 0 }
+                        pj3 = pj3 + 1
+                    }
+                    pi3 = pi3 + 1
+                }
+                if hold_zz == 1 {
+                    if rk44 == 7 { h_r7 = h_r7 + 1 } else { h_r9 = h_r9 + 1 }
+                } else {
+                    if rk44 == 7 { noh_r7 = noh_r7 + 1 } else { noh_r9 = noh_r9 + 1 }
+                }
                 if rk44 == 7 {
                     if predP == 1 { p_r7 = p_r7 + 1 } else { np_r7 = np_r7 + 1 }
                 } else {
@@ -969,6 +1117,28 @@ fn main() with IO, Mut, Panic, Div {
         }
         hh = hh + 1
     }
+    print("R_TESTS pairs ")
+    print_int(n_pairs_tested)
+    print("  R_PRESERVES_O ")
+    print_int(r_preserves)
+    print("  I1[+RR] ")
+    print_int(n_i1)
+    print("  I2[-RR] ")
+    print_int(n_i2)
+    print("  I3[R.-.R] ")
+    print_int(n_i3)
+    print("  I4[R.+.R] ")
+    print_int(n_i4)
+    print("\n")
+    print("ZZLAW_X_RANK44: hold&r7 ")
+    print_int(h_r7)
+    print("  hold&r9 ")
+    print_int(h_r9)
+    print("  nohold&r7 ")
+    print_int(noh_r7)
+    print("  nohold&r9 ")
+    print_int(noh_r9)
+    print("\n")
     print("PRED_A_PERP_E12: P&r7 ")
     print_int(p_r7)
     print("  P&no7 ")

@@ -1,0 +1,497 @@
+// Conjecture 6.8 — minimal-hypothesis probe for the two HIDDEN sector
+// identities (Claim C), found by exact lattice scan of the O x O image
+// complement (see conj68_rank_structure.sio + attack log Rodada 5):
+//
+//   for u = (N c, c z) in O(x), w = (N' d, d z') in O(x'),
+//   z = ab, z' = a'b':          <[u,w], (z+z', 0)> = 0
+//                               <[u,w], (0, z+z')> = 0
+//
+// V1 of this probe (100% violations) taught a lesson kept here honestly: the
+// partner of (A,B) is (n(A)c, ±cz) with the SIGN varying per generator, and
+// n(A) = n(B) is required — testing the formula with a fixed + sign and
+// without the ZD norm condition falsifies a hypothesis nobody held.
+//
+// Current version: legitimate integer ZDs x = (kA, At) (t _|_ 1,A with n(t)
+// square), partners assembled by the closed form and VERIFIED by exact
+// bilateral annihilation (sign retry), u/w random ±1 combos of the verified
+// generators.  Tests, over N draws:
+//     <[u,w], (z+z', 0)> = 0   and   <[u,w], (0, z+z')> = 0,  z = AB, z' = A'B'.
+// Output: violation count over accepted trials (0 = Claim C holds).
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+
+fn sed_sigma(a: i64, b: i64) -> i64 with Mut, Panic, Div { cd_sigma_c(a, b, 4) }
+
+fn smul_i(x: &[i64; 16], y: &[i64; 16], out: &![i64; 16]) with Mut, Panic, Div {
+    var k = 0
+    while k < 16 { out[k as usize] = 0; k = k + 1 }
+    var i = 0
+    while i < 16 {
+        if x[i as usize] != 0 {
+            var j = 0
+            while j < 16 {
+                if y[j as usize] != 0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + sed_sigma(i, j) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn omul_i(x: &[i64; 8], y: &[i64; 8], out: &![i64; 8]) with Mut, Panic, Div {
+    var k = 0
+    while k < 8 { out[k as usize] = 0; k = k + 1 }
+    var i = 0
+    while i < 8 {
+        if x[i as usize] != 0 {
+            var j = 0
+            while j < 8 {
+                if y[j as usize] != 0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + sed_sigma(i, j) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn gcd_i(a0: i64, b0: i64) -> i64 with Mut, Div, Panic {
+    var a = if a0 < 0 { 0 - a0 } else { a0 }
+    var b = if b0 < 0 { 0 - b0 } else { b0 }
+    while b != 0 {
+        let t = a % b
+        a = b
+        b = t
+    }
+    a
+}
+
+fn lehmer_next(state: i64) -> i64 with Mut, Div, Panic {
+    (state * 48271) % 2147483647
+}
+
+// integer basis of the perp of up to 3 pure octonion rows inside Im(O);
+// returns 7 - rank vectors in out (each 8-dim, coord 0 = 0)
+fn perp_rows(r1: &[i64; 8], r2: &[i64; 8], r3: &[i64; 8], nrows: i64, out: &![i64; 56]) -> i64 with Mut, Panic, Div {
+    var m = [0; 21]
+    var c = 0
+    while c < 7 {
+        m[c as usize] = r1[(c + 1) as usize]
+        m[(7 + c) as usize] = if nrows >= 2 { r2[(c + 1) as usize] } else { 0 }
+        m[(14 + c) as usize] = if nrows >= 3 { r3[(c + 1) as usize] } else { 0 }
+        c = c + 1
+    }
+    var piv_col = [0; 3]
+    var rank = 0
+    var col = 0
+    while col < 7 && rank < 3 {
+        var pr = 0 - 1
+        var r = rank
+        while r < 3 {
+            if m[(r * 7 + col) as usize] != 0 { pr = r; r = 3 } else { r = r + 1 }
+        }
+        if pr >= 0 {
+            if pr != rank {
+                var c1 = 0
+                while c1 < 7 {
+                    let t = m[(rank * 7 + c1) as usize]
+                    m[(rank * 7 + c1) as usize] = m[(pr * 7 + c1) as usize]
+                    m[(pr * 7 + c1) as usize] = t
+                    c1 = c1 + 1
+                }
+            }
+            let piv = m[(rank * 7 + col) as usize]
+            var r2i = 0
+            while r2i < 3 {
+                if r2i != rank {
+                    let f = m[(r2i * 7 + col) as usize]
+                    if f != 0 {
+                        var c2 = 0
+                        while c2 < 7 {
+                            m[(r2i * 7 + c2) as usize] = piv * m[(r2i * 7 + c2) as usize] - f * m[(rank * 7 + c2) as usize]
+                            c2 = c2 + 1
+                        }
+                        var g = 0
+                        var c3 = 0
+                        while c3 < 7 { g = gcd_i(g, m[(r2i * 7 + c3) as usize]); c3 = c3 + 1 }
+                        var gd = 1
+                        if g > 1 { gd = g }
+                        if gd > 1 {
+                            c3 = 0
+                            while c3 < 7 { m[(r2i * 7 + c3) as usize] = m[(r2i * 7 + c3) as usize] / gd; c3 = c3 + 1 }
+                        }
+                    }
+                }
+                r2i = r2i + 1
+            }
+            piv_col[rank as usize] = col
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    var nout = 0
+    var fc = 0
+    while fc < 7 {
+        var isp = 0
+        var q = 0
+        while q < rank {
+            if piv_col[q as usize] == fc { isp = 1 }
+            q = q + 1
+        }
+        if isp == 0 && nout < 7 {
+            var v = [0; 8]
+            var prodp = 1
+            q = 0
+            while q < rank { prodp = prodp * m[(q * 7 + piv_col[q as usize]) as usize]; q = q + 1 }
+            v[(fc + 1) as usize] = prodp
+            q = 0
+            while q < rank {
+                let pc = piv_col[q as usize]
+                var piv = 1
+                if m[(q * 7 + pc) as usize] != 0 { piv = m[(q * 7 + pc) as usize] }
+                v[(pc + 1) as usize] = (0 - m[(q * 7 + fc) as usize]) * (prodp / piv)
+                q = q + 1
+            }
+            var g2 = 0
+            var c4 = 0
+            while c4 < 8 { g2 = gcd_i(g2, v[c4 as usize]); c4 = c4 + 1 }
+            var g2d = 1
+            if g2 > 1 { g2d = g2 }
+            if g2d > 1 {
+                c4 = 0
+                while c4 < 8 { v[c4 as usize] = v[c4 as usize] / g2d; c4 = c4 + 1 }
+            }
+            c4 = 0
+            while c4 < 8 { out[(nout * 8 + c4) as usize] = v[c4 as usize]; c4 = c4 + 1 }
+            nout = nout + 1
+        }
+        fc = fc + 1
+    }
+    nout
+}
+
+fn is_zero16(v: &[i64; 16]) -> bool with Mut {
+    var k = 0
+    while k < 16 {
+        if v[k as usize] != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+
+fn annihilates_both(x: &[i64; 16], y: &[i64; 16]) -> bool with Mut, Panic, Div {
+    var p = [0; 16]
+    smul_i(x, y, &!p)
+    if !is_zero16(&p) { return false }
+    smul_i(y, x, &!p)
+    is_zero16(&p)
+}
+
+fn isqrt_exact(n: i64) -> i64 with Mut, Div, Panic {
+    if n < 0 { return 0 - 1 }
+    var k = 0
+    while k * k < n { k = k + 1 }
+    if k * k == n { k } else { 0 - 1 }
+}
+
+// sample a small integer ZD into xp; returns 1 on success
+fn sample_zd(seed_in: i64, xp: &![i64; 16], seed_out: &![i64; 1]) -> i64 with Mut, Panic, Div {
+    var seed = seed_in
+    var a8 = [0; 8]
+    seed = lehmer_next(seed)
+    let i1 = 1 + (seed % 7)
+    seed = lehmer_next(seed)
+    let i2 = 1 + (seed % 7)
+    seed = lehmer_next(seed)
+    a8[i1 as usize] = if (seed % 2) == 0 { 1 } else { 0 - 1 }
+    seed = lehmer_next(seed)
+    if i2 != i1 && (seed % 3) != 0 {
+        seed = lehmer_next(seed)
+        a8[i2 as usize] = if (seed % 2) == 0 { 1 } else { 0 - 1 }
+    }
+    var t0 = [0; 8]
+    var q = 1
+    while q < 8 {
+        seed = lehmer_next(seed)
+        let r3 = seed % 3
+        t0[q as usize] = if r3 == 0 { 0 } else { if r3 == 1 { 1 } else { 0 - 1 } }
+        q = q + 1
+    }
+    seed_out[0] = seed
+    var na = 0
+    var dta = 0
+    q = 0
+    while q < 8 {
+        na = na + a8[q as usize] * a8[q as usize]
+        dta = dta + t0[q as usize] * a8[q as usize]
+        q = q + 1
+    }
+    if na == 0 { return 0 }
+    var tp = [0; 8]
+    var nz = 0
+    q = 0
+    while q < 8 {
+        tp[q as usize] = na * t0[q as usize] - dta * a8[q as usize]
+        if tp[q as usize] != 0 { nz = 1 }
+        q = q + 1
+    }
+    if nz == 0 { return 0 }
+    var gg = 0
+    q = 0
+    while q < 8 { gg = gcd_i(gg, tp[q as usize]); q = q + 1 }
+    var ggd = 1
+    if gg > 1 { ggd = gg }
+    if ggd > 1 {
+        q = 0
+        while q < 8 { tp[q as usize] = tp[q as usize] / ggd; q = q + 1 }
+    }
+    var ntp = 0
+    q = 0
+    while q < 8 { ntp = ntp + tp[q as usize] * tp[q as usize]; q = q + 1 }
+    let kk = isqrt_exact(ntp)
+    if kk <= 0 { return 0 }
+    var b8 = [0; 8]
+    omul_i(&a8, &tp, &!b8)
+    q = 0
+    while q < 8 {
+        xp[q as usize] = kk * a8[q as usize]
+        xp[(8 + q) as usize] = b8[q as usize]
+        q = q + 1
+    }
+    1
+}
+
+// O(x) generators via the closed form with VERIFIED annihilation (sign retry);
+// returns 1 on success, generators (gcd-reduced) in grows (4 x 16)
+fn build_o_frame(xp: &[i64; 16], grows: &![i64; 64]) -> i64 with Mut, Panic, Div {
+    var arow8 = [0; 8]
+    var brow8 = [0; 8]
+    var q = 0
+    while q < 8 {
+        arow8[q as usize] = xp[q as usize]
+        brow8[q as usize] = xp[(8 + q) as usize]
+        q = q + 1
+    }
+    var z8 = [0; 8]
+    omul_i(&arow8, &brow8, &!z8)
+    var cb = [0; 56]
+    let nc = perp_rows(&arow8, &brow8, &z8, 3, &!cb)
+    if nc != 4 { return 0 }
+    var nA = 0
+    q = 0
+    while q < 8 { nA = nA + arow8[q as usize] * arow8[q as usize]; q = q + 1 }
+    var gj = 0
+    while gj < 4 {
+        var cj = [0; 8]
+        var c6 = 0
+        while c6 < 8 { cj[c6 as usize] = cb[(gj * 8 + c6) as usize]; c6 = c6 + 1 }
+        var dj = [0; 8]
+        omul_i(&cj, &z8, &!dj)
+        var cand = [0; 16]
+        c6 = 0
+        while c6 < 8 {
+            cand[c6 as usize] = nA * cj[c6 as usize]
+            cand[(8 + c6) as usize] = dj[c6 as usize]
+            c6 = c6 + 1
+        }
+        var okg = annihilates_both(xp, &cand)
+        if !okg {
+            c6 = 0
+            while c6 < 8 { cand[(8 + c6) as usize] = 0 - dj[c6 as usize]; c6 = c6 + 1 }
+            okg = annihilates_both(xp, &cand)
+        }
+        if !okg { return 0 }
+        var g3 = 0
+        c6 = 0
+        while c6 < 16 { g3 = gcd_i(g3, cand[c6 as usize]); c6 = c6 + 1 }
+        var g3d = 1
+        if g3 > 1 { g3d = g3 }
+        if g3d > 1 {
+            c6 = 0
+            while c6 < 16 { cand[c6 as usize] = cand[c6 as usize] / g3d; c6 = c6 + 1 }
+        }
+        c6 = 0
+        while c6 < 16 { grows[(gj * 16 + c6) as usize] = cand[c6 as usize]; c6 = c6 + 1 }
+        gj = gj + 1
+    }
+    1
+}
+
+fn main() with IO, Mut, Panic, Div {
+    let n_trials = 4000
+    var accepted = 0
+    var viol1 = 0
+    var viol2 = 0
+    var c1_ponly = 0
+    var c1_monly = 0
+    var c1_both = 0
+    var c1_neither = 0
+    var c2_ponly = 0
+    var c2_monly = 0
+    var c2_both = 0
+    var c2_neither = 0
+    var agree = 0
+    var seed = 424242
+    var trial = 0
+    while trial < n_trials && accepted < 250 {
+        var x1 = [0; 16]
+        var x2 = [0; 16]
+        var so = [0; 1]
+        let ok1 = sample_zd(seed, &!x1, &!so)
+        seed = so[0]
+        let ok2 = sample_zd(seed, &!x2, &!so)
+        seed = so[0]
+        if ok1 == 1 && ok2 == 1 {
+            var g1 = [0; 64]
+            var g2 = [0; 64]
+            if build_o_frame(&x1, &!g1) == 1 && build_o_frame(&x2, &!g2) == 1 {
+                // z, z' from the halves
+                var a18 = [0; 8]
+                var b18 = [0; 8]
+                var a28 = [0; 8]
+                var b28 = [0; 8]
+                var q = 0
+                while q < 8 {
+                    a18[q as usize] = x1[q as usize]
+                    b18[q as usize] = x1[(8 + q) as usize]
+                    a28[q as usize] = x2[q as usize]
+                    b28[q as usize] = x2[(8 + q) as usize]
+                    q = q + 1
+                }
+                var z18 = [0; 8]
+                var z28 = [0; 8]
+                omul_i(&a18, &b18, &!z18)
+                omul_i(&a28, &b28, &!z28)
+                var t1v = [0; 16]
+                var t2v = [0; 16]
+                var t1m = [0; 16]
+                var t2m = [0; 16]
+                q = 0
+                while q < 8 {
+                    t1v[q as usize] = z18[q as usize] + z28[q as usize]
+                    t2v[(8 + q) as usize] = z18[q as usize] + z28[q as usize]
+                    t1m[q as usize] = z18[q as usize] - z28[q as usize]
+                    t2m[(8 + q) as usize] = z18[q as usize] - z28[q as usize]
+                    q = q + 1
+                }
+                // pair-level: test ALL 16 generator pairs for both candidates
+                accepted = accepted + 1
+                var hold1 = 1
+                var hold2 = 1
+                var gi = 0
+                while gi < 4 {
+                    var u16 = [0; 16]
+                    var c7 = 0
+                    while c7 < 16 { u16[c7 as usize] = g1[(gi * 16 + c7) as usize]; c7 = c7 + 1 }
+                    var gj = 0
+                    while gj < 4 {
+                        var w16 = [0; 16]
+                        c7 = 0
+                        while c7 < 16 { w16[c7 as usize] = g2[(gj * 16 + c7) as usize]; c7 = c7 + 1 }
+                        var uw = [0; 16]
+                        var wu = [0; 16]
+                        smul_i(&u16, &w16, &!uw)
+                        smul_i(&w16, &u16, &!wu)
+                        var d1 = 0
+                        var d2 = 0
+                        c7 = 0
+                        while c7 < 16 {
+                            let cm = uw[c7 as usize] - wu[c7 as usize]
+                            d1 = d1 + cm * t1v[c7 as usize]
+                            d2 = d2 + cm * t2v[c7 as usize]
+                            c7 = c7 + 1
+                        }
+                        if d1 != 0 { hold1 = 0 }
+                        if d2 != 0 { hold2 = 0 }
+                        gj = gj + 1
+                    }
+                    gi = gi + 1
+                }
+                if hold1 == 0 { viol1 = viol1 + 1 }
+                if hold2 == 0 { viol2 = viol2 + 1 }
+                if hold1 == 1 && hold2 == 1 { agree = agree + 1 }
+                // pair invariants for correlation
+                if accepted <= 44 {
+                    var daa = 0
+                    var dab = 0
+                    var dba = 0
+                    var dbb = 0
+                    var dzz = 0
+                    q = 0
+                    while q < 8 {
+                        daa = daa + a18[q as usize] * a28[q as usize]
+                        dab = dab + a18[q as usize] * b28[q as usize]
+                        dba = dba + b18[q as usize] * a28[q as usize]
+                        dbb = dbb + b18[q as usize] * b28[q as usize]
+                        dzz = dzz + z18[q as usize] * z28[q as usize]
+                        q = q + 1
+                    }
+                    print("PAIRDIAG hold ")
+                    print_int(hold1 * 10 + hold2)
+                    print("  daa ")
+                    print_int(daa)
+                    print(" dab ")
+                    print_int(dab)
+                    print(" dba ")
+                    print_int(dba)
+                    print(" dbb ")
+                    print_int(dbb)
+                    print(" dzz ")
+                    print_int(dzz)
+                    print("\n")
+                }
+            }
+        }
+        trial = trial + 1
+    }
+    print("ACCEPTED ")
+    print_int(accepted)
+    print("  VIOL_(z+z,0) ")
+    print_int(viol1)
+    print("  VIOL_(0,z+z) ")
+    print_int(viol2)
+    print("\n")
+    print("SLOT1 +only ")
+    print_int(c1_ponly)
+    print(" -only ")
+    print_int(c1_monly)
+    print(" both ")
+    print_int(c1_both)
+    print(" neither ")
+    print_int(c1_neither)
+    print("\n")
+    print("SLOT2 +only ")
+    print_int(c2_ponly)
+    print(" -only ")
+    print_int(c2_monly)
+    print(" both ")
+    print_int(c2_both)
+    print(" neither ")
+    print_int(c2_neither)
+    print("\n")
+    print("SIGN_AGREES ")
+    print_int(agree)
+    print("\n")
+    println("CONJ68_HIDDEN_IDENTITY_PROBE DONE")
+}

@@ -182,6 +182,39 @@ usar a estrutura específica: candidatos (i) contagem de grau/Euler sobre a
 família explícita, (ii) a simetria f ↔ f̃ do double hexagon agindo no kernel
 de dim 14, (iii) redução Aut(𝕆) a uma família de 8 parâmetros + análise real.
 
+## Rodada 5 (mesmo dia): o assalto à peça (b) — mapa fino, sem fechamento
+
+Runners: `conj68_rank_structure.sio` (estendido), `conj68_hidden_identity_probe.sio`.
+
+**Negativos honestos (hipóteses mortas com dados):**
+- A estrutura complexa R: (p,q)↦(−q,p) (mult. por (0,1); o til do Lemma 3.6)
+  **preserva O(x) em 143/143 pares** ✓, mas **não intertwina T**: as quatro
+  identidades candidatas ([Ru,Rw]±[u,w]=0, [Ru,w]∓[u,Rw]=0) falham fora de 6
+  pares degenerados. A rota "complexificar o quociente" morre aí.
+- **Claim C é falsa como lei universal**: ⟨[u,w],(z±z′,0)⟩=0 vale em ~50 % dos
+  pares (com frames verificados por aniquilação), o sinal − sozinho NUNCA vale,
+  e os dois slots (z+z′,0)/(0,z+z′) sempre concordam — é UMA lei, valendo num
+  sub-estrato próprio que **não coincide** com o estrato rank-7
+  (cross-tab hold×rank44 = 38/47/7/51, todos os quadrantes vivos).
+- Nenhum invariante linear simples (⟨A,A′⟩,⟨A,B′⟩,⟨B,A′⟩,⟨B,B′⟩,⟨z,z′⟩) prediz
+  o hold (tabela PAIRDIAG).
+
+**Positivos:**
+- Forma fechada SEM ambiguidade de sinal do parceiro, derivada das equações
+  puras (a,b)(c,d)=0 ⟺ ac=−db ∧ da=bc:  **d(c) = −(bc)a / n(a)** —
+  conferida nos parceiros canônicos; mais prova-amigável que a forma via c·z
+  (que carrega sinal por gerador).
+- Par t=28 ((e₁,e₂) vs (e₃,e₄), rank-7): complemento setorial 9-dim explícito
+  em rede: {x,x̃,x′,x̃′,(z+z′,0),(0,z+z′),(e₅,−e₆),(e₆,e₅)} + e₀ — os
+  rank-7 têm colapso lattice-visível; os rank-9 genéricos têm as 2 direções
+  extras FORA da rede pequena (por isso o scan não as vê).
+
+**Estado da peça (b):** rank(T|₄ₓ₄) ≤ 9 uniforme (medido; ainda sem prova das
+2 relações setoriais extras em forma geral). Próximo degrau técnico definido:
+kernel exato ℚ do setor para pares racionais genéricos (via bigrat ou lifting
+mod-p com reconstrução racional) → forma fechada das 2 direções em função do
+par → aí sim o argumento topológico de zero real tem os dados que precisa.
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD
