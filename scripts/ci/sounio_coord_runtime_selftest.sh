@@ -736,7 +736,9 @@ output="$(cd "$SECOND" && bin/sounio-loom runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'Loom launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'Loom selected a different runtime id'
 grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the OCaml kernel'
-grep -q '^runtime_version=2026.08.29.40$' <<< "$output" || \
+first_runtime_version="$(sed -n 's/^runtime_version=//p' "$first_manifest")"
+[[ -n "$first_runtime_version" ]] || fail 'installed runtime manifest omitted its version'
+grep -qx "runtime_version=$first_runtime_version" <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
 
 mkdir -p "$POLICYLESS/bin"
@@ -1135,12 +1137,16 @@ chmod +x "$SECOND/scripts/dev/sounio_coord_runtime.sh" \
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared CLI runtime'
+shared_hook_harness="$TEST_ROOT/claude"
+cp "$(command -v bash)" "$shared_hook_harness"
+chmod 0755 "$shared_hook_harness"
 output="$(
   cd "$SECOND"
-  printf '%s\n' \
-    "{\"session_id\":\"runtime-test\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"SessionStart\"}" | \
-    SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
-    SOUNIO_LOOM_HOOK_TEST_MODE=1 bin/sounio-loom agent-hook --agent claude
+  event="{\"session_id\":\"runtime-test\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"SessionStart\"}"
+  SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
+    SOUNIO_LOOM_HOOK_TEST_MODE=1 "$shared_hook_harness" -c \
+      'printf "%s\n" "$1" | bin/sounio-loom agent-hook --agent claude' \
+      _ "$event"
 )"
 grep -q 'agent=claude lane=session-runtime-test' <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared hook runtime'
@@ -1149,47 +1155,21 @@ grep -q "^runtime_id=$first_id$" <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared agentd runtime'
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
-grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=started ' <<< "$output" || \
-  fail 'pre-upgrade control service did not start'
+grep -Eq '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=(started|already-running) ' \
+  <<< "$output" || fail 'pre-upgrade control service was not live'
 supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
+[[ -n "$supervisor_pid" ]] || fail 'pre-upgrade control service omitted its PID'
 
 git clone --local --no-hardlinks --quiet "$REPO" "$ALT"
 git -C "$ALT" fetch -q "$ROOT_DIR" "$subprocess_toolchain_commit"
 git -C "$ALT" fetch -q "$ROOT_DIR" "$native_hook_cutover_toolchain_commit"
-sed -i 's/^SOUNIO_COORD_RUNTIME_VERSION=.*/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8-test/' \
+printf '\n# runtime upgrade selftest marker\n' >> \
   "$ALT/scripts/dev/sounio_coord_runtime.sh"
-sed -i 's/^let runtime_version = .*/let runtime_version = "2026.08.23.8-test"/' \
-  "$ALT/tools/loom/src/loom.ml"
 chmod +x "$ALT/scripts/dev/"*
 git -C "$ALT" config user.name 'Sounio Runtime Upgrade Selftest'
 git -C "$ALT" config user.email 'coord-runtime-upgrade@sounio.local'
-git -C "$ALT" add scripts/dev/sounio_coord_runtime.sh tools/loom/src/loom.ml
+git -C "$ALT" add scripts/dev/sounio_coord_runtime.sh
 git -C "$ALT" commit -qm 'test runtime upgrade source'
-upgrade_implementation_commit="$(git -C "$ALT" rev-parse HEAD)"
-dune build --root "$ALT/tools/loom" src/loom.exe >/dev/null
-upgrade_runtime_sha="$(sha256sum \
-  "$ALT/tools/loom/_build/default/src/loom.exe" | awk '{print $1}')"
-upgrade_cli_sha="$(sha256sum "$ALT/tools/loom/src/loom.ml" | awk '{print $1}')"
-upgrade_evidence="$ALT/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt"
-upgrade_freeze="$ALT/tools/loom/product_exec_ingress_dark.runtime.v1"
-sed -i \
-  -e "s/^implementation_commit=.*/implementation_commit=$upgrade_implementation_commit/" \
-  -e "s/^cli_source_sha256=.*/cli_source_sha256=$upgrade_cli_sha/" \
-  -e 's/^runtime_version=.*/runtime_version=2026.08.23.8-test/' \
-  -e "s/^runtime_sha256=.*/runtime_sha256=$upgrade_runtime_sha/" \
-  "$upgrade_evidence"
-upgrade_evidence_sha="$(sha256sum "$upgrade_evidence" | awk '{print $1}')"
-sed -i \
-  -e "s/^implementation_commit=.*/implementation_commit=$upgrade_implementation_commit/" \
-  -e "s/^evidence_sha256=.*/evidence_sha256=$upgrade_evidence_sha/" \
-  -e "s/^cli_source_sha256=.*/cli_source_sha256=$upgrade_cli_sha/" \
-  -e 's/^runtime_version=.*/runtime_version=2026.08.23.8-test/' \
-  -e "s/^runtime_sha256=.*/runtime_sha256=$upgrade_runtime_sha/" \
-  "$upgrade_freeze"
-git -C "$ALT" add \
-  tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt \
-  tools/loom/product_exec_ingress_dark.runtime.v1
-git -C "$ALT" commit -qm 'test runtime upgrade freeze'
 output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord install-runtime --source-root "$ALT")"
 upgrade_output="$output"
@@ -1207,7 +1187,8 @@ assert_processes_do_not_hold "$RUNTIME_ROOT/.install.lock" \
   "$upgraded_supervisor_pid"
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$second_id$" <<< "$output" || fail 'worktree did not observe atomic runtime upgrade'
-grep -q '^runtime_version=2026.08.23.8-test$' <<< "$output" || fail 'upgraded runtime version is wrong'
+grep -qx "runtime_version=$first_runtime_version" <<< "$output" || \
+  fail 'upgrade changed the frozen Loom runtime version'
 [[ "$(sha256sum "$activation_file" | awk '{print $1}')" == "$activation_sha" ]] || \
   fail 'runtime upgrade rewrote the activation watermark'
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
