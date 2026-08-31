@@ -19,6 +19,8 @@ compilação: E230) à Contribuição 3 (orçamentos GUM/ISO) com um número cl�
 `bf1fe608`; determinístico; identidade `A/α + B/β = 2D/CL` verificada a erro 0 em 1ª ordem).
 **Registro completo:** `docs/research/paper_A_rq4_two_compartment_flip_2026-08-31.md`.
 **Twin executável do receipt em ambos os engines:** `examples/vancomycin_auc_affine.sio`.
+**Adequação Monte Carlo (verdade de amostragem):** `docs/research/sounio/rq4_vanco_mc_adequacy.sio`,
+registro `docs/research/paper_A_rq4_mc_adequacy_2026-08-31.md`.
 
 ---
 
@@ -51,6 +53,11 @@ disciplina de conjuntos de fontes (E230) recusa a adição com fontes compartilh
 a propagação afim (`stdlib/epistemic/affine`) computa a soma correta nos dois — o que o teorema
 `naive_add_understates_iff` (anti-garbling ⟺ Cov > 0) e seus corolários enunciam, e o que a coorte
 confirma: sob a propagação exata, os 909 alertas são exatamente os 909 que deveriam existir.
+E a verdade de primeira ordem é a verdade de amostragem: uma Monte Carlo da mesma coorte (1 000
+sorteios por paciente) reproduz a variância afim em 0,1 % em média (razão 0,999; extremos 0,857 e
+1,158 na cauda de baixa depuração) e a mesma decisão de WARN em 99,4 % dos pacientes, ao custo
+O(N_p) de uma única propagação em vez de 10⁶ avaliações — e confirma que a sobrestimação de 300 vezes
+da cadeia ingênua é real contra a amostragem (300,9), não um artefato da linearização.
 
 ## Legenda da figura
 

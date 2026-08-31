@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.paper-a-rq4-two-compartment-flip-2026-08-31
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -114,3 +115,7 @@ readability only.
 bin/souc run docs/research/sounio/rq4_vanco_two_compartment_flip.sio   # exit 0; last line RQ4_FLIP …
 ```
 Determinism: two consecutive runs on 2026-08-31 produced byte-identical `RQ4_FLIP` lines.
+
+**Adequacy (same day):** a Monte Carlo of the same cohort (`rq4_vanco_mc_adequacy.sio`, 1 000
+draws per patient) gives Var_MC/Var_T = 0.999 (0.857–1.158), the same WARN decision on 99.4 % of
+patients, and Var_N/Var_MC = 300.9 — see `paper_A_rq4_mc_adequacy_2026-08-31.md`.

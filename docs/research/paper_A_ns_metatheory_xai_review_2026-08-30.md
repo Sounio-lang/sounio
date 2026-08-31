@@ -156,7 +156,7 @@ Packet = round-2 packet + item 10 (break the two fixes) + item 11 (round-2 lefto
 [CLOSED]/[OPEN]). **Verdict:** 7 × [OK], 2 × [TIGHTENABLE], 2 × [FAIL] (3: labelling
 wording; 9: probabilistic adequacy + missing let-bound control). Round-2 fixes: **both
 [OK]**; leftovers: source-level witness [CLOSED], genuine ⊤ witness [CLOSED],
-probabilistic adequacy [OPEN → scoped], `AGFree` wording [OPEN → fixed].
+probabilistic adequacy [OPEN → scoped; then **measured** 2026-08-31: Var_MC/Var_T = 0.999, decision agreement 99.4 %, `paper_A_rq4_mc_adequacy_2026-08-31.md` — a measurement, not a theorem], `AGFree` wording [OPEN → fixed].
 
 ### Referee report (verbatim)
 
@@ -244,7 +244,7 @@ probabilistic adequacy [OPEN — "a scoped gap rather than a defect"].
 
 10. (a) [OK] — `opaque_red` preservation re-types at ⊤ via `covers_top`, sound since `Exact`/`AGFree` are N-independent and both recurse through `opaque` unchanged; no new stuck state (`canon_know` + progress); no annotation shrink is possible — `invOpaque` forces `nsTop` and `t_sub` cannot touch `T`. `x_plus_top_untypable` is a genuine ⊤-clause witness: both controls are present (`x_plus_y_typable` admits the un-opaqued sum, `opaque_y_typable` types `opaque yk` alone), so the rejection is attributable to the ⊤ clause of (Add-Indep) alone (`nsDisjoint_top_right`). (b) [OK] — `invMeasure` is complete: only `t_measure`/`t_sub` derive `measure` terms and `t_sub` preserves `T`, and the system has no N-widening rule, so a `measure` term can carry no annotation other than `{s}`; with `measure_plus_measure_untypable` and `let_x_plus_x_untypable` (the shared-de-Bruijn-variable control), the source-level witnesses match §8.2's "x + x flagged" at program-text level.
 
-11. source-level witness: [CLOSED] (`measure_plus_measure_untypable`, `let_x_plus_x_untypable`, both `∀ Γ T E`). genuine ⊤ witness: [CLOSED] (`x_plus_top_untypable` with both controls). probabilistic adequacy: [OPEN] — still no distributional semantics; variance is the declared algebraic proxy; correctly labelled in-file, so a scoped gap rather than a defect. `AGFree` wording: [CLOSED] — header discloses the value restriction and `soundness_star` re-establishes it per step.
+11. source-level witness: [CLOSED] (`measure_plus_measure_untypable`, `let_x_plus_x_untypable`, both `∀ Γ T E`). genuine ⊤ witness: [CLOSED] (`x_plus_top_untypable` with both controls). probabilistic adequacy: [OPEN] — still no distributional semantics; variance is the declared algebraic proxy; correctly labelled in-file, so a scoped gap rather than a defect. *(Measured the same day on the RQ4 cohort: Var_MC/Var_T = 0.999, 99.4 % decision agreement — see `paper_A_rq4_mc_adequacy_2026-08-31.md`.)* `AGFree` wording: [CLOSED] — header discloses the value restriction and `soundness_star` re-establishes it per step.
 
 12. [OK] — verdicts above were derived from the packet alone; no xAI review text was provided or consulted (the file's own comments attribute earlier fixes to prior rounds, but no review content was visible).
 

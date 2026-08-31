@@ -731,8 +731,10 @@ interprocedural summaries (§5.6), absent from the calculus; (iii) second-order 
 (iv) the noise-symbol axiom itself — distinct `measure` labels are distinct physical sources,
 *assumed, not proved*: the type system tracks sources, it does not discover them, and with
 dishonest labels the calculus under-approximates covariance; (v) the semantics is algebraic —
-`⟨a,a⟩` is the variance under independent unit-variance symbols by definition, no distributional
-adequacy is claimed; (vi) `treal` is modelled by `Int` — ring algebra over integer "reals", exact
+`⟨a,a⟩` is the variance under independent unit-variance symbols by definition; distributional
+adequacy is not proved but **measured** on the RQ4 cohort: a 5 000 × 1 000-draw Monte Carlo gives
+Var_MC/Var_T = 0.999 (0.857–1.158) and the same WARN decision on 99.4 % of patients
+(`paper_A_rq4_mc_adequacy_2026-08-31.md`); (vi) `treal` is modelled by `Int` — ring algebra over integer "reals", exact
 for first-order propagation, no ℝ-valued measure theory claimed — and Theorem 6.4's `Exact`
 hypothesis is load-bearing (a source-level `kraw` literal can fabricate metadata). Four adversarial
 reads 2026-08-30/31 — xAI Grok 4.5, 4.6, 4.6-on-fixes, and Kimi K3 as the independent second
@@ -1029,7 +1031,10 @@ and across the whole chain the over-statement compounds to 300×: garbling rathe
 anti-garbling, and a different clinical harm (alarm fatigue: 1,894 spurious WARNs) from the same
 defect. The sign of the covariance decides which harm you get; the discipline does not need to
 know the sign — E230 rejects the shared-source `add` either way, and exact propagation
-(`exact_preservation`) is right in both directions. Full record and reproduce line:
+(`exact_preservation`) is right in both directions. The first-order truth is the sampling
+truth here: a Monte Carlo of the same cohort (1 000 draws per patient) gives Var_MC/Var_T = 0.999
+(0.857–1.158), the same WARN decision on 99.4 % of patients, and Var_N/Var_MC = 300.9 — the
+300× is not a linearisation artefact (`paper_A_rq4_mc_adequacy_2026-08-31.md`). Full record and reproduce line:
 `paper_A_rq4_two_compartment_flip_2026-08-31.md`.
 
 ### 8.5 Threats to validity
