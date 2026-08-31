@@ -4,11 +4,12 @@ Concept-ID: `SOUNIO-LOOM-NATIVE-HOOK-CUTOVER`
 
 ## Authority
 
-Sounio action 9045 is the semantic authority for provider hook ingress.
-OCaml normalizes provider payloads, invokes the frozen Sounio executable, and
-realizes an admitted decision. Provider CLIs, configuration files, shell
-launchers, LLM output, Python, Rust, and receipt consumers cannot manufacture
-an ALLOW result.
+Sounio action 9045 is the semantic authority for one provider hook event.
+Sounio action 9046 is the semantic authority for draining old hook generations
+and promoting a bridge-free fleet. OCaml normalizes provider payloads, invokes
+the frozen Sounio executables, and realizes admitted decisions. Provider CLIs,
+configuration files, shell launchers, LLM output, Python, Rust, receipt
+consumers, and the UI cannot manufacture an ALLOW or CUTOVER_READY result.
 
 ## Contract
 
@@ -29,6 +30,24 @@ The cutover admits a hook event only when all of the following are affirmative:
 - CLAIM_READY requires atomic configuration promotion, rollback evidence, and
   live canaries from Codex, Claude, Cursor, and Grok.
 
+The fleet cutover reaches `CUTOVER_READY` only when all of the following are
+affirmative in the same freshness-bounded inventory epoch:
+
+- the legacy and candidate runtime hashes plus the drain and final provider
+  configuration hashes are bound;
+- every live process is bound to its exact process generation and loaded hook
+  capability;
+- the inventory is fresh and complete, every member is classified, and the
+  classified count equals the total count;
+- the native count equals the non-zero total count, while legacy, unknown, and
+  unresponsive counts are all zero;
+- four-provider canaries and the paired atomic rollback have passed; and
+- the action-9046 decision receipt is complete and no prohibited oracle ran.
+
+This is an affirmative absence proof. Merely failing to observe a Python hook,
+or deleting its file while a process still has the command cached, is not
+evidence that the legacy generation is absent.
+
 ## Provider Dialects
 
 The raw provider dialect remains part of the authority input even after event
@@ -38,10 +57,12 @@ fallback.
 
 ## Semantic Boundary
 
-Action 9045 does not redefine action 9044 material-change authority, provider
-authentication, model behavior, or the meaning of a provider result. It owns
-only the transition from a provider-specific hook envelope to a frozen Sounio
-admission decision and the evidence required to promote that transition.
+Actions 9045 and 9046 do not redefine action 9044 material-change authority,
+provider authentication, model behavior, or the meaning of a provider result.
+Action 9045 owns the transition from a provider-specific hook envelope to a
+frozen Sounio admission decision. Action 9046 owns only the transition from a
+mixed fleet generation to a bridge-free current generation and the evidence
+required to promote it.
 
 An OCaml runtime may operate the cutover because it is a material executor of
 the frozen Sounio decision. It is not semantic authority. The target remains a
@@ -51,6 +72,9 @@ Sounio-compiled ingress when the compiler can host the complete runtime safely.
 
 - Installing a native command string is not proof that the Python bridge is
   absent from the shipped runtime.
+- A clean filesystem scan is not proof that no live process retains a cached
+  legacy hook command.
+- An action-9045 hook admission is not an action-9046 fleet cutover decision.
 - A synthetic hook fixture is not a live provider canary.
 - A wake receipt is not an acknowledgement or an execution result.
 - A provider CLI exit code cannot override a Sounio DENY.
