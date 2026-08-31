@@ -9,12 +9,13 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/dev/install_sounio_coord_runtime.sh [options]
 
-Install and atomically activate the coordination runtime shared by every
+Install or atomically activate the coordination runtime shared by every
 worktree attached to this repository.
 
 Options:
   --source-root PATH       source bundle root (default: current worktree)
   --runtime-dir PATH       shared runtime root override
+  --stage                  install and validate without changing current
   --activate RUNTIME_ID    activate an already installed version
   --list                   list installed versions
   -h, --help               show this help
@@ -711,10 +712,12 @@ SOURCE_ROOT="$WORKTREE"
 RUNTIME_ROOT="${SOUNIO_COORD_RUNTIME_DIR:-$GIT_COMMON_DIR/sounio-coord-runtime}"
 action=install
 activate_id=''
+activate_after_install=1
 while (($#)); do
   case "$1" in
     --source-root) (($# >= 2)) || die "$1 requires a value"; SOURCE_ROOT="$2"; shift 2 ;;
     --runtime-dir) (($# >= 2)) || die "$1 requires a value"; RUNTIME_ROOT="$2"; shift 2 ;;
+    --stage) action=install; activate_after_install=0; shift ;;
     --activate) (($# >= 2)) || die "$1 requires a value"; action=activate; activate_id="$2"; shift 2 ;;
     --list) action=list; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -2060,4 +2063,9 @@ else
     "$runtime_id" "$protocol" "$version_dir"
 fi
 
-activate_runtime "$runtime_id"
+if ((activate_after_install)); then
+  activate_runtime "$runtime_id"
+else
+  printf 'STAGED runtime_id=%s protocol=%s path=%s current_unchanged=true\n' \
+    "$runtime_id" "$protocol" "$version_dir"
+fi
