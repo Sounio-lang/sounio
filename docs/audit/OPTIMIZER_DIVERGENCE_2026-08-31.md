@@ -7,7 +7,7 @@ validated_by: claude-3
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.optimizer-divergence-2026-08-31
 -->
 
-# `-O` changes the behaviour of 632 of 1854 programs, and nothing in CI runs it
+# `-O` changed the behaviour of 632 of 1724 programs — FIXED, and now gated
 
 **Date:** 2026-08-31
 **Engine:** one Madaros, rebuilt from `origin/main` (`94adaff03a`). Same compiler,
@@ -26,9 +26,40 @@ This one does not have that ambiguity. One compiler, one source file, one build
 command differing by a flag. **An optimiser that changes a program's observable
 output is wrong by definition, not by opinion.**
 
-## Result
+## FIXED 2026-08-31 — one line, 587 of 632 programs recovered
 
-    1854  programs in tests/run-pass/
+`ocp_mfi_dse` decided a store was dead by scanning an instruction's SRC1/SRC2
+fields. A call reads its arguments from `instr.call_args`, a Box list that peel
+does not walk — a limitation the code states in a comment on `ocp_mfi_dce_once`
+and reasons is safe "because calls are never removed". That reasoning covers
+removing the CALL. It does not cover removing the DEF whose only consumer is a
+call argument, which is what happened.
+
+The peel already treats labels and jumps as barriers, for exactly this reason:
+after them it cannot know what was read. A call has the same property. Adding
+`IrCall` and `IrCallSret` to that barrier restores correctness without walking
+the Box.
+
+    before   632 diverged   (577 exit-code, 51 output, 4 build failures)
+    after     51 diverged   (36 exit-code, 15 output, 0 build failures)
+    fixed    587            zero true regressions
+
+Of the 51 that remain, 48 diverged before as well. The other 3 were missed by the
+first sweep, not caused by the fix — they behave identically under both
+compilers. `qd_mul` is fixed by the same change, which answers the question left
+open in the second reduction: it was ONE fault surfacing in two ways, not two.
+
+Guarded by `scripts/ci/madaros_opt_chained_call_gate.sh`, wired into the
+`Contracts` job. The gate builds one multi-module fixture twice with the same
+compiler, differing only in `-O`, and refuses a difference. It carries a control:
+if the fixture stops passing WITHOUT `-O` the gate fails rather than comparing
+two broken builds and calling them equal.
+
+## Result, as originally measured
+
+    1864  files in tests/run-pass/
+     140  do not build under Madaros at all, under either flag -> not measurable
+    1724  measurable
      632  behave differently with -O
      ├─ 577  same output, exit code goes 0 -> non-zero
      ├─  51  different output
@@ -39,6 +70,15 @@ output is wrong by definition, not by opinion.**
 
 The direction is essentially unanimous: 577 of 580 exit-code changes are
 pass-becomes-fail. Three go the other way.
+
+**A correction to the denominator.** This document first said "632 of 1854". The
+count came from an earlier sweep on a different base and was carried forward
+without recounting; the tree measured here holds **1864** files. Worse, the probe
+printed nothing when BOTH builds failed, so **140 files were silently dropped** —
+they do not build under Madaros with or without the flag, and all 112 files from
+`ENGINE_DIVERGENCE_CORPUS_2026-08-30.md` are among them. Absence of output was
+being read as absence of divergence. The honest denominator is 1724 measurable
+of 1864.
 
 **Determinism control:** all 51 output-changing programs and a 60-file sample of
 the exit-code-changing ones were built without `-O` and run twice. All 111 gave
@@ -172,6 +212,59 @@ call is made or how the module boundary is crossed.
 The two manifestations also differ in sentinel: the lorenz functions return `-1`,
 `qd_mul` returns `0`. That is consistent with one optimiser fault surfacing in two
 ways, and equally consistent with two faults. This audit does not decide which.
+
+### ROOT CAUSE — `-O` does not propagate a variable between successive calls
+
+The lorenz reduction reached bottom. Six lines, in a module, called from `main`:
+
+    pub fn rp_add(a: i64, b: i64) -> i64 { return a + b }
+
+    pub fn rp_chain3() -> i64 {
+        var x: i64 = 0
+        x = rp_add(x, 1)      // 1
+        x = rp_add(x, 10)     // 11
+        x = rp_add(x, 100)    // 111
+        return x
+    }
+
+    without -O   111    correct
+    with    -O   100
+
+Not "the later calls are dropped". **Every call reads the ORIGINAL `x`, and only
+the last assignment survives**: `rp_add(0, 100) = 100`. Two shorter cases confirm
+the same reading:
+
+    x=3; x = rp_add(x,5); x = rp_add(x,5)     without -O 13   with -O 8   = add(3,5)
+    x=3; x = rp_mul(x,5); x = rp_mul(x,5)     without -O 75   with -O 15  = mul(3,5)
+    x=3; x = rp_mul(x,5)                      without -O 15   with -O 15  correct
+
+One call is fine; two or more in sequence lose the accumulation. It is not
+arithmetic — `+` and `*` behave identically — and it is not the values.
+
+### Why this explains the family
+
+`lorenz_i256_step1_taylor2_proof_trace_skeleton_instance_fingerprint` chains
+**seventeen** calls to `lorenz_i256_cert_mix`, accumulating into `fp`. Under `-O`
+only the last one takes effect, so the fingerprint is wrong, and the caller's
+`if artifact_fp != <expected>` returns `-1`. Lengthening the chain in a probe
+moved the `-O` result by small increments — 191, 192, 194, 198, 202, 207 for
+chains of 1, 2, 4, 8, 12, 17 — exactly what a single surviving call produces.
+
+### What the reduction ruled out on the way down
+
+Recorded because each was a plausible cause that cost a measurement:
+
+    arity                 probes at 9, 10, 12, 14 and 17 imported args all agree
+    argument marshalling  echo9 and sum9 return correct values under -O
+    the `Mod` effect      qd128 carries none and breaks anyway
+    the guard chain       removing all 17 early-return guards changes nothing
+    nested cross-module   a module-to-module call, one deep, agrees
+    the arithmetic        the same mix chain written locally agrees at length 17
+    the flag block        the same 60-line flag body, local AND imported, agrees
+
+The last two are the interesting pair: the identical body is correct as a local
+function and correct as an imported one — the defect needs the *chained
+assignment* specifically.
 
 ## What this does NOT establish
 

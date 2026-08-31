@@ -1,0 +1,69 @@
+//@ run-pass
+//@ known-failure: E230 under the default checker (the op this witnesses is refused by N3; N2 dataflow verified under SOUNIO_NS_DISABLE by scripts/ci/ns_dataflow_trace_gate.sh) and E245 (#1706, Knowledge x Knowledge arithmetic has no lowering on Madaros, independent of NS)
+//@ requires: madaros
+//@ expect-stdout: ns-call-projection: PASS
+//
+// N2 negative control (codex ruling 2026-08-23, closing grok-4.6's FAIL-OPEN
+// finding): the original REQ-5 "last Knowledge arg wins" substitution
+// narrowed add_noise/first/add_cap to a real handle instead of top -- the
+// DANGEROUS direction for a domain meant to certify independence. The fix
+// preserves a call's argument set ONLY when the callee is a syntactically-
+// proven, arity-1, effect-free EXACT parameter projection (body is exactly
+// `{ param }` or `{ return param }`). Everything else defaults to top (-1):
+//
+//   add_noise(x) { x + measure(0) }  -- body is not a bare identifier
+//   first(a, b)  { a }               -- body IS a bare identifier, but arity
+//                                        is 2, not 1 (codex ruling: even a
+//                                        provably-safe multi-param projection
+//                                        does not qualify)
+//   add_cap(x)   { x + cap_value() } -- body is not a bare identifier
+//
+// ...while a genuine single-parameter identity projection still preserves
+// its argument's own set.
+//
+// Observable only under SOUNIO_NS_TRACE=1: one "NS_TRACE call=<h>" line with
+// a real positive handle for ident(x), then three "NS_TRACE call=-1" lines
+// for add_noise/first/add_cap.
+//
+// Per-rule sabotage: SOUNIO_NS_SABOTAGE_CALL_PROJ=1 disables the
+// preservation rule entirely -- even ident(x)'s call=<h> collapses to -1,
+// showing the projection rule (not something else) produced the h.
+
+fn ident(k: Knowledge[f64, epsilon < 1.0]) -> Knowledge[f64, epsilon < 1.0] with IO {
+    k
+}
+
+fn cap_value() -> Knowledge[f64, epsilon < 1.0] with IO {
+    Knowledge(0.0, ε = 0.05)
+}
+
+fn add_noise(x: Knowledge[f64, epsilon < 1.0]) -> Knowledge[f64, epsilon < 1.0] with IO {
+    x + measure(0.0, uncertainty: 0.1)
+}
+
+fn first(a: Knowledge[f64, epsilon < 1.0], b: Knowledge[f64, epsilon < 1.0]) -> Knowledge[f64, epsilon < 1.0] with IO {
+    a
+}
+
+fn add_cap(x: Knowledge[f64, epsilon < 1.0]) -> Knowledge[f64, epsilon < 1.0] with IO {
+    x + cap_value()
+}
+
+fn main() -> i64 with IO {
+    // Laundering (see ns_ident_preserves_distinct_trace.sio): measure()'s
+    // epsilon=-1 fails the PRE-EXISTING (not N2) E036 call-boundary gate for
+    // any concrete Knowledge<T> parameter under current Madaros, so union
+    // with a valid-epsilon empty Knowledge(...) first (keeps the seeded
+    // singleton via REQ-2/REQ-3, clamps epsilon to something boundary-legal).
+    let seed: Knowledge<f64> = measure(1.0, uncertainty: 0.1)
+    let wrap: Knowledge[f64, epsilon < 1.0] = Knowledge(0.0, ε = 0.05)
+    let x: Knowledge[f64, epsilon < 1.0] = seed + wrap
+
+    let r_ident: Knowledge[f64, epsilon < 1.0] = ident(x)
+    let r_noise: Knowledge[f64, epsilon < 1.0] = add_noise(x)
+    let r_first: Knowledge[f64, epsilon < 1.0] = first(x, x)
+    let r_cap: Knowledge[f64, epsilon < 1.0] = add_cap(x)
+
+    println("ns-call-projection: PASS")
+    0
+}
