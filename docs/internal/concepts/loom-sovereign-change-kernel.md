@@ -11,11 +11,50 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-LOOM-SOVEREIGN-CHANGE-KERNEL`
 
-Status: `hypothesis`
+Status: `executable`
+
+Semantic-Lane-ID: `loom-sovereign-change-kernel-20260831`
+
+Owner: `codex-1`
+
+Concept-IDs: `SOUNIO-LOOM-SOVEREIGN-CHANGE-KERNEL`
+
+Intent-Preserved: one exact structured mutation is authorized by Sounio
+before execution, held as non-bearer kernel memory, consumed once against the
+exact post-image, and admitted to Git and CI without policy reinterpretation.
+
+Transformation: founder-authorized mutation authority becomes executable
+action 9043 with ordered prepare, consume, commit, CI, and production decisions.
+
+Types-Changed: none
+
+Effects-Changed: none
+
+IR-Changed: none
+
+Claims-Introduced: action 9043 is an executable semantic authority for the
+bounded ChangeIntent decision protocol and its enumerated refusal controls.
 
 Claims-Forbidden: production mutation authority, arbitrary shell-write
 authority, commit admission, CI admission, or `claim_ready=true` before the
 frozen action-9043 executable and installed adversarial product gate exist.
+
+Assumptions: action 9042 remains frozen and production-active; material peer,
+filesystem, Git, and CI observations remain facts rather than semantic oracles.
+
+Read-Set: action-9042 freeze and product manifests, structured hook event,
+authenticated peer state, Git `HEAD` and index, canonical worktree pre-image,
+post-image, commit, and receipt.
+
+Positive-Witness: `scripts/ci/sounio_loom_sovereign_change_kernel_selftest.sh`
+
+Negative-Witness: action-9043 refusals `DENY613` through `DENY628`, including
+the isolated CI no-reinterpretation sabotage control in the positive witness.
+
+Acceptance-Gate: `scripts/ci/sounio_loom_sovereign_change_kernel_selftest.sh`
+
+Integration-Target: frozen action-9043 authority followed by the existing
+OCaml Loom kernel, structured mutation hooks, Git hook, and CI admission job.
 
 ## Authority
 
