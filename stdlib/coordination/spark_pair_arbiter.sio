@@ -14,6 +14,8 @@ pub struct SparkPairAuthorityFacts {
     pair_identity_exact: bool,
     nodeset_generation_matches: bool,
     device_plugin_exclusive: bool,
+    admission_fail_closed: bool,
+    pair_taint_exact: bool,
 }
 
 pub struct SparkPairSlurmFacts {
@@ -32,12 +34,14 @@ pub struct SparkPairK8sFacts {
     canonical: bool,
     both_gpu_capacity_one: bool,
     reservations_two: bool,
+    reservation_count_zero: bool,
     reservations_distinct_nodes: bool,
     reservation_epoch_matches: bool,
     both_nvml_clean: bool,
     workload_count_zero: bool,
     stale_epoch_workload_zero: bool,
     heartbeat_fresh: bool,
+    unexpected_gpu_consumers_zero: bool,
 }
 
 pub struct SparkPairDecision {
@@ -64,6 +68,8 @@ pub fn admit_spark_pair_authority_facts(
     pair_identity_exact: i64,
     nodeset_generation_matches: i64,
     device_plugin_exclusive: i64,
+    admission_fail_closed: i64,
+    pair_taint_exact: i64,
 ) -> SparkPairAuthorityFacts {
     SparkPairAuthorityFacts {
         canonical:
@@ -74,7 +80,9 @@ pub fn admit_spark_pair_authority_facts(
             pair_bit_is_canonical(lease_live) &&
             pair_bit_is_canonical(pair_identity_exact) &&
             pair_bit_is_canonical(nodeset_generation_matches) &&
-            pair_bit_is_canonical(device_plugin_exclusive),
+            pair_bit_is_canonical(device_plugin_exclusive) &&
+            pair_bit_is_canonical(admission_fail_closed) &&
+            pair_bit_is_canonical(pair_taint_exact),
         policy_present: pair_bool(policy_present),
         policy_error: pair_bool(policy_error),
         operation_timed_out: pair_bool(operation_timed_out),
@@ -83,6 +91,8 @@ pub fn admit_spark_pair_authority_facts(
         pair_identity_exact: pair_bool(pair_identity_exact),
         nodeset_generation_matches: pair_bool(nodeset_generation_matches),
         device_plugin_exclusive: pair_bool(device_plugin_exclusive),
+        admission_fail_closed: pair_bool(admission_fail_closed),
+        pair_taint_exact: pair_bool(pair_taint_exact),
     }
 }
 
@@ -120,31 +130,37 @@ pub fn admit_spark_pair_slurm_facts(
 pub fn admit_spark_pair_k8s_facts(
     both_gpu_capacity_one: i64,
     reservations_two: i64,
+    reservation_count_zero: i64,
     reservations_distinct_nodes: i64,
     reservation_epoch_matches: i64,
     both_nvml_clean: i64,
     workload_count_zero: i64,
     stale_epoch_workload_zero: i64,
     heartbeat_fresh: i64,
+    unexpected_gpu_consumers_zero: i64,
 ) -> SparkPairK8sFacts {
     SparkPairK8sFacts {
         canonical:
             pair_bit_is_canonical(both_gpu_capacity_one) &&
             pair_bit_is_canonical(reservations_two) &&
+            pair_bit_is_canonical(reservation_count_zero) &&
             pair_bit_is_canonical(reservations_distinct_nodes) &&
             pair_bit_is_canonical(reservation_epoch_matches) &&
             pair_bit_is_canonical(both_nvml_clean) &&
             pair_bit_is_canonical(workload_count_zero) &&
             pair_bit_is_canonical(stale_epoch_workload_zero) &&
-            pair_bit_is_canonical(heartbeat_fresh),
+            pair_bit_is_canonical(heartbeat_fresh) &&
+            pair_bit_is_canonical(unexpected_gpu_consumers_zero),
         both_gpu_capacity_one: pair_bool(both_gpu_capacity_one),
         reservations_two: pair_bool(reservations_two),
+        reservation_count_zero: pair_bool(reservation_count_zero),
         reservations_distinct_nodes: pair_bool(reservations_distinct_nodes),
         reservation_epoch_matches: pair_bool(reservation_epoch_matches),
         both_nvml_clean: pair_bool(both_nvml_clean),
         workload_count_zero: pair_bool(workload_count_zero),
         stale_epoch_workload_zero: pair_bool(stale_epoch_workload_zero),
         heartbeat_fresh: pair_bool(heartbeat_fresh),
+        unexpected_gpu_consumers_zero: pair_bool(unexpected_gpu_consumers_zero),
     }
 }
 
@@ -182,20 +198,31 @@ pub fn decide_spark_pair_transition(
     if !authority.canonical || !slurm.canonical || !k8s.canonical {
         return pair_refuse(current_state, 104)
     }
+    if k8s.reservations_two && k8s.reservation_count_zero {
+        return pair_refuse(current_state, 104)
+    }
     if !pair_state_is_known(current_state) { return pair_refuse(current_state, 105) }
     if !authority.policy_present { return pair_refuse(current_state, 101) }
     if authority.policy_error { return pair_refuse(current_state, 102) }
     if authority.operation_timed_out { return pair_refuse(current_state, 103) }
     if !authority.pair_identity_exact { return pair_refuse(current_state, 109) }
-    if epoch <= 0 || observed_epoch != epoch { return pair_refuse(current_state, 107) }
+    if epoch <= 0 { return pair_refuse(current_state, 107) }
 
     // Entering recovery is the only transition that remains admissible after
     // Lease loss. It authorizes no user work and cannot resume Slurm.
     if action == 11 {
-        if current_state >= 1 && current_state <= 9 {
+        if current_state >= 1 && current_state <= 10 {
             return pair_allow(current_state, 10)
         }
         return pair_refuse(current_state, 105)
+    }
+
+    if observed_epoch != epoch { return pair_refuse(current_state, 107) }
+
+    // Status is read-only. It reports the frozen policy decision surface even
+    // when the caller is not the current Lease holder.
+    if action == 14 {
+        return pair_allow(current_state, current_state)
     }
 
     if !authority.holder_matches { return pair_refuse(current_state, 106) }
@@ -206,11 +233,59 @@ pub fn decide_spark_pair_transition(
         if !authority.nodeset_generation_matches { return pair_refuse(current_state, 110) }
         if !slurm.slurmd_gpu_request_exact { return pair_refuse(current_state, 111) }
         if !authority.device_plugin_exclusive { return pair_refuse(current_state, 112) }
+        if !authority.admission_fail_closed { return pair_refuse(current_state, 125) }
+        if !authority.pair_taint_exact { return pair_refuse(current_state, 126) }
         if !slurm.slurm_controller_ready { return pair_refuse(current_state, 113) }
         if !slurm.both_slurmd_gpu_bound { return pair_refuse(current_state, 117) }
         if !k8s.both_gpu_capacity_one { return pair_refuse(current_state, 118) }
         if !slurm.resume_verified { return pair_refuse(current_state, 123) }
+        if !k8s.unexpected_gpu_consumers_zero { return pair_refuse(current_state, 127) }
         return pair_allow(current_state, 1)
+    }
+
+    // Bootstrap effects are admitted one at a time while the Lease remains
+    // UNINITIALIZED. None of these actions authorizes a user workload.
+    if action == 23 {
+        if current_state != 0 { return pair_refuse(current_state, 105) }
+        if !authority.nodeset_generation_matches { return pair_refuse(current_state, 110) }
+        if !slurm.slurm_controller_ready { return pair_refuse(current_state, 113) }
+        if !slurm.active_jobs_zero { return pair_refuse(current_state, 115) }
+        if !slurm.allocations_zero { return pair_refuse(current_state, 116) }
+        if !k8s.unexpected_gpu_consumers_zero { return pair_refuse(current_state, 127) }
+        return pair_allow(current_state, 0)
+    }
+
+    if action == 24 {
+        if current_state != 0 { return pair_refuse(current_state, 105) }
+        if !slurm.slurm_controller_ready { return pair_refuse(current_state, 113) }
+        if !slurm.both_slurm_drained { return pair_refuse(current_state, 114) }
+        if !slurm.active_jobs_zero { return pair_refuse(current_state, 115) }
+        if !slurm.allocations_zero { return pair_refuse(current_state, 116) }
+        if !k8s.unexpected_gpu_consumers_zero { return pair_refuse(current_state, 127) }
+        return pair_allow(current_state, 0)
+    }
+
+    if action == 25 {
+        if current_state != 0 { return pair_refuse(current_state, 105) }
+        if !authority.admission_fail_closed { return pair_refuse(current_state, 125) }
+        if !authority.pair_taint_exact { return pair_refuse(current_state, 126) }
+        if !authority.device_plugin_exclusive { return pair_refuse(current_state, 112) }
+        if !slurm.both_slurm_drained { return pair_refuse(current_state, 114) }
+        if !slurm.active_jobs_zero { return pair_refuse(current_state, 115) }
+        if !slurm.allocations_zero { return pair_refuse(current_state, 116) }
+        if !k8s.unexpected_gpu_consumers_zero { return pair_refuse(current_state, 127) }
+        return pair_allow(current_state, 0)
+    }
+
+    if action == 26 {
+        if current_state != 0 { return pair_refuse(current_state, 105) }
+        if !authority.admission_fail_closed { return pair_refuse(current_state, 125) }
+        if !authority.pair_taint_exact { return pair_refuse(current_state, 126) }
+        if !slurm.slurmd_gpu_request_exact { return pair_refuse(current_state, 111) }
+        if !slurm.both_slurmd_gpu_bound { return pair_refuse(current_state, 117) }
+        if !k8s.reservation_count_zero { return pair_refuse(current_state, 119) }
+        if !k8s.unexpected_gpu_consumers_zero { return pair_refuse(current_state, 127) }
+        return pair_allow(current_state, 0)
     }
 
     if action == 2 {
@@ -218,9 +293,12 @@ pub fn decide_spark_pair_transition(
         if !authority.nodeset_generation_matches { return pair_refuse(current_state, 110) }
         if !slurm.slurmd_gpu_request_exact { return pair_refuse(current_state, 111) }
         if !authority.device_plugin_exclusive { return pair_refuse(current_state, 112) }
+        if !authority.admission_fail_closed { return pair_refuse(current_state, 125) }
+        if !authority.pair_taint_exact { return pair_refuse(current_state, 126) }
         if !slurm.slurm_controller_ready { return pair_refuse(current_state, 113) }
         if !slurm.both_slurmd_gpu_bound { return pair_refuse(current_state, 117) }
         if !k8s.both_gpu_capacity_one { return pair_refuse(current_state, 118) }
+        if !k8s.unexpected_gpu_consumers_zero { return pair_refuse(current_state, 127) }
         return pair_allow(current_state, 2)
     }
 
@@ -297,6 +375,7 @@ pub fn decide_spark_pair_transition(
 
     if action == 12 {
         if current_state != 9 { return pair_refuse(current_state, 105) }
+        if !k8s.reservation_count_zero { return pair_refuse(current_state, 119) }
         if !slurm.slurm_controller_ready { return pair_refuse(current_state, 113) }
         if !slurm.slurmd_gpu_request_exact { return pair_refuse(current_state, 111) }
         if !slurm.both_slurmd_gpu_bound { return pair_refuse(current_state, 117) }
@@ -313,6 +392,7 @@ pub fn decide_spark_pair_transition(
             return pair_refuse(current_state, 121)
         }
         if !k8s.both_nvml_clean { return pair_refuse(current_state, 120) }
+        if !k8s.reservation_count_zero { return pair_refuse(current_state, 119) }
         if !slurm.slurm_controller_ready { return pair_refuse(current_state, 113) }
         if !slurm.slurmd_gpu_request_exact { return pair_refuse(current_state, 111) }
         if !slurm.both_slurmd_gpu_bound { return pair_refuse(current_state, 117) }
@@ -320,8 +400,84 @@ pub fn decide_spark_pair_transition(
         return pair_allow(current_state, 1)
     }
 
-    if action == 14 {
-        return pair_allow(current_state, current_state)
+    if action == 15 {
+        if current_state != 10 { return pair_refuse(current_state, 105) }
+        return pair_allow(current_state, 10)
+    }
+
+    if action == 16 {
+        if current_state != 10 { return pair_refuse(current_state, 105) }
+        if !k8s.workload_count_zero || !k8s.stale_epoch_workload_zero {
+            return pair_refuse(current_state, 121)
+        }
+        if !k8s.reservations_two || !k8s.reservations_distinct_nodes ||
+            !k8s.reservation_epoch_matches {
+            return pair_refuse(current_state, 119)
+        }
+        return pair_allow(current_state, 10)
+    }
+
+    if action == 17 {
+        if current_state != 10 { return pair_refuse(current_state, 105) }
+        if !k8s.workload_count_zero || !k8s.stale_epoch_workload_zero {
+            return pair_refuse(current_state, 121)
+        }
+        if !k8s.reservations_two || !k8s.reservations_distinct_nodes ||
+            !k8s.reservation_epoch_matches {
+            return pair_refuse(current_state, 119)
+        }
+        if !k8s.both_nvml_clean { return pair_refuse(current_state, 120) }
+        return pair_allow(current_state, 10)
+    }
+
+    if action == 18 {
+        if current_state != 10 { return pair_refuse(current_state, 105) }
+        if !k8s.workload_count_zero || !k8s.stale_epoch_workload_zero {
+            return pair_refuse(current_state, 121)
+        }
+        if !k8s.reservation_count_zero { return pair_refuse(current_state, 119) }
+        if !k8s.both_nvml_clean { return pair_refuse(current_state, 120) }
+        return pair_allow(current_state, 10)
+    }
+
+    if action == 19 {
+        if current_state != 10 { return pair_refuse(current_state, 105) }
+        if !k8s.workload_count_zero || !k8s.stale_epoch_workload_zero {
+            return pair_refuse(current_state, 121)
+        }
+        if !k8s.reservation_count_zero { return pair_refuse(current_state, 119) }
+        if !k8s.both_nvml_clean { return pair_refuse(current_state, 120) }
+        if !slurm.slurm_controller_ready { return pair_refuse(current_state, 113) }
+        if !slurm.slurmd_gpu_request_exact { return pair_refuse(current_state, 111) }
+        if !slurm.both_slurmd_gpu_bound { return pair_refuse(current_state, 117) }
+        return pair_allow(current_state, 10)
+    }
+
+    if action == 20 {
+        if current_state != 10 { return pair_refuse(current_state, 105) }
+        if !slurm.slurm_controller_ready { return pair_refuse(current_state, 113) }
+        if !slurm.both_slurm_drained { return pair_refuse(current_state, 114) }
+        if !slurm.active_jobs_zero { return pair_refuse(current_state, 115) }
+        if !slurm.allocations_zero { return pair_refuse(current_state, 116) }
+        return pair_allow(current_state, 10)
+    }
+
+    if action == 21 {
+        if current_state != 10 { return pair_refuse(current_state, 105) }
+        if !slurm.both_slurmd_absent { return pair_refuse(current_state, 117) }
+        if !k8s.both_gpu_capacity_one { return pair_refuse(current_state, 118) }
+        if !authority.device_plugin_exclusive { return pair_refuse(current_state, 112) }
+        if !k8s.reservation_count_zero { return pair_refuse(current_state, 119) }
+        if !k8s.workload_count_zero || !k8s.stale_epoch_workload_zero {
+            return pair_refuse(current_state, 121)
+        }
+        return pair_allow(current_state, 10)
+    }
+
+    if action == 22 {
+        if current_state != 10 { return pair_refuse(current_state, 105) }
+        if !slurm.slurm_controller_ready { return pair_refuse(current_state, 113) }
+        return pair_allow(current_state, 10)
     }
 
     pair_refuse(current_state, 124)

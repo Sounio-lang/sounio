@@ -31,9 +31,9 @@ SOUNIO_SOUC_ENGINE="$ENGINE" "$SOUC" compile "$combined" -o "$compiled"
 [[ -x "$compiled" ]] || fail 'compiler omitted the native Sounio executable'
 install -m 0755 "$compiled" "$OUTPUT"
 
-# STATUS over a canonical fact frame. Authority mask 249 has policy/holder/
-# Lease/pair/NodeSet/plugin set and the policy-error/timeout bits clear.
-probe="$($OUTPUT 9024 14 1 1 1 249 255 255)"
+# STATUS over a canonical, non-contradictory fact frame. Bootstrap and runtime
+# decisions use stricter action-specific facts inside the Sounio authority.
+probe="$($OUTPUT 9024 14 1 1 1 1017 255 1009)"
 case "$probe" in
   SOUNIO_SPARK_PAIR_ALLOW*) ;;
   *) fail "native authority failed its probe: $probe" ;;
