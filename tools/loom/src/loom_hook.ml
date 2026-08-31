@@ -1099,7 +1099,17 @@ let execute_event tool_root root event agent lane raw_session_id
           refresh_hook_capability tool_root presence_root agent lane raw_session_id;
           refresh_endpoint tool_root presence_root agent lane raw_session_id;
           let replacement =
-            Loom_exec.authorize_and_issue ~file_capability_fixture ~root ~cwd ~command
+            if Loom_sovereign_exec.required_mode () then (
+              if file_capability_fixture then
+                failf "file-capability-fixture-forbidden-in-sovereign-mode";
+              let prepared =
+                Loom_sovereign_exec.prepare ~root ~cwd ~event_sha256 ~command
+              in
+              Loom_sovereign_exec.start ~event_sha256 prepared
+              |> Loom_sovereign_exec.presentation_command)
+            else
+              Loom_exec.authorize_and_issue ~file_capability_fixture ~root ~cwd
+                ~command
           in
           Some (execution_hook_output input field replacement))
     else None)
@@ -1181,6 +1191,7 @@ let run arguments =
   with
   | Error message
   | Loom_exec.Error message
+  | Loom_sovereign_exec.Error message
   | Loom_exec_intent.Error message
   | Loom_exec_catalog.Error message
   | Loom_exec_result.Error message

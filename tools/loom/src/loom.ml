@@ -1246,7 +1246,9 @@ let verify_events path events =
         | "EXEC_GRANT_ISSUED" | "EXEC_GRANT_EXPIRED"
         | "EXEC_GRANT_REFUSED" | "EXEC_GRANT_CONSUMED"
         | "EXEC_CONSUME_REFUSED" | "EXEC_OUTCOME_RECORDED"
-        | "EXEC_OUTCOME_REFUSED" | "EXEC_OUTCOME_INCOMPLETE" ), Active -> ()
+        | "EXEC_OUTCOME_REFUSED" | "EXEC_OUTCOME_INCOMPLETE"
+        | "SOVEREIGN_GRANT_CONSUMED" | "SOVEREIGN_EXEC_COMPLETED"
+        | "SOVEREIGN_EXEC_REFUSED" ), Active -> ()
       | _, Initial -> failf "semantic:event-before-session-start seq=%d" event.seq
       | _, Exited -> failf "semantic:event-after-session-exit seq=%d" event.seq
       | _ -> failf "semantic:unknown-event kind=%s seq=%d" event.kind event.seq);
@@ -1326,14 +1328,30 @@ let parse_nonnegative name value =
   if parsed < 0 then failf "invalid-%s" name;
   parsed
 
+let process_pidfd_alive descriptor =
+  let readable, _, _ = Unix.select [ descriptor ] [] [] 0.0 in
+  readable = []
+
 type guardian_client_mode = Guardian_awaiting | Guardian_bridge
 
 type guardian_client = {
   guardian_fd : file_descr;
+  guardian_peer_pid : int;
+  guardian_peer_uid : int;
+  guardian_peer_gid : int;
+  guardian_peer_start : string;
+  guardian_peer_pidfd : file_descr;
   guardian_input : Buffer.t;
   mutable guardian_mode : guardian_client_mode;
   mutable guardian_pending : string;
   mutable guardian_pending_offset : int;
+}
+
+type guardian_material = {
+  guardian_material_pid : int;
+  guardian_material_start : string;
+  guardian_material_job : string;
+  guardian_material_pidfd : file_descr;
 }
 
 type guardian = {
@@ -1357,6 +1375,9 @@ type guardian = {
   guardian_output_descriptor : file_descr;
   guardian_journal : journal;
   guardian_clients : (file_descr, guardian_client) Hashtbl.t;
+  guardian_materials : (file_descr, guardian_material) Hashtbl.t;
+  guardian_kernel_pid : int;
+  guardian_kernel_start : string;
   mutable guardian_bridge : file_descr option;
   mutable guardian_output_cursor : int;
   mutable guardian_stopping : bool;
@@ -1407,6 +1428,7 @@ let guardian_descriptor_fields guardian state =
     ("output_file", guardian.guardian_output_path);
     ("guardian_journal_file", guardian.guardian_journal_path);
     ("output_cursor", string_of_int guardian.guardian_output_cursor);
+    ("material_witnesses", string_of_int (Hashtbl.length guardian.guardian_materials));
     ("command", logical_command_name guardian.guardian_command);
     ("argv_digest", command_argv_digest guardian.guardian_command);
     ("started_utc", guardian.guardian_started_utc);
@@ -1447,6 +1469,7 @@ let guardian_close_client guardian descriptor =
          && guardian.guardian_bridge = Some descriptor
       then guardian.guardian_bridge <- None;
       Hashtbl.remove guardian.guardian_clients descriptor;
+      (try Unix.close client.guardian_peer_pidfd with _ -> ());
       (try Unix.close descriptor with _ -> ())
 
 let guardian_output_range guardian cursor limit =
@@ -1481,6 +1504,7 @@ let guardian_status_fields guardian =
     ("harness_pid_start", guardian.guardian_harness_pid_start);
     ("output_cursor", string_of_int guardian.guardian_output_cursor);
     ("bridge_clients", if guardian.guardian_bridge = None then "0" else "1");
+    ("material_witnesses", string_of_int (Hashtbl.length guardian.guardian_materials));
     ("worktree", guardian.guardian_cwd);
     ("command", logical_command_name guardian.guardian_command);
     ("argv_digest", command_argv_digest guardian.guardian_command);
@@ -1552,6 +1576,61 @@ let guardian_handle_request guardian client line =
           with
           | Loom_error error -> refuse error
           | Unix_error _ -> refuse "signal-failed")
+      | "MATERIAL_REGISTER", [ job_id; pid_raw; start ] -> (
+          try
+            if not (valid_sha256 job_id) then failf "material-job-invalid";
+            let pid = parse_nonnegative "material-pid" pid_raw in
+            if client.guardian_peer_pid <> guardian.guardian_kernel_pid ||
+               client.guardian_peer_uid <> Unix.geteuid () ||
+               client.guardian_peer_gid <> Unix.getegid () ||
+               client.guardian_peer_start <> guardian.guardian_kernel_start ||
+               not (process_pidfd_alive client.guardian_peer_pidfd)
+            then failf "material-register-peer-refused";
+            if process_start pid <> start then
+              failf "material-register-start-mismatch";
+            let parent = process_parent pid in
+            if parent <> guardian.guardian_kernel_pid then
+              failf "material-register-parent-mismatch";
+            if process_executable pid <> process_executable guardian.guardian_kernel_pid
+               || process_executable_sha256 pid <>
+                  process_executable_sha256 guardian.guardian_kernel_pid
+            then failf "material-register-executable-mismatch";
+            let pidfd =
+              match pidfd_open pid with
+              | Some descriptor when process_pidfd_alive descriptor -> descriptor
+              | Some descriptor ->
+                  Unix.close descriptor;
+                  failf "material-register-worker-dead"
+              | None -> failf "material-register-pidfd-unavailable"
+            in
+            let duplicate =
+              Hashtbl.fold
+                (fun _ material found ->
+                  found || material.guardian_material_pid = pid
+                  || material.guardian_material_job = job_id)
+                guardian.guardian_materials false
+            in
+            if duplicate then (
+              Unix.close pidfd;
+              failf "material-register-duplicate");
+            Hashtbl.add guardian.guardian_materials pidfd
+              { guardian_material_pid = pid;
+                guardian_material_start = start;
+                guardian_material_job = job_id;
+                guardian_material_pidfd = pidfd };
+            ignore
+              (append_event guardian.guardian_journal "MATERIAL_REGISTERED"
+                 (String.concat ":" [ job_id; string_of_int pid; start ]));
+            guardian_queue client
+              (control_line
+                 [ "OK"; "MATERIAL_REGISTERED";
+                   guardian.guardian_instance_id; job_id ])
+          with
+          | Loom_error error -> refuse error
+          | Unix_error (error, name, argument) ->
+              refuse
+                (Printf.sprintf "%s:%s(%s)" (Unix.error_message error) name
+                   argument))
       | _ -> refuse "unknown-operation")
   | magic :: _
     when magic <> Printf.sprintf "GUARD/%d" guardian_protocol_version ->
@@ -1595,17 +1674,41 @@ let guardian_read_client guardian descriptor =
 let guardian_accept_client guardian =
   try
     let descriptor, _ = Unix.accept guardian.guardian_listener in
-    Unix.set_close_on_exec descriptor;
-    Unix.set_nonblock descriptor;
-    Hashtbl.add guardian.guardian_clients descriptor
-      {
-        guardian_fd = descriptor;
-        guardian_input = Buffer.create 256;
-        guardian_mode = Guardian_awaiting;
-        guardian_pending = "";
-        guardian_pending_offset = 0;
-      }
-  with Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> ()
+    let peer_pidfd = ref None in
+    (try
+       Unix.set_close_on_exec descriptor;
+       let peer_pid, peer_uid, peer_gid = peer_credentials descriptor in
+       let peer_start = process_start peer_pid in
+       let pidfd =
+         match pidfd_open peer_pid with
+         | Some value when process_pidfd_alive value -> value
+         | Some value ->
+             Unix.close value;
+             failf "guardian-peer-dead"
+         | None -> failf "guardian-peer-pidfd-unavailable"
+       in
+       peer_pidfd := Some pidfd;
+       Unix.set_nonblock descriptor;
+       Hashtbl.add guardian.guardian_clients descriptor
+         {
+           guardian_fd = descriptor;
+           guardian_peer_pid = peer_pid;
+           guardian_peer_uid = peer_uid;
+           guardian_peer_gid = peer_gid;
+           guardian_peer_start = peer_start;
+           guardian_peer_pidfd = pidfd;
+           guardian_input = Buffer.create 256;
+           guardian_mode = Guardian_awaiting;
+           guardian_pending = "";
+           guardian_pending_offset = 0;
+         }
+     with error ->
+       Option.iter (fun value -> try Unix.close value with _ -> ()) !peer_pidfd;
+       (try Unix.close descriptor with _ -> ());
+       raise error)
+  with
+  | Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> ()
+  | _ -> ()
 
 let guardian_read_pty guardian =
   let bytes = Bytes.create 65536 in
@@ -1644,6 +1747,38 @@ let guardian_child_status guardian =
   | _, status -> Some status
   | exception Unix_error (ECHILD, _, _) -> Some (WEXITED 0)
 
+let guardian_reap_material guardian descriptor =
+  match Hashtbl.find_opt guardian.guardian_materials descriptor with
+  | None -> ()
+  | Some material ->
+      Hashtbl.remove guardian.guardian_materials descriptor;
+      (try Unix.close material.guardian_material_pidfd with _ -> ());
+      ignore
+        (append_event guardian.guardian_journal "MATERIAL_EXTINCT"
+           (String.concat ":"
+              [ material.guardian_material_job;
+                string_of_int material.guardian_material_pid;
+                material.guardian_material_start ]))
+
+let guardian_stop_materials guardian =
+  let materials =
+    Hashtbl.fold
+      (fun descriptor material values -> (descriptor, material) :: values)
+      guardian.guardian_materials []
+  in
+  List.iter
+    (fun (descriptor, material) ->
+      (try Unix.kill material.guardian_material_pid Sys.sigkill with _ -> ());
+      Hashtbl.remove guardian.guardian_materials descriptor;
+      (try Unix.close material.guardian_material_pidfd with _ -> ());
+      ignore
+        (append_event guardian.guardian_journal "MATERIAL_REVOKED"
+           (String.concat ":"
+              [ material.guardian_material_job;
+                string_of_int material.guardian_material_pid;
+                material.guardian_material_start ])))
+    materials
+
 let guardian_stop_child guardian =
   if guardian.guardian_harness_exit = None then (
     (try Unix.kill guardian.guardian_harness_pid Sys.sigterm with _ -> ());
@@ -1680,7 +1815,7 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
         [| Printf.sprintf "SOUNIO_LOOM_GUARDIAN_SOCKET=%s"
              paths.guardian_socket_path;
            Printf.sprintf "SOUNIO_LOOM_SOCKET=%s" paths.socket_path;
-           Printf.sprintf "SOUNIO_LOOM_TOKEN_FILE=%s" paths.token_path;
+           "SOUNIO_LOOM_SOVEREIGN_EXEC_REQUIRED=1";
            Printf.sprintf "SOUNIO_LOOM_AGENT=%s" agent;
            Printf.sprintf "SOUNIO_LOOM_LANE=%s" lane;
            Printf.sprintf "SOUNIO_LOOM_SESSION_ID=%s" session_id;
@@ -1690,6 +1825,7 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
   Unix.set_close_on_exec master_fd;
   Unix.set_nonblock master_fd;
   (try set_winsize master_fd 40 140 with _ -> ());
+  let kernel_pid = Unix.getppid () in
   let guardian =
     {
       guardian_paths = paths;
@@ -1712,6 +1848,9 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
       guardian_output_descriptor = output_descriptor;
       guardian_journal = journal;
       guardian_clients = Hashtbl.create 8;
+      guardian_materials = Hashtbl.create 8;
+      guardian_kernel_pid = kernel_pid;
+      guardian_kernel_start = process_start kernel_pid;
       guardian_bridge = None;
       guardian_output_cursor = 0;
       guardian_stopping = false;
@@ -1726,7 +1865,9 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
   Sys.set_signal Sys.sigterm (Sys.Signal_handle signal_stop);
   Sys.set_signal Sys.sigint (Sys.Signal_handle signal_stop);
   while
-    not guardian.guardian_stopping && guardian.guardian_harness_exit = None
+    not guardian.guardian_stopping &&
+    (guardian.guardian_harness_exit = None ||
+     Hashtbl.length guardian.guardian_materials > 0)
   do
     let client_fds =
       Hashtbl.fold
@@ -1742,15 +1883,26 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
           else values)
         guardian.guardian_clients []
     in
+    let material_fds =
+      Hashtbl.fold
+        (fun descriptor _ values -> descriptor :: values)
+        guardian.guardian_materials []
+    in
+    let guardian_inputs =
+      guardian.guardian_listener :: client_fds @ material_fds @
+      (if guardian.guardian_harness_exit = None
+       then [ guardian.guardian_master_fd ] else [])
+    in
     let readable, writable, _ =
       Unix.select
-        (guardian.guardian_listener :: guardian.guardian_master_fd :: client_fds)
-        write_fds [] 0.2
+        guardian_inputs write_fds [] 0.2
     in
     List.iter
       (fun descriptor ->
         if descriptor = guardian.guardian_listener then
           guardian_accept_client guardian
+        else if Hashtbl.mem guardian.guardian_materials descriptor then
+          guardian_reap_material guardian descriptor
         else if descriptor = guardian.guardian_master_fd then
           guardian_read_pty guardian
         else guardian_read_client guardian descriptor)
@@ -1763,11 +1915,18 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
              with _ -> guardian_close_client guardian descriptor)
         | None -> ())
       writable;
-    match guardian_child_status guardian with
-    | Some status -> guardian.guardian_harness_exit <- Some (process_exit_code status)
-    | None -> ()
+    if guardian.guardian_harness_exit = None then
+      match guardian_child_status guardian with
+      | Some status ->
+          guardian.guardian_harness_exit <- Some (process_exit_code status);
+          write_guardian_descriptor guardian
+            (if Hashtbl.length guardian.guardian_materials = 0
+             then "exited" else "material-active")
+      | None -> ()
   done;
-  if guardian.guardian_stopping then guardian_stop_child guardian;
+  if guardian.guardian_stopping then (
+    guardian_stop_materials guardian;
+    guardian_stop_child guardian);
   let clients =
     Hashtbl.fold
       (fun fd _ values -> fd :: values)
@@ -1819,7 +1978,8 @@ let verify_guardian_events path events =
               "guardian-semantic:non-contiguous-output expected=%d actual=%d:%d seq=%d"
               !output_cursor start ending event.seq;
           output_cursor := ending
-      | ("INPUT" | "RESIZE" | "SIGNAL"), Guardian_active -> ()
+      | ("INPUT" | "RESIZE" | "SIGNAL" | "MATERIAL_REGISTERED"
+        | "MATERIAL_EXTINCT" | "MATERIAL_REVOKED"), Guardian_active -> ()
       | "GUARDIAN_EXITED", Guardian_active -> phase := Guardian_exited
       | _, Guardian_initial ->
           failf "guardian-semantic:event-before-start seq=%d" event.seq
@@ -2058,6 +2218,23 @@ type exec_outcome_obligation = {
   outcome_consumed_us : int64;
 }
 
+type sovereign_job_state =
+  | Sovereign_running
+  | Sovereign_complete of string * string
+  | Sovereign_failed of string
+
+type sovereign_job = {
+  sovereign_job_id : string;
+  sovereign_payload_sha256 : string;
+  sovereign_event_sha256 : string;
+  sovereign_command_sha256 : string;
+  sovereign_worker_pid : int;
+  sovereign_worker_start : string;
+  sovereign_worker_pidfd : file_descr;
+  sovereign_result_path : string;
+  mutable sovereign_state : sovereign_job_state;
+}
+
 type kernel = {
   paths : paths;
   agent : string;
@@ -2088,6 +2265,9 @@ type kernel = {
   clients : (file_descr, client) Hashtbl.t;
   exec_grants : (string, exec_grant) Hashtbl.t;
   exec_outcomes : (string, exec_outcome_obligation) Hashtbl.t;
+  sovereign_grants : (string, unit) Hashtbl.t;
+  sovereign_jobs : (string, sovereign_job) Hashtbl.t;
+  sovereign_exec_required : bool;
   mutable next_client : int;
   mutable input_holder : file_descr option;
   mutable output_cursor : int;
@@ -2142,6 +2322,8 @@ let descriptor_fields kernel state =
     ("guardian_socket", kernel.paths.guardian_socket_path);
     ("socket", kernel.paths.socket_path);
     ("token_file", kernel.paths.token_path);
+    ("sovereign_exec_required", string_of_bool kernel.sovereign_exec_required);
+    ("exec_release_protocol", if kernel.sovereign_exec_required then "LOOM_EXEC/1" else "LOOM/1-legacy");
     ("output_file", kernel.output_path);
     ("journal_file", kernel.journal_path);
     ("guardian_journal_file", kernel.guardian_journal_path);
@@ -2171,6 +2353,9 @@ let status_fields kernel =
     ("kernel_generation", kernel.kernel_generation);
     ("pending_exec_grants", string_of_int (Hashtbl.length kernel.exec_grants));
     ("pending_exec_outcomes", string_of_int (Hashtbl.length kernel.exec_outcomes));
+    ("pending_sovereign_grants", string_of_int (Hashtbl.length kernel.sovereign_grants));
+    ("sovereign_jobs", string_of_int (Hashtbl.length kernel.sovereign_jobs));
+    ("sovereign_exec_required", string_of_bool kernel.sovereign_exec_required);
     ("daemon_pid", string_of_int (Unix.getpid ()));
     ("daemon_pid_start", kernel.daemon_pid_start);
     ("harness_pid", string_of_int kernel.harness_pid);
@@ -2253,7 +2438,20 @@ let authenticate_exec_peer kernel client operation handle =
   let peer_cwd = process_cwd client.peer_pid in
   if not (path_within kernel.cwd peer_cwd) then failf "exec-peer-cwd-outside-worktree";
   let arguments = process_arguments client.peer_pid in
-  if operation = "issue" then (
+  if operation = "sovereign-start" then (
+    if process_parent client.peer_pid <> kernel.harness_pid then
+      failf "sovereign-issuer-not-direct-harness-child";
+    if not (List.mem "agent-hook" arguments) then
+      failf "sovereign-issuer-command-mismatch")
+  else if operation = "sovereign-present" then (
+    if process_parent client.peer_pid <> kernel.harness_pid then
+      failf "sovereign-presenter-not-direct-harness-child";
+    if not (List.mem "sovereign-result" arguments) then
+      failf "sovereign-presenter-command-mismatch";
+    match handle with
+    | Some expected when arguments_contain_pair arguments "--job" expected -> ()
+    | _ -> failf "sovereign-presenter-job-mismatch")
+  else if operation = "issue" then (
     if not (List.mem "agent-hook" arguments) then
       failf "exec-issuer-command-mismatch")
   else if operation = "consume" || operation = "outcome" then (
@@ -2323,12 +2521,311 @@ let materialize_orphaned_exec_outcomes kernel =
       materialize_exec_outcome_incomplete kernel handle obligation "broker-exited")
     orphaned
 
+let guardian_register_material kernel job_id worker_pid worker_start =
+  let descriptor = connect_unix kernel.paths.guardian_socket_path in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      write_all descriptor
+        (guardian_request_line kernel.token "MATERIAL_REGISTER"
+           [ job_id; string_of_int worker_pid; worker_start ]);
+      match
+        guardian_parse_ok (read_protocol_line descriptor) "MATERIAL_REGISTERED"
+      with
+      | [ instance; actual_job ]
+        when instance = kernel.instance_id && actual_job = job_id -> ()
+      | _ -> failf "guardian-material-register-response-invalid")
+
+let sovereign_result_directory kernel =
+  let path =
+    Filename.concat (Filename.dirname kernel.output_path) "sovereign-results"
+  in
+  mkdir_p path;
+  path
+
+let close_sovereign_worker_inherited kernel start_gate_write =
+  let close descriptor =
+    if descriptor <> start_gate_write then try Unix.close descriptor with _ -> ()
+  in
+  close kernel.listener;
+  close kernel.guardian_fd;
+  close kernel.journal.descriptor;
+  Hashtbl.iter
+    (fun descriptor client ->
+      close descriptor;
+      close client.peer_pidfd)
+    kernel.clients;
+  Hashtbl.iter
+    (fun _ job -> close job.sovereign_worker_pidfd)
+    kernel.sovereign_jobs
+
+let new_sovereign_job_id kernel =
+  let rec choose () =
+    let value = random_hex 32 in
+    if Hashtbl.mem kernel.sovereign_jobs value then choose () else value
+  in
+  choose ()
+
+let start_sovereign_job kernel client ~event_sha256 ~command_sha256
+    ~payload_sha256 ~payload =
+  if not kernel.sovereign_exec_required then
+    failf "sovereign-exec-not-required";
+  ignore
+    (authenticate_exec_peer kernel client "sovereign-start" None);
+  if not (valid_sha256 event_sha256 && valid_sha256 command_sha256 &&
+          valid_sha256 payload_sha256)
+  then failf "sovereign-exec-digest-invalid";
+  if payload = "" || String.length payload > max_exec_capability_payload_bytes
+  then failf "sovereign-exec-payload-size-refused";
+  if sha256 payload <> payload_sha256 then
+    failf "sovereign-exec-payload-digest-mismatch";
+  ignore
+    (Loom_sovereign_exec.validate_payload ~root:kernel.cwd ~event_sha256
+       ~command_sha256 payload);
+  let grant_id =
+    sha256
+      (String.concat ":"
+         [ kernel.kernel_generation; string_of_int client.peer_pid;
+           client.peer_start; event_sha256; command_sha256; payload_sha256 ])
+  in
+  if Hashtbl.mem kernel.sovereign_grants grant_id then
+    failf "sovereign-grant-duplicate";
+  Hashtbl.add kernel.sovereign_grants grant_id ();
+  let job_id = new_sovereign_job_id kernel in
+  let result_path =
+    Filename.concat (sovereign_result_directory kernel) (job_id ^ ".record")
+  in
+  if Sys.file_exists result_path then (
+    Hashtbl.remove kernel.sovereign_grants grant_id;
+    failf "sovereign-result-collision");
+  let start_gate_read, start_gate_write = Unix.pipe ~cloexec:true () in
+  let worker_pid =
+    match Unix.fork () with
+    | 0 ->
+        Unix.close start_gate_write;
+        close_sovereign_worker_inherited kernel start_gate_read;
+        let code =
+          Loom_sovereign_exec.worker ~root:kernel.cwd ~event_sha256
+            ~command_sha256 ~payload ~job_id
+            ~kernel_generation:kernel.kernel_generation
+            ~guardian_pid:kernel.guardian_pid
+            ~guardian_start:kernel.guardian_pid_start ~result_path
+            ~start_gate:start_gate_read
+        in
+        Unix._exit code
+    | pid -> pid
+  in
+  Unix.close start_gate_read;
+  let worker_start =
+    try process_start worker_pid with error ->
+      Unix.close start_gate_write;
+      Hashtbl.remove kernel.sovereign_grants grant_id;
+      (try Unix.kill worker_pid Sys.sigkill with _ -> ());
+      (try ignore (Unix.waitpid [] worker_pid) with _ -> ());
+      raise error
+  in
+  let worker_pidfd =
+    match pidfd_open worker_pid with
+    | Some descriptor when pidfd_alive descriptor -> descriptor
+    | Some descriptor ->
+        Unix.close descriptor;
+        Unix.close start_gate_write;
+        Hashtbl.remove kernel.sovereign_grants grant_id;
+        (try Unix.kill worker_pid Sys.sigkill with _ -> ());
+        (try ignore (Unix.waitpid [] worker_pid) with _ -> ());
+        failf "sovereign-worker-not-alive"
+    | None ->
+        Unix.close start_gate_write;
+        Hashtbl.remove kernel.sovereign_grants grant_id;
+        (try Unix.kill worker_pid Sys.sigkill with _ -> ());
+        (try ignore (Unix.waitpid [] worker_pid) with _ -> ());
+        failf "sovereign-worker-pidfd-unavailable"
+  in
+  (try
+     guardian_register_material kernel job_id worker_pid worker_start;
+     if not (Hashtbl.mem kernel.sovereign_grants grant_id) then
+       failf "sovereign-grant-state-lost";
+     Hashtbl.remove kernel.sovereign_grants grant_id;
+     write_all start_gate_write "G";
+     Unix.close start_gate_write
+   with error ->
+     Hashtbl.remove kernel.sovereign_grants grant_id;
+     (try Unix.close start_gate_write with _ -> ());
+     (try Unix.kill worker_pid Sys.sigkill with _ -> ());
+     (try ignore (Unix.waitpid [] worker_pid) with _ -> ());
+     Unix.close worker_pidfd;
+     raise error);
+  let job =
+    { sovereign_job_id = job_id;
+      sovereign_payload_sha256 = payload_sha256;
+      sovereign_event_sha256 = event_sha256;
+      sovereign_command_sha256 = command_sha256;
+      sovereign_worker_pid = worker_pid;
+      sovereign_worker_start = worker_start;
+      sovereign_worker_pidfd = worker_pidfd;
+      sovereign_result_path = result_path;
+      sovereign_state = Sovereign_running }
+  in
+  Hashtbl.add kernel.sovereign_jobs job_id job;
+  ignore
+    (append_event kernel.journal "SOVEREIGN_GRANT_CONSUMED"
+       (String.concat ":"
+          [ sha256 grant_id; job_id; payload_sha256; event_sha256;
+            command_sha256; string_of_int client.peer_pid;
+            string_of_int worker_pid ]));
+  job
+
+let reap_sovereign_jobs kernel =
+  Hashtbl.iter
+    (fun _ job ->
+      match job.sovereign_state with
+      | Sovereign_complete _ | Sovereign_failed _ -> ()
+      | Sovereign_running -> (
+          if pidfd_alive job.sovereign_worker_pidfd then
+            let actual_start =
+              try process_start job.sovereign_worker_pid
+              with _ -> ""
+            in
+            if actual_start <> job.sovereign_worker_start then
+              failf "sovereign-worker-identity-changed";
+          match Unix.waitpid [ WNOHANG ] job.sovereign_worker_pid with
+          | 0, _ -> ()
+          | _, status ->
+              (try Unix.close job.sovereign_worker_pidfd with _ -> ());
+              let code = process_exit_code status in
+              if code = 0 then
+                (try
+                   let table, record_sha256, _ =
+                     Loom_sovereign_exec.validate_result_file
+                       ~path:job.sovereign_result_path
+                       ~job_id:job.sovereign_job_id
+                       ~payload_sha256:job.sovereign_payload_sha256
+                   in
+                   if Loom_exec.required table "state" <> "COMPLETED" then
+                     failf "sovereign-worker-result-not-complete";
+                   if Loom_exec.required table "event_sha256" <>
+                      job.sovereign_event_sha256
+                   then failf "sovereign-worker-event-mismatch";
+                   if Loom_exec.required table "command_sha256" <>
+                      job.sovereign_command_sha256
+                   then failf "sovereign-worker-command-mismatch";
+                   job.sovereign_state <-
+                     Sovereign_complete
+                       (job.sovereign_result_path, record_sha256);
+                   ignore
+                     (append_event kernel.journal "SOVEREIGN_EXEC_COMPLETED"
+                        (String.concat ":"
+                           [ job.sovereign_job_id; record_sha256;
+                             job.sovereign_payload_sha256;
+                             string_of_int job.sovereign_worker_pid ]))
+                 with
+                 | Loom_sovereign_exec.Error reason
+                 | Loom_error reason ->
+                     job.sovereign_state <- Sovereign_failed reason;
+                     ignore
+                       (append_event kernel.journal "SOVEREIGN_EXEC_REFUSED"
+                          (String.concat ":"
+                             [ job.sovereign_job_id; sha256 reason;
+                               string_of_int code ])))
+              else (
+                let reason = Printf.sprintf "worker-exit-%d" code in
+                job.sovereign_state <- Sovereign_failed reason;
+                ignore
+                  (append_event kernel.journal "SOVEREIGN_EXEC_REFUSED"
+                     (String.concat ":"
+                        [ job.sovereign_job_id; sha256 reason;
+                          string_of_int code ])))
+          | exception Unix_error (ECHILD, _, _) ->
+              let reason = "worker-reap-lost" in
+              job.sovereign_state <- Sovereign_failed reason;
+              (try Unix.close job.sovereign_worker_pidfd with _ -> ());
+              ignore
+                (append_event kernel.journal "SOVEREIGN_EXEC_REFUSED"
+                   (String.concat ":"
+                      [ job.sovereign_job_id; sha256 reason; "255" ]))))
+    kernel.sovereign_jobs
+
 let handle_request kernel client line =
   let refuse code =
     queue client (control_line [ "ERR"; code ]);
     client.mode <- Awaiting
   in
   match split_on '\t' line with
+  | [ "LOOM_EXEC/1"; "START"; instance; event_sha256; command_sha256;
+      payload_sha256; payload_hex ] -> (
+      try
+        if instance <> kernel.instance_id then
+          failf "sovereign-instance-mismatch";
+        let payload = string_of_hex payload_hex in
+        let job =
+          start_sovereign_job kernel client ~event_sha256 ~command_sha256
+            ~payload_sha256 ~payload
+        in
+        queue client
+          (control_line
+             [ "OK"; "SOVEREIGN_STARTED"; kernel.instance_id;
+               kernel.kernel_generation; job.sovereign_job_id;
+               job.sovereign_payload_sha256 ])
+      with
+      | Loom_error error
+      | Loom_sovereign_exec.Error error ->
+          ignore
+            (append_event kernel.journal "SOVEREIGN_EXEC_REFUSED"
+               (String.concat ":"
+                  [ sha256 error; string_of_int client.peer_pid; "pre-exec" ]));
+          refuse error
+      | Unix_error (error, name, argument) ->
+          let reason =
+            Printf.sprintf "%s:%s(%s)" (Unix.error_message error) name argument
+          in
+          ignore
+            (append_event kernel.journal "SOVEREIGN_EXEC_REFUSED"
+               (String.concat ":"
+                  [ sha256 reason; string_of_int client.peer_pid; "pre-exec" ]));
+          refuse reason)
+  | [ "LOOM_EXEC/1"; "WAIT"; instance; generation; job_id;
+      payload_sha256 ] -> (
+      try
+        if instance <> kernel.instance_id then
+          failf "sovereign-instance-mismatch";
+        if generation <> kernel.kernel_generation then
+          failf "sovereign-generation-mismatch";
+        if not (valid_sha256 job_id && valid_sha256 payload_sha256) then
+          failf "sovereign-result-identity-invalid";
+        ignore
+          (authenticate_exec_peer kernel client "sovereign-present"
+             (Some job_id));
+        reap_sovereign_jobs kernel;
+        let job =
+          match Hashtbl.find_opt kernel.sovereign_jobs job_id with
+          | Some value -> value
+          | None -> failf "sovereign-result-missing"
+        in
+        if job.sovereign_payload_sha256 <> payload_sha256 then
+          failf "sovereign-result-payload-mismatch";
+        (match job.sovereign_state with
+        | Sovereign_running ->
+            queue client
+              (control_line [ "OK"; "SOVEREIGN_PENDING"; job_id ])
+        | Sovereign_complete (path, record_sha256) ->
+            queue client
+              (control_line
+                 [ "OK"; "SOVEREIGN_COMPLETE"; job_id;
+                   hex_of_string path; record_sha256 ])
+        | Sovereign_failed reason -> refuse reason)
+      with
+      | Loom_error error
+      | Loom_sovereign_exec.Error error -> refuse error
+      | Unix_error (error, name, argument) ->
+          refuse
+            (Printf.sprintf "%s:%s(%s)" (Unix.error_message error) name
+               argument))
+  | "LOOM_EXEC/1" :: _ ->
+      ignore
+        (append_event kernel.journal "SOVEREIGN_EXEC_REFUSED"
+           (String.concat ":"
+              [ sha256 line; string_of_int client.peer_pid; "unknown-operation" ]));
+      refuse "sovereign-operation-refused"
   | magic :: token :: operation :: arguments
     when magic = Printf.sprintf "LOOM/%d" protocol_version && token = kernel.token -> (
       match (operation, arguments) with
@@ -2340,6 +2837,8 @@ let handle_request kernel client line =
           queue client (control_line ("OK" :: "STATUS" :: fields))
       | "EXEC_ISSUE", [ instance; cwd_hex; ttl_raw; payload_sha256; payload_hex ] -> (
           try
+            if kernel.sovereign_exec_required then
+              failf "legacy-exec-route-disabled";
             if instance <> kernel.instance_id then failf "exec-instance-mismatch";
             ignore (authenticate_exec_peer kernel client "issue" None);
             let ttl = parse_nonnegative "exec-ttl" ttl_raw in
@@ -2390,6 +2889,8 @@ let handle_request kernel client line =
               refuse reason)
       | "EXEC_CONSUME", [ instance; generation; handle ] -> (
           try
+            if kernel.sovereign_exec_required then
+              failf "legacy-exec-route-disabled";
             if instance <> kernel.instance_id then failf "exec-instance-mismatch";
             if generation <> kernel.kernel_generation then
               failf "exec-kernel-generation-mismatch";
@@ -2444,6 +2945,8 @@ let handle_request kernel client line =
       | "EXEC_OUTCOME",
         [ instance; generation; handle; receipt_sha256; receipt_hex ] -> (
           try
+            if kernel.sovereign_exec_required then
+              failf "legacy-exec-route-disabled";
             if instance <> kernel.instance_id then failf "exec-instance-mismatch";
             if generation <> kernel.kernel_generation then
               failf "exec-kernel-generation-mismatch";
@@ -2896,6 +3399,7 @@ let run_kernel kernel =
   while not kernel.stopping && kernel.harness_exit = None do
     expire_exec_grants kernel;
     materialize_orphaned_exec_outcomes kernel;
+    reap_sovereign_jobs kernel;
     reap_coordination kernel;
     if Sys.getenv_opt "SOUNIO_LOOM_COORD_AUTO" <> Some "0"
        && Unix.gettimeofday () >= kernel.next_coord_refresh
@@ -3060,6 +3564,9 @@ let build_kernel paths agent lane session_id cwd instance_id output_path
     clients = Hashtbl.create 16;
     exec_grants = Hashtbl.create 16;
     exec_outcomes = Hashtbl.create 16;
+    sovereign_grants = Hashtbl.create 4;
+    sovereign_jobs = Hashtbl.create 16;
+    sovereign_exec_required = true;
     next_client = 0;
     input_holder = None;
     output_cursor = ending;
@@ -12557,6 +13064,13 @@ let exec_result_record_present_command cli =
   flush Stdlib.stdout;
   0
 
+let sovereign_result_command cli =
+  Loom_sovereign_exec.present_result
+    ~instance:(required cli "--instance")
+    ~generation:(required cli "--generation")
+    ~job_id:(required cli "--job")
+    ~payload_sha256:(required cli "--payload-sha256")
+
 let usage () =
   Printf.eprintf
     "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  host-enroll --agent A --lane L [--replace] [--state-dir DIR]\n  host-reconcile [--agent A --lane L] [--apply] [--service-enabled] [--state-dir DIR]\n  host-supervise [--once] [--interval-seconds N] [--apply] [--service-enabled] [--state-dir DIR]\n  host-verify --agent A --lane L [--state-dir DIR]\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
@@ -12579,6 +13093,8 @@ let usage () =
     "  exec-result-present --root DIR --event SHA --command SHA --handle HANDLE --receipt-sha256 SHA --receipt-hex HEX --manifest-sha256 SHA\n";
   Printf.eprintf
     "  exec-result-record-present --root DIR --event SHA --command SHA --handle HANDLE --record-sha256 SHA --record-hex HEX --manifest-sha256 SHA\n";
+  Printf.eprintf
+    "  sovereign-result --instance I --generation SHA --job SHA --payload-sha256 SHA\n";
   Printf.eprintf
     "  peer-activation-capsule-probe --root DIR --mode current|python|happy|deny-preserves|poison|replay|mismatch|timeout|eof --seal FILE [--consume FILE] [--extinguish FILE] [--poison FILE] [--deny FILE] --deadline-ms N (test mode only)\n";
   Printf.eprintf "  provider-open persistent providers: claude, codex, kimi\n";
@@ -12666,6 +13182,7 @@ let main () =
     | "exec-result-probe" -> exec_result_probe_command cli
     | "exec-result-present" -> exec_result_present_command cli
     | "exec-result-record-present" -> exec_result_record_present_command cli
+    | "sovereign-result" -> sovereign_result_command cli
     | "peer-activation-capsule-probe" ->
         peer_activation_capsule_probe_command cli
     | "start" -> start_command cli; 0
@@ -12780,6 +13297,8 @@ let () =
   | Loom_exec_result_record.Error error ->
       Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_exec_result.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
+  | Loom_sovereign_exec.Error error ->
+      Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_peer_activation_capsule.Error error ->
       Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_epistemic.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1

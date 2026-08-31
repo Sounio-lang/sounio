@@ -6,6 +6,8 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #ifdef __linux__
+#include <signal.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #endif
 #include <unistd.h>
@@ -103,5 +105,19 @@ CAMLprim value sounio_loom_pidfd_open(value pid_value) {
   CAMLreturn(result);
 #else
   CAMLreturn(Val_int(0));
+#endif
+}
+
+CAMLprim value sounio_loom_arm_parent_death_kill(value unit) {
+  CAMLparam1(unit);
+#ifdef __linux__
+  const pid_t parent = getppid();
+  if (parent <= 1 || prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 ||
+      getppid() != parent) {
+    caml_failwith("PR_SET_PDEATHSIG failed");
+  }
+  CAMLreturn(Val_unit);
+#else
+  caml_failwith("PR_SET_PDEATHSIG unavailable on this platform");
 #endif
 }
