@@ -1,0 +1,57 @@
+//@ run-pass
+//@ exit-code: 0
+//@ description: stdlib/epistemic/affine — x + x on one source gives Var 4 (ep_add reports 2); x + y on disjoint sources gives 5 in both; Lemma 1 gap = 2·Cov in both signs
+// Companion to formal/lean4/EpistemicEffectsNS.lean: trueVar_append, naive_add_understates_iff,
+// naive_add_conservative_of_cov_nonpos, naive_add_exact_iff — the same identities, executed.
+
+use epistemic::affine::{
+    af_measured, af_add, af_sub, af_scale, af_variance, af_cov, af_add_gap,
+    af_naive_add_variance, af_sources_disjoint, af_value,
+}
+use epistemic::knowledge::{ep_measured, ep_add, ep_variance}
+
+fn close2(a: f64, b: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < 0.000001
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var ok: i64 = 1
+    let x = af_measured(10.0, 1.0, 0)
+    let y = af_measured(20.0, 2.0, 1)
+
+    // x + x: true Var = 4 (one source, coefficient 2); the scalar add reports 1 + 1 = 2.
+    let xx = af_add(&x, &x)
+    if !close2(af_variance(&xx), 4.0) { ok = 0 }
+    if !close2(af_naive_add_variance(&x, &x), 2.0) { ok = 0 }
+    if !close2(af_add_gap(&x, &x), 2.0) { ok = 0 }              // 2·Cov = 2·1
+    let ex = ep_measured(10.0, 1.0)
+    let exx = ep_add(&ex, &ex)
+    if !close2(ep_variance(&exx), 2.0) { ok = 0 }                // the shipped scalar add: 2, understated
+    if af_sources_disjoint(&x, &x) { ok = 0 }                  // the E230 precondition fails on x + x
+
+    // x + y on disjoint sources: 1 + 4 = 5 both ways; gap 0.
+    let xy = af_add(&x, &y)
+    if !close2(af_variance(&xy), 5.0) { ok = 0 }
+    if !close2(af_add_gap(&x, &y), 0.0) { ok = 0 }
+    if !af_sources_disjoint(&x, &y) { ok = 0 }
+    if !close2(af_value(&xy), 30.0) { ok = 0 }
+
+    // Negative covariance: x + (−x + y) — the naive add OVER-states (Cov < 0 ⇒ conservative).
+    let nx = af_scale(&x, 0.0 - 1.0)
+    let z = af_add(&nx, &y)                                    // z = -x + y: c = (-1, 2)
+    if !close2(af_cov(&x, &z), 0.0 - 1.0) { ok = 0 }
+    let xz = af_add(&x, &z)                                    // = y: true Var 4
+    if !close2(af_variance(&xz), 4.0) { ok = 0 }
+    if !(af_naive_add_variance(&x, &z) > af_variance(&xz)) { ok = 0 }   // 1 + 5 = 6 > 4
+    if !close2(af_add_gap(&x, &z), 0.0 - 2.0) { ok = 0 }
+
+    // Subtraction on a shared source: x − x is exactly certain.
+    let zero = af_sub(&x, &x)
+    if !close2(af_variance(&zero), 0.0) { ok = 0 }
+
+    if ok == 1 { println("AFFINE_SHARED_SOURCE_ADD PASS"); return 0 }
+    println("AFFINE_SHARED_SOURCE_ADD FAIL")
+    1
+}
