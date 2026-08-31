@@ -427,6 +427,27 @@ Um bônus da versão posto-7: mesmo onde UMA relação degenera, sobram 3 e o
 posto local ≤ 8 = dim — a folga do deficit-(-1) torna a lapidação mais
 robusta que a versão original.
 
+## Rodada 12: O LOCUS MEDIDO + MANUSCRITO
+
+`conj68_loci_probe.sio`: 40 configurações × ~60 amostras (u,w) cada:
+
+```
+RANK9_HIST 8 N 85 · RANK9_HIST 9 N 2312
+DROPS: at_parallel 85  other 0
+TARGETED_DEGENERATE CONFIRMED
+```
+
+**Z = Z₁ ∪ Z₂ exatamente** ({[u]=[x]} ∪ {[w]=[x′]}, codim 4 cada), todo drop
+é de exatamente 1 (posto local 8 = dim, dentro da folga do posto-7), e s é
+canonicamente não-nula perto de Z quando d ≥ 3 (s(x,w) = 0 daria witness
+trivial d ≤ 2). A lista da lapidação virou UM item: o passo de excisão
+relativa L(iii) (codim 4, sequência exata, classe relativa ↦ w₇).
+
+**Manuscrito iniciado**: `conj68_manuscript_draft.md` — estrutura de paper
+com status por claim ([T]/[K]/[M]/[L]), todas as provas das rodadas 4-11,
+o argumento de obstrução, o Technical Lemma L com a evidência, o apêndice de
+artefatos e as retratações registradas como parte do método.
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD
