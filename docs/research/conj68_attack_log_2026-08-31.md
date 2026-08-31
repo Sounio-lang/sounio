@@ -318,6 +318,53 @@ genéricos, mistura contínua entre os casos). Candidatos restantes: (α) grau
 positiva nos dados — provar que não pode colapsar a vazio ao variar (x,x′)
 no espaço conexo de configurações, via um invariante topológico da família.
 
+## Rodada 9: ROTA α — A OBSTRUÇÃO DE EULER É NÃO-NULA
+
+A peça que faltava para transformar o deficit-3 em empate exato: **três
+relações PONTUAIS** da seção comutador, universais para u,w puros, cada uma
+com prova de uma linha:
+
+- **P1/P2**: ⟨[u,w],u⟩ = ⟨[u,w],w⟩ = 0 — φ(u,w,v) = ⟨[u,w],v⟩ é antissimétrica
+  em (u,w) E cíclica (Rodada 4) ⟹ **totalmente alternada**.
+- **P3**: ⟨[u,w], uw+wu⟩ = 0 — para u,w puros, wu = conj(uw) ⟹
+  n(uw) = n(wu), e ⟨[u,w],u∘w⟩ = n(uw) − n(wu).
+
+Verificação: 2000 amostras inteiras exatas (P1=P2=P3=0 violações,
+`conj68_pointwise_relations_probe.sio`) + polarização multilinear completa
+sobre a base pura no kernel do Lean (`p12_polarized` 15³ instâncias;
+`p3_bilinear` wu=conj(uw) em 15²).
+
+**Consequência topológica:** com as 4 relações lineares provadas, a seção
+s(u,w) = T(u,w) vive num fibrado de **posto 8 = dim(ℝP⁴×ℝP⁴)**:
+E ≅ ℝ¹¹ ⊖ γ₁ ⊖ γ₂ ⊖ γ₁γ₂, seção bilinear ⟹ twist γ₁γ₂. A obstrução mod 2:
+
+    e = Σᵢ wᵢ(E)·(α+β)^{8−i},  w(E) = [(1+α)(1+β)(1+α+β)]⁻¹
+    em ℤ/2[α,β]/(α⁵,β⁵):  **coeficiente de α⁴β⁴ = 1**
+
+(computado em `conj68_euler_class.sio`, conferido à mão — o termo W₈ = α⁴β⁴
+contribui sozinho, os demais cancelam em pares — e kernel-verified em
+`SounioConj68EulerLeg.lean::euler_obstruction_nonzero`).
+
+**⟹ uma seção sem zeros é impossível ⟹ toda configuração admite witness ⟹
+d(x,x′) ≤ 3 para todo par ⟹ CONJECTURE 6.8 — módulo a lapidação dos loci de
+degeneração.**
+
+### O que a lapidação precisa fechar (honestidade cirúrgica)
+
+O argumento do fibrado usa E de posto constante 8; as linhas perpendiculares
+{proj_{W₁₁}u, proj w, proj Im(u∘w)} podem colapsar em loci especiais
+(e.g. u = x, onde proj u = 0; Im(u∘w) ∈ span{proj u, proj w}). O passo
+restante é topologia diferencial padrão mas real: mostrar que uma seção sem
+zeros induziria uma seção sem zeros do fibrado honesto fora dos loci +
+argumento de extensão/posição geral (ou blow-up), OU reformular via
+obstrução equivariante que não precise do posto constante. Só isso separa
+"esqueleto completo" de "teorema".
+
+Lição de infra: o pod limita o número de `native_decide` por unidade de
+tradução (thread cap) — daí o split em dois arquivos Lean; e `Poly` precisa
+ser `abbrev` (não `def`) para herdar `BEq` de List — o erro manifestava como
+"failed to create thread" espúrio.
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD

@@ -219,4 +219,25 @@ def ghostNormalized : Bool :=
 
 theorem ghost_normalized_n2 : ghostNormalized = true := by native_decide
 
+/-! ## Route alpha (Rodada 9): the Euler-class obstruction
+
+Three POINTWISE relations of the commutator section, universal for pure u, w:
+  (P1) ⟨[u,w], u⟩ = 0   (P2) ⟨[u,w], w⟩ = 0   — φ is fully alternating
+       (antisymmetric in (u,w) + cyclic via ⟨a,bc⟩ = ⟨ac̄,b⟩);
+  (P3) ⟨[u,w], uw + wu⟩ = 0 — since wu = conj(uw) for pure u,w, so
+       n(uw) = n(wu) and the cross terms cancel.
+Together with the 4 proven linear relations, the section s(u,w) = T(u,w) lives
+in a rank-8 bundle E ≅ ℝ¹¹ ⊖ γ₁ ⊖ γ₂ ⊖ γ₁γ₂ over ℝP⁴ × ℝP⁴ (twisted by
+γ₁γ₂; degeneracy loci to be handled separately).  The mod-2 obstruction
+  e = Σᵢ wᵢ(E)(α+β)^{8-i},  w(E) = [(1+α)(1+β)(1+α+β)]⁻¹
+in ℤ/2[α,β]/(α⁵,β⁵) has α⁴β⁴-coefficient 1 (verified below), so a nowhere-
+zero section is impossible: every configuration admits a witness — the last
+lemma of Conjecture 6.8, modulo the degeneracy-loci refinement.
+
+The kernel verifications of P1-P3 (multilinear polarization over the pure
+basis) and of the characteristic-class arithmetic live in the companion file
+`SounioConj68EulerLeg.lean` (theorems `p12_polarized`, `p3_bilinear`,
+`euler_obstruction_nonzero`) — split because the pod's thread cap bounds the
+number of native_decide invocations per translation unit. -/
+
 end SounioConj68RankBound
