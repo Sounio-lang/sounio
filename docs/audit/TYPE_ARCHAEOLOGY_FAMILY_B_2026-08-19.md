@@ -12,14 +12,22 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.type-arc
 **This is a census converted to fixtures.** It does not reclassify `docs/internal/concepts/registry.tsv`. It does not store a ladder position.
 
 **Index:** [`TYPE_ARCHAEOLOGY_FAMILY_B_2026-08-19.tsv`](TYPE_ARCHAEOLOGY_FAMILY_B_2026-08-19.tsv)  
-**Derive (writes the table that used to be handwritten):**
+**Derive / CI gate (writes nothing; prints the table that used to be handwritten):**
 
 ```bash
-bash scripts/dev/typekind_family_b_derive.sh
+bash scripts/ci/typekind_archaeology_b.sh
+# report-only (never fails the ladder criteria):
+TYPEKIND_B_REPORT_ONLY=1 bash scripts/ci/typekind_archaeology_b.sh
 ```
 
 **Fixtures:** `tests/typekind-archaeology/family-b/`  
-That tree is **not** in the `run_sio_test_suite.sh` globs. The derive script is the runner. It is not wired to `.github/workflows/ci.yml`.
+That tree is **not** in the `run_sio_test_suite.sh` globs. The CI gate is the runner:
+
+```bash
+bash scripts/ci/typekind_archaeology_b.sh
+```
+
+Wired in `.github/workflows/ci.yml` (Contracts → TypeKind archaeology family B). The older report-only derive remains at `scripts/dev/typekind_family_b_derive.sh`.
 
 **Engine:** this worktree `bin/souc` (Madaros). Inherited `SOUC_BIN` / `SOUNIO_SOUC_ENGINE` unset. `SOUNIO_STDLIB_PATH` pinned here. `MADAROS_STACK_KB=524288`, `ulimit -s 1048576`.
 
@@ -62,8 +70,8 @@ Garden is not a failure of the census. A new TypeKind with no fixtures will deri
 - Does not treat `fn takes(x: Kind<i64>)` or `let x: Kind<i64> = 1` as either fixture.
 - Does not point at `tests/frontend/*_basic.sio` (policy-item DSL parse-fail is not a named TypeKind refuse).
 - Does not use lean_single as a semantic authority.
-- Does not wire a CI gate this turn. The derive script is the executable spec; wiring it is a later decision.
-- Does not claim that `Contest.pass.sio` compiles or runs. The v2 turn saw `souc compile` die at `native-v2 bridge compilation failed`. The derive script records `pass_run` when check is OK. Claim-ready, if derived, is a check fact until `pass_run` is 0.
+- Does not claim that `Contest.pass.sio` compiles or runs. The v2 turn saw `souc compile` die at `native-v2 bridge compilation failed`. The CI gate records `pass_run` when check is OK but does **not** fail on a non-zero run. Claim-ready remains a check fact until `pass_run` is 0.
+- The CI gate fails on refuse xpass, refuse missing named diagnostic, or Contest pass-check regression. Reserved pass fixtures are allowed to fail check.
 
 ## Pairing
 

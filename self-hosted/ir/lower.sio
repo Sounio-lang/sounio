@@ -2727,7 +2727,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                                 // the real class from the field type, matching
                                                 // ir_fast_summary_register_struct_fields_owned.
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_bool(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
-                                                elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*flist).head.ty)),
+                                                elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty)),
                                                 word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
                                                 named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                                             }
@@ -2913,7 +2913,7 @@ fn lowerer_preseed_external_items_into_acc_mut(
                                                 name_id: ir_intern_name((*flist).head.name),
                                                 index: fc,
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_bool(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
-                                                elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*flist).head.ty)),
+                                                elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty)),
                                                 word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
                                                 named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                                             }
@@ -3005,7 +3005,7 @@ fn lowerer_register_struct_fields_direct_mut(
                     // FIRST-registered field entry — the one actually found by name lookup —
                     // without the i64 marker).
                     is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_bool(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
-                    elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*flist).head.ty)),
+                    elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty)),
                     word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
                     named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                 }
@@ -3062,7 +3062,7 @@ fn lowerer_register_struct_fields_mut(
                         index: field_idx,
                         // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
                         is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
-                        elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*list).head.ty)),
+                        elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*list).head.ty)),
                         word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
                         named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
                     }
@@ -3257,6 +3257,24 @@ fn lower_type_expr_word_scalar_array_len(te: &TypeExpr) -> i64 with Mut, Panic, 
 fn lower_type_expr_named_type_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeNamed { return ir_empty_name() }
     ir_path_first_name((*te).path)
+}
+
+// A field's ELEMENT type: the array element for `[T; N]`, and the INNER T for
+// `Box<T>`. The two shapes are disjoint -- a field is one or the other, never
+// both -- so they share `elem_type_name_id`, the way tuple0_array_elem_layout
+// already shares a local slot between disjoint shapes.
+//
+// WHY NOT named_type_name_id: it holds the literal "Box" for `f: Box<T>`, and
+// field_is_box_for_struct TESTS for exactly that (is_float == 4 &&
+// ir_name_is_box(named_type_name_id)). Writing T there would resolve the type
+// and silently disable every Box deref -- the auto-deref class that has already
+// been reverted four times. The name stays "Box"; the inner type rides in the
+// slot that is empty for a Box field anyway.
+fn lower_type_expr_elem_or_box_inner_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
+    if lower_type_expr_is_box(te) {
+        return lower_box_inner_type_name(te)
+    }
+    lower_type_expr_array_elem_name(te)
 }
 
 fn lower_array_literal_fixed_len_ref(e: &Expr) -> i64 with Alloc, Mut, Div {
@@ -3930,7 +3948,7 @@ fn ir_fast_summary_register_struct_fields_owned(
                     index: idx,
                     // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
                     is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
-                    elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*list).head.ty)),
+                    elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*list).head.ty)),
                     word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
                     named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
                 }
@@ -4467,6 +4485,84 @@ fn lowerer_fresh_reg_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
     reg
 }
 
+// `self` reaches lowering UNTYPED. parser/items.sio:1741 gives the receiver a
+// dummy_type_expr() unless the source wrote `self: T`, so lower_param_struct_type_name
+// answers empty, struct_types[self] stays empty, and every `self.a.b` loses its base
+// type -- the chained field index then falls to the cross-struct first-match scan.
+// Measured: `self.n` came out right (7) while `self.boxed.a/.b/.c` came out 1/0/0
+// against 10/20/30. Not a crash; a wrong number.
+//
+// The owner type is recoverable WITHOUT string surgery. A method's own name is
+// ir_mangle_method_name(T, M) = T + "_" + M, so a registered layout T matches when
+// its bytes prefix the name and the next byte is '_'. LONGEST match wins and an
+// ambiguous tie binds NOTHING: `Foo` and `Foo_bar` can both prefix `Foo_bar_baz`,
+// and choosing between them is exactly how a wrong layout gets picked silently.
+// Refusing leaves today's behaviour in place -- the discipline the 8-byte
+// struct-name collision fix settled on.
+//
+// A FREE function over the table, not a `self` method: every earlier attempt to
+// read a side table through a by-value `self` on a param/field path copied the
+// whole Lowerer and broke the build (see lower_lookup_box_inner_layout, which
+// exists for exactly this reason).
+fn lower_self_owner_type_from_mangled(table: &StructLayoutTable, fn_name: Name) -> Name with Mut, Panic, Div {
+    var best = ir_empty_name()
+    var best_len: i64 = 0
+    var ties: i64 = 0
+    var si: i64 = 0
+    while si < (*table).count {
+        let t = (*table).entries[si as usize].type_name
+        if t.len > 0 && (t.len + 1) < fn_name.len {
+            var k: i64 = 0
+            var same = true
+            while k < t.len {
+                if fn_name.buf[k as usize] != t.buf[k as usize] {
+                    same = false
+                }
+                k = k + 1
+            }
+            if same && (fn_name.buf[t.len as usize] as i64) == 95 {
+                if t.len > best_len {
+                    best = t
+                    best_len = t.len
+                    ties = 0
+                } else if t.len == best_len && !ir_name_eq(t, best) {
+                    ties = ties + 1
+                }
+            }
+        }
+        si = si + 1
+    }
+    if ties > 0 {
+        return ir_empty_name()
+    }
+    best
+}
+
+// Rebind the receiver's struct type once the params are in place. Only the
+// param flagged is_self, and only when it declared no type of its own, so an
+// explicit `self: T` still wins and every non-receiver param is untouched.
+fn lowerer_bind_self_owner_type_mut(
+    lo: &! Lowerer,
+    params: &Option<Box<ParamList>>,
+    fn_name: Name
+) with IO, Mut, Panic, Div, Alloc {
+    var current = params
+    while true {
+        match *current {
+            Some(list) => {
+                if (*list).head.is_self && lower_param_struct_type_name(&(*list).head.ty).len == 0 {
+                    let owner = lower_self_owner_type_from_mangled(&(*(*lo).struct_layouts), fn_name)
+                    if owner.len > 0 {
+                        lowerer_bind_local_struct_type_mut(lo, (*list).head.name, owner)
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
 fn lowerer_lower_fn_params_mut(
     lo: &! Lowerer,
     params: &Option<Box<ParamList>>
@@ -4867,6 +4963,16 @@ fn lowerer_lower_fn_item_mut(
     let kernel_param_reg_base = (*(*lo).current_func).reg_count
     if ir_param_list_count_ref(&fd.params) > 0 {
         lowerer_lower_fn_params_mut(lo, &fd.params)
+        // The receiver's type, which the parser did not supply. Bound HERE and
+        // not inside lowerer_lower_fn_params_mut because the mangled name lives
+        // in this frame; the params walker never sees it.
+        //
+        // The first attempt patched lower_fn_params_ref, the by-value twin, and
+        // measured no change at all -- that function is reached only from
+        // lower_fn_item_owned / lower_fn_item_ref, and NEITHER has a caller
+        // anywhere in self-hosted/. Dead twins of a live path is a known shape
+        // here (codegen carries seven compile_ir_function variants, one live).
+        lowerer_bind_self_owner_type_mut(lo, &fd.params, name)
     }
     lower_rss_mark("after_params")
     if lower_live_diag_enabled() {
@@ -12535,6 +12641,30 @@ impl Lowerer {
         false
     }
 
+    // Inner T of a `Box<T>` FIELD, or empty. Reads the slot the array-element
+    // type would occupy; the Box test is on named_type_name_id, which still says
+    // "Box", so this cannot answer for a plain array field.
+    fn field_box_inner_type_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
+        if type_name.len <= 0 { return ir_empty_name() }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        if ir_name_is_box(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id)) {
+                            return ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].elem_type_name_id)
+                        }
+                        return ir_empty_name()
+                    }
+                    fi = fi + 1
+                }
+            }
+            si = si + 1
+        }
+        ir_empty_name()
+    }
+
     fn field_named_type_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
         if type_name.len <= 0 { return ir_empty_name() }
         var si: i64 = 0
@@ -12856,6 +12986,14 @@ impl Lowerer {
                 var fi: i64 = 0
                 while fi < (*self.struct_layouts).entries[si as usize].field_count {
                     if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        // elem_type_name_id now also carries the inner T of a
+                        // `Box<T>` field. This asks for an ARRAY element type, so
+                        // a Box answer would be a new claim where the answer used
+                        // to be empty. Keep it empty: this reader's behaviour is
+                        // unchanged by the widening, deliberately.
+                        if ir_name_is_box(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id)) {
+                            return ir_empty_name()
+                        }
                         return ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].elem_type_name_id)
                     }
                     fi = fi + 1
@@ -12907,7 +13045,31 @@ impl Lowerer {
             match (*expr).left {
                 Some(owner) => {
                     let owner_type = self.expr_receiver_struct_type_ref(&(*owner))
-                    return self.field_named_type_for_struct(owner_type, (*expr).name)
+                    let named = self.field_named_type_for_struct(owner_type, (*expr).name)
+                    // `self.module.fn_count` is where this mattered. The recursion
+                    // above already resolved the owner to Lowerer correctly; it
+                    // then stopped at the literal "Box", the declared type of
+                    // `module: Box<IrModule>`, which names no layout. The caller
+                    // reads a non-empty name as TYPED, so field_idx_for_base_ref
+                    // called field_idx_from_name("Box", "fn_count"), found no such
+                    // layout, and fell through to the cross-struct first-match
+                    // scan. `fn_count` is index 1 in IrModule and index 2 in four
+                    // other structs (HlirModule, CompilerIrRoundtripResult,
+                    // A64PreviewCompiler x2), so the loop bound in
+                    // find_or_add_fn_id was read from `string_table` -- a value
+                    // large enough that the scan could never end. It walked the
+                    // 16384-entry function array and dereferenced the first word
+                    // past it. That is the gen2 SIGSEGV at module 7.
+                    //
+                    // Unwrapping the Box here is the whole repair. Falling back to
+                    // `named` keeps every other chain exactly as it was.
+                    if ir_name_is_box(named) {
+                        let inner = self.field_box_inner_type_for_struct(owner_type, (*expr).name)
+                        if inner.len > 0 {
+                            return inner
+                        }
+                    }
+                    return named
                 }
                 None => {}
             }
@@ -13569,7 +13731,7 @@ impl Lowerer {
                             // Marker 3 is consumed only by field_is_int_* (println
                             // dispatch), so this is inert for float/array/store paths.
                             is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
-                            elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*list).head.ty)),
+                            elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*list).head.ty)),
                             word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
                             named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
                         }
