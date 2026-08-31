@@ -67,6 +67,37 @@ bin/sounio-loom obligation-serve --bind 127.0.0.1 --port 8788
 bin/sounio-loom obligation-supervise --state-dir PATH
 ```
 
+## Sovereign Change Kernel
+
+With `SOUNIO_LOOM_SOVEREIGN_CHANGE_MEDIATED=1`, the provider sees both the
+worktree and its Git common directory as read-only. `Write`, `Edit`, and
+`apply_patch` are redirected to kernel-owned staging outside the worktree. A
+single-use in-memory `ChangeGrant` binds the exact tool-call ID, mutation bytes,
+worktree and index preimage, authenticated harness peer, and file set. The
+kernel materializes only the expected postimage.
+
+The hook accepts only `git commit -m MESSAGE` or `git commit --message MESSAGE`.
+The kernel builds a temporary index from the authorized postimages, asks frozen
+Sounio action 9044 for `COMMIT_ADMIT` and `CI_ADMIT`, and atomically advances the
+branch together with a `refs/loom/change-receipts/<sha256>` receipt ref. Direct,
+widened, dynamic, and replayed commit forms fail closed.
+
+CI consumes the pinned receipt without executing or reinterpreting its policy:
+
+```sh
+scripts/ci/sounio_loom_sovereign_change_receipt_admit.sh \
+  /absolute/change/worktree /absolute/commit.receipt
+```
+
+Only after receipt consumption does the separate claim stage ask the frozen
+Sounio authority for `CLAIM_READY`. The operational gate exercises a disposable
+Git repository, direct-write and direct-commit refusal, exact-tree admission,
+receipt tamper, replay, and Python/Rust execution sentinels:
+
+```sh
+scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh
+```
+
 ## Subprocess Membrane
 
 LOOM has frozen Sounio semantics for a process-tree effect membrane and a Linux

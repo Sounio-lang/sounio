@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.30.42"
+let runtime_version = "2026.08.31.0"
 let max_control_bytes = 16 * 1024
 let max_kernel_control_bytes = 2 * 1024 * 1024
 let max_snapshot_bytes = 1024 * 1024
@@ -18,6 +18,8 @@ external set_winsize : file_descr -> int -> int -> unit = "sounio_loom_set_winsi
 external peer_credentials : file_descr -> int * int * int = "sounio_loom_peer_credentials"
 external pidfd_open : int -> file_descr option = "sounio_loom_pidfd_open"
 external int_of_file_descr : file_descr -> int = "sounio_loom_int_of_file_descr"
+external enter_readonly_namespace : string array -> unit =
+  "sounio_loom_enter_readonly_namespace"
 
 let failf format = Printf.ksprintf (fun value -> raise (Loom_error value)) format
 
@@ -559,6 +561,17 @@ let process_arguments pid =
   read_file_bounded "process command line" (256 * 1024)
     (Printf.sprintf "/proc/%d/cmdline" pid)
   |> split_on '\000' |> List.filter (( <> ) "")
+
+let process_mount_readonly pid path =
+  let expected = Unix.realpath path in
+  read_file_bounded "process mountinfo" (4 * 1024 * 1024)
+    (Printf.sprintf "/proc/%d/mountinfo" pid)
+  |> String.split_on_char '\n'
+  |> List.exists (fun line ->
+         match split_on ' ' line with
+         | _mount_id :: _parent :: _device :: _root :: mount_point :: options :: _ ->
+             mount_point = expected && List.mem "ro" (split_on ',' options)
+         | _ -> false)
 
 let path_within root path =
   path = root
@@ -1260,7 +1273,10 @@ let verify_events path events =
         | "EXEC_CONSUME_REFUSED" | "EXEC_OUTCOME_RECORDED"
         | "EXEC_OUTCOME_REFUSED" | "EXEC_OUTCOME_INCOMPLETE"
         | "SOVEREIGN_GRANT_CONSUMED" | "SOVEREIGN_EXEC_COMPLETED"
-        | "SOVEREIGN_EXEC_REFUSED" ), Active -> ()
+        | "SOVEREIGN_EXEC_REFUSED" | "CHANGE_GRANT_PREPARED"
+        | "CHANGE_GRANT_CONSUMED" | "CHANGE_GRANT_EXPIRED"
+        | "CHANGE_GRANT_REFUSED" | "CHANGE_COMMIT_ADMITTED"
+        | "CHANGE_COMMIT_REFUSED" ), Active -> ()
       | _, Initial -> failf "semantic:event-before-session-start seq=%d" event.seq
       | _, Exited -> failf "semantic:event-after-session-exit seq=%d" event.seq
       | _ -> failf "semantic:unknown-event kind=%s seq=%d" event.kind event.seq);
@@ -1821,6 +1837,20 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
   let listener = create_unix_listener paths.guardian_socket_path in
   let child_pid, master_fd = forkpty () in
   if child_pid = 0 then (
+    let mediated_change =
+      Sys.getenv_opt "SOUNIO_LOOM_SOVEREIGN_CHANGE_MEDIATED" = Some "1"
+    in
+    if mediated_change then (
+      let selected_roots =
+        [ cwd; git_common_dir cwd;
+          Option.value ~default:cwd
+            (Sys.getenv_opt "SOUNIO_LOOM_SOVEREIGN_CHANGE_ROOT");
+          Option.value ~default:cwd
+            (Sys.getenv_opt "SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT") ]
+        |> List.map Unix.realpath |> List.sort_uniq String.compare
+        |> Array.of_list
+      in
+      enter_readonly_namespace selected_roots);
     Unix.chdir cwd;
     let environment =
       Array.append (Unix.environment ())
@@ -1828,6 +1858,9 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
              paths.guardian_socket_path;
            Printf.sprintf "SOUNIO_LOOM_SOCKET=%s" paths.socket_path;
            "SOUNIO_LOOM_SOVEREIGN_EXEC_REQUIRED=1";
+           "SOUNIO_LOOM_SOVEREIGN_CHANGE_REQUIRED=1";
+           Printf.sprintf "SOUNIO_LOOM_MATERIAL_READONLY=%d"
+             (if mediated_change then 1 else 0);
            Printf.sprintf "SOUNIO_LOOM_AGENT=%s" agent;
            Printf.sprintf "SOUNIO_LOOM_LANE=%s" lane;
            Printf.sprintf "SOUNIO_LOOM_SESSION_ID=%s" session_id;
@@ -2279,7 +2312,11 @@ type kernel = {
   exec_outcomes : (string, exec_outcome_obligation) Hashtbl.t;
   sovereign_grants : (string, unit) Hashtbl.t;
   sovereign_jobs : (string, sovereign_job) Hashtbl.t;
+  change_grants : (string, Loom_change.prepared) Hashtbl.t;
+  change_consumed : (string, Loom_change.consumed) Hashtbl.t;
+  change_commits : (string, Loom_change.commit_receipt) Hashtbl.t;
   sovereign_exec_required : bool;
+  sovereign_change_required : bool;
   mutable next_client : int;
   mutable input_holder : file_descr option;
   mutable output_cursor : int;
@@ -2335,6 +2372,7 @@ let descriptor_fields kernel state =
     ("socket", kernel.paths.socket_path);
     ("token_file", kernel.paths.token_path);
     ("sovereign_exec_required", string_of_bool kernel.sovereign_exec_required);
+    ("sovereign_change_required", string_of_bool kernel.sovereign_change_required);
     ("exec_release_protocol", if kernel.sovereign_exec_required then "LOOM_EXEC/1" else "LOOM/1-legacy");
     ("output_file", kernel.output_path);
     ("journal_file", kernel.journal_path);
@@ -2367,7 +2405,11 @@ let status_fields kernel =
     ("pending_exec_outcomes", string_of_int (Hashtbl.length kernel.exec_outcomes));
     ("pending_sovereign_grants", string_of_int (Hashtbl.length kernel.sovereign_grants));
     ("sovereign_jobs", string_of_int (Hashtbl.length kernel.sovereign_jobs));
+    ("pending_change_grants", string_of_int (Hashtbl.length kernel.change_grants));
+    ("consumed_changes", string_of_int (Hashtbl.length kernel.change_consumed));
+    ("admitted_change_commits", string_of_int (Hashtbl.length kernel.change_commits));
     ("sovereign_exec_required", string_of_bool kernel.sovereign_exec_required);
+    ("sovereign_change_required", string_of_bool kernel.sovereign_change_required);
     ("daemon_pid", string_of_int (Unix.getpid ()));
     ("daemon_pid_start", kernel.daemon_pid_start);
     ("harness_pid", string_of_int kernel.harness_pid);
@@ -2463,6 +2505,12 @@ let authenticate_exec_peer kernel client operation handle =
     match handle with
     | Some expected when arguments_contain_pair arguments "--job" expected -> ()
     | _ -> failf "sovereign-presenter-job-mismatch")
+  else if operation = "change-prepare" || operation = "change-consume"
+          || operation = "change-commit" then (
+    if process_parent client.peer_pid <> kernel.harness_pid then
+      failf "change-hook-not-direct-harness-child";
+    if not (List.mem "agent-hook" arguments) then
+      failf "change-hook-command-mismatch")
   else if operation = "issue" then (
     if not (List.mem "agent-hook" arguments) then
       failf "exec-issuer-command-mismatch")
@@ -2772,12 +2820,286 @@ let reap_sovereign_jobs kernel =
                       [ job.sovereign_job_id; sha256 reason; "255" ])))))
     kernel.sovereign_jobs
 
+let expire_change_grants kernel =
+  let now = current_time_us () in
+  let expired =
+    Hashtbl.fold
+      (fun descriptor grant values ->
+        if now > grant.Loom_change.expires_us then descriptor :: values
+        else values)
+      kernel.change_grants []
+  in
+  List.iter
+    (fun descriptor ->
+      (match Hashtbl.find_opt kernel.change_grants descriptor with
+      | Some grant -> Loom_change.remove_tree grant.Loom_change.stage_root
+      | None -> ());
+      Hashtbl.remove kernel.change_grants descriptor;
+      ignore
+        (append_event kernel.journal "CHANGE_GRANT_EXPIRED"
+           (String.concat "\n"
+              [ "decision=DENY"; "reason=change-grant-expired";
+                "reason_sha256=" ^ sha256 "change-grant-expired";
+                "decision_authority=OCaml-structural-precondition";
+                "semantic_authority=Sounio";
+                "descriptor_sha256=" ^ sha256 descriptor ])))
+    expired
+
+let change_allow_payload reason fields =
+  String.concat "\n"
+    ([ "decision=ALLOW"; "reason=" ^ reason;
+       "reason_sha256=" ^ sha256 reason; "decision_authority=Sounio";
+       "semantic_authority=Sounio"; "language_role=SEMANTIC_AUTHORITY" ]
+     @ fields)
+
+let change_deny_payload phase reason peer_pid =
+  let decision_authority =
+    if starts_with reason "change-authority-" then "Sounio"
+    else "OCaml-structural-precondition"
+  in
+  String.concat "\n"
+    [ "decision=DENY"; "phase=" ^ phase; "reason=" ^ reason;
+      "reason_sha256=" ^ sha256 reason;
+      "decision_authority=" ^ decision_authority;
+      "semantic_authority=Sounio"; "peer_pid=" ^ string_of_int peer_pid ]
+
+let change_paths count_raw encoded =
+  let count = parse_nonnegative "change-path-count" count_raw in
+  if count < 1 || count > 256 || List.length encoded <> count then
+    failf "change-path-count-mismatch";
+  encoded
+  |> List.map string_of_hex
+  |> List.sort_uniq String.compare
+  |> fun paths ->
+  if List.length paths <> count then failf "change-path-set-duplicate";
+  paths
+
+let find_change_grant kernel ~session_id ~call_id =
+  let matches =
+    Hashtbl.fold
+      (fun descriptor grant values ->
+        if grant.Loom_change.session_id = session_id
+           && grant.call_id = call_id
+        then (descriptor, grant) :: values
+        else values)
+      kernel.change_grants []
+  in
+  match matches with
+  | [ value ] -> value
+  | [] -> failf "change-grant-missing-or-replayed"
+  | _ -> failf "change-grant-ambiguous"
+
+let change_call_resident kernel ~session_id ~call_id =
+  Hashtbl.fold
+    (fun _ grant found ->
+      found ||
+      (grant.Loom_change.session_id = session_id && grant.call_id = call_id))
+    kernel.change_grants false
+
+let change_consumed_digest = Loom_change.consumed_digest
+
 let handle_request kernel client line =
   let refuse code =
     queue client (control_line [ "ERR"; code ]);
     client.mode <- Awaiting
   in
   match split_on '\t' line with
+  | "LOOM_CHANGE/2" :: "PREPARE" :: instance :: session_hex :: call_id_hex ::
+      event_sha256 :: patch_sha256 :: payload_hex :: count_raw :: encoded_paths -> (
+      try
+        if not kernel.sovereign_change_required then
+          failf "sovereign-change-not-required";
+        if instance <> kernel.instance_id then failf "change-instance-mismatch";
+        ignore (authenticate_exec_peer kernel client "change-prepare" None);
+        let session_id = string_of_hex session_hex in
+        if session_id <> kernel.session_id then failf "change-session-mismatch";
+        let call_id = string_of_hex call_id_hex in
+        let paths = change_paths count_raw encoded_paths in
+        let mutation_payload = string_of_hex payload_hex in
+        if change_call_resident kernel ~session_id ~call_id then
+          failf "change-call-id-already-resident";
+        let grant =
+          let provider_root_readonly =
+            process_mount_readonly kernel.harness_pid kernel.cwd
+            && process_mount_readonly kernel.harness_pid
+                 (git_common_dir kernel.cwd)
+          in
+          Loom_change.prepare ~root:kernel.cwd
+            ~stage_parent:(Filename.concat kernel.paths.session_dir "change-staging")
+            ~kernel_generation:kernel.kernel_generation ~session_id ~call_id
+            ~event_sha256 ~patch_sha256 ~mutation_payload ~paths
+            ~provider_root_readonly
+        in
+        if Hashtbl.mem kernel.change_grants grant.descriptor then
+          failf "change-grant-duplicate";
+        Hashtbl.add kernel.change_grants grant.descriptor grant;
+        ignore
+          (append_event kernel.journal "CHANGE_GRANT_PREPARED"
+             (change_allow_payload "action-9044-material-prepare-admit"
+                [ "descriptor_sha256=" ^ sha256 grant.descriptor;
+                  "patch_sha256=" ^ grant.patch_sha256;
+                  "expected_post_sha256=" ^ grant.expected_post_sha256;
+                  "material_frame_sha256=" ^
+                    grant.material_prepare_frame_sha256;
+                  "material_decision=" ^ grant.material_prepare_decision;
+                  "provider_root_readonly=true";
+                  "git_common_readonly=true";
+                  "call_id_sha256=" ^ sha256 grant.call_id;
+                  "peer_pid=" ^ string_of_int client.peer_pid ]));
+        queue client
+          (control_line
+             [ "OK"; "CHANGE_PREPARED"; grant.descriptor;
+               hex_of_string grant.stage_root ])
+      with
+      | Loom_error error
+      | Loom_change.Error error ->
+          ignore
+            (append_event kernel.journal "CHANGE_GRANT_REFUSED"
+               (change_deny_payload "prepare" error client.peer_pid));
+          refuse error
+      | Unix_error (error, name, argument) ->
+          let reason =
+            Printf.sprintf "%s:%s(%s)" (Unix.error_message error) name argument
+          in
+          ignore
+            (append_event kernel.journal "CHANGE_GRANT_REFUSED"
+               (change_deny_payload "prepare" reason client.peer_pid));
+          refuse reason)
+  | [ "LOOM_CHANGE/2"; "CONSUME"; instance; session_hex; call_id_hex;
+      event_sha256 ] -> (
+      let resident = ref None in
+      let resident_grant = ref None in
+      try
+        if not kernel.sovereign_change_required then
+          failf "sovereign-change-not-required";
+        if instance <> kernel.instance_id then failf "change-instance-mismatch";
+        ignore (authenticate_exec_peer kernel client "change-consume" None);
+        let session_id = string_of_hex session_hex in
+        if session_id <> kernel.session_id then failf "change-session-mismatch";
+        let call_id = string_of_hex call_id_hex in
+        let descriptor, grant =
+          find_change_grant kernel ~session_id ~call_id
+        in
+        resident := Some descriptor;
+        resident_grant := Some grant;
+        (* Removal precedes every material comparison. A failed post-image burns
+           the one-shot grant and cannot be repaired into a later admission. *)
+        Hashtbl.remove kernel.change_grants descriptor;
+        let consumed =
+          Loom_change.consume ~root:kernel.cwd grant ~session_id ~call_id
+            ~event_sha256
+        in
+        let digest = change_consumed_digest consumed in
+        Hashtbl.replace kernel.change_consumed descriptor consumed;
+        ignore
+          (append_event kernel.journal "CHANGE_GRANT_CONSUMED"
+             (change_allow_payload "action-9044-material-consume-admit"
+                [ "descriptor_sha256=" ^ sha256 descriptor;
+                  "consumed_sha256=" ^ digest;
+                  "post_sha256=" ^ consumed.consumed_post_sha256;
+                  "material_frame_sha256=" ^
+                    consumed.consumed_material_frame_sha256;
+                  "material_decision=" ^
+                    consumed.consumed_material_decision;
+                  "peer_pid=" ^ string_of_int client.peer_pid ]));
+        queue client (control_line [ "OK"; "CHANGE_CONSUMED"; digest ])
+      with
+      | Loom_error error
+      | Loom_change.Error error ->
+          Option.iter (Hashtbl.remove kernel.change_grants) !resident;
+          Option.iter
+            (fun grant -> Loom_change.remove_tree grant.Loom_change.stage_root)
+            !resident_grant;
+          ignore
+            (append_event kernel.journal "CHANGE_GRANT_REFUSED"
+               (change_deny_payload "consume" error client.peer_pid));
+          refuse error
+      | Unix_error (error, name, argument) ->
+          Option.iter (Hashtbl.remove kernel.change_grants) !resident;
+          Option.iter
+            (fun grant -> Loom_change.remove_tree grant.Loom_change.stage_root)
+            !resident_grant;
+          let reason =
+            Printf.sprintf "%s:%s(%s)" (Unix.error_message error) name argument
+          in
+          ignore
+            (append_event kernel.journal "CHANGE_GRANT_REFUSED"
+               (change_deny_payload "consume" reason client.peer_pid));
+          refuse reason)
+  | [ "LOOM_CHANGE/2"; "COMMIT"; instance; session_hex; call_id_hex;
+      event_sha256; message_hex ] -> (
+      try
+        if not kernel.sovereign_change_required then
+          failf "sovereign-change-not-required";
+        if instance <> kernel.instance_id then failf "change-instance-mismatch";
+        ignore (authenticate_exec_peer kernel client "change-commit" None);
+        let session_id = string_of_hex session_hex in
+        if session_id <> kernel.session_id then failf "change-session-mismatch";
+        let call_id = string_of_hex call_id_hex in
+        if call_id = "" then failf "change-commit-call-id-missing";
+        if not (valid_sha256 event_sha256) then
+          failf "change-commit-event-digest-invalid";
+        let message = string_of_hex message_hex in
+        let changes =
+          Hashtbl.fold
+            (fun _ change values ->
+              if change.Loom_change.consumed_session_id = session_id then
+                change :: values
+              else values)
+            kernel.change_consumed []
+        in
+        let receipt, digest, receipt_path =
+          Loom_change.commit_changes ~root:kernel.cwd ~message changes
+        in
+        if Hashtbl.mem kernel.change_commits digest then
+          failf "change-commit-receipt-replay";
+        List.iter
+          (fun change ->
+            Hashtbl.remove kernel.change_consumed
+              change.Loom_change.consumed_descriptor)
+          changes;
+        Hashtbl.add kernel.change_commits digest receipt;
+        ignore
+          (append_event kernel.journal "CHANGE_COMMIT_ADMITTED"
+             (change_allow_payload "action-9044-material-commit-admit"
+                [ "commit_receipt_sha256=" ^ digest;
+                  "commit_receipt_path_sha256=" ^ sha256 receipt_path;
+                  "commit_oid=" ^ receipt.commit_oid;
+                  "tree_oid=" ^ receipt.commit_tree_oid;
+                  "parent_oid=" ^ receipt.commit_parent_oid;
+                  "message_sha256=" ^ receipt.commit_message_sha256;
+                  "changes_sha256=" ^ receipt.commit_changes_sha256;
+                  "material_frame_sha256=" ^
+                    receipt.commit_material_frame_sha256;
+                  "material_decision=" ^ receipt.commit_material_decision;
+                  "call_id_sha256=" ^ sha256 call_id;
+                  "event_sha256=" ^ event_sha256;
+                  "peer_pid=" ^ string_of_int client.peer_pid ]));
+        queue client
+          (control_line
+             [ "OK"; "CHANGE_COMMITTED"; digest; receipt.commit_oid;
+               hex_of_string receipt_path ])
+      with
+      | Loom_error error
+      | Loom_change.Error error ->
+          ignore
+            (append_event kernel.journal "CHANGE_COMMIT_REFUSED"
+               (change_deny_payload "commit" error client.peer_pid));
+          refuse error
+      | Unix_error (error, name, argument) ->
+          let reason =
+            Printf.sprintf "%s:%s(%s)" (Unix.error_message error) name argument
+          in
+          ignore
+            (append_event kernel.journal "CHANGE_COMMIT_REFUSED"
+               (change_deny_payload "commit" reason client.peer_pid));
+          refuse reason)
+  | "LOOM_CHANGE/1" :: _ ->
+      ignore
+        (append_event kernel.journal "CHANGE_GRANT_REFUSED"
+           (change_deny_payload "unknown-operation" "change-operation-refused"
+              client.peer_pid));
+      refuse "change-operation-refused"
   | [ "LOOM_EXEC/1"; "START"; instance; event_sha256; command_sha256;
       payload_sha256; payload_hex ] -> (
       try
@@ -3425,6 +3747,7 @@ let run_kernel kernel =
   Sys.set_signal Sys.sigint (Sys.Signal_handle signal_stop);
   while not kernel.stopping && kernel.harness_exit = None do
     expire_exec_grants kernel;
+    expire_change_grants kernel;
     materialize_orphaned_exec_outcomes kernel;
     reap_sovereign_jobs kernel;
     reap_coordination kernel;
@@ -3593,7 +3916,11 @@ let build_kernel paths agent lane session_id cwd instance_id output_path
     exec_outcomes = Hashtbl.create 16;
     sovereign_grants = Hashtbl.create 4;
     sovereign_jobs = Hashtbl.create 16;
+    change_grants = Hashtbl.create 16;
+    change_consumed = Hashtbl.create 16;
+    change_commits = Hashtbl.create 8;
     sovereign_exec_required = true;
+    sovereign_change_required = true;
     next_client = 0;
     input_holder = None;
     output_cursor = ending;
@@ -13100,6 +13427,30 @@ let sovereign_result_command cli =
     ~job_id:(required cli "--job")
     ~payload_sha256:(required cli "--payload-sha256")
 
+let change_ci_admit_command cli =
+  let root = required cli "--root" |> Unix.realpath in
+  let receipt = required cli "--receipt" in
+  let receipt_sha256, oid, tree, consumption_sha256, consumption_path =
+    Loom_change.verify_ci_receipt ~root ~path:receipt
+  in
+  Printf.printf
+    "LOOM_CHANGE_CI_ADMITTED receipt_sha256=%s commit=%s tree=%s consumption_sha256=%s consumption_path=%s semantic_authority=Sounio action=9044 ci_policy=consume-not-reinterpret policy_executed_by_ci=false claim_ready=false\n%!"
+    receipt_sha256 oid tree consumption_sha256 consumption_path;
+  0
+
+let change_claim_ready_command cli =
+  let root = required cli "--root" |> Unix.realpath in
+  let receipt = required cli "--receipt" in
+  let receipt_sha256, oid, consumption_sha256, claim_sha256, claim_path,
+      claim_frame_sha256, claim_decision =
+    Loom_change.claim_ready ~root ~path:receipt
+  in
+  Printf.printf
+    "LOOM_CHANGE_CLAIM_READY receipt_sha256=%s commit=%s ci_consumption_sha256=%s claim_sha256=%s claim_path=%s claim_frame_sha256=%s claim_decision=%S semantic_authority=Sounio action=9044 ci_policy=consume-not-reinterpret policy_executed_by_ci=false claim_ready=true\n%!"
+    receipt_sha256 oid consumption_sha256 claim_sha256 claim_path
+    claim_frame_sha256 claim_decision;
+  0
+
 let usage () =
   Printf.eprintf
     "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  host-enroll --agent A --lane L [--replace] [--state-dir DIR]\n  host-reconcile [--agent A --lane L] [--apply] [--service-enabled] [--state-dir DIR]\n  host-supervise [--once] [--interval-seconds N] [--apply] [--service-enabled] [--state-dir DIR]\n  host-verify --agent A --lane L [--state-dir DIR]\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
@@ -13124,6 +13475,8 @@ let usage () =
     "  exec-result-record-present --root DIR --event SHA --command SHA --handle HANDLE --record-sha256 SHA --record-hex HEX --manifest-sha256 SHA\n";
   Printf.eprintf
     "  sovereign-result --instance I --generation SHA --job SHA --payload-sha256 SHA\n";
+  Printf.eprintf
+    "  change-ci-admit --root DIR --receipt PATH\n  change-claim-ready --root DIR --receipt PATH\n";
   Printf.eprintf
     "  peer-activation-capsule-probe --root DIR --mode current|python|happy|deny-preserves|poison|replay|mismatch|timeout|eof --seal FILE [--consume FILE] [--extinguish FILE] [--poison FILE] [--deny FILE] --deadline-ms N (test mode only)\n";
   Printf.eprintf "  provider-open persistent providers: claude, codex, kimi\n";
@@ -13212,6 +13565,8 @@ let main () =
     | "exec-result-present" -> exec_result_present_command cli
     | "exec-result-record-present" -> exec_result_record_present_command cli
     | "sovereign-result" -> sovereign_result_command cli
+    | "change-ci-admit" -> change_ci_admit_command cli
+    | "change-claim-ready" -> change_claim_ready_command cli
     | "peer-activation-capsule-probe" ->
         peer_activation_capsule_probe_command cli
     | "start" -> start_command cli; 0
@@ -13327,6 +13682,8 @@ let () =
       Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_exec_result.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_sovereign_exec.Error error ->
+      Printf.eprintf "error: %s\n%!" error; exit 1
+  | Loom_change.Error error ->
       Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_peer_activation_capsule.Error error ->
       Printf.eprintf "error: %s\n%!" error; exit 1

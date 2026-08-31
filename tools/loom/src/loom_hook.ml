@@ -488,6 +488,132 @@ let extract_paths event =
       in
       unique (direct @ patches)
 
+let change_tool name = List.mem name [ "Write"; "Edit"; "apply_patch" ]
+
+let change_string_field input name =
+  match object_field input name with
+  | Some (Json_string value) -> value
+  | Some _ -> failf "change-%s-must-be-string" name
+  | None -> failf "change-%s-missing" name
+
+let change_bool_field ~default input name =
+  match object_field input name with
+  | Some (Json_bool value) -> value
+  | Some _ -> failf "change-%s-must-be-boolean" name
+  | None -> default
+
+let change_mutation event target_paths =
+  let tool_name = string_field event "tool_name" in
+  let input =
+    match object_field event "tool_input" with
+    | Some value -> value
+    | None -> failf "change-tool-input-missing"
+  in
+  match tool_name, input, target_paths with
+  | "Write", Json_object _, [ path ] ->
+      Loom_change.Write { path; content = change_string_field input "content" }
+  | "Edit", Json_object _, [ path ] ->
+      Loom_change.Edit
+        { path;
+          old_string = change_string_field input "old_string";
+          new_string = change_string_field input "new_string";
+          replace_all = change_bool_field ~default:false input "replace_all" }
+  | "apply_patch", Json_string patch, _ -> Loom_change.Apply_patch patch
+  | "apply_patch", Json_object _, _ ->
+      let patch =
+        match object_field input "patch", object_field input "input" with
+        | Some (Json_string value), _ -> value
+        | None, Some (Json_string value) -> value
+        | Some _, _ -> failf "change-patch-must-be-string"
+        | None, Some _ -> failf "change-input-must-be-string"
+        | None, None -> failf "change-patch-missing"
+      in
+      Loom_change.Apply_patch patch
+  | ("Write" | "Edit"), _, _ -> failf "change-single-path-required"
+  | _ -> failf "change-tool-refused:%s" tool_name
+
+let change_call_id event =
+  [ "tool_use_id"; "tool_call_id"; "toolUseId" ]
+  |> List.find_map (fun name ->
+         match object_field event name with
+         | Some (Json_string value) when value <> "" -> Some value
+         | _ -> None)
+  |> function
+  | Some value when String.length value <= 256 -> value
+  | Some _ -> failf "change-tool-call-id-too-long"
+  | None -> failf "change-tool-call-id-missing"
+
+let rewrite_patch_for_stage root stage_root patch =
+  String.split_on_char '\n' patch
+  |> List.map (fun line ->
+         let prefixes = [ "*** Add File: "; "*** Update File: "; "*** Delete File: " ] in
+         match
+           List.find_map
+             (fun prefix ->
+               if starts_with line prefix then Some prefix else None)
+             prefixes
+         with
+         | None -> line
+         | Some prefix ->
+             let raw =
+               String.sub line (String.length prefix)
+                 (String.length line - String.length prefix)
+             in
+             let relative = Loom_change.normalize_declared_path root raw in
+             prefix ^ Filename.concat stage_root relative)
+  |> String.concat "\n"
+
+let change_hook_output root input mutation stage_root =
+  let updated_input =
+    match mutation, input with
+    | (Loom_change.Write { path; _ } | Loom_change.Edit { path; _ }),
+      Json_object _ ->
+        replace_object_field input "file_path"
+          (Json_string (Filename.concat stage_root path))
+    | Loom_change.Apply_patch patch, Json_string _ ->
+        Json_string (rewrite_patch_for_stage root stage_root patch)
+    | Loom_change.Apply_patch patch, Json_object _ ->
+        let field =
+          match object_field input "patch", object_field input "input" with
+          | Some _, _ -> "patch"
+          | None, Some _ -> "input"
+          | None, None -> failf "change-patch-missing"
+        in
+        replace_object_field input field
+          (Json_string (rewrite_patch_for_stage root stage_root patch))
+    | _ -> failf "change-stage-input-invalid"
+  in
+  Json_object
+    [ ("hookSpecificOutput",
+       Json_object
+         [ ("hookEventName", Json_string "PreToolUse");
+           ("permissionDecision", Json_string "allow");
+           ("permissionDecisionReason",
+            Json_string "Sounio 9043 admitted a kernel-resident staged change");
+           ("updatedInput", updated_input) ]) ]
+
+let git_commit_message command =
+  try
+    match Loom_exec.lex_command command with
+    | [ executable; "commit"; ("-m" | "--message"); message ]
+      when Filename.basename executable = "git" && message <> "" -> Some message
+    | words when
+        (match words with executable :: "commit" :: _ ->
+           Filename.basename executable = "git" | _ -> false) ->
+        failf "change-git-commit-form-refused"
+    | _ -> None
+  with Loom_exec.Dynamic_command reason ->
+    if starts_with (String.trim command) "git commit" then
+      failf "change-git-commit-dynamic-refused:%s" reason
+    else None
+
+let commit_presentation receipt oid path =
+  "/usr/bin/printf '%s\\n' " ^
+  Loom_exec.shell_quote
+    (Printf.sprintf
+       "LOOM_CHANGE_COMMITTED receipt_sha256=%s commit=%s receipt_path=%s"
+       receipt oid path)
+
 let safe_token ?(limit = 24) value =
   let output = Buffer.create (min limit (String.length value)) in
   String.iter
@@ -1021,7 +1147,11 @@ let execute_event tool_root root event agent lane raw_session_id
   let intent = "active " ^ agent ^ " session" in
   let common = scope_arguments agent lane intent in
   let presence_root = process_worktree root agent lane raw_session_id in
-  if event_name = "SessionEnd" then (
+  let coordination_enabled =
+    Sys.getenv_opt "SOUNIO_LOOM_COORD_AUTO" <> Some "0" || not (test_mode ())
+  in
+  if event_name = "SessionEnd" && not coordination_enabled then None
+  else if event_name = "SessionEnd" then (
     refresh_presence tool_root presence_root root agent lane raw_session_id;
     ignore
       (coord_ok tool_root presence_root
@@ -1041,6 +1171,8 @@ let execute_event tool_root root event agent lane raw_session_id
   else if event_name = "PreToolUse" then (
     let paths = extract_paths event in
     let tool_name = string_field event "tool_name" in
+    let change_target = ref None in
+    let staged_change_output = ref None in
     if List.mem tool_name [ "apply_patch"; "Edit"; "Write"; "MultiEdit";
                             "NotebookEdit" ] && paths = []
     then failf "write-path-missing";
@@ -1048,23 +1180,43 @@ let execute_event tool_root root event agent lane raw_session_id
       let target_root, target_paths =
         target_scope (string_field ~default:root event "cwd") root paths
       in
-      refresh_presence tool_root presence_root root agent lane raw_session_id;
-      refresh_hook_capability tool_root presence_root agent lane raw_session_id;
-      let authorization =
-        run_coord tool_root target_root
-          ([ "authorize"; "--agent"; agent; "--files" ] @ target_paths)
-      in
-      if authorization.code <> 0 then (
-        let scoped =
-          if target_root = root then
-            run_coord tool_root root
-              ([ "scope" ] @ common @ [ "--files" ] @ target_paths)
-          else authorization
+      change_target := Some (target_root, target_paths);
+      if coordination_enabled then (
+        refresh_presence tool_root presence_root root agent lane raw_session_id;
+        refresh_hook_capability tool_root presence_root agent lane raw_session_id;
+        let authorization =
+          run_coord tool_root target_root
+            ([ "authorize"; "--agent"; agent; "--files" ] @ target_paths)
         in
-        if scoped.code <> 0 then (
-          notify_conflict tool_root root agent lane target_paths scoped.output;
-          failf "coordination-write-refused:%s" (trim scoped.output)));
-      refresh_endpoint tool_root presence_root agent lane raw_session_id);
+        if authorization.code <> 0 then (
+          let scoped =
+            if target_root = root then
+              run_coord tool_root root
+                ([ "scope" ] @ common @ [ "--files" ] @ target_paths)
+            else authorization
+          in
+          if scoped.code <> 0 then (
+            notify_conflict tool_root root agent lane target_paths scoped.output;
+            failf "coordination-write-refused:%s" (trim scoped.output)));
+        refresh_endpoint tool_root presence_root agent lane raw_session_id));
+    if Loom_change.required_mode () && change_tool tool_name then (
+      match !change_target with
+      | Some (_, target_paths) ->
+          let mutation = change_mutation event target_paths in
+          let prepared =
+            Loom_change.prepare_remote ~session_id:raw_session_id
+              ~call_id:(change_call_id event) ~event_sha256 mutation target_paths
+          in
+          let input =
+            match object_field event "tool_input" with
+            | Some value -> value
+            | None -> failf "change-tool-input-missing"
+          in
+          staged_change_output :=
+            Some
+              (change_hook_output root input mutation
+                 prepared.Loom_change.remote_stage_root)
+      | None -> failf "change-target-missing");
     if execution_tool tool_name then (
       let input =
         match object_field event "tool_input" with
@@ -1073,11 +1225,22 @@ let execute_event tool_root root event agent lane raw_session_id
       in
       let field, command = execution_command input in
       let cwd = execution_cwd event input root in
+      match git_commit_message command with
+      | Some message when Loom_change.required_mode () ->
+          let receipt, oid, receipt_path =
+            Loom_change.commit_remote ~session_id:raw_session_id
+              ~call_id:(change_call_id event) ~event_sha256 ~message
+          in
+          Some
+            (execution_hook_output
+               ~reason:"Sounio 9044 admitted a byte-exact kernel Git commit"
+               input field (commit_presentation receipt oid receipt_path))
+      | _ ->
       let ingress =
         Loom_exec_ingress.observe ~root ~agent ~lane ~session_id:raw_session_id
           ~cwd ~event_sha256 ~command ~command_sha256:(sha256 command)
       in
-      match ingress with
+      (match ingress with
       | Some
           { Loom_exec_ingress.result =
               Some (Loom_exec_ingress.Frozen_result result); _ } ->
@@ -1095,9 +1258,10 @@ let execute_event tool_root root event agent lane raw_session_id
                (Loom_exec_result_record.presentation_command result))
       | _ when Loom_exec_ingress.probe_only () -> None
       | _ ->
-          refresh_presence tool_root presence_root root agent lane raw_session_id;
-          refresh_hook_capability tool_root presence_root agent lane raw_session_id;
-          refresh_endpoint tool_root presence_root agent lane raw_session_id;
+          if coordination_enabled then (
+            refresh_presence tool_root presence_root root agent lane raw_session_id;
+            refresh_hook_capability tool_root presence_root agent lane raw_session_id;
+            refresh_endpoint tool_root presence_root agent lane raw_session_id);
           let replacement =
             if Loom_sovereign_exec.required_mode () then (
               if file_capability_fixture then
@@ -1111,33 +1275,41 @@ let execute_event tool_root root event agent lane raw_session_id
               Loom_exec.authorize_and_issue ~file_capability_fixture ~root ~cwd
                 ~command
           in
-          Some (execution_hook_output input field replacement))
-    else None)
+          Some (execution_hook_output input field replacement)))
+    else !staged_change_output)
   else (
-    let claim =
-      if event_name = "SessionStart" then run_coord tool_root root ([ "scope" ] @ common)
-      else
-        let heartbeat =
-          run_coord tool_root root [ "heartbeat"; "--agent"; agent; "--lane"; lane ]
-        in
-        if heartbeat.code = 0 then heartbeat
-        else run_coord tool_root root ([ "scope" ] @ common)
-    in
-    if claim.code <> 0 && not (contains claim.output "claim belongs to worktree ")
-    then failf "coordination-claim-refused:%s" (trim claim.output);
-    refresh_presence tool_root presence_root root agent lane raw_session_id;
-    refresh_hook_capability tool_root presence_root agent lane raw_session_id;
-    refresh_endpoint tool_root presence_root agent lane raw_session_id;
-    if event_name = "SessionStart" then (
-      ignore
-        (coord_ok tool_root root
-           [ "obligation-supervisor-ensure"; "--interval-seconds"; "1" ]);
-      Printf.printf
-        "Sounio coordination joined: agent=%s lane=%s. Use this same agent/lane with `bin/sounio-coord scope` before write-bearing Bash commands.\n%!"
-        agent lane);
-    if event_name = "UserPromptSubmit" || event_name = "PostToolUse" then
-      inject_messages tool_root root agent lane;
-    None)
+    if event_name = "PostToolUse" && Loom_change.required_mode () then (
+      let tool_name = string_field event "tool_name" in
+      if change_tool tool_name then (
+        ignore
+          (Loom_change.consume_remote ~session_id:raw_session_id
+             ~call_id:(change_call_id event) ~event_sha256)));
+    if not coordination_enabled then None
+    else (
+      let claim =
+        if event_name = "SessionStart" then run_coord tool_root root ([ "scope" ] @ common)
+        else
+          let heartbeat =
+            run_coord tool_root root [ "heartbeat"; "--agent"; agent; "--lane"; lane ]
+          in
+          if heartbeat.code = 0 then heartbeat
+          else run_coord tool_root root ([ "scope" ] @ common)
+      in
+      if claim.code <> 0 && not (contains claim.output "claim belongs to worktree ")
+      then failf "coordination-claim-refused:%s" (trim claim.output);
+      refresh_presence tool_root presence_root root agent lane raw_session_id;
+      refresh_hook_capability tool_root presence_root agent lane raw_session_id;
+      refresh_endpoint tool_root presence_root agent lane raw_session_id;
+      if event_name = "SessionStart" then (
+        ignore
+          (coord_ok tool_root root
+             [ "obligation-supervisor-ensure"; "--interval-seconds"; "1" ]);
+        Printf.printf
+          "Sounio coordination joined: agent=%s lane=%s. Use this same agent/lane with `bin/sounio-coord scope` before write-bearing Bash commands.\n%!"
+          agent lane);
+      if event_name = "UserPromptSubmit" || event_name = "PostToolUse" then
+        inject_messages tool_root root agent lane;
+      None))
 
 let parse_agent arguments =
   let loop = function
@@ -1167,6 +1339,15 @@ let run arguments =
     let event = parse_json raw_event in
     let cwd = string_field ~default:(Unix.getcwd ()) event "cwd" in
     let current_root = git_root cwd |> Unix.realpath in
+    let tool_root =
+      match Sys.getenv_opt "SOUNIO_LOOM_TOOL_ROOT" with
+      | Some value when value <> "" ->
+          let selected = Unix.realpath value in
+          if not (Sys.file_exists (Filename.concat selected "bin/sounio-coord")) then
+            failf "configured-tool-root-missing-coordination-launcher";
+          selected
+      | _ -> current_root
+    in
     root := Some current_root;
     let raw_session_id = string_field ~default:"unknown" event "session_id" in
     lane := "session-" ^ safe_token raw_session_id;
@@ -1181,7 +1362,7 @@ let run arguments =
     let authorized_receipt = authorize_guard current_root raw_event base_receipt in
     receipt := Some authorized_receipt;
     let hook_output =
-      execute_event current_root current_root event !agent !lane raw_session_id
+      execute_event tool_root current_root event !agent !lane raw_session_id
         file_capability_fixture (sha256 raw_event)
     in
     append_decision_log current_root "ALLOW" authorized_receipt.result !agent !lane
@@ -1192,6 +1373,7 @@ let run arguments =
   | Error message
   | Loom_exec.Error message
   | Loom_sovereign_exec.Error message
+  | Loom_change.Error message
   | Loom_exec_intent.Error message
   | Loom_exec_catalog.Error message
   | Loom_exec_result.Error message

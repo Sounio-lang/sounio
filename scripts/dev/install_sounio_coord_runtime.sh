@@ -308,6 +308,89 @@ activate_runtime() {
         die "installed sovereign execution product source drifted: $sovereign_rel"
     done
   fi
+  if grep -q '^capability=loom-sovereign-change-kernel-v2$' "$manifest"; then
+    local change_capsule="$version_dir/policy/sovereign-change"
+    local change_product="$change_capsule/tools/loom/sovereign_material_change_product.runtime.v2"
+    [[ -x "$version_dir/bin/sounio-loom-runtime" &&
+      -x "$version_dir/bin/sounio-loom-sovereign-change-kernel" &&
+      -x "$version_dir/bin/sounio-loom-sovereign-material-change" &&
+      -f "$change_product" ]] ||
+      die "installed sovereign change product omits Loom or Sounio actions 9043/9044: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" loom_change_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-sovereign-change-kernel"
+    verify_manifest_binary_sha256 "$manifest" loom_material_change_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-sovereign-material-change"
+    verify_manifest_binary_sha256 "$manifest" loom_change_manifest_sha256 \
+      "$change_capsule/tools/loom/sovereign_change_kernel.freeze.v1"
+    verify_manifest_binary_sha256 "$manifest" loom_material_change_manifest_sha256 \
+      "$change_capsule/tools/loom/sovereign_material_change.freeze.v2"
+    verify_manifest_binary_sha256 "$manifest" loom_material_change_product_sha256 \
+      "$change_product"
+    [[ "$(manifest_value "$change_product" semantic_authority)" == Sounio &&
+      "$(manifest_value "$change_product" producing_language)" == Sounio &&
+      "$(manifest_value "$change_product" language_role)" == SEMANTIC_AUTHORITY &&
+      "$(manifest_value "$change_product" action)" == 9044 &&
+      "$(manifest_value "$change_product" stage)" == CLAIM_READY &&
+      "$(manifest_value "$change_product" operational_language)" == OCaml &&
+      "$(manifest_value "$change_product" operational_role)" == OPERATIONAL_ATTACHMENT &&
+      "$(manifest_value "$change_product" operational_semantic_authority)" == false &&
+      "$(manifest_value "$change_product" provider_root_readonly)" == true &&
+      "$(manifest_value "$change_product" staging_outside_root)" == true &&
+      "$(manifest_value "$change_product" grant_residency)" == Loom_kernel_memory &&
+      "$(manifest_value "$change_product" grant_is_bearer)" == false &&
+      "$(manifest_value "$change_product" grant_single_use)" == true &&
+      "$(manifest_value "$change_product" consume_atomic)" == true &&
+      "$(manifest_value "$change_product" exported_token)" == false &&
+      "$(manifest_value "$change_product" exported_handle)" == false &&
+      "$(manifest_value "$change_product" exact_call_id)" == true &&
+      "$(manifest_value "$change_product" exact_patch_hash)" == true &&
+      "$(manifest_value "$change_product" exact_worktree_state)" == true &&
+      "$(manifest_value "$change_product" authenticated_peer)" == true &&
+      "$(manifest_value "$change_product" exact_file_set)" == true &&
+      "$(manifest_value "$change_product" write_attached)" == true &&
+      "$(manifest_value "$change_product" commit_attached)" == true &&
+      "$(manifest_value "$change_product" ci_attached)" == true &&
+      "$(manifest_value "$change_product" ci_policy)" == consume-not-reinterpret &&
+      "$(manifest_value "$change_product" policy_executed_by_ci)" == false &&
+      "$(manifest_value "$change_product" parity_open)" == true &&
+      "$(manifest_value "$change_product" parity_executed)" == false &&
+      "$(manifest_value "$change_product" parity_receipts_semantic_authority)" == false &&
+      "$(manifest_value "$change_product" claim_ready)" == true ]] ||
+      die "installed sovereign change product is not bound to CLAIM_READY action 9044: $runtime_id"
+    [[ "$(manifest_value "$change_product" parent_sounio_runtime_sha256)" == \
+        "$(manifest_value "$manifest" loom_change_runtime_sha256)" &&
+      "$(manifest_value "$change_product" sounio_runtime_sha256)" == \
+        "$(manifest_value "$manifest" loom_material_change_runtime_sha256)" &&
+      "$(manifest_value "$change_product" loom_runtime_sha256)" == \
+        "$(manifest_value "$manifest" loom_runtime_sha256)" ]] ||
+      die "installed sovereign change product runtime hashes diverged: $runtime_id"
+    local change_pair change_path_key change_hash_key change_rel
+    local change_expected change_actual
+    for change_pair in \
+      parent_manifest_path:parent_manifest_sha256 \
+      material_manifest_path:material_manifest_sha256 \
+      sounio_source_path:sounio_source_sha256 \
+      loom_change_source_path:loom_change_source_sha256 \
+      loom_source_path:loom_source_sha256 \
+      hook_source_path:hook_source_sha256 \
+      c_stub_path:c_stub_sha256 \
+      provider_fixture_path:provider_fixture_sha256 \
+      dune_path:dune_sha256 \
+      loom_build_path:loom_build_sha256 \
+      installer_path:installer_sha256 \
+      operational_gate_path:operational_gate_sha256 \
+      ci_entrypoint_path:ci_entrypoint_sha256; do
+      change_path_key="${change_pair%%:*}"
+      change_hash_key="${change_pair#*:}"
+      change_rel="$(manifest_value "$change_product" "$change_path_key")"
+      [[ -n "$change_rel" && "$change_rel" != /* && "$change_rel" != *'..'* ]] ||
+        die "installed sovereign change source path is unsafe: $change_rel"
+      change_expected="$(manifest_value "$change_product" "$change_hash_key")"
+      change_actual="$(sha256sum "$change_capsule/$change_rel" | awk '{print $1}')"
+      [[ "$change_actual" == "$change_expected" ]] ||
+        die "installed sovereign change source drifted: $change_rel"
+    done
+  fi
   if grep -q '^capability=loom-truthful-lane-health-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-lane-health-runtime" && \
@@ -749,6 +832,26 @@ loom_sovereign_sources=(
   "$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_execution_kernel_product_selftest.sh"
   "$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_execution_kernel_product_freeze_selftest.sh"
 )
+loom_change_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_sovereign_change_kernel.sh"
+loom_material_change_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_sovereign_material_change.sh"
+loom_change_source="$SOURCE_ROOT/stdlib/coordination/loom_sovereign_change_kernel_authority.sio"
+loom_change_entrypoint="$SOURCE_ROOT/tools/loom/sovereign_change_kernel_authority_main.sio"
+loom_change_freeze="$SOURCE_ROOT/tools/loom/sovereign_change_kernel.freeze.v1"
+loom_material_change_source="$SOURCE_ROOT/stdlib/coordination/loom_sovereign_material_change_authority.sio"
+loom_material_change_entrypoint="$SOURCE_ROOT/tools/loom/sovereign_material_change_authority_main.sio"
+loom_material_change_freeze="$SOURCE_ROOT/tools/loom/sovereign_material_change.freeze.v2"
+loom_material_change_product="$SOURCE_ROOT/tools/loom/sovereign_material_change_product.runtime.v2"
+loom_material_change_evidence="$SOURCE_ROOT/tools/loom/evidence/loom-sovereign-material-change-product-v2-20260831.txt"
+loom_change_operational_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh"
+loom_change_ci_admit="$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_change_receipt_admit.sh"
+loom_change_sources=(
+  "$SOURCE_ROOT/tools/loom/src/loom_change.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_change_stubs.c"
+  "$SOURCE_ROOT/tools/loom/src/loom_change_provider_fixture.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook.ml"
+  "$SOURCE_ROOT/tools/loom/src/dune"
+)
 [[ -x "$installer_source" ]] || die "runtime installer source missing or not executable: $installer_source"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
@@ -873,11 +976,30 @@ for product_exec_ingress_source in \
   [[ -f "$product_exec_ingress_source" ]] ||
     die "Loom product ExecIngress capsule is incomplete: $product_exec_ingress_source"
 done
+for sovereign_change_source in \
+  "$loom_change_build_source" \
+  "$loom_material_change_build_source" \
+  "$loom_change_source" \
+  "$loom_change_entrypoint" \
+  "$loom_change_freeze" \
+  "$loom_material_change_source" \
+  "$loom_material_change_entrypoint" \
+  "$loom_material_change_freeze" \
+  "$loom_material_change_product" \
+  "$loom_material_change_evidence" \
+  "$loom_change_operational_gate" \
+  "$loom_change_ci_admit" \
+  "${loom_change_sources[@]}"; do
+  [[ -f "$sovereign_change_source" ]] ||
+    die "Loom sovereign change capsule is incomplete: $sovereign_change_source"
+done
 [[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_arrow.ml" && \
   -f "$loom_project/src/loom_epistemic.ml" && \
   -f "$loom_project/src/loom_exec.ml" && \
   -f "$loom_project/src/loom_exec_ingress.ml" && \
   -f "$loom_project/src/loom_hook.ml" && \
+  -f "$loom_project/src/loom_change.ml" && \
+  -f "$loom_project/src/loom_change_stubs.c" && \
   -f "$loom_project/src/loom_sovereign_exec.ml" && \
   -f "$loom_project/src/loom_sovereign_provider_fixture.ml" && \
   -f "$loom_project/src/loom_lane_health.ml" && \
@@ -928,9 +1050,13 @@ loom_witness_epoch_handoff_binary="$loom_project/_build/default/src/sounio-loom-
 loom_witness_epoch_transparency_binary="$loom_project/_build/default/src/sounio-loom-witness-epoch-transparency-runtime"
 loom_product_activation_resident_binary="$loom_project/.runtime/sounio-loom-resident-membrane-runtime-v5"
 loom_sovereign_binary="$loom_project/_build/default/src/sounio-loom-sovereign-execution-kernel"
+loom_change_binary="$loom_project/_build/default/src/sounio-loom-sovereign-change-kernel"
+loom_material_change_binary="$loom_project/_build/default/src/sounio-loom-sovereign-material-change"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
 [[ -x "$loom_sovereign_binary" ]] || \
   die "Loom build omitted frozen Sounio action 9042"
+[[ -x "$loom_change_binary" && -x "$loom_material_change_binary" ]] ||
+  die "Loom build omitted frozen Sounio actions 9043/9044"
 loom_sovereign_expected_sha="$(manifest_value "$loom_sovereign_semantic_freeze" executable_sha256)"
 loom_sovereign_actual_sha="$(sha256sum "$loom_sovereign_binary" | awk '{print $1}')"
 [[ "$loom_sovereign_actual_sha" == "$loom_sovereign_expected_sha" ]] || \
@@ -939,6 +1065,22 @@ loom_sovereign_probe="$(printf '0\n' | "$loom_sovereign_binary")"
 [[ "$loom_sovereign_probe" == \
   'SOUNIO_SOVEREIGN_EXECUTION_KERNEL_SELFTEST PASS cases=14' ]] || \
   die "Loom Sounio action 9042 failed its install probe"
+loom_change_expected_sha="$(manifest_value "$loom_change_freeze" executable_sha256)"
+loom_material_change_expected_sha="$(
+  manifest_value "$loom_material_change_freeze" executable_sha256
+)"
+[[ "$(sha256sum "$loom_change_binary" | awk '{print $1}')" == \
+   "$loom_change_expected_sha" ]] ||
+  die "Loom Sounio action 9043 runtime failed frozen hash verification"
+[[ "$(sha256sum "$loom_material_change_binary" | awk '{print $1}')" == \
+   "$loom_material_change_expected_sha" ]] ||
+  die "Loom Sounio action 9044 runtime failed frozen hash verification"
+[[ "$(printf '0\n' | "$loom_change_binary")" == \
+   'SOUNIO_SOVEREIGN_CHANGE_KERNEL_SELFTEST PASS cases=21' ]] ||
+  die "Loom Sounio action 9043 failed its install probe"
+[[ "$(printf '0\n' | "$loom_material_change_binary")" == \
+   'SOUNIO_SOVEREIGN_MATERIAL_CHANGE_SELFTEST PASS cases=8' ]] ||
+  die "Loom Sounio action 9044 failed its install probe"
 [[ -x "$loom_language_authority_binary" ]] || \
   die "Loom build omitted its frozen Sounio language-authority runtime"
 [[ -x "$loom_custody_transfer_binary" ]] || \
@@ -1219,6 +1361,12 @@ bundle_sources=(
   "$loom_sovereign_material_freeze" "$loom_sovereign_product_freeze"
   "$loom_sovereign_product_contract" "$loom_sovereign_product_evidence"
   "$loom_sovereign_product_gate" "$loom_sovereign_product_freeze_gate"
+  "$loom_change_build_source" "$loom_material_change_build_source"
+  "$loom_change_source" "$loom_change_entrypoint" "$loom_change_freeze"
+  "$loom_material_change_source" "$loom_material_change_entrypoint"
+  "$loom_material_change_freeze" "$loom_material_change_product"
+  "$loom_material_change_evidence" "$loom_change_operational_gate"
+  "$loom_change_ci_admit" "${loom_change_sources[@]}"
   "$loom_project/src/loom_membrane.ml"
   "$loom_project/src/loom_peer_activation_capsule.ml"
   "$loom_project/src/loom_resident.ml"
@@ -1273,7 +1421,8 @@ else
     "$stage/policy/product-activation/scripts/ci" \
     "$stage/policy/product-exec-ingress/tools/loom/evidence" \
     "$stage/policy/product-exec-ingress/tools/loom/src" \
-    "$stage/policy/sovereign-execution"
+    "$stage/policy/sovereign-execution" \
+    "$stage/policy/sovereign-change"
   install -m 0755 "$runtime_source" "$stage/bin/sounio-coord-runtime"
   install -m 0755 "$causal_source" "$stage/bin/sounio-coord-causal-runtime"
   install -m 0755 "$agentd_source" "$stage/bin/sounio-agentd-runtime"
@@ -1284,6 +1433,10 @@ else
   install -m 0755 "$loom_binary" "$stage/bin/sounio-loom-runtime"
   install -m 0555 "$loom_sovereign_binary" \
     "$stage/bin/sounio-loom-sovereign-execution-kernel"
+  install -m 0555 "$loom_change_binary" \
+    "$stage/bin/sounio-loom-sovereign-change-kernel"
+  install -m 0555 "$loom_material_change_binary" \
+    "$stage/bin/sounio-loom-sovereign-material-change"
   install -m 0755 "$loom_language_authority_binary" \
     "$stage/bin/sounio-loom-language-authority-runtime"
   install -m 0644 "$loom_language_authority_freeze" \
@@ -1371,6 +1524,28 @@ else
     mkdir -p "$(dirname "$sovereign_target")"
     install -m 0444 "$sovereign_source" "$sovereign_target"
   done
+  sovereign_change_capsule_sources=(
+    "$installer_source"
+    "$loom_change_build_source" "$loom_material_change_build_source"
+    "$loom_change_source" "$loom_change_entrypoint" "$loom_change_freeze"
+    "$loom_material_change_source" "$loom_material_change_entrypoint"
+    "$loom_material_change_freeze" "$loom_material_change_product"
+    "$loom_material_change_evidence" "$loom_change_operational_gate"
+    "$loom_change_ci_admit" "${loom_change_sources[@]}"
+  )
+  for sovereign_change_source in "${sovereign_change_capsule_sources[@]}"; do
+    sovereign_change_relative="${sovereign_change_source#"$SOURCE_ROOT/"}"
+    sovereign_change_target="$stage/policy/sovereign-change/$sovereign_change_relative"
+    mkdir -p "$(dirname "$sovereign_change_target")"
+    case "$sovereign_change_relative" in
+      scripts/dev/*|scripts/ci/*)
+        install -m 0555 "$sovereign_change_source" "$sovereign_change_target"
+        ;;
+      *)
+        install -m 0444 "$sovereign_change_source" "$sovereign_change_target"
+        ;;
+    esac
+  done
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
@@ -1378,6 +1553,21 @@ else
   loom_runtime_sha256="$(sha256sum "$stage/bin/sounio-loom-runtime" | awk '{print $1}')"
   loom_sovereign_runtime_sha256="$(
     sha256sum "$stage/bin/sounio-loom-sovereign-execution-kernel" | awk '{print $1}'
+  )"
+  loom_change_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-sovereign-change-kernel" | awk '{print $1}'
+  )"
+  loom_material_change_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-sovereign-material-change" | awk '{print $1}'
+  )"
+  loom_change_manifest_sha256="$(
+    sha256sum "$stage/policy/sovereign-change/tools/loom/sovereign_change_kernel.freeze.v1" | awk '{print $1}'
+  )"
+  loom_material_change_manifest_sha256="$(
+    sha256sum "$stage/policy/sovereign-change/tools/loom/sovereign_material_change.freeze.v2" | awk '{print $1}'
+  )"
+  loom_material_change_product_sha256="$(
+    sha256sum "$stage/policy/sovereign-change/tools/loom/sovereign_material_change_product.runtime.v2" | awk '{print $1}'
   )"
   loom_sovereign_product_manifest_sha256="$(
     sha256sum "$stage/policy/sovereign-execution/tools/loom/sovereign_execution_kernel_product.runtime.v1" | awk '{print $1}'
@@ -1499,6 +1689,22 @@ else
       "$loom_sovereign_product_contract_sha256"
     printf 'loom_sovereign_product_evidence_sha256=%s\n' \
       "$loom_sovereign_product_evidence_sha256"
+    printf 'loom_change_language=Sounio\n'
+    printf 'loom_change_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_change_operational_kernel=OCaml\n'
+    printf 'loom_change_actions=9043,9044\n'
+    printf 'loom_change_manifest_sha256=%s\n' \
+      "$loom_change_manifest_sha256"
+    printf 'loom_material_change_manifest_sha256=%s\n' \
+      "$loom_material_change_manifest_sha256"
+    printf 'loom_change_runtime_sha256=%s\n' \
+      "$loom_change_runtime_sha256"
+    printf 'loom_material_change_runtime_sha256=%s\n' \
+      "$loom_material_change_runtime_sha256"
+    printf 'loom_material_change_product_sha256=%s\n' \
+      "$loom_material_change_product_sha256"
+    printf 'loom_change_ci_policy=consume-not-reinterpret\n'
+    printf 'loom_change_claim_ready=true\n'
     printf 'loom_continuity_language=Sounio\n'
     printf 'loom_continuity_engine=lean_single\n'
     printf 'loom_obligation_language=Sounio\n'
@@ -1545,6 +1751,7 @@ else
     printf 'capability=loom-runtime-authority-capsule-v1\n'
     printf 'capability=loom-product-launch-dark-attachment-v1\n'
     printf 'capability=loom-sovereign-execution-kernel-product-v1\n'
+    printf 'capability=loom-sovereign-change-kernel-v2\n'
     printf 'capability=loom-truthful-lane-health-v1\n'
     printf 'capability=loom-nondestructive-health-reconcile-v1\n'
     printf 'capability=loom-native-hook-binary-attestation-v1\n'
