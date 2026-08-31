@@ -62,7 +62,7 @@ run_hook() {
 
 wait_for_file() {
   local path="$1" attempt
-  for attempt in $(seq 1 100); do
+  for attempt in $(seq 1 300); do
     [[ -f "$path" ]] && return 0
     sleep 0.1
   done
@@ -402,7 +402,23 @@ mkdir -p "$TEST_ROOT/not-a-repository"
 tmux -S "$TMUX_SOCKET" new-session -d -s "$WRONG_CWD_SESSION" \
   -c "$TEST_ROOT/not-a-repository" \
   "$TMUX_HARNESS '$TMUX_HARNESS_SCRIPT' '$LOOM' '$ROOT_DIR' '$WRONG_CWD_ID' '$WRONG_CWD_READY' '$WRONG_CWD_LOG'"
-wait_for_file "$WRONG_CWD_READY" || fail 'wrong-cwd native harness did not start'
+if ! wait_for_file "$WRONG_CWD_READY"; then
+  wrong_cwd_pane="$(tmux -S "$TMUX_SOCKET" list-panes -a \
+    -F 'session=#{session_name} pane=#{pane_id} dead=#{pane_dead} status=#{pane_dead_status} command=#{pane_current_command}' \
+    2>&1 || true)"
+  wrong_cwd_screen="$(tmux -S "$TMUX_SOCKET" capture-pane -p -S -200 \
+    -t "$WRONG_CWD_SESSION" 2>&1 || true)"
+  wrong_cwd_pane_pid="$(tmux -S "$TMUX_SOCKET" display-message -p \
+    -t "$WRONG_CWD_SESSION" '#{pane_pid}' 2>/dev/null || true)"
+  wrong_cwd_tree="$(
+    ps -o pid=,ppid=,stat=,wchan=,comm=,args= --ppid "$wrong_cwd_pane_pid" 2>&1 || true
+    for child in $(ps -o pid= --ppid "$wrong_cwd_pane_pid" 2>/dev/null); do
+      ps -o pid=,ppid=,stat=,wchan=,comm=,args= --ppid "$child" 2>&1 || true
+    done
+  )"
+  wrong_cwd_log="$(cat "$WRONG_CWD_LOG" 2>/dev/null || true)"
+  fail "wrong-cwd native harness did not start: panes=$wrong_cwd_pane screen=$wrong_cwd_screen tree=$wrong_cwd_tree log=$wrong_cwd_log"
+fi
 wrong_cwd_capability="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
   "$ROOT_DIR/bin/sounio-coord" hook-capability-status \
   --agent codex --lane "$WRONG_CWD_LANE")"

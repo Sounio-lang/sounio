@@ -5,8 +5,8 @@ umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-native-hook-promotion.XXXXXX")"
-RUNTIME_ROOT="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)/sounio-coord-runtime"
-STATE_ROOT="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)/sounio-coord-state"
+RUNTIME_ROOT="${SOUNIO_COORD_RUNTIME_DIR:-$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)/sounio-coord-runtime}"
+STATE_ROOT="${SOUNIO_COORD_DIR:-$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)/sounio-coord-state}"
 INSTALLER="$ROOT_DIR/scripts/dev/install_sounio_loom_native_hooks.sh"
 
 cleanup() {
@@ -32,8 +32,15 @@ create_target() {
 }
 
 config_sha() {
-  sha256sum "$1/.codex/hooks.json" "$1/.claude/settings.json" |
-    awk '{print $1}' | paste -sd ':' -
+  local root="$1" path
+  for path in .codex/hooks.json .claude/settings.json .cursor/hooks.json \
+      .grok/hooks/loom-native.json; do
+    if [[ -f "$root/$path" ]]; then
+      sha256sum "$root/$path" | awk '{print $1}'
+    else
+      printf 'absent\n'
+    fi
+  done | paste -sd ':' -
 }
 
 [[ -x "$INSTALLER" ]] || fail 'promotion installer is not executable'
@@ -53,15 +60,31 @@ grep -q '^LOOM_NATIVE_HOOKS_ACTIVATED ' <<< "$output" ||
 [[ "$(sha256sum "$positive/.claude/settings.json" | awk '{print $1}')" == \
   "$(sha256sum "$ROOT_DIR/.claude/settings.json" | awk '{print $1}')" ]] ||
   fail 'positive promotion installed the wrong Claude configuration'
+[[ "$(sha256sum "$positive/.cursor/hooks.json" | awk '{print $1}')" == \
+  "$(sha256sum "$ROOT_DIR/.cursor/hooks.json" | awk '{print $1}')" ]] ||
+  fail 'positive promotion installed the wrong Cursor configuration'
+[[ "$(sha256sum "$positive/.grok/hooks/loom-native.json" | awk '{print $1}')" == \
+  "$(sha256sum "$ROOT_DIR/.grok/hooks/loom-native.json" | awk '{print $1}')" ]] ||
+  fail 'positive promotion installed the wrong Grok configuration'
 [[ ! -e "$positive/.git/index.lock" ]] ||
   fail 'positive promotion retained the target Git index lock'
 receipt="$(sed -n 's/.* receipt=\(.*\)$/\1/p' <<< "$output")"
 [[ -f "$receipt" ]] || fail 'positive promotion receipt is missing'
 grep -q '^result=ACTIVATED$' "$receipt" || fail 'positive promotion receipt is not activated'
-grep -q '^canary_allow_receipts=3$' "$receipt" ||
-  fail 'positive promotion did not retain its three-ALLOW canary proof'
-grep -q '^canary_runtime_capsule_receipts=3$' "$receipt" ||
+grep -q '^canary_allow_receipts=12$' "$receipt" ||
+  fail 'positive promotion did not retain its twelve-ALLOW canary proof'
+grep -q '^canary_runtime_capsule_receipts=12$' "$receipt" ||
   fail 'positive promotion did not retain its runtime-capsule proof'
+grep -q '^canary_action_9045_receipts=12$' "$receipt" ||
+  fail 'positive promotion did not retain its Sounio action 9045 proof'
+grep -q '^canary_providers=codex+claude+cursor+grok$' "$receipt" ||
+  fail 'positive promotion did not retain its four-provider binding'
+for provider in codex claude cursor grok; do
+  grep -q "^${provider}_config_sha256=[0-9a-f]\{64\}$" "$receipt" ||
+    fail "positive promotion receipt omitted the $provider configuration"
+  grep -q "^canary_${provider}_lane=session-" "$receipt" ||
+    fail "positive promotion receipt omitted the $provider lane"
+done
 
 rollback="$TEST_ROOT/rollback"
 create_target "$rollback"
@@ -80,7 +103,7 @@ grep -q 'error: sabotage-after-swap' <<< "$rollback_output" ||
 grep -q '^ROLLED_BACK transaction=' <<< "$rollback_output" ||
   fail 'after-swap sabotage did not report rollback'
 [[ "$(config_sha "$rollback")" == "$rollback_before" ]] ||
-  fail 'after-swap sabotage did not restore both configurations exactly'
+  fail 'after-swap sabotage did not restore all four configurations exactly'
 [[ ! -e "$rollback/.git/index.lock" ]] ||
   fail 'rollback retained the target Git index lock'
 
@@ -111,4 +134,4 @@ grep -q '^foreign-index-lock$' "$locked/.git/index.lock" ||
   fail 'promotion removed a foreign target Git index lock'
 
 printf '%s\n' \
-  'sounio-loom-native-hook-promotion-selftest: PASS promotion=atomic runtime=manifest-bound git_index=locked policyless_canary=3-ALLOW rollback=exact dirty_target=refused foreign_lock=preserved python_oracle=absent rust_oracle=absent'
+  'sounio-loom-native-hook-promotion-selftest: PASS promotion=atomic runtime=manifest-bound git_index=locked policyless_canary=12-ALLOW providers=codex+claude+cursor+grok action=9045 rollback=exact dirty_target=refused foreign_lock=preserved python_oracle=absent rust_oracle=absent'

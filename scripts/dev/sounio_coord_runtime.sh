@@ -1593,6 +1593,11 @@ native_hook_caller_is_exact_harness() {
           "$NATIVE_HOOK_CALLER_CMDLINE" == *'/@anthropic-ai/claude-code/'* &&
           "$NATIVE_HOOK_CALLER_CMDLINE" == *'cli.js'* ]]
       ;;
+    cursor)
+      [[ "$NATIVE_HOOK_CALLER_COMMAND" == cursor-agent* ||
+        "$NATIVE_HOOK_CALLER_COMMAND" == cursor* ]]
+      ;;
+    grok) [[ "$NATIVE_HOOK_CALLER_COMMAND" == grok* ]] ;;
     *) return 1 ;;
   esac
 }
