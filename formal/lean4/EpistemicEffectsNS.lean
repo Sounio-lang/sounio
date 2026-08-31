@@ -148,6 +148,23 @@ theorem trueVar_append (a b : Aff) :
   rw [inner_append_left, inner_append_right, inner_append_right, inner_comm b a]
   omega
 
+/-- **The sign of the harm (Paper A §8.4, measured 2026-08-31).** The independence-assuming
+    add reports `Var a + Var b`; by `trueVar_append` it UNDER-states the true variance exactly
+    when the covariance is positive (anti-garbling — precision manufactured) and OVER-states it
+    when the covariance is negative (garbling — information lost). Sets of sources cannot see
+    the sign; coefficients can. -/
+theorem naive_add_understates_iff (a b : Aff) :
+    trueVar a + trueVar b < trueVar (a ++ b) ↔ 0 < inner a b := by
+  rw [trueVar_append]; omega
+
+theorem naive_add_conservative_of_cov_nonpos (a b : Aff) (h : inner a b ≤ 0) :
+    trueVar (a ++ b) ≤ trueVar a + trueVar b := by
+  rw [trueVar_append]; omega
+
+theorem naive_add_exact_iff (a b : Aff) :
+    trueVar (a ++ b) = trueVar a + trueVar b ↔ inner a b = 0 := by
+  rw [trueVar_append]; omega
+
 theorem coeff_scale (k : Int) (a : Aff) (s : Nat) : coeff (scale k a) s = k * coeff a s := by
   induction a with
   | nil => simp [scale, coeff]
@@ -1476,6 +1493,7 @@ end Sounio.EpistemicEffectsNS
 -- Axiom footprint (reproduce: `lake env lean EpistemicEffectsNS.lean`)
 -- ================================================================
 #print axioms Sounio.EpistemicEffectsNS.trueVar_append
+#print axioms Sounio.EpistemicEffectsNS.naive_add_understates_iff
 #print axioms Sounio.EpistemicEffectsNS.inner_zero_of_ns
 #print axioms Sounio.EpistemicEffectsNS.covers_coeff
 #print axioms Sounio.EpistemicEffectsNS.progress
