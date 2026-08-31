@@ -31,7 +31,11 @@ command -v lean >/dev/null 2>&1 || { echo "SKIP: lean not found"; exit 0; }
 # ---- C1: compile (and capture the #print axioms output for C3) -------------------------
 OUT="$(mktemp -t ns_lean_gate-XXXXXX.log)"
 TMPDIR_OLEAN=""
-cleanup() { rm -f "${OUT}"; [[ -n "${TMPDIR_OLEAN}" ]] && rm -rf "${TMPDIR_OLEAN}"; }
+cleanup() {
+    rm -f "${OUT}"
+    if [[ -n "${TMPDIR_OLEAN}" ]]; then rm -rf "${TMPDIR_OLEAN}"; fi
+    return 0
+}
 trap cleanup EXIT
 
 direct_build() {
