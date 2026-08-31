@@ -3515,3 +3515,10 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - Verdict: 6 OK, 2 TIGHTENABLE, 1 FAIL (missing witnesses). Correct catches: `uk` shared source 0 → old x+⊤ witness did not isolate ⊤; no source-level `measure s + measure s` witness
 - Acted: `opaque` constructor + `t_opaque`/`opaque_red`; `x_plus_top_untypable` rebuilt on `kadd xk (opaque yk)`; `invMeasure` + `measure_plus_measure_untypable`; gate → 12 theorems, PASS
 - Record: `docs/research/paper_A_ns_metatheory_xai_review_2026-08-30.md` (Round 2 section)
+
+## 2026-08-31 - EpistemicEffectsNS.lean round 3: xai Grok 4.6 on the opaque-extended file
+
+- Packet = round-2 packet + attack-the-fixes items (10, 11); DONE 3586 bytes
+- Verdict: round-2 fixes both OK/CLOSED; new: 3 FAIL (labelling sentence overclaims "never under-approx"), 9 FAIL (no let-bound x+x control; probabilistic adequacy), AGFree wording OPEN
+- Acted: header states honest-labelling as an ASSUMPTION + algebraic scope; `invVar`/`invLet`/`let_x_plus_x_untypable` (§8.2 shared-variable control, de Bruijn); AGFree/typed_agfree docstrings value-restricted. Gate 13 theorems PASS
+- Record: `docs/research/paper_A_ns_metatheory_xai_review_2026-08-30.md` (Round 3)

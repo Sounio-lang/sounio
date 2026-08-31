@@ -700,7 +700,7 @@ operator reached during evaluation. ∎
 | Lemma 1 in **general form** (all affine forms, not Int witnesses; Mathlib-free) | ✅ mechanized — `trueVar_append`, `trueVar_mul` (delta method), `inner_disjoint` |
 | Exactness preservation: reported variance = true first-order variance along every step | ✅ mechanized — `exact_preservation`: under the premise the defective `gAddMeta`/`gMulMeta` are exact |
 | **Theorem 6.4** — no reached independence-assuming operator has correlated operands | ✅ mechanized — `typed_agfree`, `soundness_star` (along `⇒*`) |
-| Sabotage witness in the kernel: `x+x` steps to an inexact value and is untypable for **every** `N`; `measure s + measure s` untypable at source level; `x + opaque(y)` rejected purely by the ⊤ clause (with `x+y` admitted); `x+y` stays exact | ✅ kernel-checked — `x_plus_x_understates`, `x_plus_x_untypable`, `measure_plus_measure_untypable`, `x_plus_top_untypable`, `x_plus_y_exact` |
+| Sabotage witness in the kernel: `x+x` steps to an inexact value and is untypable for **every** `N`; `measure s + measure s` and the shared-variable `let x = measure s in x + x` untypable at source level; `x + opaque(y)` rejected purely by the ⊤ clause (with `x+y` admitted); `x+y` stays exact | ✅ kernel-checked — `x_plus_x_understates`, `x_plus_x_untypable`, `measure_plus_measure_untypable`, `let_x_plus_x_untypable`, `x_plus_top_untypable`, `x_plus_y_exact` |
 
 Every ingredient of the theorem now carries a machine proof (`formal/lean4/EpistemicEffectsNS.lean`,
 Lean 4.33.1, Mathlib-free, no `sorry`; axiom footprint ⊆ {`propext`, `Quot.sound`,
@@ -713,9 +713,13 @@ not give (§6.1) and NS typing does. What is **not** mechanized, and stated as s
 correspondence between this core calculus and the production checker's E230 rule — the wire
 is source-verified and sabotage-gated (§8.2) but not proven equivalent to `HasTy`; (ii)
 interprocedural summaries (§5.6), absent from the calculus; (iii) second-order terms (§6.5);
-(iv) the noise-symbol axiom itself — distinct `measure` labels are distinct physical sources;
-the type system tracks sources, it does not discover them (xai adversarial reviews 2026-08-30/31, Grok 4.5 + 4.6: 0 unsound
-findings, 6 tightenables/missing witnesses all acted on, `paper_A_ns_metatheory_xai_review_2026-08-30.md`).
+(iv) the noise-symbol axiom itself — distinct `measure` labels are distinct physical sources,
+*assumed, not proved*: the type system tracks sources, it does not discover them, and with
+dishonest labels the calculus under-approximates covariance; (v) the semantics is algebraic —
+`⟨a,a⟩` is the variance under independent unit-variance symbols by definition, no distributional
+adequacy is claimed (three xai adversarial rounds 2026-08-30/31, Grok 4.5 + 4.6 + 4.6-on-fixes:
+0 unsound findings, every finding closed by a theorem or stated as a boundary —
+`paper_A_ns_metatheory_xai_review_2026-08-30.md`).
 
 ### 6.5 Two boundaries carried as hypotheses
 

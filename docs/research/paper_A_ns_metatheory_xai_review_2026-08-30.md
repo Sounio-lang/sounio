@@ -132,3 +132,62 @@ still ⊆ {propext, Quot.sound, Classical.choice}, sorry-free.
 **External-review status now:** two adversarial rounds from xAI (Grok 4.5, Grok 4.6): 0
 unsound findings; 5 tightenables + 1 missing-witness FAIL, all acted on. Independent
 second-vendor opinion (Z.AI) still pending on operator account action.
+
+---
+
+## Round 3 — xai Grok **4.6** (2026-08-31), file with `opaque` (attack the round-2 fixes)
+
+Packet = round-2 packet + item 10 (break the two fixes) + item 11 (round-2 leftovers, report
+[CLOSED]/[OPEN]). **Verdict:** 7 × [OK], 2 × [TIGHTENABLE], 2 × [FAIL] (3: labelling
+wording; 9: probabilistic adequacy + missing let-bound control). Round-2 fixes: **both
+[OK]**; leftovers: source-level witness [CLOSED], genuine ⊤ witness [CLOSED],
+probabilistic adequacy [OPEN → scoped], `AGFree` wording [OPEN → fixed].
+
+### Referee report (verbatim)
+
+**1. Aff / inner / trueVar.** [OK] `inner a b = Σ_{(s,c)∈a} c·coeff b s` unfolds to `Σ_s coeff_a(s)·coeff_b(s)` even with duplicate keys (`coeff` sums); `trueVar a = ⟨a,a⟩ = Σ_s c_s²` is Var of `Σ c_s ε_s` for i.i.d. unit `ε_s` (constant lives in the payload).
+
+**2. `Covers` membership vs coeff.** [TIGHTENABLE] Membership is strictly stronger than “nonzero coeff ⇒ s∈N” (`covers_coeff`); dummy/`scale 0` monomials inflate `N`. Conservative (more E230), not unsound — no under-approx of true support.
+
+**3. Labels = noise symbols.** [FAIL] Programmer-chosen `s` can tag physically correlated sites with distinct labels; calculus then treats them as `nsDisjoint` and `inner=0` in-model. File’s “sharing is an over-approx, never an under-approx” is false. Not circular: `Covers` is established by `meas_red`/`cert_red` and preserved, not assumed for source terms; it *is* tautological for handwritten `kraw`.
+
+**4. Exact ⇒ reported=true at reached Knowledge.** [OK] `Exact` walks every `kraw` (incl. under `lam`); `exact_shift`/`exact_subst`/`exact_preservation` close beta/let/opaque. `kunc`/`kconf`/`kvalue` peel metadata to bare `treal`/`T` (untracked, but not Knowledge). Well-typed ⇏ `Exact` (`t_kraw` only `kvalid`); that extra hyp is as paper §6.1.
+
+**5. `AGFree` value-only.** [OK] Vacuous until both sides are `kraw`; `soundness_star` re-checks every `⇒*` intermediate, so once congruence has valued the operands the inner-product clause fires. Wording of `typed_agfree` is slightly stronger than the def.
+
+**6. Delta-method product.** [OK] `y·a ++ x·b` is the linearisation of `uv` at `(x,y)`; `trueVar_mul` vs `gMulMeta` differs by exactly `2xy⟨a,b⟩`. (Silent: second-order `a·b` noise dropped — first-order only.)
+
+**7. E230 / untypability vs “every N”.** [OK] `t_kadd`/`t_kmul` = (Add/Mul-Indep) with `⊤` never disjoint. `∀ Γ T E, ¬HasTy (kadd xk xk)` quantifies result `T` (hence operand `N`s by inversion); any covering `N` contains source 0, so `nsDisjoint` dies. Annotations are those in the derivation, not a separate `∀ N`.
+
+**8. Progress / preservation.** [OK] No extra stuck states for closed well-typed terms (`opaque`/`measure` of values step; `kadd` of non-`treal` Knowledge is untypable). `t_sub` mutates only `E`, never `N`; weakening/subst leave `a`/`N` intact.
+
+**9. Claim gap / overclaim.** [FAIL] File does **not** prove probabilistic/sampling adequacy of `trueVar`, nor let-bound `let x=measure s in x+x` as a named control. Overclaim: comment “never an under-approximation”; `typed_agfree` text vs value-restricted `AGFree`. Algebraic Thm 6.4 (`soundness_star`) matches the packet if “true variance” = `⟨a,a⟩`.
+
+**10. Round-3 fixes.**
+- (a) `opaque`. [OK] `opaque_red` retypes at `⊤` via `covers_top` (widen, not shrink); no new stuck state; `Exact`/`AGFree` unchanged (ghost form `a` not erased — type-only). `x_plus_top_untypable` + `x_plus_y_typable` + `opaque_y_typable` is a genuine ⊤-clause witness. Residual: after `opaque_red` the *term* `kraw … a` still *admits* a precise `t_kraw` (principal-type instability); harmless inside subject reduction.
+- (b) `invMeasure`. [OK] Inversion complete: only `t_measure`/`t_sub`, `T` fixed to `{s}`. [TIGHTENABLE] `measure s + measure s` ≠ let-bound `x+x`; weaker than a §8.2 shared-variable control (though that program is untypable by the same `nsDisjoint` on `t_var`).
+
+**11. Round-2 leftovers.** source-level witness [CLOSED]; genuine ⊤ witness [CLOSED]; probabilistic adequacy [OPEN]; `AGFree` informal wording [OPEN].
+
+
+### Disposition
+
+| # | Finding | Action |
+|---|---|---|
+| 3 [FAIL] | the header sentence "sharing a label is an over-approximation, never an under-approximation" reads as a claim that the calculus never under-approximates; with distinct labels on physically correlated sites it *does* | **Wording was wrong, fixed.** The header now states the honest-labelling axiom as an *assumption, not a theorem*: under it, shared labels only over-approximate; without it the calculus under-approximates the true covariance and every theorem is relative to the axiom (= residual (iv)). "The type system tracks sources; it does not discover them." The referee's "tautological for handwritten `kraw`" is accurate and intended: `Covers` is a premise for runtime values and *derived* for source programs (`meas_red`/`cert_red`). |
+| 9 [FAIL] / 10b | no let-bound `let x = measure s in x + x` control (the §8.2 *shared-variable* case; `measure s + measure s` is only duplicated text) | Added `invVar`, `invLet`, `var_plus_var_untypable'` and **`let_x_plus_x_untypable : ∀ Γ T E, ¬ HasTy Γ (letE mx (kadd (var 0) (var 0))) T E`** — (Measure) fixes `x : Knowledge⟨ℝ,{0}⟩`, both `var 0` look up the same `{0}`, `nsDisjoint {0} {0} = false`. This is the paper's `x + x` control verbatim (de Bruijn). |
+| 9 [FAIL] / 11 | probabilistic / sampling adequacy of `trueVar` not proved | **Scoped, not claimed.** Header now says: `trueVar a = ⟨a,a⟩` is the variance of `Σ c_s ε_s` under independent unit-variance symbols *by definition*; no distributional semantics is modelled; Lemma 1 and Theorem 6.4 are algebraic. Matches the paper (Lemma 1 is an algebraic identity; §6.5 first-order). |
+| 9 / 11 | `AGFree` informal wording stronger than the value-restricted definition | Docstrings of `AGFree` and `typed_agfree` and the header now say "whose operands are runtime values", with the reason (an operator computes only at a redex; `soundness_star` re-derives it on every reduct — the referee's own item 5). |
+| 10a | `opaque` fixes | [OK] — "genuine ⊤-clause witness"; residual noted: after `opaque_red` the term `kraw … a` again admits a precise `t_kraw` (principal-type instability), "harmless inside subject reduction" — recorded, no action. |
+| 2 | membership vs coefficient `Covers` | as round 1/2: `covers_coeff`; conservative direction only. |
+| 6 | second-order product noise dropped | scope, §6.5. |
+
+Gate after round 3: `NS_METATHEORY_LEAN_GATE_PASS`, **13** theorems in the footprint,
+⊆ {propext, Quot.sound, Classical.choice}, sorry-free.
+
+**External-review status:** three adversarial rounds from xAI (4.5, 4.6, 4.6-on-fixes).
+Cumulative: **0 unsound findings**; every [FAIL]/[TIGHTENABLE] either closed by a new theorem
+(`covers_coeff`, `opaque`+`x_plus_top_untypable`, `measure_plus_measure_untypable`,
+`let_x_plus_x_untypable`) or converted into an explicitly stated boundary (honest labelling,
+algebraic scope, first-order). Independent second-vendor opinion (Z.AI) still pending on
+operator account action.
