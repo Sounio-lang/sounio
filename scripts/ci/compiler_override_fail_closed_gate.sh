@@ -28,6 +28,7 @@ REAL="$ROOT_DIR/bin/madaros-linux-x86_64"
 cp "$REAL" "$W/noexec.elf"; chmod 600 "$W/noexec.elf"
 cp "$REAL" "$W/ok.elf";     chmod 700 "$W/ok.elf"
 printf '#!/bin/sh\necho nope\n' > "$W/script.elf"; chmod 755 "$W/script.elf"
+cp "$REAL" "$W/local.elf"; printf '\0' >> "$W/local.elf"; chmod 700 "$W/local.elf"   # byte-different, still runs: a "local build"
 
 fails=0
 check() {  # check <name> <expect-rc0|expect-reject> <needle> <cmd...>
@@ -63,6 +64,10 @@ check "souc: non-executable SOUNIO_SOUC_BIN" expect-reject "not executable" \
   env SOUNIO_SOUC_BIN="$W/noexec.elf" ./bin/souc check "$W/t.sio"
 check "madaros: non-executable MADAROS_RAW_BIN" expect-reject "not executable" \
   env MADAROS_RAW_BIN="$W/noexec.elf" ./bin/madaros check "$W/t.sio"
+check "souc: strict mode refuses a non-committed ELF"    expect-reject "not the committed" \
+  env SOUNIO_REQUIRE_COMMITTED_MADAROS=1 MADAROS_RAW_BIN="$W/local.elf" ./bin/souc --version
+check "madaros: strict mode refuses a non-committed ELF" expect-reject "not the committed" \
+  env SOUNIO_REQUIRE_COMMITTED_MADAROS=1 MADAROS_RAW_BIN="$W/local.elf" ./bin/madaros --version
 
 # The same defect lives in two sourced libraries, and they are the wider door:
 # scripts/lib/resolve_souc.sh is sourced by 126 scripts. They are checked here
@@ -101,6 +106,21 @@ check "no override resolves normally"   expect-rc0 "" ./bin/souc check "$W/t.sio
 check "valid override is honoured"      expect-rc0 "" env MADAROS_RAW_BIN="$W/ok.elf" ./bin/souc check "$W/t.sio"
 check "empty override is not an override" expect-rc0 "" env MADAROS_RAW_BIN= ./bin/souc check "$W/t.sio"
 check "--version unaffected"            expect-rc0 "" ./bin/souc --version
+check "strict mode honours the committed ELF by content" expect-rc0 "" \
+  env SOUNIO_REQUIRE_COMMITTED_MADAROS=1 MADAROS_RAW_BIN="$W/ok.elf" ./bin/souc --version
+# provenance must TELL THE TRUTH about a local build (measured 2026-08-31, #2318)
+_pv="$(env -u SOUC_BIN MADAROS_RAW_BIN="$W/local.elf" ./bin/souc --version 2>&1)"
+if grep -q "LOCAL BUILD" <<<"$_pv" && ! grep -q "is the COMMITTED binary" <<<"$_pv"; then
+  echo "  ok   --version names a local build honestly"
+else
+  echo "  FAIL --version called a non-committed ELF COMMITTED (or stayed silent)" >&2; fails=$((fails+1))
+fi
+_pv="$(env -u SOUC_BIN MADAROS_RAW_BIN="$W/ok.elf" ./bin/souc --version 2>&1)"
+if grep -q "is the COMMITTED binary" <<<"$_pv"; then
+  echo "  ok   --version recognises the committed ELF by content"
+else
+  echo "  FAIL --version did not recognise a byte-identical copy as committed" >&2; fails=$((fails+1))
+fi
 
 if [[ $fails -gt 0 ]]; then
   echo >&2
@@ -109,4 +129,4 @@ if [[ $fails -gt 0 ]]; then
   echo "  to the committed ELF answers a question nobody asked, and exits 0." >&2
   exit 1
 fi
-echo "COMPILER_OVERRIDE_FAIL_CLOSED_GATE_OK: 13 cases, 7 of them refusals, each behaved as stated"
+echo "COMPILER_OVERRIDE_FAIL_CLOSED_GATE_OK: 18 cases, 9 of them refusals, each behaved as stated"

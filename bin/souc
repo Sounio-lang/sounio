@@ -109,6 +109,23 @@ _resolve_madaros() {
   return 1
 }
 
+# Which build is a resolved ELF? "committed" when it IS bin/madaros-linux-x86_64 or is
+# byte-identical to it; otherwise a local artifact or an override, with its build time.
+# Measured 2026-08-31: a gitignored artifacts/self-hosted/madaros from 2026-08-16 was
+# resolved ahead of the committed ELF for a day of measurements while `souc --version`
+# still said "COMMITTED" -- a false compiler defect (#2318) was filed on its output.
+_madaros_provenance_kind() {
+  local elf="$1" committed="$ROOT_DIR/bin/madaros-linux-x86_64" when
+  if [[ "$elf" == "$committed" ]]; then echo committed; return; fi
+  if [[ -f "$committed" ]] && cmp -s "$elf" "$committed"; then echo committed; return; fi
+  when="$(date -r "$elf" +%Y-%m-%dT%H:%M 2>/dev/null || echo '?')"
+  if [[ "$elf" == "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; then
+    echo "local artifact built $when"
+  else
+    echo "override ${elf#$ROOT_DIR/} built $when"
+  fi
+}
+
 cmd_init() {
   if [[ $# -ne 1 ]]; then
     echo "souc: init requires <name>" >&2
@@ -327,6 +344,13 @@ if MADAROS_ELF="$(_resolve_madaros)"; then
   #
   # stdout stays byte-identical because ~657 call sites parse it; stderr is where
   # the condition goes, so a human or a captured log sees it and a parser does not.
+  _prov_kind="$(_madaros_provenance_kind "$MADAROS_ELF")"
+  if [[ "${SOUNIO_REQUIRE_COMMITTED_MADAROS:-0}" == "1" && "$_prov_kind" != "committed" ]]; then
+    echo "souc: refusing to run: SOUNIO_REQUIRE_COMMITTED_MADAROS=1 but the resolved Madaros ELF is not the committed bin/madaros-linux-x86_64" >&2
+    echo "  resolved: ${MADAROS_ELF#$ROOT_DIR/} ($_prov_kind)" >&2
+    echo "  remove artifacts/self-hosted/madaros or unset MADAROS_RAW_BIN -- or unset SOUNIO_REQUIRE_COMMITTED_MADAROS" >&2
+    exit 78
+  fi
   if [[ "${1:-}" == "--version" ]]; then
     _prov_elf="$MADAROS_ELF"
     _prov_sum="$( { md5sum "$_prov_elf" 2>/dev/null || echo '? -'; } | cut -c1-8 )"
@@ -337,7 +361,13 @@ if MADAROS_ELF="$(_resolve_madaros)"; then
     fi
     printf 'provenance: elf=%s md5=%s tree=%s%s\n' \
       "${_prov_elf#$ROOT_DIR/}" "$_prov_sum" "$_prov_src" "$_prov_dirty" >&2
-    printf 'provenance: this ELF is the COMMITTED binary; it is not built from the tree above.\n' >&2
+    if [[ "$_prov_kind" == "committed" ]]; then
+      printf 'provenance: this ELF is the COMMITTED binary; it is not built from the tree above.\n' >&2
+    else
+      _prov_csum="$( { md5sum "$ROOT_DIR/bin/madaros-linux-x86_64" 2>/dev/null || echo '? -'; } | cut -c1-8 )"
+      printf 'provenance: this ELF is a LOCAL BUILD (%s), NOT the committed bin/madaros-linux-x86_64 (md5=%s); it was resolved ahead of the committed ELF.\n' "$_prov_kind" "$_prov_csum" >&2
+      printf 'provenance: set SOUNIO_REQUIRE_COMMITTED_MADAROS=1 to refuse local builds; a claim about the committed compiler must not be measured on this one.\n' >&2
+    fi
     printf 'provenance: for a claim about compiler behaviour, build from source.\n' >&2
   fi
   exec env MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" "$@"

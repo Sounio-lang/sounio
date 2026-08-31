@@ -425,6 +425,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.sigsegv-pbpk28-private-struct-2026-06-02 | repo_only | docs/audit/SIGSEGV_PBPK28_PRIVATE_STRUCT_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.soir-blocked-drafts-triage-2026-08-17 | repo_only | docs/audit/SOIR_BLOCKED_DRAFTS_TRIAGE_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.soir-capacity-lockstep-census-2026-08-19 | repo_only | docs/audit/SOIR_CAPACITY_LOCKSTEP_CENSUS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.souc-provenance-local-build-gate-2026-08-31 | repo_only | docs/audit/SOUC_PROVENANCE_LOCAL_BUILD_GATE_2026-08-31.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.souc-wrapper-bare-dash-o-swallow-dispatch-2026-08-18 | repo_only | docs/audit/SOUC_WRAPPER_BARE_DASH_O_SWALLOW_DISPATCH_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sounio-release-production-readiness-2026-06-22 | repo_only | docs/audit/SOUNIO_RELEASE_PRODUCTION_READINESS_2026-06-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sounio-science-flex-2026-07-27 | repo_only | docs/audit/SOUNIO_SCIENCE_FLEX_2026-07-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
