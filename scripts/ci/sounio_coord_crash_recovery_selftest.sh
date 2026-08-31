@@ -9,6 +9,7 @@ SECOND="$TEST_ROOT/supervisor-worktree"
 TMP_ROOT="$TEST_ROOT/tmp"
 HISTORY_HOME="$TEST_ROOT/history-home"
 LOOM_RUNTIME="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
+TEST_LOOM_RUNTIME="$REPO/tools/loom/_build/default/src/loom.exe"
 LOOM_OBLIGATION_ADAPTER="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-obligation-runtime"
 first_pid=''
 second_pid=''
@@ -37,6 +38,13 @@ fail() {
   fail "Loom obligation adapter was not built: $LOOM_OBLIGATION_ADAPTER"
 export SOUNIO_COORD_LOOM_RUNTIME="$LOOM_RUNTIME"
 export SOUNIO_LOOM_OBLIGATION_ADAPTER="$LOOM_OBLIGATION_ADAPTER"
+export SOUNIO_LOOM_HOOK_TEST_MODE=1
+export SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1
+export SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT="$ROOT_DIR"
+export SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_ROOT="$ROOT_DIR"
+export SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
+export SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_RUNTIME="$ROOT_DIR/tools/loom/.runtime/sounio-loom-native-hook-cutover"
+export SOUNIO_LOOM_NATIVE_HOOK_CONFIG="$ROOT_DIR/.codex/hooks.json"
 
 process_start() {
   local pid="$1" tail
@@ -68,18 +76,23 @@ run_coord() {
 
 run_hook() {
   local payload="$1"
+  local hook_runtime="$TEST_LOOM_RUNTIME"
+  [[ "$payload" != *"$SECOND"* ]] || \
+    hook_runtime="$SECOND/tools/loom/_build/default/src/loom.exe"
   printf '%s\n' "$payload" | \
-    env -u TMUX -u TMUX_PANE TMPDIR="$TMP_ROOT" \
+    env -u TMUX -u TMUX_PANE TMPDIR="$(dirname "$TEST_ROOT")" \
       SOUNIO_COORD_HISTORY_HOME="$HISTORY_HOME" \
+      SOUNIO_COORD_DIR="$DURABLE_STATE" \
       SOUNIO_COORD_RUNTIME_MODE=local \
-      "$REPO/scripts/dev/sounio_coord_agent_hook.py" --agent codex
+      SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
+      "$hook_runtime" agent-hook --agent codex
 }
 
-mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$TMP_ROOT"
+mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$TMP_ROOT" \
+  "$REPO/tools/loom/_build/default/src"
 cp "$ROOT_DIR/bin/sounio-coord" "$REPO/bin/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev/"
+cp "$LOOM_RUNTIME" "$TEST_LOOM_RUNTIME"
 chmod +x "$REPO/bin/sounio-coord" "$REPO/scripts/dev/"*
 printf 'crash recovery marker\n' > "$REPO/marker.txt"
 git -C "$REPO" init -q
@@ -88,6 +101,8 @@ git -C "$REPO" config user.email 'coord-crash-selftest@sounio.local'
 git -C "$REPO" add .
 git -C "$REPO" commit -qm seed
 git -C "$REPO" worktree add -q -b supervisor-lane "$SECOND"
+rm "$SECOND/tools/loom/_build/default/src/loom.exe"
+ln -s "$TEST_LOOM_RUNTIME" "$SECOND/tools/loom/_build/default/src/loom.exe"
 
 common_dir="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir)"
 repo_key="$(printf '%s' "$common_dir" | cksum | awk '{print $1}')"
@@ -220,8 +235,8 @@ hook_sabotage="$(run_hook \
 hook_rc=$?
 set -e
 [[ "$hook_rc" -eq 2 ]] || fail "hook generation sabotage returned $hook_rc instead of 2"
-grep -q 'this process does not own the live lane generation' <<< "$hook_sabotage" || \
-  fail 'structured write sabotage was refused by the wrong rule'
+grep -q 'lane is still bound to generation 1' <<< "$hook_sabotage" || \
+  fail "structured write sabotage was refused by the wrong rule: $hook_sabotage"
 run_hook "{\"session_id\":\"$hook_session_id\",\"cwd\":\"$REPO\",\"hook_event_name\":\"SessionEnd\"}" \
   >"$TEST_ROOT/hook-end.log"
 

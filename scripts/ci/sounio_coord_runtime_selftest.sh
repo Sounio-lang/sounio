@@ -74,7 +74,8 @@ snapshot_coord_state() {
 }
 
 mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$REPO/scripts/ci" \
-  "$REPO/formal/tla" "$REPO/tools"
+  "$REPO/formal/tla" "$REPO/tools" "$REPO/.codex" "$REPO/.claude" \
+  "$REPO/.cursor" "$REPO/.grok/hooks"
 cp "$ROOT_DIR/bin/sounio-coord" "$ROOT_DIR/bin/sounio-agentd" \
   "$ROOT_DIR/bin/sounio-fleet" "$ROOT_DIR/bin/sounio-loom" "$REPO/bin/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
@@ -85,12 +86,11 @@ cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$REPO/formal/tla/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_cutover.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_custody_transfer.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_execution_outcome.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
@@ -110,12 +110,18 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_peer_activation_capsule_current_frame.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v5.sh" \
   "$REPO/scripts/dev/"
+cp "$ROOT_DIR/.codex/hooks.json" "$REPO/.codex/"
+cp "$ROOT_DIR/.claude/settings.json" "$REPO/.claude/"
+cp "$ROOT_DIR/.cursor/hooks.json" "$REPO/.cursor/"
+cp "$ROOT_DIR/.grok/hooks/loom-native.json" "$REPO/.grok/hooks/"
 cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
   "$REPO/scripts/ci/"
 mkdir -p "$REPO/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/native_hook_cutover_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1" \
   "$ROOT_DIR/tools/loom/execution_authority.freeze.v2" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
   "$ROOT_DIR/tools/loom/custody_transfer.freeze.v1" "$REPO/tools/loom/"
@@ -196,6 +202,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
   "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_native_hook_cutover_authority.sio" \
+  "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_custody_transfer.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_execution_outcome_authority.sio" \
@@ -241,9 +249,14 @@ git -C "$REPO" add .
 git -C "$REPO" commit -qm seed
 subprocess_toolchain_commit="$(sed -n 's/^sounio_executable_commit=//p' \
   "$REPO/tools/loom/subprocess_membrane.freeze.v1")"
+native_hook_cutover_toolchain_commit="$(sed -n 's/^sounio_executable_commit=//p' \
+  "$REPO/tools/loom/native_hook_cutover.freeze.v1")"
 [[ "$subprocess_toolchain_commit" =~ ^[0-9a-f]{40}$ ]] || \
   fail 'subprocess membrane fixture has no frozen toolchain commit'
+[[ "$native_hook_cutover_toolchain_commit" =~ ^[0-9a-f]{40}$ ]] || \
+  fail 'native hook cutover fixture has no frozen toolchain commit'
 git -C "$REPO" fetch -q "$ROOT_DIR" "$subprocess_toolchain_commit"
+git -C "$REPO" fetch -q "$ROOT_DIR" "$native_hook_cutover_toolchain_commit"
 git -C "$REPO" worktree add -q -b second-lane "$SECOND"
 RUNTIME_ROOT="$REPO/.git/sounio-coord-runtime"
 
@@ -1038,14 +1051,11 @@ grep -q '"count":4,"unclosed":0' <<< "$output" || \
   fail 'completed shared-runtime obligation remained unclosed'
 
 printf '#!/usr/bin/env bash\nexit 97\n' > "$SECOND/scripts/dev/sounio_coord_runtime.sh"
-printf '#!/usr/bin/env python3\nraise SystemExit(98)\n' > \
-  "$SECOND/scripts/dev/sounio_coord_agent_hook_runtime.py"
 printf '#!/usr/bin/env python3\nraise SystemExit(99)\n' > \
   "$SECOND/scripts/dev/sounio_coord_causal_runtime.py"
 printf '#!/usr/bin/env python3\nraise SystemExit(100)\n' > \
   "$SECOND/scripts/dev/sounio_coord_agentd.py"
 chmod +x "$SECOND/scripts/dev/sounio_coord_runtime.sh" \
-  "$SECOND/scripts/dev/sounio_coord_agent_hook_runtime.py" \
   "$SECOND/scripts/dev/sounio_coord_causal_runtime.py" \
   "$SECOND/scripts/dev/sounio_coord_agentd.py"
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
@@ -1055,7 +1065,8 @@ output="$(
   cd "$SECOND"
   printf '%s\n' \
     "{\"session_id\":\"runtime-test\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"SessionStart\"}" | \
-    SOUNIO_COORD_DIR="$STATE" python3 scripts/dev/sounio_coord_agent_hook.py --agent claude
+    SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
+    SOUNIO_LOOM_HOOK_TEST_MODE=1 bin/sounio-loom agent-hook --agent claude
 )"
 grep -q 'agent=claude lane=session-runtime-test' <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared hook runtime'
@@ -1070,6 +1081,7 @@ supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
 
 git clone --local --no-hardlinks --quiet "$REPO" "$ALT"
 git -C "$ALT" fetch -q "$ROOT_DIR" "$subprocess_toolchain_commit"
+git -C "$ALT" fetch -q "$ROOT_DIR" "$native_hook_cutover_toolchain_commit"
 sed -i 's/^SOUNIO_COORD_RUNTIME_VERSION=.*/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8-test/' \
   "$ALT/scripts/dev/sounio_coord_runtime.sh"
 sed -i 's/^let runtime_version = .*/let runtime_version = "2026.08.23.8-test"/' \
@@ -1198,7 +1210,6 @@ supervisor_pid=''
 
 mkdir -p "$BAD/scripts/dev" "$BAD/formal/tla" "$BAD/tools"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$BAD/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$BAD/scripts/dev/"
@@ -1208,6 +1219,7 @@ cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_cutover.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_custody_transfer.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_execution_outcome.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
@@ -1502,7 +1514,8 @@ if (
   cd "$REPO"
   printf '%s\n' \
     "{\"session_id\":\"broken-link\",\"cwd\":\"$REPO\",\"hook_event_name\":\"SessionStart\"}" | \
-    SOUNIO_COORD_DIR="$STATE" python3 scripts/dev/sounio_coord_agent_hook.py --agent claude
+    SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
+    SOUNIO_LOOM_HOOK_TEST_MODE=1 bin/sounio-loom agent-hook --agent claude
 ) >/dev/null 2>&1; then
   fail 'hook launcher silently fell back across a broken shared-runtime link'
 fi

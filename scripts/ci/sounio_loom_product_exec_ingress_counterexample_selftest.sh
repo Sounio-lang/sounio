@@ -48,7 +48,11 @@ if git -C "$ROOT_DIR" grep -q -E \
   fail 'frozen counterexample commit unexpectedly contained product ingress'
 fi
 
-for config in "$ROOT_DIR/.codex/hooks.json" "$ROOT_DIR/.claude/settings.json"; do
+for config in \
+  "$ROOT_DIR/.codex/hooks.json" \
+  "$ROOT_DIR/.claude/settings.json" \
+  "$ROOT_DIR/.cursor/hooks.json" \
+  "$ROOT_DIR/.grok/hooks/loom-native.json"; do
   [[ -f "$config" ]] || fail "native hook config missing: ${config#$ROOT_DIR/}"
   grep -Fq 'sounio-loom-runtime' "$config" ||
     fail "native OCaml hook missing: ${config#$ROOT_DIR/}"
@@ -57,9 +61,12 @@ for config in "$ROOT_DIR/.codex/hooks.json" "$ROOT_DIR/.claude/settings.json"; d
   fi
 done
 
-[[ -f "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" &&
-   -f "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" ]] ||
-  fail 'legacy Python compatibility boundary unexpectedly disappeared'
+[[ ! -e "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" &&
+   ! -e "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" ]] ||
+  fail 'legacy Python compatibility boundary remains present'
+[[ -f "$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1" &&
+   -f "$ROOT_DIR/stdlib/coordination/loom_native_hook_cutover_authority.sio" ]] ||
+  fail 'frozen Sounio native-hook cutover authority is missing'
 
 custody_output="$(bash "$CUSTODY_GATE")" ||
   fail 'execution custody prerequisite failed'
@@ -69,4 +76,4 @@ custody_output="$(bash "$CUSTODY_GATE")" ||
   fail 'execution custody prerequisite omitted its outside-ancestry control'
 
 printf '%s\n' \
-  'sounio-loom-product-exec-ingress-counterexample-selftest: PASS semantic_authority=Sounio action=9030 operational_kernel=OCaml frozen_counterexample_commit=eb853be79be289deb596bea0b3ab8a042509d8df current_hook_at_freeze=forged-JSON-from-harness frozen_counterexample=accepted counterexample_falsifies_product_attachment=true shared_bearer_file=true same_uid_same_executable=true same_harness_ancestry=true outside_ancestry_control=refused missing_fact=non-bearer-inherited-ingress native_hook_config=codex+claude legacy_python_compatibility_bridge=present python_executed=false rust_executed=false product_exec_ingress_observed_at_freeze=false same_ancestry_forgery_refused_at_freeze=false non_bearer_product_ingress_at_freeze=false production_activation=false material_execution=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false next=descriptor-bound-dark-ingress'
+  'sounio-loom-product-exec-ingress-counterexample-selftest: PASS semantic_authority=Sounio action=9030 operational_kernel=OCaml frozen_counterexample_commit=eb853be79be289deb596bea0b3ab8a042509d8df current_hook_at_freeze=forged-JSON-from-harness frozen_counterexample=accepted counterexample_falsifies_product_attachment=true shared_bearer_file=true same_uid_same_executable=true same_harness_ancestry=true outside_ancestry_control=refused missing_fact=non-bearer-inherited-ingress native_hook_config=codex+claude+cursor+grok native_hook_cutover_action=9045 legacy_python_compatibility_bridge=absent python_executed=false rust_executed=false product_exec_ingress_observed_at_freeze=false same_ancestry_forgery_refused_at_freeze=false non_bearer_product_ingress_at_freeze=false production_activation=false material_execution=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false next=descriptor-bound-dark-ingress'

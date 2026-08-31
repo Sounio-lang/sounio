@@ -17,6 +17,8 @@ SESSION_ID='c89fe8c8-7421-42c6-9321-agentd-selftest'
 LANE='session-c89fe8c8-7421-42c6-9321-'
 AUTO_SESSION_ID='71fa6b78-9532-404c-84fe-198240daf5e0'
 AUTO_LANE='session-71fa6b78-9532-404c-84fe-'
+LOOM_RUNTIME="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
+TEST_LOOM_RUNTIME="$REPO/tools/loom/_build/default/src/loom.exe"
 
 cleanup() {
   if [[ -d "$REPO" ]]; then
@@ -41,6 +43,8 @@ fail() {
   exit 1
 }
 
+trap 'rc=$?; printf "sounio-coord-agentd-selftest: ERROR line=%s rc=%s command=%s\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2' ERR
+
 wait_for_text() {
   local file="$1" pattern="$2" attempt
   for attempt in $(seq 1 80); do
@@ -50,12 +54,15 @@ wait_for_text() {
   return 1
 }
 
-mkdir -p "$REPO/bin" "$REPO/scripts/dev"
+"$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
+[[ -x "$LOOM_RUNTIME" ]] || fail "Loom runtime was not built: $LOOM_RUNTIME"
+
+mkdir -p "$REPO/bin" "$REPO/scripts/dev" \
+  "$REPO/tools/loom/_build/default/src"
+cp "$LOOM_RUNTIME" "$TEST_LOOM_RUNTIME"
 cp "$ROOT_DIR/bin/sounio-coord" "$ROOT_DIR/bin/sounio-agentd" "$REPO/bin/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$REPO/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$REPO/scripts/dev/"
 chmod +x "$REPO/bin/"* "$REPO/scripts/dev/"*
 git -C "$REPO" init -q
@@ -64,22 +71,39 @@ git -C "$REPO" config user.email 'coord-agentd-selftest@sounio.local'
 git -C "$REPO" add .
 git -C "$REPO" commit -qm seed
 git -C "$REPO" worktree add -q -b context-lane "$CONTEXT"
+rm "$CONTEXT/tools/loom/_build/default/src/loom.exe"
+ln -s "$TEST_LOOM_RUNTIME" "$CONTEXT/tools/loom/_build/default/src/loom.exe"
 
 cat > "$RECEIVER" <<'JS'
 const fs = require("fs");
 const { spawnSync } = require("child_process");
-const [repo, context, state, log, sessionId] = process.argv.slice(2);
+const [repo, context, state, log, sessionId, loom, sourceRoot] = process.argv.slice(2);
 const event = JSON.stringify({
   session_id: sessionId,
   cwd: context,
   hook_event_name: "SessionStart",
 });
 const hook = spawnSync(
-  "python3",
-  [`${repo}/scripts/dev/sounio_coord_agent_hook.py`, "--agent", "codex"],
+  loom,
+  ["agent-hook", "--agent", "codex"],
   {
     cwd: repo,
-    env: { ...process.env, SOUNIO_COORD_DIR: state, SOUNIO_COORD_RUNTIME_MODE: "local" },
+    env: {
+      ...process.env,
+      SOUNIO_COORD_DIR: state,
+      SOUNIO_COORD_RUNTIME_MODE: "local",
+      SOUNIO_COORD_DURABLE_OBLIGATIONS: "0",
+      SOUNIO_LOOM_HOOK_TEST_MODE: "1",
+      SOUNIO_COORD_NATIVE_HOOK_SELFTEST: "1",
+      SOUNIO_LOOM_TOOL_ROOT: repo,
+      SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT: sourceRoot,
+      SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_ROOT: sourceRoot,
+      SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME:
+        `${sourceRoot}/tools/loom/.runtime/sounio-loom-language-authority-runtime`,
+      SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_RUNTIME:
+        `${sourceRoot}/tools/loom/.runtime/sounio-loom-native-hook-cutover`,
+      SOUNIO_LOOM_NATIVE_HOOK_CONFIG: `${sourceRoot}/.codex/hooks.json`,
+    },
     input: `${event}\n`,
     encoding: "utf8",
   },
@@ -170,7 +194,7 @@ start_output="$(
     SOUNIO_AGENTD_DIR="$AGENTD_STATE" SOUNIO_AGENTD_COORD_AUTO=0 \
     bin/sounio-agentd start --agent codex --lane "$LANE" --session-id "$SESSION_ID" \
       --cwd "$REPO" -- node "$RECEIVER" "$REPO" "$CONTEXT" "$COORD_STATE" \
-      "$RECEIVER_LOG" "$SESSION_ID"
+      "$RECEIVER_LOG" "$SESSION_ID" "$CONTEXT/tools/loom/_build/default/src/loom.exe" "$ROOT_DIR"
 )"
 grep -q '^AGENTD_STARTED ' <<< "$start_output" || fail 'supervisor did not start'
 socket_path="$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' <<< "$start_output")"
@@ -179,7 +203,8 @@ token_file="$(sed -n 's/.* token_file=\([^ ]*\).*/\1/p' <<< "$start_output")"
 [[ "$(stat -c %a "$token_file")" == 600 ]] || fail 'capability file mode is not 600'
 output="$(agentd status --agent codex --lane "$LANE" --cwd "$REPO")"
 argv_digest="$(python3 - "node" "$RECEIVER" "$REPO" "$CONTEXT" \
-  "$COORD_STATE" "$RECEIVER_LOG" "$SESSION_ID" <<'PY'
+  "$COORD_STATE" "$RECEIVER_LOG" "$SESSION_ID" \
+  "$CONTEXT/tools/loom/_build/default/src/loom.exe" "$ROOT_DIR" <<'PY'
 import hashlib
 import json
 import sys
@@ -190,15 +215,18 @@ grep -q "^argv_digest=$argv_digest$" <<< "$output" || \
   fail 'supervisor did not attest the complete argv vector'
 if agentd start --agent codex --lane "$LANE" --session-id 'different-live-generation' \
   --cwd "$REPO" -- node "$RECEIVER" "$REPO" "$CONTEXT" "$COORD_STATE" \
-  "$RECEIVER_LOG" 'different-live-generation' >/dev/null 2>&1; then
+  "$RECEIVER_LOG" 'different-live-generation' \
+  "$CONTEXT/tools/loom/_build/default/src/loom.exe" "$ROOT_DIR" >/dev/null 2>&1; then
   fail 'start aliased a different UUID onto the live supervisor generation'
 fi
 if agentd start --agent codex --lane "$LANE" --session-id "$SESSION_ID" \
   --cwd "$REPO" -- node "$RECEIVER" "$REPO" "$CONTEXT" "$COORD_STATE" \
-  "$RECEIVER_LOG" 'sabotaged-argv' >/dev/null 2>&1; then
+  "$RECEIVER_LOG" 'sabotaged-argv' \
+  "$CONTEXT/tools/loom/_build/default/src/loom.exe" "$ROOT_DIR" >/dev/null 2>&1; then
   fail 'start reused a live generation with a different argv vector'
 fi
-wait_for_text "$RECEIVER_LOG" 'HOOK_RC=0' || fail 'harness hook did not start'
+wait_for_text "$RECEIVER_LOG" 'HOOK_RC=0' || \
+  fail "harness hook did not start: $(cat "$RECEIVER_LOG" 2>/dev/null || true)"
 wait_for_text "$RECEIVER_LOG" "agent=codex lane=$LANE" || fail 'hook did not claim the supervised lane'
 output="$(agentd list --cwd "$REPO")"
 grep -q "^AGENTD_SESSION state=active agent=codex lane=$LANE " <<< "$output" || \

@@ -1537,7 +1537,9 @@ native_hook_parent_identity() {
     case "$STATE_DIR" in
       "${TMPDIR:-/tmp}"/sounio-loom-native-hook.*/coord | \
         "${TMPDIR:-/tmp}"/sounio-loom-exec-capability.*/coord | \
-        "${TMPDIR:-/tmp}"/sounio-loom-custody.*/coord) ;;
+        "${TMPDIR:-/tmp}"/sounio-loom-custody.*/coord | \
+        "${TMPDIR:-/tmp}"/sounio-coord-crash-selftest.*/repo/.git/sounio-coord-state | \
+        "${TMPDIR:-/tmp}"/sounio-coord-agentd-selftest.*/coord-state) ;;
       *) return 1 ;;
     esac
     NATIVE_HOOK_RUNTIME_ID="local-${SOUNIO_COORD_RUNTIME_VERSION}"

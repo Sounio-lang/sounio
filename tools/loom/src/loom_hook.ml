@@ -1292,20 +1292,29 @@ let process_identity () =
 let exact_environment name expected =
   Sys.getenv_opt name = Some expected
 
+let agentd_process_worktree root agent lane raw_session_id =
+  if not
+       (exact_environment "SOUNIO_AGENTD_AGENT" agent
+        && exact_environment "SOUNIO_AGENTD_LANE" lane
+        && exact_environment "SOUNIO_AGENTD_SESSION_ID" raw_session_id)
+  then None
+  else
+    match Sys.getenv_opt "SOUNIO_AGENTD_WORKTREE" with
+    | Some path when path <> "" ->
+        (try
+           let process_root = git_root path |> Unix.realpath in
+           if git_common_dir process_root = git_common_dir root then
+             Some process_root
+           else None
+         with _ -> None)
+    | _ -> None
+
 let agentd_identity_matches root agent lane raw_session_id =
-  exact_environment "SOUNIO_AGENTD_AGENT" agent
-  && exact_environment "SOUNIO_AGENTD_LANE" lane
-  && exact_environment "SOUNIO_AGENTD_SESSION_ID" raw_session_id
-  &&
-  match Sys.getenv_opt "SOUNIO_AGENTD_WORKTREE" with
-  | Some path when path <> "" ->
-      (try Unix.realpath path = Unix.realpath root with _ -> false)
-  | _ -> false
+  Option.is_some (agentd_process_worktree root agent lane raw_session_id)
 
 let process_worktree root agent lane raw_session_id =
-  if agentd_identity_matches root agent lane raw_session_id then
-    Unix.realpath root
-  else root
+  Option.value ~default:root
+    (agentd_process_worktree root agent lane raw_session_id)
 
 let refresh_presence tool_root process_root claim_root agent lane raw_session_id =
   let harness = harness_of_agent agent in
@@ -1460,6 +1469,10 @@ let execute_event tool_root root event agent lane raw_session_id
   let coordination_enabled =
     Sys.getenv_opt "SOUNIO_LOOM_COORD_AUTO" <> Some "0" || not (test_mode ())
   in
+  let obligation_supervisor_enabled =
+    Sys.getenv_opt "SOUNIO_COORD_DURABLE_OBLIGATIONS" <> Some "0"
+    || not (test_mode ())
+  in
   if event_name = "SessionEnd" && not coordination_enabled then None
   else if event_name = "SessionEnd" then (
     refresh_presence tool_root presence_root root agent lane raw_session_id;
@@ -1611,9 +1624,10 @@ let execute_event tool_root root event agent lane raw_session_id
       refresh_hook_capability tool_root presence_root agent lane raw_session_id;
       refresh_endpoint tool_root presence_root agent lane raw_session_id;
       if event_name = "SessionStart" then (
-        ignore
-          (coord_ok tool_root root
-             [ "obligation-supervisor-ensure"; "--interval-seconds"; "1" ]);
+        if obligation_supervisor_enabled then
+          ignore
+            (coord_ok tool_root root
+               [ "obligation-supervisor-ensure"; "--interval-seconds"; "1" ]);
         Printf.printf
           "Sounio coordination joined: agent=%s lane=%s. Use this same agent/lane with `bin/sounio-coord scope` before write-bearing Bash commands.\n%!"
           agent lane);
