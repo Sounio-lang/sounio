@@ -566,21 +566,21 @@ fn lambda_lift(func: IrFunction, module: IrModule) -> LiftResult with Mut, Panic
 }
 
 // Lift all functions in a module that have free variables.
-fn lambda_lift_module(module: IrModule) -> IrModule with Mut, Panic, Div {
+fn lambda_lift_module(module: IrModule) -> IrModule with Alloc, Mut, Panic, Div {
     var result = ir_empty_module()
     result.string_table = module.string_table
     result.string_count = module.string_count
 
     var fn_idx: i64 = 0
     while fn_idx < module.fn_count {
-        let func = module.functions[fn_idx]
+        let func = ir_fn_get(&module, fn_idx)
         let lr = lambda_lift(func, module)
 
         // Add all lifted functions to the result module
         var li: i64 = 0
         while li < lr.lift_count {
             if result.fn_count < 4096 {
-                result.functions[result.fn_count] = lr.lifted_functions[li]
+                ir_fn_set(&! result, result.fn_count, lr.lifted_functions[li])
                 result.fn_count = result.fn_count + 1
             }
             li = li + 1
@@ -742,12 +742,12 @@ fn lower_closure_call(func: IrFunction, call_idx: i64, closure_table: ClosureTab
 }
 
 // Lower all closure calls in an entire module.
-fn lower_all_closure_calls(module: IrModule, closure_table: ClosureTable) -> IrModule with Mut, Panic, Div {
+fn lower_all_closure_calls(module: IrModule, closure_table: ClosureTable) -> IrModule with Alloc, Mut, Panic, Div {
     var result = module
 
     var fn_idx: i64 = 0
     while fn_idx < result.fn_count {
-        var func = result.functions[fn_idx]
+        var func = ir_fn_get(&result, fn_idx)
 
         // Scan for call instructions that target closures.
         // Process in reverse order so indices remain valid.
@@ -768,7 +768,7 @@ fn lower_all_closure_calls(module: IrModule, closure_table: ClosureTable) -> IrM
             ci = ci - 1
         }
 
-        result.functions[fn_idx] = func
+        ir_fn_set(&! result, fn_idx, func)
         fn_idx = fn_idx + 1
     }
 
@@ -1025,7 +1025,7 @@ fn test_closure_convert_with_free() -> i64 with Mut, Panic, Div {
     0
 }
 
-fn test_lambda_lift_no_free() -> i64 with Mut, Panic, Div {
+fn test_lambda_lift_no_free() -> i64 with Alloc, Mut, Panic, Div {
     var func = ir_empty_function()
     func.reg_count = 2
     func.param_regs[0] = 0
@@ -1042,7 +1042,7 @@ fn test_lambda_lift_no_free() -> i64 with Mut, Panic, Div {
     0
 }
 
-fn test_lambda_lift_with_free() -> i64 with Mut, Panic, Div {
+fn test_lambda_lift_with_free() -> i64 with Alloc, Mut, Panic, Div {
     var free_regs: [i64; 8] = [0; 8]
     free_regs[0] = 10
     free_regs[1] = 20
@@ -1060,7 +1060,7 @@ fn test_lambda_lift_with_free() -> i64 with Mut, Panic, Div {
     0
 }
 
-fn test_lambda_lift_module_identity() -> i64 with Mut, Panic, Div {
+fn test_lambda_lift_module_identity() -> i64 with Alloc, Mut, Panic, Div {
     // A module with only non-closure functions should pass through unchanged
     var module = ir_empty_module()
     var f1 = ir_empty_function()
@@ -1070,12 +1070,12 @@ fn test_lambda_lift_module_identity() -> i64 with Mut, Panic, Div {
     ir_arena_store(ir_region_slot_w(f1.region, (0)), ir_load_imm(1, 5))
     ir_arena_store(ir_region_slot_w(f1.region, (1)), ir_return(1))
     f1.instr_count = 2
-    module.functions[0] = f1
+    ir_fn_set(&! module, 0, f1)
     module.fn_count = 1
 
     let result = lambda_lift_module(module)
     if result.fn_count != 1 { return 1 }
-    if result.functions[0].param_count != 1 { return 2 }
+    if ir_fn_get(&result, 0).param_count != 1 { return 2 }
     0
 }
 
@@ -1218,7 +1218,7 @@ fn test_lower_closure_call_hit() -> i64 with Mut, Panic, Div {
     0
 }
 
-fn test_lower_all_closure_calls() -> i64 with Mut, Panic, Div {
+fn test_lower_all_closure_calls() -> i64 with Alloc, Mut, Panic, Div {
     // Build module with one function containing a closure call
     var module = ir_empty_module()
     var func = ir_empty_function()
@@ -1227,7 +1227,7 @@ fn test_lower_all_closure_calls() -> i64 with Mut, Panic, Div {
     ir_arena_store(ir_region_slot_w(func.region, (1)), ir_call(1, 5, ir_empty_name(), None, 1))
     ir_arena_store(ir_region_slot_w(func.region, (2)), ir_return(1))
     func.instr_count = 3
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
 
     var table = closure_table_new()
@@ -1244,7 +1244,7 @@ fn test_lower_all_closure_calls() -> i64 with Mut, Panic, Div {
     let result = lower_all_closure_calls(module, table)
     // The function should have been rewritten
     if result.fn_count != 1 { return 1 }
-    let rewritten = result.functions[0]
+    let rewritten = ir_fn_get(&result, 0)
     // Should have more instructions than the original 3
     if rewritten.instr_count < 3 { return 2 }
     0

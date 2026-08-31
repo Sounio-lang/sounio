@@ -436,6 +436,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.surgical-calculus-disjoint-union-2026-08-19 | repo_only | docs/audit/SURGICAL_CALCULUS_DISJOINT_UNION_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.token-ceiling-blocked-runpass-census-2026-08-17 | repo_only | docs/audit/TOKEN_CEILING_BLOCKED_RUNPASS_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.token-table-ceiling-refusal-2026-08-17 | repo_only | docs/audit/TOKEN_TABLE_CEILING_REFUSAL_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.tolerated-buckets-remeasured-2026-08-31 | repo_only | docs/audit/TOLERATED_BUCKETS_REMEASURED_2026-08-31.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.type-archaeology-family-b-2026-08-19 | repo_only | docs/audit/TYPE_ARCHAEOLOGY_FAMILY_B_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.type-archaeology-family-g-2026-08-19 | repo_only | docs/audit/TYPE_ARCHAEOLOGY_FAMILY_G_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.type-enum-denominator-2026-08-19 | repo_only | docs/audit/TYPE_ENUM_DENOMINATOR_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -1172,6 +1173,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.octonion-validation-report | historical | docs/research/OCTONION_VALIDATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.onn-benchmark-analysis | historical | docs/research/ONN_BENCHMARK_ANALYSIS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ontology-elplus-complete-universe-open-question-2026-08-03 | historical | docs/research/ontology_elplus_complete_universe_open_question_2026-08-03.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-ns-metatheory-mechanized-2026-08-30 | historical | docs/research/paper_A_ns_metatheory_mechanized_2026-08-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-ns-metatheory-xai-review-2026-08-30 | historical | docs/research/paper_A_ns_metatheory_xai_review_2026-08-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-e175-1627-close-2026-08-06 | historical | docs/research/particle_e175_1627_close_2026-08-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-e175-amp-import-2026-08-05 | historical | docs/research/particle_e175_amp_import_2026-08-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-e175-trilogy-2026-08-06 | historical | docs/research/particle_e175_trilogy_2026-08-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

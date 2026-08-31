@@ -79,15 +79,64 @@ That arm measures the frozen seed's coverage of current stdlib, not anything abo
 the tests. It is listed here only so the next person does not spend the sweep
 again.
 
-## The gap this audit does NOT close
+## GAP CLOSED 2026-08-31 — CI's engine IS the seed, byte for byte
 
-CI does not run the committed seed. It builds `souc-stage2` from source, and the
-suite calibrates against that. So "green in CI" tells us stage2 accepts these 112;
-it does not tell us whether stage2 behaves like the seed or like Madaros on them.
-Settling that needs a stage2 built from current source, which was not done here.
+Built `souc-stage2` exactly as CI does: `scripts/ci/selfhost_host_gate.sh` with
+`SOUNIO_SELFHOST_HOST_GATE_DIR` **and `SOUNIO_FORCE_SOURCE_BOOTSTRAP=1`**, the
+variable the `native-selfhost-linux-x86_64` job sets. Gate passes,
+`stage2_sha256=b4f9eed017644248…`.
 
-What is certain either way: 110 tests with no declared engine dependency do not
-pass under the compiler `bin/souc` invokes by default.
+    md5(souc-stage2 built from source)        e9b044ae1f8e0001a200a1757b858cbd
+    md5(bin/souc-lean-single-x86_64, committed) e9b044ae1f8e0001a200a1757b858cbd
+
+**Identical.** The engine CI calibrates against is the committed seed, so the
+question "does stage2 side with the seed or with Madaros" is answered by identity:
+it *is* the seed. Green CI on these 112 therefore says nothing whatever about the
+compiler `bin/souc` invokes by default.
+
+Confirmed against the real harness rather than by inference:
+`run_sio_test_suite_v2.sh --filter-exact async_basic.sio` with
+`SOUNIO_TEST_SOUC_BIN=<stage2>` reports **Pass: 1**, while `bin/souc check` on the
+same file under Madaros reports `error[E012] this type has no field named`.
+
+### Without the source-bootstrap flag the gate fails, and it is not a finding
+
+Omitting `SOUNIO_FORCE_SOURCE_BOOTSTRAP=1` makes the gate exit 1 in 5 s with
+`error: self-host fixed-point mismatch for x86_64-linux`, reproducibly, producing
+a deterministic 2 557 444-byte binary that differs from the committed seed. That
+is the flag missing, not the seed drifting. Recorded because the failure is
+convincing enough to be mistaken for one.
+
+### Three invocation paths, three behaviours
+
+Do not compare across them; the binary is not the only variable.
+
+    bin/souc check           (wrapper, ENGINE=lean_single)  -> OK
+    SOUNIO_SOUC_BIN=<elf> check   (raw CLI, same bytes)     -> error[E221]: no main
+    run_sio_test_suite_v2.sh (harness, SOUNIO_TEST_SOUC_BIN) -> Pass
+
+The middle row is the same binary as the first and reports "no main" on a file
+that *has* `fn main`. An earlier draft of this note read that as a third engine
+disagreeing; it is one binary under three entry points. The harness is ground
+truth for what CI does.
+
+## What this audit still does NOT close
+
+Which side is right, per file. Madaros refusing `approx_propagation.sio` with
+"effect not declared (missing: Approx, Mut, Div, Panic)" may well be Madaros being
+correct and the seed being lax. This audit establishes that the two disagree and
+that CI cannot see it; it does not adjudicate 112 individual cases.
+
+What is certain: 110 tests with no declared engine dependency do not pass under
+the compiler `bin/souc` invokes by default.
+
+**CORRECTED 2026-08-31.** An earlier version of this sentence ended "and no gate
+in this repository notices." That was wrong. `scripts/ci/madaros_corpus_regression_gate.sh`
+exists, has a checked-in baseline and measures this territory at larger scope; it
+is deliberately unwired for a reason ci.yml states in full. Nothing in CI notices,
+which is managed debt rather than blindness. See
+TOLERATED_BUCKETS_REMEASURED_2026-08-31.md, which also re-measures that gate:
+1028 failures outside baseline on 2026-07-27, 39 on 2026-08-31.
 
 ## Affected files
 
