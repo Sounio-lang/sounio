@@ -91,6 +91,48 @@ when it explains why silent miscompiles matter.
 So the entire optimised path is untested: no gate in CI compiles anything with
 `-O`, and the two gates that do are not wired.
 
+## ADDENDUM — one defect isolated, and where the rest actually lives
+
+### A five-line reproducer: `-O` makes quad-double multiplication return zero
+
+    use math::qd128::{qd_from_f64, qd_mul, qd_to_f64}
+    fn main() -> i32 with IO, Mut, Panic {
+        let v = qd_to_f64(qd_mul(qd_from_f64(2.0), qd_from_f64(3.0)))
+        println("v="); print_f64(v)
+        0
+    }
+
+    without -O   v=6.000000
+    with    -O   v=0.000000
+
+Controls isolating the operation — same shape, same import, same build commands:
+
+    qd_add(2,3)   5.000000  /  5.000000    unaffected
+    qd_sub(2,3)  -1.000000  / -1.000000    unaffected
+    qd_mul(2,3)   6.000000  /  0.000000    BROKEN
+
+And isolating the import rather than the arithmetic: `qd_to_f64(qd_from_f64(2.0))`
+round-trips to 2.0 under both, so the defect is in `qd_mul`, not in crossing the
+module boundary. Plain `f64` and `i64` multiplication, a local function call, and
+a bare `println` are all unaffected under `-O`.
+
+### This explains one case out of 632, not the blast radius
+
+    632  programs affected
+      1  imports qd128
+    530  are `lorenz*`   (84%)
+    246  have `imported` in the name
+
+The `lorenz` family dominates, and its members behave differently from the qd128
+case: sampled ones print nothing under either build and only the exit code moves,
+0 -> 1. They are certificate-chain smoke tests that return a status rather than
+text, which is why 577 of the 580 exit-code changes sit in this population.
+
+So the reproducer above is *a* defect the sweep found, minimal and controlled. It
+is not the cause of the 632. If the repository's own precedent holds — `ci.yml`
+records 1028 corpus failures that were one segfault — the lorenz family is where
+a second reduction should start, and it has not been attempted here.
+
 ## What this does NOT establish
 
 **Where the defect is.** 632 programs is not 632 bugs — the corpus gate's own
