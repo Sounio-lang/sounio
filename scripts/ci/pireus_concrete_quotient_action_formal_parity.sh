@@ -28,10 +28,10 @@ GATE_REL='scripts/ci/pireus_concrete_quotient_action_formal_parity.sh'
 
 PARENT_GATE_COMMIT='e04304321bf55e2538c31fffc07ea23c2d69be77'
 SOURCE_COMMIT='5b014f2dd2527237da6c8a9bd82aa9224ec29640'
-ARTIFACT_COMMIT='35c782388aace08b916e3bdcd2f0b341ed9ce86f'
-PRESEAL_GATE_SHA256='222fbfd445b87507ab15df493a7c5871107af9052ea55206c80c88554c1ec085'
-ARTIFACT_GATE_ANCHOR_COMMIT='35c782388aace08b916e3bdcd2f0b341ed9ce86f'
-ARTIFACT_GATE_ANCHOR_PRESEAL_SHA256='222fbfd445b87507ab15df493a7c5871107af9052ea55206c80c88554c1ec085'
+ARTIFACT_COMMIT='cbbef9f945f57df4e90b62fbff27096c6ea3b71e'
+PRESEAL_GATE_SHA256='68bcbae017580da4d51d6b282217f7cee379543ea6c183e39efa27f2fcf0aa1a'
+ARTIFACT_GATE_ANCHOR_COMMIT='cbbef9f945f57df4e90b62fbff27096c6ea3b71e'
+ARTIFACT_GATE_ANCHOR_PRESEAL_SHA256='68bcbae017580da4d51d6b282217f7cee379543ea6c183e39efa27f2fcf0aa1a'
 SOURCE_BUNDLE_SHA256='55fcedae89418f94271773815f09805d2999b1f75268408421b7ac72e1646387'
 AUDIT_BUNDLE_SHA256='8a2c2485b5111b4b18ad8093743c117ad66564ccc79d025a2641229c6196731b'
 SIGN_SHA256='160b68484acedc4f501f181b28eed3e3a17bf483b1207cca1c5ca433661696c9'
@@ -43,7 +43,7 @@ QUOTIENT_AUDIT_SHA256='99a6ae72d01c5b200086771058f1835eb78e5bd3c5b154c61cd536709
 TARGET03_CHECK_SHA256='c64ff31970a700f21e96e34719a05e341321c8ccf636641b46b9004d4b681d66'
 LAKEFILE_SHA256='7992ce727698567504989f963c46e89b0ba9d0cdf79b3ecb5859f2da831506b1'
 SOURCE_OFFLOAD_LOG_SHA256='d93426d27e26cac031b1943629bb4b7d8a9889aefbeec712e057c1db2afe24ff'
-GATE_OFFLOAD_LOG_SHA256='d93426d27e26cac031b1943629bb4b7d8a9889aefbeec712e057c1db2afe24ff'
+GATE_OFFLOAD_LOG_SHA256='8a14c942966821adf67cd4fec8e1cbf7f048e46f3f62e147e7f3db28a850da3a'
 PARENT_RECEIPT_SHA256='36c23734c1a05ddea1716de5d0013cb795aeaf20ebb811848a7d6699211e6b3e'
 PARENT_GATE_SHA256='aa413f08d12c447a992bcacf54e68a376cac1babd71f6b3b2fd662c2ccb32dd2'
 PARENT_EVIDENCE_SHA256='5363ce3100b5429c7a8d7c9dd9dba14a836f2af10d1f1e4f5823e521ea250218'
@@ -411,10 +411,14 @@ audit_output="$({
 [[ "$(count_occurrences 'Quot.sound' "${audit_output}")" -eq 64 ]] || fail 'Quot.sound count drift'
 [[ "$(count_occurrences 'native_decide' "${audit_output}")" -eq 0 ]] || fail 'native_decide count drift'
 [[ "$(count_occurrences 'sorryAx' "${audit_output}")" -eq 0 ]] || fail 'sorryAx count drift'
-parsed_axiom_report_count="$(sed -n "s/^'.*' depends on axioms: \[\(.*\)\]$/\1/p" <<<"${audit_output}" | wc -l | tr -d ' ')"
+axiom_blocks="$(
+  tr '\n' ' ' <<<"${audit_output}" |
+    grep -oE 'depends on axioms: \[[^]]+\]'
+)"
+parsed_axiom_report_count="$(grep -c '^depends on axioms:' <<<"${axiom_blocks}")"
 [[ "${parsed_axiom_report_count}" -eq 68 ]] || fail 'axiom allowlist parser coverage drift'
 axiom_set="$(
-  sed -n "s/^'.*' depends on axioms: \[\(.*\)\]$/\1/p" <<<"${audit_output}" |
+  sed 's/^depends on axioms: \[//;s/\]$//' <<<"${axiom_blocks}" |
     tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort -u
 )"
 [[ "${axiom_set}" == $'Classical.choice\nQuot.sound\npropext' ]] || fail "unexpected axiom set: ${axiom_set}"
