@@ -79,7 +79,10 @@ open SounioPireusGL4AnalyticActionCensus
 #print axioms scanEntryOfAnalyticBasis
 #print axioms basis_of_scan_entry_of_analytic_basis
 #print axioms scan_entry_of_basis_of_scan_entry
+#print axioms AnalyticScanBijection
 #print axioms analyticScanEquiv
+#print axioms analytic_scan_to_basis_injective
+#print axioms analytic_basis_to_scan_injective
 #print axioms eraseMany_nodup
 #print axioms choicesOutside_nodup
 #print axioms nodup_flatMap_of_tagged_fibers
