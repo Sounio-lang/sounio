@@ -53,6 +53,13 @@ struct LowerLocalStack {
     // Layout index for an aggregate element carried by a local: tuple slot-0
     // fixed arrays and Seq<T> share this slot because those shapes are disjoint.
     tuple0_array_elem_layout: Box<LowerLocalI64Slots>,
+    // Tuple-typed local one of whose slots holds a named struct: that struct's
+    // index in the layout table, and WHICH slot it is. -1 on both when absent.
+    // Two slots and not one packed value because the slot number is what a `.K`
+    // access has to match -- applying the layout to any K is how `pair.0.x`
+    // would read a bool as a struct.
+    tuple_struct_layout: Box<LowerLocalI64Slots>,
+    tuple_struct_slot: Box<LowerLocalI64Slots>,
     // f64 register carrying the GUM variance shadow for scalar locals, or -1 when absent.
     variance_regs: Box<LowerLocalI64Slots>,
     // -1 = not a capturing closure; otherwise the synthetic closure fn_id whose captures
@@ -86,6 +93,8 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         scalar_kind: lowerer_box_local_i64_slots(0),
         tuple_float_mask: lowerer_box_local_i64_slots(0),
         tuple0_array_elem_layout: lowerer_box_local_i64_slots(-1),
+        tuple_struct_layout: lowerer_box_local_i64_slots(-1),
+        tuple_struct_slot: lowerer_box_local_i64_slots(-1),
         variance_regs: lowerer_box_local_i64_slots(-1),
         closure_fn_id: lowerer_box_local_i64_slots(-1),
         box_inner_layout: lowerer_box_local_i64_slots(-1),
@@ -5760,9 +5769,114 @@ fn lower_tuple0_array_struct_return_sentinel() -> i64 {
     0 - 2
 }
 
+// A tuple return can carry a named struct in a slot other than 0, and until this
+// there was no way to say so. lower_opt_type_return_layout_name answered for a
+// DIRECT named return and for a fixed array of structs in slot 0; a return type
+// like `(bool, NativeCompileResult)` fell through to an empty name and the
+// element type was gone for good. Downstream, `pair.1.field` then resolves its
+// index by a name scan across every registered struct, and the print classifier,
+// which has no such fallback, refused outright -- the last println-poison refusal
+// standing in a gen2 self-compile (#2288).
+//
+// A builtin scalar spelled as TypeNamed (bool, i64, string, f64) is NOT a
+// candidate: the point is to name a struct whose LAYOUT can be looked up. This
+// only PROPOSES a name; lower_struct_layout_index_of at the bind site disposes of
+// one that no registered struct answers to, so a wrong guess costs nothing.
+fn lower_type_expr_is_candidate_struct(ty: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeNamed {
+        return false
+    }
+    if lower_type_expr_is_f64(ty) {
+        return false
+    }
+    let n = ir_path_first_name((*ty).path)
+    if n.len <= 0 {
+        return false
+    }
+    if lower_name_is_integer_type(n) {
+        return false
+    }
+    if lower_name_is_string_type(n) {
+        return false
+    }
+    if lower_name_is_bool_type(n) {
+        return false
+    }
+    true
+}
+
+// Slot index of the FIRST tuple element naming a candidate struct, or -1. First,
+// not all: one slot is what the return metadata can carry (see the sentinel
+// below), and a tuple with a SECOND struct slot degrades to the refusal that
+// stands today rather than to a guess about which one a `.K` meant.
+fn lower_type_list_first_struct_slot(opt: &Option<Box<TypeExprList>>, idx: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            if lower_type_expr_is_candidate_struct(&(*list).head) {
+                return idx
+            }
+            lower_type_list_first_struct_slot(&(*list).tail, idx + 1)
+        }
+        None => 0 - 1,
+    }
+}
+
+fn lower_type_list_named_at(opt: &Option<Box<TypeExprList>>, k: i64) -> Name with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            if k <= 0 {
+                return ir_path_first_name((*list).head.path)
+            }
+            lower_type_list_named_at(&(*list).tail, k - 1)
+        }
+        None => ir_empty_name(),
+    }
+}
+
+fn lower_opt_type_tuple_struct_slot(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple {
+                return 0 - 1
+            }
+            lower_type_list_first_struct_slot(&(*te).type_args, 0)
+        }
+        None => 0 - 1,
+    }
+}
+
+fn lower_opt_type_tuple_struct_slot_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
+    let k = lower_opt_type_tuple_struct_slot(opt)
+    if k < 0 {
+        return ir_empty_name()
+    }
+    match *opt {
+        Some(te) => lower_type_list_named_at(&(*te).type_args, k),
+        None => ir_empty_name(),
+    }
+}
+
+// -3 and below encode "return_struct_name names the struct in tuple slot k",
+// with k = -3 - code. The same reuse the -2 sentinel above makes, for the same
+// reason: IrFunction's aggregate layout stays put. Every fixed-array consumer
+// requires >= 0 -- checked at all five read sites -- so the whole negative range
+// is inert to them, and return_struct_name_for_fn_id refuses at <= -2 so a tuple
+// local is never handed the slot's struct name as its OWN type.
+fn lower_tuple_slot_struct_return_sentinel(k: i64) -> i64 {
+    0 - 3 - k
+}
+
+fn lower_tuple_slot_struct_sentinel_slot(code: i64) -> i64 {
+    0 - 3 - code
+}
+
 fn lower_opt_type_return_fixed_array_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     if lower_opt_type_tuple0_array_elem_struct_name(opt).len > 0 {
         return lower_tuple0_array_struct_return_sentinel()
+    }
+    let struct_slot = lower_opt_type_tuple_struct_slot(opt)
+    if struct_slot >= 0 && lower_opt_type_tuple_struct_slot_name(opt).len > 0 {
+        return lower_tuple_slot_struct_return_sentinel(struct_slot)
     }
     lower_opt_type_word_scalar_array_len(opt)
 }
@@ -5772,7 +5886,11 @@ fn lower_opt_type_return_layout_name(opt: &Option<Box<TypeExpr>>) -> Name with M
     if direct.len > 0 {
         return direct
     }
-    lower_opt_type_tuple0_array_elem_struct_name(opt)
+    let tuple0 = lower_opt_type_tuple0_array_elem_struct_name(opt)
+    if tuple0.len > 0 {
+        return tuple0
+    }
+    lower_opt_type_tuple_struct_slot_name(opt)
 }
 
 // Struct-type name of a parameter, unwrapping `&T` / `&!T`. Used so a method body's
@@ -8070,6 +8188,8 @@ impl Lowerer {
                 (*(*stk).scalar_kind).values[idx as usize] = 0
                 (*(*stk).tuple_float_mask).values[idx as usize] = 0
                 (*(*stk).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
+                (*(*stk).tuple_struct_layout).values[idx as usize] = 0 - 1
+                (*(*stk).tuple_struct_slot).values[idx as usize] = 0 - 1
                 (*(*stk).variance_regs).values[idx as usize] = -1
                 // Explicit -1: slot reuse across functions — see lowerer_bind_local_mut.
                 (*(*stk).box_inner_layout).values[idx as usize] = 0 - 1
@@ -8113,6 +8233,41 @@ impl Lowerer {
             i = i - 1
         }
         lo
+    }
+
+    fn bind_local_tuple_struct(self, name: Name, layout_idx: i64, slot: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        if layout_idx < 0 { return lo }
+        if slot < 0 { return lo }
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if (*stk.depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*stk.names).values[i as usize], name) {
+                (*stk.tuple_struct_layout).values[i as usize] = layout_idx
+                (*stk.tuple_struct_slot).values[i as usize] = slot
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    // Layout index of the struct in tuple slot `slot` of `name`, or -1 -- which
+    // includes the case where the local records a DIFFERENT slot, so asking for
+    // `.0` on `(bool, Result)` answers -1 rather than the Result.
+    fn lookup_local_tuple_struct_layout(self, name: Name, slot: i64) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                if (*(*self.locals).tuple_struct_slot).values[i as usize] == slot {
+                    return (*(*self.locals).tuple_struct_layout).values[i as usize]
+                }
+                return 0 - 1
+            }
+            i = i - 1
+        }
+        0 - 1
     }
 
     fn lookup_local_tuple_float_mask(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
@@ -11784,10 +11939,34 @@ impl Lowerer {
     fn return_struct_name_for_fn_id(self, fn_id: i64) -> Name with Mut, Panic, Div, Alloc {
         if fn_id >= 0 && fn_id < self.module.fn_count {
             let fn_slot = ir_fn_get(&(*self.module), fn_id as usize)
-            if fn_slot.return_fixed_array_len == lower_tuple0_array_struct_return_sentinel() {
+            // <=, not ==: every sentinel at or below -2 means return_struct_name
+            // describes a PART of a tuple return, not the return type itself.
+            // Answering with it here is what would bind `let pair = f()` to the
+            // slot's struct and let `pair.ok` resolve against the wrong layout.
+            if fn_slot.return_fixed_array_len <= lower_tuple0_array_struct_return_sentinel() {
                 return ir_empty_name()
             }
             return fn_slot.return_struct_name
+        }
+        ir_empty_name()
+    }
+
+    // Slot index carried by the tuple-slot sentinel, or -1 when the callee's
+    // return metadata is not of that shape.
+    fn return_tuple_struct_slot_for_fn_id(self, fn_id: i64) -> i64 with Mut, Panic, Div, Alloc {
+        if fn_id >= 0 && fn_id < self.module.fn_count {
+            let fn_slot = ir_fn_get(&(*self.module), fn_id as usize)
+            let code = fn_slot.return_fixed_array_len
+            if code <= lower_tuple_slot_struct_return_sentinel(0) {
+                return lower_tuple_slot_struct_sentinel_slot(code)
+            }
+        }
+        0 - 1
+    }
+
+    fn return_tuple_struct_name_for_fn_id(self, fn_id: i64) -> Name with Mut, Panic, Div, Alloc {
+        if self.return_tuple_struct_slot_for_fn_id(fn_id) >= 0 {
+            return ir_fn_get(&(*self.module), fn_id as usize).return_struct_name
         }
         ir_empty_name()
     }
@@ -11827,6 +12006,34 @@ impl Lowerer {
                     return ir_fn_get(&(*self.module), fn_id as usize).return_fixed_array_len
                 }
                 0 - 1
+            }
+            None => 0 - 1,
+        }
+    }
+
+    // The expr_call_return_* accessors around this each re-derive the callee's
+    // fn_id with the same twelve lines. This is that resolution written once, for
+    // the new readers; the existing three are left alone rather than churned into
+    // this change.
+    fn expr_call_callee_fn_id_ref(self, expr: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*expr).kind != ExprKind::ExprCall { return 0 - 1 }
+        match (*expr).left {
+            Some(callee_expr) => {
+                var callee_name = ir_empty_name()
+                if (*callee_expr).kind == ExprKind::ExprIdent {
+                    callee_name = (*callee_expr).name
+                } else if (*callee_expr).kind == ExprKind::ExprPath {
+                    let first = ir_path_first_name((*callee_expr).path)
+                    let last = ir_path_last_name((*callee_expr).path)
+                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
+                        callee_name = ir_mangle_method_name(first, last)
+                    } else {
+                        callee_name = first
+                    }
+                } else {
+                    return 0 - 1
+                }
+                lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
             }
             None => 0 - 1,
         }
@@ -12770,6 +12977,31 @@ impl Lowerer {
                         let base_type = self.lookup_local_struct_type((*base_expr).name)
                         if lower_name_is_string_type(self.struct_layout_field_named_type(base_type, (*e).name)) {
                             return true
+                        }
+                    }
+                    // `pair.K.field`: the base is itself a TUPLE SLOT access, so
+                    // the ident case above cannot fire -- the slot's struct type is
+                    // not the local's type. It is recorded at the bind instead, from
+                    // the callee's declared return type, and this reads it back.
+                    // The recorded slot must EQUAL K, so `pair.0.x` on
+                    // `(bool, Result)` still refuses instead of borrowing slot 1.
+                    if (*base_expr).kind == ExprKind::ExprFieldAccess {
+                        let slot = lower_name_tuple_index((*base_expr).name)
+                        if slot >= 0 {
+                            match (*base_expr).left {
+                                Some(tuple_base) => {
+                                    if (*tuple_base).kind == ExprKind::ExprIdent {
+                                        let slot_layout = self.lookup_local_tuple_struct_layout((*tuple_base).name, slot)
+                                        if slot_layout >= 0 && slot_layout < (*self.struct_layouts).count {
+                                            let slot_type = (*self.struct_layouts).entries[slot_layout as usize].type_name
+                                            if lower_name_is_string_type(self.struct_layout_field_named_type(slot_type, (*e).name)) {
+                                                return true
+                                            }
+                                        }
+                                    }
+                                }
+                                None => {}
+                            }
                         }
                     }
                 }
@@ -15441,6 +15673,19 @@ impl Lowerer {
                     }
                     if name_eq(callee_struct_name, make_name("seq_len")) {
                         lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                    }
+                    // `let pair = f()` where f returns a tuple carrying a named
+                    // struct in slot k: record THAT slot's layout, so `pair.k.field`
+                    // can be typed later. bind_local_struct_type is deliberately not
+                    // used here -- the local is a tuple, not that struct, and saying
+                    // otherwise is what would send `pair.ok` to the wrong layout.
+                    let tuple_callee_id = lo.expr_call_callee_fn_id_ref(&(*expr_box))
+                    let tuple_struct_slot = lo.return_tuple_struct_slot_for_fn_id(tuple_callee_id)
+                    if tuple_struct_slot >= 0 {
+                        let tuple_struct_layout = lower_struct_layout_index_of(
+                            &(*lo.struct_layouts),
+                            lo.return_tuple_struct_name_for_fn_id(tuple_callee_id))
+                        lo = lo.bind_local_tuple_struct(s.name, tuple_struct_layout, tuple_struct_slot)
                     }
                     if !callee_is_box {
                         let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
