@@ -36,7 +36,7 @@ CHECK_SHA256='d6520e6c3da3448ac78b3bccd959ebbc0a905c7c16197e4c39f8a108e8360ac3'
 LAKEFILE_SHA256='7992ce727698567504989f963c46e89b0ba9d0cdf79b3ecb5859f2da831506b1'
 FORMAL_SOURCE_REVIEW_LOG_SHA256='416902a5596de446026a24487e366dde4f3485e72b91d407d7379eaafc3df05a'
 PROOF_CHECK_REVIEW_LOG_SHA256='7a30d67c84514f85fcfbec9f8f3bcfadb316c1f408daff5afb1329450185ae6e'
-ARTIFACT_REVIEW_LOG_SHA256='eab5404714c0a1f9d2e12dd53f3612ccbd39d3bb1e883dd4c16904a5f77c771d'
+ARTIFACT_REVIEW_LOG_SHA256='4abea42f0763864ba15499b855c0b9c949d8e47fed0ff151d67c2f344d67ec23'
 PARENT_GATE_SHA256='85592497911796c5111aabf1267bc4085ac19e91b345694ce12669e1e0330a50'
 PARENT_RECEIPT_SHA256='60c96ae686e578124426f8dcf864f917c98572465ed65f22ca13c8693f2e2270'
 PARENT_EVIDENCE_SHA256='d8255c3c26860a5754c1e5116d943e1606c1791351850d713c752a6f651e06b7'
@@ -227,7 +227,8 @@ live_hardware_manifest="$(printf '%s\n' \
 [[ "$(grep -c '^example ' "${ROOT}/${CHECK_REL}")" -eq 9 ]] || fail 'proof-check obligation count drift'
 
 for theorem_name in "${EXPECTED_THEOREMS[@]}"; do
-  grep -Eq "^theorem ${theorem_name}([[:space:]]|:|$)" "${ROOT}/${MAIN_REL}" || fail "missing theorem: ${theorem_name}"
+  awk -v name="${theorem_name}" '$1 == "theorem" && $2 == name { found = 1 } END { exit !found }' \
+    "${ROOT}/${MAIN_REL}" || fail "missing theorem: ${theorem_name}"
   grep -Fqx "#print axioms ${theorem_name}" "${ROOT}/${AUDIT_REL}" || fail "missing theorem audit: ${theorem_name}"
 done
 for definition_name in "${EXPECTED_DEFINITIONS[@]}"; do
