@@ -18,6 +18,7 @@ use check::hyper::{check_hyper_binary}
 use check::compat::*
 use check::invariance::*
 use check::epistemic::*
+use check::noise_sets::*
 use check::effects::*
 use check::ontology_side_table_cache::{
     ontology_side_table_cache_source_disjoint_axiom_count,
@@ -374,6 +375,58 @@ pub struct Checker {
     // both the un-writable kernel and threading the list through the call chain.
     // Placed at struct end to keep all existing field offsets unchanged.
     ontology_items: Option<Box<ItemList> >,
+    // ---- NS noise-source dataflow ------------------------------------------
+    // Noise-symbol interning table, heap-allocated like structs/enums/fn_sigs
+    // (see ns_table_alloc, check::noise_sets) -- NOT inlined, so it does not
+    // grow the by-value Checker (already ~164KB and SRET-fragile; see
+    // checker_check_measure_expr_inplace's comment below). Shared by pointer
+    // across every by-value copy of Checker, exactly like fn_sigs.
+    ns_table: *mut NoiseSetTable,
+    // Counter of measurement SOURCES issued this checker run. Deliberately
+    // SEPARATE from ns_table's interned SET count: many distinct sources can
+    // union into fewer distinct interned sets, so the two counters diverge on
+    // real programs. Reset to 0 in checker_new/checker_init_in_place;
+    // saturates to unknown via ns_singleton's own src>63 guard once 64
+    // sources have been issued (the issuer does not duplicate that cap).
+    ns_source_issued: i64,
+    // Scratch set during checker_check_call_args_inplace to the noise_set_id
+    // of the most recently seen Knowledge-typed call argument (parametric
+    // call-result substitution). ns_arg_sentinel() (-2) means "no Knowledge
+    // argument observed this call" -- distinct from all three valid handle
+    // states (-1 unknown / 0 empty / >0 interned), so a call with no
+    // Knowledge argument leaves the callee's declared return noise_set_id
+    // untouched rather than being forced to unknown.
+    last_call_arg_ns: i64,
+    // Call-projection verdict table (codex ruling 2026-08-23) -- see
+    // ns_proj_table_get/set and ns_body_projected_param_index above
+    // checker_collect_fn_param_list_mut.
+    ns_proj: *mut NsProjTable,
+    // ---- env-φ fix (codex ruling 2026-08-23, round 3) ----------------------
+    // A Knowledge var reassigned INSIDE an if/match branch does not survive
+    // that branch's own block-scope pop (checker_check_block_inplace's
+    // push_scope/pop_scope discards any shadow binding pushed inside it), so
+    // the merge that matters happens back in the OUTER, surviving scope, at
+    // checker_merge_ns_reassigned_inplace -- not at the reassignment site
+    // itself. ns_branch_depth tracks "are we currently inside some if/match
+    // branch's body" (incremented by checker_ns_branch_enter_inplace,
+    // decremented by checker_merge_ns_reassigned_inplace, independent of the
+    // borrow system's own branch_depth since match arms don't participate in
+    // that one). ns_reassigned_names/_count is the flat, non-nesting-scoped
+    // list of outer-scope Knowledge var names reassigned since the
+    // OUTERMOST branch context began; only cleared when ns_branch_depth
+    // returns to 0, so a nested if/match's merge can force a name to top in
+    // its own (still-branch-nested) scope and the ENCLOSING merge can force
+    // it again one scope further out -- forcing top twice is idempotent.
+    ns_branch_depth: i64,
+    ns_reassigned_names: [Name; 64],
+    ns_reassigned_count: i64,
+    // Sticky: set when ns_reassigned_names overflows its 64-slot cap inside a
+    // branch context (a 65th distinct reassigned Knowledge var cannot be
+    // recorded). At the depth-0 merge this forces EVERY live TyKnowledge
+    // binding to top -- the sound fallback, since we can no longer name which
+    // vars were reassigned. Mirrors the source-cap-64 -> unknown saturation in
+    // noise_sets.sio: on overflow we must lose precision, never soundness.
+    ns_reassigned_overflow: bool,
 }
 
 // Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
@@ -1338,6 +1391,14 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         refine_violations: 0,
         refine_cond_env: refine_static_env_new(),
         ontology_items: None,
+        ns_table: ns_table_alloc(),
+        ns_source_issued: 0,
+        last_call_arg_ns: ns_arg_sentinel(),
+        ns_proj: ns_proj_table_alloc(),
+        ns_branch_depth: 0,
+        ns_reassigned_names: [empty_name(); 64],
+        ns_reassigned_count: 0,
+        ns_reassigned_overflow: false,
     }
     let _ = setup_intrinsics(c.fn_sigs)
     c
@@ -1444,6 +1505,14 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).refine_violations = 0
     (*raw).refine_cond_env = refine_static_env_new()
     (*raw).ontology_items = None
+    (*raw).ns_table = ns_table_alloc()
+    (*raw).ns_source_issued = 0
+    (*raw).last_call_arg_ns = ns_arg_sentinel()
+    (*raw).ns_proj = ns_proj_table_alloc()
+    (*raw).ns_branch_depth = 0
+    (*raw).ns_reassigned_names = [empty_name(); 64]
+    (*raw).ns_reassigned_count = 0
+    (*raw).ns_reassigned_overflow = false
 }
 
 fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Div, Alloc {
@@ -1542,6 +1611,14 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).refine_violations = src.refine_violations
     (*dst).refine_cond_env = src.refine_cond_env
     (*dst).ontology_items = src.ontology_items
+    (*dst).ns_table = src.ns_table
+    (*dst).ns_source_issued = src.ns_source_issued
+    (*dst).last_call_arg_ns = src.last_call_arg_ns
+    (*dst).ns_proj = src.ns_proj
+    (*dst).ns_branch_depth = src.ns_branch_depth
+    (*dst).ns_reassigned_names = src.ns_reassigned_names
+    (*dst).ns_reassigned_count = src.ns_reassigned_count
+    (*dst).ns_reassigned_overflow = src.ns_reassigned_overflow
 }
 
 fn checker_note_type_error_mut(c: *mut Checker) with Mut {
@@ -3854,6 +3931,117 @@ fn epistemic_min_confidence_from_effects(opt: Option<Box<EffectList> >) -> i64 w
     0 - 1
 }
 
+// ============================================================
+// N2 call-projection table (codex ruling 2026-08-23, fail-closed fix)
+// ============================================================
+//
+// grok-4.6 found the original REQ-5 substitution ("last Knowledge arg
+// wins") FAIL-OPEN: add_noise(x){x+measure(0)}, first(a,b){a}, and
+// add_cap(x){x+cap} all narrowed to a real handle instead of top, which is
+// the DANGEROUS direction for a domain meant to certify independence. The
+// fix: substitution is preserved ONLY when the callee is a syntactically-
+// proven, effect-free EXACT parameter projection -- body is exactly one
+// statement, a bare tail identifier or `return <ident>`, naming one of the
+// function's own parameters. A single-statement bare-identifier body cannot
+// contain a capture, a measure()/Knowledge ctor, or control flow -- ruling
+// those out is structural, not a separate check. Everything else defaults
+// to top (unknown, -1) at the call site (see
+// checker_propagate_call_result_ns_inplace below).
+//
+// Storage: a flat table parallel to FnSigTable, indexed by the SAME sig_id
+// (fn_sig_table_add's return value) so lookup is O(1) at the call site.
+// heap_alloc zeroes it, so any sig_id this module never explicitly writes
+// (closures, methods, monomorphized/type-expr signatures, intrinsics) reads
+// back as is_proj=false/param_idx=-1 -- i.e. top -- for free: only the ONE
+// real user-fn collection site needs to call ns_proj_table_set, not every
+// fn_sig_table_add call site in this file. Sized to FnSigTable's own
+// documented cap (fn_sig_table_add refuses idx >= 1048576) so every valid
+// sig_id is addressable; the byte budget is rounded up generously (matches
+// fn_sig_chunk_alloc's "not checked against sizeof, headroom is deliberate"
+// precedent below) since bool/i64 array layout is not sizeof-verified here.
+pub struct NsProjTable {
+    is_proj: [bool; 1048576],
+    param_idx: [i64; 1048576],
+}
+
+pub fn ns_proj_table_alloc() -> *mut NsProjTable with Alloc {
+    heap_alloc(16777216) as *mut NsProjTable
+}
+
+pub fn ns_proj_table_set(t: *mut NsProjTable, sig_id: i64, is_proj: bool, param_idx: i64) with Mut, Panic, Div {
+    if sig_id < 0 || sig_id >= 1048576 { return }
+    (*t).is_proj[sig_id as usize] = is_proj
+    (*t).param_idx[sig_id as usize] = param_idx
+}
+
+pub fn ns_proj_table_get(t: *mut NsProjTable, sig_id: i64) -> (bool, i64) with Mut, Panic, Div {
+    if sig_id < 0 || sig_id >= 1048576 { return (false, 0 - 1) }
+    ((*t).is_proj[sig_id as usize], (*t).param_idx[sig_id as usize])
+}
+
+// Walk a fn's ORIGINAL (unlowered) parameter list looking for `name`,
+// returning (found, index). Index order matches checker_collect_fn_param_list_mut's
+// walk of the same ParamList, so it lines up with FnSig.params/param_count.
+fn ns_param_index_of(params: Option<Box<ParamList> >, name: Name, idx: i64) -> (bool, i64) with Mut, Panic, Div {
+    match params {
+        None => (false, 0 - 1)
+        Some(list) => {
+            if name_eq((*list).head.name, name) {
+                (true, idx)
+            } else {
+                ns_param_index_of((*list).tail, name, idx + 1)
+            }
+        }
+    }
+}
+
+// The projection predicate itself. body.stmts must hold EXACTLY one
+// statement: either a bare tail-expression identifier (`{ x }`, the
+// implicit-return shape) or `{ return x }` (ExprReturn's payload lives in
+// Expr.left per parser/ast.sio). Anything else -- more statements, a
+// non-identifier tail, an identifier that is not one of this fn's own
+// parameters -- is NOT a projection.
+fn ns_body_projected_param_index(body: Block, params: Option<Box<ParamList> >) -> (bool, i64) with Mut, Panic, Div {
+    match body.stmts {
+        None => (false, 0 - 1)
+        Some(list) => {
+            match (*list).tail {
+                Some(_) => (false, 0 - 1)
+                None => {
+                    let s = (*list).head
+                    if s.kind != StmtKind::StmtExpr {
+                        (false, 0 - 1)
+                    } else {
+                        match s.expr {
+                            None => (false, 0 - 1)
+                            Some(eb) => {
+                                let e = *eb
+                                if e.kind == ExprKind::ExprIdent {
+                                    ns_param_index_of(params, e.name, 0)
+                                } else if e.kind == ExprKind::ExprReturn {
+                                    match e.left {
+                                        Some(rv) => {
+                                            let rve = *rv
+                                            if rve.kind == ExprKind::ExprIdent {
+                                                ns_param_index_of(params, rve.name, 0)
+                                            } else {
+                                                (false, 0 - 1)
+                                            }
+                                        }
+                                        None => (false, 0 - 1)
+                                    }
+                                } else {
+                                    (false, 0 - 1)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn checker_collect_fn_param_list_mut(c: *mut Checker, pl: ParamList) -> MutParamListResult with Mut, Panic, Div, Alloc, IO {
     let head_ty = checker_lower_type_expr_mut(c, pl.head.ty)
     let head_param = FnParamInfo { name: pl.head.name, ty: head_ty }
@@ -3993,7 +4181,22 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             // In-place insert mirrors FnSigTable::add — avoids copying the 45KB
             // FnSigTable by value (one of the large-aggregate copies the *mut
             // conversion eliminates).
-            let _sig_id = fn_sig_table_add((*c).fn_sigs, sig)
+            let sig_id = fn_sig_table_add((*c).fn_sigs, sig)
+            // N2 (codex ruling 2026-08-23): register this fn's call-projection
+            // verdict at the SAME index fn_sig_table_add just returned, so
+            // checker_propagate_call_result_ns_inplace can look it up in O(1)
+            // at every call site. See ns_body_projected_param_index's comment.
+            var proj = ns_body_projected_param_index((*fd).body, (*fd).params)
+            // Codex ruling: arity-1 ONLY. first(a, b) { a } does NOT qualify
+            // even though its body is a bare reference to one of its own
+            // parameters -- restricting to single-parameter signatures keeps
+            // "exact parameter projection" to the one archetype (ident(x){x})
+            // it is meant to cover and removes an entire class of positional-
+            // argument-mismatch risk from ever being a concern.
+            if param_count != 1 {
+                proj = (false, 0 - 1)
+            }
+            ns_proj_table_set((*c).ns_proj, sig_id, proj.0, proj.1)
             // Functions are NOT bound in env — they live in the chunked fn_sigs and resolve via
             // the fn_sigs fallback in checker_check_ident_expr_inplace. Binding ~15K module-level
             // fns into the ONE shared env (check_modules_verdict_boot4) overflowed bindings[4096],
@@ -6078,9 +6281,14 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         if kk_both && kk_arith && !kk_hyper {
             checker_report_error_at_inplace(c, e.span, 245, 0, 0, 0)
         }
-        let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty)
+        let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, (*c).ns_table)
         if knowledge_result.kind == TypeKind::TyError {
             checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
+        }
+        // N3: anti-garbling gate. An independence-assuming op over operands whose
+        // noise-symbol sets are not provably disjoint understates variance -- E230.
+        if checker_ns_should_refuse((*c).ns_table, e.bin_op, left_ty, right_ty) {
+            checker_report_error_at_inplace(c, e.span, 230, 0, 0, 0)
         }
         let final_result = checker_finish_binary_units_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_result)
         if e.bin_op == BinaryOp::OpMul && left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
@@ -6253,6 +6461,98 @@ fn checker_merge_if_branches_inplace(c: *mut Checker) with Mut, Panic, Div, Allo
     }
 }
 
+// ============================================================
+// N2 env-φ fix (codex ruling 2026-08-23, round 3): the env-merge site.
+// ============================================================
+//
+// grok-4.6's round-3 finding: a Knowledge var REASSIGNED inside an if/match
+// branch is not ns-union'd (or forced to top) across the merge --
+// checker_merge_if_branches_inplace above only merges LINEAR-CONSUME flags,
+// never a binding's noise_set_id, and there was no TypeEnv snapshot/merge
+// machinery at all (unlike (*c).borrows' branch_snap array). Worse: the
+// reassignment inside the branch does not even SURVIVE past the branch's own
+// block scope -- checker_check_block_inplace push_scope()s on entry and
+// pop_scope()s on exit around every block, including if/else arms and match
+// arm bodies, and pop_scope only rewinds env.count back to the scope's
+// starting count; it does not (and structurally cannot, from outside that
+// generic, reused block-checking function) hand back what happened inside.
+// So `var x = measure(1); if c { x = measure(2) }` left x's env entry
+// completely untouched by the branch -- not "then-branch-wins", literally
+// AS IF the reassignment never happened, once you're back outside the `if`.
+//
+// The fix does NOT try to diff per-branch env snapshots (infeasible without
+// invasively changing the generic block-checker used everywhere): it
+// implements the codex-sanctioned sound fallback -- any TyKnowledge binding
+// reassigned anywhere inside a branch is forced to top (-1) once merge sees
+// it again in the surviving outer scope. Mechanism: ns_branch_depth (>0
+// means "inside some if/match branch body", independent of the borrow
+// system's own branch_depth since match arms never touch that one) gates
+// checker_check_assign_stmt_inplace into recording the reassigned NAME
+// (ns_reassigned_names/_count) instead of writing a rebind that would just
+// be discarded; checker_merge_ns_reassigned_inplace, called at every if/
+// match merge point (both with and without an else-arm), looks each
+// recorded name up in the NOW-restored outer scope and re-binds it there
+// with noise_set_id forced to top. The list is flat (not per-nesting-level
+// stacked) and only cleared once ns_branch_depth returns to 0: a nested
+// if's own merge forces a name to top in ITS still-branch-nested scope, and
+// the enclosing merge forces it again one scope further out when it exits
+// -- forcing top twice is idempotent, so this needs no nesting-aware
+// bookkeeping to be correct.
+fn checker_ns_branch_enter_inplace(c: *mut Checker) with Mut, Panic, Div {
+    (*c).ns_branch_depth = (*c).ns_branch_depth + 1
+}
+
+fn checker_merge_ns_reassigned_inplace(c: *mut Checker) with Mut, Panic, Div, IO {
+    if (*c).ns_branch_depth > 0 {
+        (*c).ns_branch_depth = (*c).ns_branch_depth - 1
+    }
+    if checker_ns_sabotage_join() {
+        // Per-rule negative control: skip the env-merge entirely, so a
+        // branch-reassigned Knowledge var reverts to whatever the block's
+        // own pop_scope left behind -- the pre-fix fail-open bug, reproduced
+        // on demand. Still clear the list at depth 0 so it cannot leak into
+        // a later, unrelated if/match.
+        if (*c).ns_branch_depth == 0 {
+            (*c).ns_reassigned_count = 0
+            (*c).ns_reassigned_overflow = false
+        }
+        return
+    }
+    var i: i64 = 0
+    while i < (*c).ns_reassigned_count {
+        let nm = (*c).ns_reassigned_names[i as usize]
+        let cur_ty = (*c).env.lookup(nm)
+        if cur_ty.kind == TypeKind::TyKnowledge {
+            var forced = cur_ty
+            forced.noise_set_id = 0 - 1
+            (*c).env = (*c).env.bind(nm, forced, true)
+            checker_ns_trace_emit("env_join", forced.noise_set_id)
+        }
+        i = i + 1
+    }
+    if (*c).ns_branch_depth == 0 {
+        // Overflow fallback: the recorded-name list could not hold every
+        // branch-reassigned Knowledge var, so re-forcing by name is
+        // insufficient. Force EVERY live TyKnowledge binding to top -- sound
+        // over-approximation (some never-reassigned vars are widened too, but
+        // never wrongly narrowed). Only at the outermost merge, before clear.
+        if (*c).ns_reassigned_overflow {
+            var j: i64 = 0
+            while j < (*c).env.count {
+                var b = (*c).env.bindings[j as usize]
+                if b.ty.kind == TypeKind::TyKnowledge && b.ty.noise_set_id != (0 - 1) {
+                    b.ty.noise_set_id = 0 - 1
+                    (*c).env.bindings[j as usize] = b
+                    checker_ns_trace_emit("env_join_overflow", 0 - 1)
+                }
+                j = j + 1
+            }
+            (*c).ns_reassigned_overflow = false
+        }
+        (*c).ns_reassigned_count = 0
+    }
+}
+
 fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let cond_ty = checker_check_opt_expr_inplace(c, e.left)
     // Condition must be bool (skip E006 when the condition already failed typechecking).
@@ -6277,6 +6577,7 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
         (*c).refine_cond_env = refine_static_env_push((*c).refine_cond_env, cond_guard.1)
     }
     checker_branch_enter_inplace(c)
+    checker_ns_branch_enter_inplace(c)
     let then_ty = checker_check_opt_block_inplace(c, e.block)
     checker_branch_then_done_inplace(c)
     (*c).refine_cond_env = saved_cond_env
@@ -6285,13 +6586,40 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
     // statements is a shape this compiler miscompiles.
     match e.else_expr {
         Some(else_e) => {
+            // NOTE: only ONE checker_ns_branch_enter_inplace call covers this
+            // whole if-statement (called once, above, before the then-block)
+            // -- ns_branch_depth counts "inside this if-statement's branch
+            // context" per STATEMENT, not per arm, so checker_merge_ns_
+            // reassigned_inplace's single decrement below balances it
+            // exactly. A second enter here would double-count against that
+            // one decrement and leave ns_branch_depth permanently elevated.
             let else_ty = checker_check_expr_inplace(c, *else_e)
             (*c).refine_cond_env = saved_cond_env
             if !checker_types_compatible_inplace(c, then_ty, else_ty) {
                 checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
             }
             checker_merge_if_branches_inplace(c)
-            then_ty
+            // N2 CFG join (codex ruling 2026-08-23, closes the missing-join
+            // gap grok-4.6 flagged): `if c {measure(1)} else {measure(2)}`
+            // must not silently keep only the then-branch's noise_set_id.
+            // ns_union already treats a negative (top/unknown) operand as
+            // absorbing (REQ-4), so this single call gives exactly "union of
+            // the incoming known IDs; top if either incoming is top".
+            // SOUNIO_NS_SABOTAGE_JOIN=1 skips the union, reproducing the
+            // pre-fix "one branch" bug as the per-rule negative control.
+            var joined = then_ty
+            if then_ty.kind == TypeKind::TyKnowledge && else_ty.kind == TypeKind::TyKnowledge {
+                if !checker_ns_sabotage_join() {
+                    joined.noise_set_id = ns_union(&!(*(*c).ns_table), then_ty.noise_set_id, else_ty.noise_set_id)
+                }
+                checker_ns_trace_emit("if_join", joined.noise_set_id)
+            }
+            // env-φ (round 3): force top on any Knowledge var REASSIGNED
+            // inside either branch, in the now-restored outer scope. This is
+            // the RESULT-value join above's counterpart for BINDINGS -- two
+            // different fail-open holes, both closed at this same merge point.
+            checker_merge_ns_reassigned_inplace(c)
+            joined
         }
         None => {
             // No else-arm: nothing is consumed on that path, which is what
@@ -6299,6 +6627,13 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             // then-arm consumed.
             (*c).refine_cond_env = saved_cond_env
             checker_merge_if_branches_inplace(c)
+            // env-φ (round 3): a bare `if c { x = measure(2) }` -- codex's
+            // OWN literal example -- has no else-arm to union against, but
+            // still needs x forced to top: the implicit else path never
+            // reassigned it, so ns_branch_depth is still 1 here (only the
+            // then-side ever called checker_ns_branch_enter_inplace) and
+            // this call correctly decrements it back to 0 and clears the list.
+            checker_merge_ns_reassigned_inplace(c)
             ty_unit()
         }
     }
@@ -6329,9 +6664,20 @@ fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     // iteration may re-borrow the same variables; without this the second iteration
     // would fail because the first iteration's exclusive borrows are still active.
     (*c).borrows = (*c).borrows.release_exclusive_borrows()
+    // env-φ loop widen (codex ruling 2026-08-23, round 4 -- grok-4.6 measured
+    // this as a REAL fail-open, not theoretical: `var x=measure(1); while
+    // ... {x=x+measure(2)}; let y=x+x` traced union=1 after the loop, i.e.
+    // x silently reverted to {s1} -- the SAME block-scope-pop-discards-the-
+    // rebind hole as if/match, just not yet closed for loop bodies. A loop
+    // body runs 0+ times and accumulates, so the sound post-loop value for
+    // ANY Knowledge var reassigned in the body is TOP -- identical hammer to
+    // if/match, deliberately NOT a per-binding fixpoint union (no such pass
+    // exists, or is being added, here).
+    checker_ns_branch_enter_inplace(c)
     // Loop body block (via the *mut spine; its type is discarded, exactly as the
     // by-value original discards body_pair.1).
     let _body_ty = checker_check_opt_block_inplace(c, e.block)
+    checker_merge_ns_reassigned_inplace(c)
     (*c).loop_depth = (*c).loop_depth - 1
     ty_unit()
 }
@@ -6350,11 +6696,29 @@ fn checker_check_for_in_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     (*c).env = (*c).env.bind(e.name, ty_i64(), false)
     (*c).loop_depth = (*c).loop_depth + 1
     (*c).borrows = (*c).borrows.release_exclusive_borrows()
+    // env-φ loop widen (codex ruling 2026-08-23, round 4) -- see the matching
+    // comment in checker_check_while_expr_inplace. A `for` body runs 0+
+    // times exactly like `while`, so the same top-widen hammer applies.
+    //
+    // IMPORTANT (found while verifying this fix, not while writing it): the
+    // merge call must run AFTER (*c).env.pop_scope() below, not before it --
+    // unlike checker_check_while_expr_inplace, this function pushes its OWN
+    // outer scope (for the loop variable `e.name`) around the whole body,
+    // one level further out than the body block's own push/pop. Calling the
+    // merge before that outer pop_scope writes the forced-top rebind into
+    // the loop-variable's scope, which the very next line then discards --
+    // the identical bug one level deeper. Verified by trace: with the merge
+    // called too early, env_join=-1 fired (the merge DID run) but a
+    // subsequent read of the reassigned var after the loop still saw the
+    // stale pre-loop handle -- the merge's own write was thrown away before
+    // it could be read back.
+    checker_ns_branch_enter_inplace(c)
     let _body_ty = checker_check_opt_block_inplace(c, e.block)
     (*c).loop_depth = (*c).loop_depth - 1
     checker_pop_const_scope_inplace(c)
     (*c).borrows = (*c).borrows.pop_scope()
     (*c).env = (*c).env.pop_scope()
+    checker_merge_ns_reassigned_inplace(c)
     ty_unit()
 }
 
@@ -6871,6 +7235,11 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     var cursor = e.arms
     var result_ty = ty_unit()
     var seen_first = false
+    // env-φ (round 3): one enter covers the WHOLE match (all arms are
+    // mutually exclusive branches of one construct, exactly like if/else's
+    // single enter above) -- balanced by the single
+    // checker_merge_ns_reassigned_inplace call after the arm loop below.
+    checker_ns_branch_enter_inplace(c)
     while true {
         match cursor {
             Some(list) => {
@@ -6887,12 +7256,32 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     if !checker_types_compatible_inplace(c, arm_ty, result_ty) {
                         checker_report_mismatch_inplace(c, arm.span, 18, result_ty, arm_ty)
                     }
+                    // N2 CFG join (codex ruling 2026-08-23, closes the missing-
+                    // join gap grok-4.6 flagged): accumulate this arm's
+                    // noise_set_id into the running result via ns_union -- same
+                    // "union of the known IDs, top if either is top" semantics
+                    // as the if/else join. Without this, result_ty silently
+                    // kept only the FIRST arm's set forever. SOUNIO_NS_SABOTAGE_
+                    // JOIN=1 skips the union, reproducing that pre-fix bug as
+                    // the per-rule negative control.
+                    if result_ty.kind == TypeKind::TyKnowledge && arm_ty.kind == TypeKind::TyKnowledge {
+                        if !checker_ns_sabotage_join() {
+                            result_ty.noise_set_id = ns_union(&!(*(*c).ns_table), result_ty.noise_set_id, arm_ty.noise_set_id)
+                        }
+                    }
                 }
                 cursor = (*list).tail
             }
             None => break
         }
     }
+    if result_ty.kind == TypeKind::TyKnowledge {
+        checker_ns_trace_emit("match_join", result_ty.noise_set_id)
+    }
+    // env-φ (round 3): force top on any Knowledge var reassigned inside any
+    // arm, in the now-restored outer scope -- same counterpart-to-the-
+    // result-value-join role as the if/else site.
+    checker_merge_ns_reassigned_inplace(c)
     result_ty
 }
 
@@ -7137,7 +7526,25 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                 checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
                 return ty_error()
             }
-            return ty_knowledge(value_ty, 0.0 - 1.0)
+            // N2 seeding (false-positive fix, 2026-08-25): a struct-literal
+            // `Knowledge { value: .. }` with a SCALAR payload is a deterministic
+            // construction carrying no measurement source, so its noise-symbol set is
+            // EMPTY, not the top default. Mirror the inline-ctor path. Without this, N3
+            // wrongly refuses `Knowledge{..} + Knowledge{..}` (E230).
+            // Defensive (math-review, zai, 2026-08-25): if the payload is itself a
+            // noise-bearing Knowledge, INHERIT its source-set rather than laundering it
+            // to empty (which would let `Knowledge{value:x} + x` bypass E230). The
+            // current type system rejects a Knowledge payload here (E001), so this arm
+            // is belt-and-suspenders, but it makes the seeding sound by construction
+            // rather than by relying on that check elsewhere.
+            var k_struct_result = ty_knowledge(value_ty, 0.0 - 1.0)
+            if is_knowledge_type(value_ty) {
+                k_struct_result.noise_set_id = value_ty.noise_set_id
+            } else {
+                k_struct_result.noise_set_id = ns_empty()
+            }
+            checker_ns_trace_emit("knowledge_struct_lit", k_struct_result.noise_set_id)
+            return k_struct_result
         }
         // ---- Enum struct-variant constructor (`Enum::Variant { field: val }`). The head
         // segment ("Event") is the enum name; the last segment ("C") names a struct variant.
@@ -7535,7 +7942,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         if sig_id >= 0 {
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
-            checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(fn_param_list_clone(&sig.params)), sig.param_count, e.span)
+            checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(fn_param_list_clone(&sig.params)), sig.param_count, e.span, 0 - 1)
             checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
             checker_release_call_arg_borrows_inplace(c, e.args, fn_param_list_clone(&sig.params), call_start_borrows)
             sig.return_type
@@ -7568,7 +7975,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
         if sig_id >= 0 {
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
-            checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(fn_param_list_clone(&sig.params)), sig.param_count, e.span)
+            checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(fn_param_list_clone(&sig.params)), sig.param_count, e.span, 0 - 1)
             checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
             checker_release_call_arg_borrows_inplace(c, e.args, fn_param_list_clone(&sig.params), call_start_borrows)
             sig.return_type
@@ -7742,7 +8149,15 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
 
 // *mut transcription of check_call_args_inner (16907): the arg is checked via the spine;
 // the boundary contracts inspect the already-computed arg_ty (no re-check) and are bridged.
-fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params: FnParamListHandle, expected_count: i64, call_span: Span) with Mut, Panic, Div, Alloc, IO {
+// ns_watch_idx: codex ruling 2026-08-23 (fail-closed call-projection fix).
+// -1 means "this callee is not a proven exact-parameter-projection -- do not
+// capture anything, checker_propagate_call_result_ns_inplace will force top."
+// A value >= 0 is the ONE parameter index ns_proj_table proved this callee's
+// body is exactly `{ param }`/`{ return param }` for; only THAT argument's
+// noise_set_id is captured into (*c).last_call_arg_ns, never "last Knowledge
+// arg wins" (grok-4.6 found that fail-open: add_noise(x){x+measure(0)} and
+// first(a,b){a} both narrowed to a real handle instead of top).
+fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params: FnParamListHandle, expected_count: i64, call_span: Span, ns_watch_idx: i64) with Mut, Panic, Div, Alloc, IO {
     var current = args
     var idx: i64 = 0
     while current.ptr != 0 as *mut ExprList {
@@ -7765,6 +8180,12 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
             (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
         }
         let arg_ty = checker_check_expr_inplace(c, arg_expr)
+        // N2 (REQ-5, codex ruling 2026-08-23): capture ONLY the argument at
+        // the callee's proven-projection parameter index -- never "last
+        // Knowledge arg wins" (that was fail-open; see the fn comment above).
+        if idx == ns_watch_idx && arg_ty.kind == TypeKind::TyKnowledge {
+            (*c).last_call_arg_ns = arg_ty.noise_set_id
+        }
         if suppress_arg_consume && (*c).suppress_linear_consume_depth > 0 {
             (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
         }
@@ -7823,7 +8244,20 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     // (~41% of remaining checker crashers).
     let first_arg = expr_list_head(e.args)
     let v_ty = checker_check_opt_expr_inplace(c, first_arg)
-    ty_knowledge(v_ty, 0.0 - 1.0)
+    var result = ty_knowledge(v_ty, 0.0 - 1.0)
+    // N2 seed (REQ-2): a measured value is a fresh independent source, so it
+    // becomes a NEW singleton set -- never empty (that would claim it shares
+    // no uncertainty with itself) and never a leftover handle from an
+    // earlier measure() call in the same checker run. The source id comes
+    // from ns_source_issued, NOT from ns_table's interned-set count (REQ-1) --
+    // see the field comment on Checker.
+    if !checker_ns_sabotage() {
+        let src = (*c).ns_source_issued
+        (*c).ns_source_issued = src + 1
+        result.noise_set_id = ns_singleton(&!(*(*c).ns_table), src)
+    }
+    checker_ns_trace_emit("measure", result.noise_set_id)
+    result
 }
 
 // seq_new() -> Seq<_>. Element type comes from the binding annotation
@@ -8007,7 +8441,16 @@ fn checker_check_knowledge_ctor_expr_inplace(c: *mut Checker, e: Expr) -> TypeEn
     let first_arg = expr_list_head(e.args)
     let v_ty = checker_check_opt_expr_inplace(c, first_arg)
     let confidence = checker_enforce_knowledge_confidence_inplace(c, e.args, e.span)
-    ty_knowledge(v_ty, confidence)
+    var result = ty_knowledge(v_ty, confidence)
+    // N2 (REQ-2): this ctor wraps a plain value directly -- no independent
+    // measurement source is created (that is measure()'s job, above), so the
+    // result carries NO uncertainty sources: empty (0), not unknown (-1).
+    // Sabotage leaves it at ty_knowledge's -1 default instead.
+    if !checker_ns_sabotage() {
+        result.noise_set_id = ns_empty()
+    }
+    checker_ns_trace_emit("knowledge_ctor", result.noise_set_id)
+    result
 }
 
 fn checker_check_variance_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -8708,19 +9151,33 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             }
             None => {}
         }
+        // N2 (REQ-5, codex ruling 2026-08-23): save/reset the noise-set
+        // scratch around this call's argument walk, so a nested call in an
+        // argument position cannot leave its own noise_set_id behind for the
+        // outer call. ns_proj_d is this callee's
+        // proven-projection verdict (fail-closed: not-a-projection -> -1,
+        // "watch nothing").
+        let outer_arg_ns_d = (*c).last_call_arg_ns
+        (*c).last_call_arg_ns = ns_arg_sentinel()
+        let ns_proj_d = ns_proj_table_get((*c).ns_proj, direct_sig_id)
+        let ns_watch_d = if ns_proj_d.0 { ns_proj_d.1 } else { 0 - 1 }
         checker_check_call_args_inplace(
             c,
             expr_list_handle(e.args),
             fn_param_list_handle(effective_params),
             direct_sig.param_count,
             e.span,
+            ns_watch_d,
         )
         checker_check_callee_effects_named_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count, direct_sig.name)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
         if refused_unimplemented {
+            (*c).last_call_arg_ns = outer_arg_ns_d
             return ty_error()
         }
-        return effective_return_type
+        let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, ns_proj_d.0)
+        (*c).last_call_arg_ns = outer_arg_ns_d
+        return ns_result
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
     // Option<Box<Expr>> through another *mut helper boundary.
@@ -8807,13 +9264,28 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             }
             None => {}
         }
-        checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span)
+        // N2 (REQ-5, codex ruling 2026-08-23): same save/reset/restore
+        // discipline as the direct_sig_id path above, applied to the
+        // noise-set scratch, plus the callee's proven-projection verdict.
+        let outer_arg_ns = (*c).last_call_arg_ns
+        (*c).last_call_arg_ns = ns_arg_sentinel()
+        // Fail-closed (grok-4.6 re-review 2026-08-23): an INDIRECT call through a
+        // first-class function VALUE must NEVER project. callee_ty.fn_sig_id can be
+        // stale — assignment and CFG-join do not rebind a TyFn value's sig_id
+        // (var f = id; f = add_noise; f(k) would else trust id's projection over
+        // the real callee). Only the DIRECT named-call path (direct_sig_id above)
+        // may project; here we watch nothing so the result defaults to top.
+        let ns_watch = 0 - 1
+        checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span, ns_watch)
         checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
         if refused_unimplemented {
+            (*c).last_call_arg_ns = outer_arg_ns
             ty_error()
         } else {
-            effective_return_type
+            let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, false)
+            (*c).last_call_arg_ns = outer_arg_ns
+            ns_result
         }
     } else if is_error_or_unknown(callee_ty) {
         let call_start_borrows = (*c).borrows
@@ -8892,6 +9364,189 @@ fn checker_effect_inference_enabled() -> bool with IO, Mut, Panic, Div {
         }
     }
     CHECKER_EFFECT_INFERENCE_ENABLED_ON == 1
+}
+
+// ============================================================
+// NS noise-source dataflow -- sabotage + trace knobs.
+//
+// The sabotage control follows the witness-sabotage discipline of
+// scripts/ci/witness_declares_its_sabotage_gate.sh (SOUNIO_SABOTAGE_*), for the
+// same reason: a control that makes the invariant DISAPPEAR is the only control
+// that proves the rule under test produced it, rather than something
+// upstream. SOUNIO_NS_SABOTAGE=1 disables ONLY the propagation WRITES --
+// the seed at measure()/Knowledge(), the union at Knowledge binary ops, and
+// the call-return substitution -- so noise_set_id is left at whatever its
+// caller already carried (the TypeEntry default, -1, for anything not
+// explicitly re-seeded). E230 is wired separately and has its own diagnostic
+// negative control, SOUNIO_NS_DISABLE; this dataflow sabotage knob does not
+// disable the refusal predicate.
+//
+// Memoised for the same reason as CHECKER_PROVENANCE_SABOTAGE_ON: read_env
+// allocates and the runtime allocator never reclaims.
+var CHECKER_NS_SABOTAGE_ON: i64 = 0
+var CHECKER_NS_SABOTAGE_CHECKED: i64 = 0
+
+pub fn checker_ns_sabotage() -> bool with IO, Mut, Panic, Div {
+    if CHECKER_NS_SABOTAGE_CHECKED == 0 {
+        CHECKER_NS_SABOTAGE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_NS_SABOTAGE"), "1") {
+            CHECKER_NS_SABOTAGE_ON = 1
+        }
+    }
+    CHECKER_NS_SABOTAGE_ON == 1
+}
+
+// SOUNIO_NS_TRACE=1 exposes the abstract-domain state directly: it prints one
+// "NS_TRACE <context>=<handle>" line per Knowledge value at each of the
+// write sites (measure seed, deterministic-ctor empty, binary-op union,
+// call-return substitution). The trace knob itself changes no checker
+// behavior; the propagated handles remain inputs to E230 when tracing is off.
+var CHECKER_NS_TRACE_ON: i64 = 0
+var CHECKER_NS_TRACE_CHECKED: i64 = 0
+
+pub fn checker_ns_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if CHECKER_NS_TRACE_CHECKED == 0 {
+        CHECKER_NS_TRACE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_NS_TRACE"), "1") {
+            CHECKER_NS_TRACE_ON = 1
+        }
+    }
+    CHECKER_NS_TRACE_ON == 1
+}
+
+pub fn checker_ns_trace_emit(context: string, handle: i64) with IO, Mut, Panic, Div {
+    if checker_ns_trace_enabled() {
+        print("NS_TRACE ")
+        print(context)
+        print("=")
+        print_int(handle)
+        print("\n")
+    }
+}
+
+// ============================================================
+// Per-rule sabotage knobs (codex ruling 2026-08-23).
+//
+// grok-4.6's review demanded each individual N2 dataflow rule (call-
+// projection substitution, CFG-join union, loop widening) be independently
+// disableable, so a negative control can show THAT rule's invariant vanish
+// without also silencing the others. These are separate from the general
+// checker_ns_sabotage() above, which still gates seed/union-at-binary-op/
+// deterministic-ctor.
+var CHECKER_NS_SABOTAGE_CALL_PROJ_ON: i64 = 0
+var CHECKER_NS_SABOTAGE_CALL_PROJ_CHECKED: i64 = 0
+pub fn checker_ns_sabotage_call_proj() -> bool with IO, Mut, Panic, Div {
+    if CHECKER_NS_SABOTAGE_CALL_PROJ_CHECKED == 0 {
+        CHECKER_NS_SABOTAGE_CALL_PROJ_CHECKED = 1
+        if str_eq(read_env("SOUNIO_NS_SABOTAGE_CALL_PROJ"), "1") {
+            CHECKER_NS_SABOTAGE_CALL_PROJ_ON = 1
+        }
+    }
+    CHECKER_NS_SABOTAGE_CALL_PROJ_ON == 1
+}
+
+var CHECKER_NS_SABOTAGE_JOIN_ON: i64 = 0
+var CHECKER_NS_SABOTAGE_JOIN_CHECKED: i64 = 0
+pub fn checker_ns_sabotage_join() -> bool with IO, Mut, Panic, Div {
+    if CHECKER_NS_SABOTAGE_JOIN_CHECKED == 0 {
+        CHECKER_NS_SABOTAGE_JOIN_CHECKED = 1
+        if str_eq(read_env("SOUNIO_NS_SABOTAGE_JOIN"), "1") {
+            CHECKER_NS_SABOTAGE_JOIN_ON = 1
+        }
+    }
+    CHECKER_NS_SABOTAGE_JOIN_ON == 1
+}
+
+// (N2 note: a SOUNIO_NS_SABOTAGE_LOOP_WIDEN knob was defined and removed as
+// dead — there is no separate loop-widen mechanism to gate; loop-carried
+// Knowledge joins through the reassignment path, so SOUNIO_NS_SABOTAGE_JOIN
+// already disables it. See ns_loop_widen_top_trace.sio.)
+
+// Parametric call-result substitution (REQ-5), FAIL-CLOSED (codex ruling
+// 2026-08-23, replacing the fail-open "last Knowledge arg wins" grok-4.6
+// found). DEFAULT is top (unknown, -1) for every call to a user fn returning
+// Knowledge. Substitution is preserved ONLY when `is_projection` is true --
+// ns_proj_table proved the callee's body is EXACTLY `{ param }` or
+// `{ return param }` for the parameter whose argument
+// checker_check_call_args_inplace captured into (*c).last_call_arg_ns (see
+// ns_watch_idx there). SOUNIO_NS_SABOTAGE_CALL_PROJ=1 disables the
+// preservation specifically -- even a genuine ident(x) then collapses to
+// top, which is the per-rule negative control.
+fn checker_propagate_call_result_ns_inplace(c: *mut Checker, ret_ty: TypeEntry, is_projection: bool) -> TypeEntry with IO, Mut, Panic, Div {
+    var carried = ret_ty
+    if carried.kind == TypeKind::TyKnowledge {
+        if is_projection && !checker_ns_sabotage_call_proj() && (*c).last_call_arg_ns != ns_arg_sentinel() {
+            carried.noise_set_id = (*c).last_call_arg_ns
+        } else {
+            // Not a proven projection (the general, dangerous-if-narrowed
+            // case), OR the projection rule itself is sabotaged, OR a
+            // projection fn whose projected-parameter argument was not
+            // Knowledge-typed (sentinel never overwritten) -- top either way.
+            carried.noise_set_id = 0 - 1
+        }
+        checker_ns_trace_emit("call", carried.noise_set_id)
+    }
+    carried
+}
+
+// The sabotage knob for E230, and the reason it exists.
+//
+// Same discipline as the SOUNIO_SABOTAGE_* witness knobs: a compile-fail witness
+// proves nothing by "it also failed under sabotage" -- a refusal fails either
+// way. The control that means something is a knob that makes E230 DISAPPEAR
+// while every unrelated refusal (E245 in particular, which sits at the SAME
+// kadd/kmul site) stays, because then the E230 under test is provably the
+// noise-symbol rule and not an error further up. SOUNIO_NS_DISABLE=1 turns off
+// ONLY the anti-garbling refusal; the noise_set_id field, the N2 dataflow and
+// the union all still run.
+var CHECKER_NS_DISABLE_ON: i64 = 0
+var CHECKER_NS_DISABLE_CHECKED: i64 = 0
+
+pub fn checker_ns_disable() -> bool with IO, Mut, Panic, Div {
+    if CHECKER_NS_DISABLE_CHECKED == 0 {
+        CHECKER_NS_DISABLE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_NS_DISABLE"), "1") {
+            CHECKER_NS_DISABLE_ON = 1
+        }
+    }
+    CHECKER_NS_DISABLE_ON == 1
+}
+
+// E230 -- anti-garbling. The predicate, in ONE place, called from both
+// binary-op checking paths (the *mut Checker in-place path and the value path)
+// so the rule cannot go inert on one of them.
+//
+// An independence-assuming operator (OpAdd, OpMul) over two Knowledge operands
+// whose sources are not provably disjoint CAN understate the propagated variance
+// (it drops the covariance term). For Add the assumed a^2+b^2 vs true (a+b)^2 on a
+// shared symbol understates iff the coefficient product ab>0 and OVERstates iff
+// ab<0; refusing every non-disjoint pair is therefore CONSERVATIVE (it never
+// admits an understatement, though it also refuses the ab<0 pairs that were safe).
+// ns_disjoint fails closed: unknown (-1) and any unrepresentable set are NEVER
+// disjoint. A non-Knowledge operand carries no source of its own and never
+// triggers the rule (both operands must be Knowledge to reach the disjointness
+// test). Sub/Div are NOT gated here -- a SCOPE decision, not a safety one: the
+// SAME-sign correlated case of subtraction overstates (safe), but an OPPOSITE-sign
+// shared source makes Sub (and Div, sign-dependent) a genuine ungated anti-garbling
+// (math-review, zai, 2026-08-25). A full sign-of-covariance treatment of Sub/Div is
+// future work; today they pass unrefused.
+fn checker_ns_should_refuse(table: *mut NoiseSetTable, bin_op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) -> bool with IO, Mut, Panic, Div {
+    if checker_ns_disable() { return false }
+    let is_indep_op = bin_op == BinaryOp::OpAdd || bin_op == BinaryOp::OpMul
+    if !is_indep_op { return false }
+    if !is_knowledge_type(left_ty) { return false }
+    if !is_knowledge_type(right_ty) { return false }
+    let a = left_ty.noise_set_id
+    let b = right_ty.noise_set_id
+    // An empty source-set is a deterministic value: it carries no measurement
+    // source, so it cannot share one with the other operand and never causes an
+    // anti-garbling -- even against an unknown (top) operand. ns_disjoint fails
+    // closed on top BEFORE its empty shortcut, so empty-vs-top would read as
+    // "not disjoint"; short-circuit it here to avoid a false refusal of
+    // `deterministic + anything` (e.g. the N2 `x + w` witnesses where x is top).
+    if a == ns_empty() { return false }
+    if b == ns_empty() { return false }
+    !ns_disjoint(&(*table), a, b)
 }
 
 fn checker_check_callee_effects_named_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64, source: Name) with Mut, IO, Panic, Div, Alloc {
@@ -9720,6 +10375,18 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             bind_ty = init_ty
         } else {
             bind_ty = ann_ty
+            // N2: noise_set_id has no source-level annotation syntax (unlike
+            // provenance/epsilon, which a `Knowledge[T, Measured]`-style
+            // annotation legitimately DOES override -- that is the whole
+            // point of ascribing it). checker_lower_knowledge_type_mut always
+            // defaults an annotation's noise_set_id to -1, so taking ann_ty
+            // verbatim here would silently erase whatever the RHS expression
+            // actually seeded/unioned/substituted -- for EVERY explicitly-
+            // typed Knowledge let, which is the common case in this corpus.
+            // Carry the inferred RHS's noise_set_id through the ascription.
+            if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
+                bind_ty.noise_set_id = init_ty.noise_set_id
+            }
         }
     }
     // Validate refinement predicate on literal initializers
@@ -9781,6 +10448,12 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             bind_ty = init_ty
         } else {
             bind_ty = ann_ty
+            // N2: see the matching comment in checker_check_let_stmt_inplace
+            // -- noise_set_id has no annotation syntax, so carry it from the
+            // inferred RHS rather than resetting it to the annotation's -1.
+            if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
+                bind_ty.noise_set_id = init_ty.noise_set_id
+            }
         }
     }
     checker_check_refinement_literal_inplace(c, s.span, bind_ty)
@@ -9935,6 +10608,61 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
                     checker_const_int_bind_value_inplace(c, (*target).name, rhs_pair.1)
                 } else {
                     checker_const_int_bind_unknown_inplace(c, (*target).name)
+                }
+                // N2 reassignment join (codex ruling 2026-08-23; env-φ
+                // refinement round 3). `var x = measure(1); x = measure(2)`
+                // must not leave x's env binding pinned to measure(1)'s
+                // stale singleton forever -- this checker has no flow-
+                // sensitive re-narrowing (nothing above rebinds env's TYPE
+                // on assignment at all otherwise).
+                //
+                // TWO cases, because a rebind written HERE does not survive
+                // equally in both:
+                //
+                // ns_branch_depth > 0 (inside an if/match branch body): a
+                // `.bind()` here would just be discarded by that branch's
+                // own block-scope pop_scope (checker_check_block_inplace) --
+                // see checker_merge_ns_reassigned_inplace's header comment.
+                // Go conservative locally (top, not union -- the sound
+                // fallback for a value that might or might not have taken
+                // this path) and record the name; the merge point (called
+                // once the branch construct finishes, back in the outer,
+                // SURVIVING scope) is what actually fixes the env.
+                //
+                // ns_branch_depth == 0 (straight-line, top-level code ONLY):
+                // while/for loop bodies now DO participate (their check wraps
+                // call checker_ns_branch_enter_inplace/_merge, so a
+                // reassignment inside a loop body takes the depth>0 path above
+                // and is widened to top at the post-loop merge -- see
+                // ns_loop_widen_top_trace.sio). At depth 0 there is no
+                // enclosing branch to discard the rebind before it's read, so
+                // the monotone union with the OLD noise_set_id is sound and
+                // sufficient.
+                //
+                // SOUNIO_NS_SABOTAGE_JOIN=1 disables BOTH cases, reproducing
+                // the pre-fix "stays at the first value's set forever" bug.
+                if target_ty.kind == TypeKind::TyKnowledge && val_ty.kind == TypeKind::TyKnowledge && !checker_ns_sabotage_join() {
+                    if (*c).ns_branch_depth > 0 {
+                        var forced = target_ty
+                        forced.noise_set_id = 0 - 1
+                        (*c).env = (*c).env.bind((*target).name, forced, true)
+                        if (*c).ns_reassigned_count < 64 {
+                            (*c).ns_reassigned_names[(*c).ns_reassigned_count as usize] = (*target).name
+                            (*c).ns_reassigned_count = (*c).ns_reassigned_count + 1
+                        } else {
+                            // Cap reached: cannot record this name, so the
+                            // depth-0 merge could not re-force it and it would
+                            // revert to its pre-branch set (a fail-open). Mark
+                            // overflow -> the merge forces ALL Knowledge to top.
+                            (*c).ns_reassigned_overflow = true
+                        }
+                        checker_ns_trace_emit("env_reassign_branch", forced.noise_set_id)
+                    } else {
+                        var rebound = target_ty
+                        rebound.noise_set_id = ns_union(&!(*(*c).ns_table), target_ty.noise_set_id, val_ty.noise_set_id)
+                        (*c).env = (*c).env.bind((*target).name, rebound, true)
+                        checker_ns_trace_emit("reassign_join", rebound.noise_set_id)
+                    }
                 }
             }
         }
@@ -14279,6 +15007,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 242 { print("epistemic channel index is out of range") }
     else if code == 232 { print("the same array local initialises two fields; the value copy is shallow, so they would be one array -- give each field its own literal") }
     else if code == 243 { print("the correlation coefficient must be a compile-time literal; a runtime value silently becomes 0.0, which asserts independence") }
+    else if code == 230 { print("independence-assuming operation over correlated uncertainty") }
     else { print("unknown error") }
 }
 
@@ -14571,6 +15300,18 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 250 {
         print("   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6, malloc, free, getpid, getppid, exit, abort, system, read_i64, write_i64, read_f64, write_f64\n")
+    }
+    else if code == 230 {
+        print("   |\n   = help: E230 anti-garbling. This operation assumes its operands are")
+        print("\n   =       statistically independent, but they carry a SHARED measurement")
+        print("\n   =       source, so the propagated variance drops the covariance term and")
+        print("\n   =       can come out smaller than the truth -- precision the inputs do")
+        print("\n   =       not justify. This is the epistemic dual of R-ORIGIN: where that")
+        print("\n   =       refuses manufacturing provenance, this refuses manufacturing")
+        print("\n   =       precision.")
+        print("\n   =")
+        print("\n   =       Prove the sources disjoint, or use a correlation-aware operator")
+        print("\n   =       that takes the covariance explicitly instead of assuming zero.\n")
     }
     else {
         // No help available for unknown errors
@@ -19825,6 +20566,16 @@ impl Checker {
                     defining_module: defining_module,
                 }
                 let sig_id = fn_sig_table_add(c.fn_sigs, sig)
+                // N2 (codex ruling 2026-08-23, call-projection fail-closed
+                // fix): by-value twin of the registration in
+                // checker_collect_fn_def_inplace -- see that site's comment.
+                var proj = ns_body_projected_param_index((*fd).body, (*fd).params)
+                // Codex ruling: arity-1 only -- see the matching comment in
+                // checker_collect_fn_def_inplace.
+                if param_count != 1 {
+                    proj = (false, 0 - 1)
+                }
+                ns_proj_table_set(c.ns_proj, sig_id, proj.0, proj.1)
                 c.env = c.env.bind(name, ty_fn(sig_id), false)
                 c = c.const_int_bind_unknown(name)
                 c
@@ -21196,6 +21947,12 @@ impl Checker {
                 bind_ty = init_ty
             } else {
                 bind_ty = ann_ty
+                // N2: see checker_check_let_stmt_inplace's matching comment --
+                // noise_set_id has no annotation syntax, so carry it from the
+                // inferred RHS rather than resetting it to the annotation's -1.
+                if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
+                    bind_ty.noise_set_id = init_ty.noise_set_id
+                }
             }
         }
         // Validate refinement predicate on literal initializers
@@ -21254,6 +22011,12 @@ impl Checker {
                 bind_ty = init_ty
             } else {
                 bind_ty = ann_ty
+                // N2: see checker_check_let_stmt_inplace's matching comment --
+                // noise_set_id has no annotation syntax, so carry it from the
+                // inferred RHS rather than resetting it to the annotation's -1.
+                if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
+                    bind_ty.noise_set_id = init_ty.noise_set_id
+                }
             }
         }
         // Validate refinement predicate on literal initializers
@@ -21626,9 +22389,14 @@ impl Checker {
             if kk_both && kk_arith && !kk_hyper {
                 c = c.report_error_at(e.span, 245, 0, 0, 0)
             }
-            let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty)
+            let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table)
             if knowledge_result.kind == TypeKind::TyError {
                 c = c.report_error_at(e.span, 36, 0, 0, 0)
+            }
+            // N3: anti-garbling gate (value path). Mirrors the in-place path so
+            // the E230 rule cannot go inert on plain named-call binary checking.
+            if checker_ns_should_refuse(c.ns_table, e.bin_op, left_ty, right_ty) {
+                c = c.report_error_at(e.span, 230, 0, 0, 0)
             }
             // Continue with normal checking for inner type compatibility
             // The knowledge_binary_result handles epsilon propagation

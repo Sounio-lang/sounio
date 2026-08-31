@@ -1,0 +1,52 @@
+//@ run-pass
+//@ known-failure: E245 (#1706) refuses Knowledge x Knowledge arithmetic on Madaros (no lowering) independently of the NS wire; this N2 witness is check-level only -- its NS_TRACE dataflow is asserted by scripts/ci/ns_dataflow_trace_gate.sh / ns_antigarbling_gate.sh
+//@ requires: madaros
+//@ expect-stdout: ns-ident-distinct: PASS
+//
+// N2 witness (REQ-5, parametric call substitution): ident(x) and ident(y)
+// must carry x's and y's OWN noise_set_id respectively -- a static label
+// baked into ident's declared return type at definition time would give both
+// calls the SAME handle, which is exactly the bug REQ-5 rules out.
+//
+// measure()'s result always carries knowledge_epsilon = -1 (unspecified),
+// which the call-boundary gate (checker_check_call_arg_knowledge_boundary_
+// inplace / E036, self-hosted/check/check.sio -- PRE-EXISTING, not part of
+// N2) fails closed on for ANY user function whose Knowledge<T> parameter
+// omits an explicit epsilon clause, under current Madaros -- independently
+// reproducible on this checkout with the unrelated corpus fixture
+// tests/run-pass/epistemic_guarded_nested_measure_call.sio (`consume(x:
+// Knowledge<f64>)` called with a bare measure() argument: E036 under
+// bin/souc/Madaros, passes under SOUNIO_SOUC_ENGINE=lean_single). So each
+// operand here is unioned with a zero-value, epsilon=0.05 Knowledge(...)
+// literal first: the union keeps the measure()'s fresh singleton handle
+// (union with the empty set is the identity -- REQ-2 seeds it, REQ-3 unions
+// it) while epsilon_combine_independent's sqrt+clamp turns the pair's
+// epsilon into a valid, boundary-passing number, and ident's parameter
+// declares an explicit `epsilon < 1.0` clause wide enough to admit it. This
+// sidesteps the pre-existing E036 gap without touching it -- it is a test
+// workaround, not a checker fix.
+//
+// Observable only under SOUNIO_NS_TRACE=1: two "NS_TRACE measure=<h>" seed
+// lines with distinct handles Hx, Hy, "NS_TRACE knowledge_ctor=0" and
+// "NS_TRACE union=<h>" lines reproducing Hx then Hy for the laundering step,
+// then two "NS_TRACE call=<h>" lines (one per ident() call) reproducing Hx
+// and Hy in the same order -- never the same handle twice.
+
+fn ident(k: Knowledge[f64, epsilon < 1.0]) -> Knowledge[f64, epsilon < 1.0] with IO {
+    k
+}
+
+fn main() -> i64 with IO {
+    let x_seed: Knowledge<f64> = measure(1.0, uncertainty: 0.1)
+    let x_wrap: Knowledge[f64, epsilon < 1.0] = Knowledge(0.0, ε = 0.05)
+    let x: Knowledge[f64, epsilon < 1.0] = x_seed + x_wrap
+
+    let y_seed: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+    let y_wrap: Knowledge[f64, epsilon < 1.0] = Knowledge(0.0, ε = 0.05)
+    let y: Knowledge[f64, epsilon < 1.0] = y_seed + y_wrap
+
+    let rx: Knowledge[f64, epsilon < 1.0] = ident(x)
+    let ry: Knowledge[f64, epsilon < 1.0] = ident(y)
+    println("ns-ident-distinct: PASS")
+    0
+}

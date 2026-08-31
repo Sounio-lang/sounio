@@ -1,0 +1,48 @@
+//@ run-pass
+//@ known-failure: E245 (#1706) refuses Knowledge x Knowledge arithmetic on Madaros (no lowering) independently of the NS wire; this N2 witness is check-level only -- its NS_TRACE dataflow is asserted by scripts/ci/ns_dataflow_trace_gate.sh / ns_antigarbling_gate.sh
+//@ requires: madaros
+//@ expect-stdout: ns-env-join-ifelse: PASS
+//
+// N2 negative control (codex ruling 2026-08-23, round 3 -- grok-4.6's
+// env-φ finding): `var x = measure(1); if c { x = measure(2) }; use(x)`
+// must NOT let x's post-if type revert to measure(1)'s narrow set. The bug
+// was structural, not just "wrong branch wins": checker_check_block_inplace
+// push_scope()s/pop_scope()s around every block including if-arms, and
+// pop_scope discards ANY env rebind made inside -- so the reassignment
+// literally never reached anywhere outside the branch, AS IF it had not
+// happened. checker_merge_ns_reassigned_inplace (called at the if/match
+// merge point) closes this: reassigning a Knowledge var while
+// ns_branch_depth > 0 records the name instead of a rebind that would just
+// be discarded, and the merge re-binds it in the NOW-RESTORED outer scope
+// with noise_set_id forced to top.
+//
+// The observable proof is NOT just the "env_join" trace line at the merge
+// (that only proves the merge RAN) -- it's reading x again afterward: `x +
+// w3` unions x's POST-merge type with an empty set, so its own "union=-1"
+// line is the end-to-end proof that the forced-top value actually survived
+// past the if-statement into the code that follows it.
+//
+// Per-rule sabotage: SOUNIO_NS_SABOTAGE_JOIN=1 disables the env-merge
+// (same knob as the CFG-join fixes), reproducing the pre-fix bug: x reverts
+// to its PRE-if handle, and the trailing union's handle becomes a real
+// (non-top) combination of that stale handle with w3's empty set instead
+// of -1 -- proving the env-join, not something else, closed the hole.
+
+fn main() -> i64 with IO {
+    let s1: Knowledge<f64> = measure(1.0, uncertainty: 0.1)
+    let w1: Knowledge[f64, epsilon < 1.0] = Knowledge(0.0, ε = 0.05)
+    var x: Knowledge[f64, epsilon < 1.0] = s1 + w1
+
+    let cond = true
+    if cond {
+        let s2: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+        let w2: Knowledge[f64, epsilon < 1.0] = Knowledge(0.0, ε = 0.05)
+        x = s2 + w2
+    }
+
+    let w3: Knowledge[f64, epsilon < 1.0] = Knowledge(0.0, ε = 0.05)
+    let y: Knowledge[f64, epsilon < 1.0] = x + w3
+
+    println("ns-env-join-ifelse: PASS")
+    0
+}
