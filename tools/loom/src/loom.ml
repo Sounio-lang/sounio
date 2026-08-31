@@ -3856,7 +3856,7 @@ let launch_guardian paths agent lane session_id cwd command instance_id
       in
       wait ()
 
-let build_kernel paths agent lane session_id cwd instance_id output_path
+let build_kernel ?listener paths agent lane session_id cwd instance_id output_path
     journal_path guardian_journal_path journal semantic_cursor =
   let token = trim (read_file paths.token_path) in
   let guardian_values = guardian_status_request paths token in
@@ -3881,7 +3881,11 @@ let build_kernel paths agent lane session_id cwd instance_id output_path
     try int_of_string (table_value guardian_values name)
     with _ -> failf "guardian status omitted %s" name
   in
-  let listener = create_listener paths.socket_path in
+  let listener =
+    match listener with
+    | Some descriptor -> descriptor
+    | None -> create_listener paths.socket_path
+  in
   let self_pid = Unix.getpid () in
   {
     paths;
@@ -3947,18 +3951,32 @@ let serve_session paths agent lane session_id cwd command =
   let output_path = Filename.concat generation_dir "output.bin" in
   let journal_path = Filename.concat generation_dir "journal.tsv" in
   let guardian_journal_path = Filename.concat generation_dir "guardian.tsv" in
-  ignore
-    (launch_guardian paths agent lane session_id cwd command instance_id output_path
-       guardian_journal_path lock);
-  let journal = open_journal journal_path in
-  ignore
-    (append_event journal "SESSION_STARTED"
-       (Printf.sprintf "%s:%s" instance_id
-          (table_value (parse_key_values paths.guardian_descriptor_path)
-             "harness_pid")));
+  (* The provider inherits the kernel socket path and may invoke its first hook
+     immediately after exec. Bind the listener before releasing the Guardian so
+     that connect(2) is never a startup race. *)
+  let listener = create_listener paths.socket_path in
   let kernel =
-    build_kernel paths agent lane session_id cwd instance_id output_path
-      journal_path guardian_journal_path journal 0
+    try
+      ignore
+        (launch_guardian paths agent lane session_id cwd command instance_id
+           output_path guardian_journal_path lock);
+      let journal = open_journal journal_path in
+      ignore
+        (append_event journal "SESSION_STARTED"
+           (Printf.sprintf "%s:%s" instance_id
+              (table_value (parse_key_values paths.guardian_descriptor_path)
+                 "harness_pid")));
+      build_kernel ~listener paths agent lane session_id cwd instance_id
+        output_path journal_path guardian_journal_path journal 0
+    with error ->
+      (try
+         let token = trim (read_file paths.token_path) in
+         guardian_stop_request paths token
+       with _ -> ());
+      (try Unix.close listener with _ -> ());
+      (try Unix.unlink paths.socket_path with _ -> ());
+      (try Unix.close lock with _ -> ());
+      raise error
   in
   let code =
     try run_kernel kernel

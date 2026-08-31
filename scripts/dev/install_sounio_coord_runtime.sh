@@ -334,6 +334,9 @@ activate_runtime() {
       "$(manifest_value "$change_product" operational_language)" == OCaml &&
       "$(manifest_value "$change_product" operational_role)" == OPERATIONAL_ATTACHMENT &&
       "$(manifest_value "$change_product" operational_semantic_authority)" == false &&
+      "$(manifest_value "$change_product" loom_runtime_reproducible)" == true &&
+      "$(manifest_value "$change_product" loom_repro_build_count)" == 2 &&
+      "$(manifest_value "$change_product" loom_link_policy)" == strip-symbols+omit-gnu-build-id &&
       "$(manifest_value "$change_product" provider_root_readonly)" == true &&
       "$(manifest_value "$change_product" staging_outside_root)" == true &&
       "$(manifest_value "$change_product" grant_residency)" == Loom_kernel_memory &&
