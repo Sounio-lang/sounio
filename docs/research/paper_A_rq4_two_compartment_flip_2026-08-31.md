@@ -92,14 +92,21 @@ are shared), with the sign of the covariance deciding which harm you get.
 
 ## Engine note (honest)
 
-Runs under Madaros (the claim clock). Under `lean_single` the program does not build (exit 1,
-no diagnostic) — as the `a_mu_*` run-pass tests record, stage-2 does not execute imported
-`Epistemic` graphs. Two Madaros defects were hit and worked around on the way, both
-documented: the #1692 nested-aggregate SRET return, and a new one — a per-function scalar-slot
-overflow that segfaults or **silently returns wrong values** past ~130–150 slots
-(`docs/audit/MADAROS_LOCAL_SLOT_OVERFLOW_2026-08-31.md`, probe in `tests/known_failures/`).
-The RQ4 chain is therefore written in stage functions of ≤ 16 struct locals, one 5-field
-struct per return, no `&f(&g(x))`.
+Runs under Madaros (the claim clock) — **re-verified on the committed compiler `bf1fe608` with a
+byte-identical `RQ4_FLIP` line.** Under `lean_single` the program does not build (exit 1, no
+diagnostic) — as the `a_mu_*` run-pass tests record, stage-2 does not execute imported
+`Epistemic` graphs.
+
+**Correction (same day).** During development the program crashed and printed wrong values, which
+was attributed to a per-function scalar-slot overflow in the committed Madaros (audit note, issue
+#2318). That was wrong: `bin/souc` in the lane worktree had resolved a gitignored, stale
+2026-08-16 lane build (`md5 709acf97`) ahead of the committed ELF — while its provenance line
+still said "COMMITTED". With the artifact removed, the 30-local probe, 100/400-local probes, the
+inline shape and a 183-struct borrowed chain all pass on the committed, source-built and
+lean_single engines (worktree agent + independent re-run). #2318 is closed as not reproducible;
+the audit doc keeps the false alarm with the correction appended; the probes are kept as
+positive-control run-pass fixtures. The stage-function structure of the RQ4 chain is kept for
+readability only.
 
 ## Reproduce
 
