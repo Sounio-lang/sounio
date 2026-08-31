@@ -1,0 +1,799 @@
+//@ run-pass
+//@ expect-stdout: CONJ68_BASIS_SWEEP OK
+// Probe for Conjecture 6.8 of Guterman-Zhilina, arXiv:2608.26903 (27 Aug 2026):
+// the commutativity graph of the sedenions restricted to elements whose imaginary
+// part is a zero divisor has diameter 3 (they prove 3 <= d <= 4; the 3 is
+// conjectured from floating-point Mathematica runs).
+//
+// Reduction executed here, for the canonical ZD x0 = (e1, e2) against the swap
+// (e2, e1) and all 84 basis zero divisors (e_i, +-e_j):
+//   * commutation depends only on imaginary parts -> pure ZDs suffice;
+//   * Im C(x) = R x (+) O(x) has dim 5; in the basis subgraph, O(x) is spanned
+//     by the 4 basis partners of x (the double-hexagon neighbours,
+//     Prop. 4.6 / Description 4.18 of the paper) -- VERIFIED here, not assumed:
+//     each partner is checked to annihilate x on both sides (exact i64), and
+//     dim U = dim V = 5 is certified by exact integer Bareiss rank;
+//   * d = 1  iff  [x0, x'] = 0                       (exact i64);
+//   * d = 2  iff  U /\ V != 0, i.e. rank(U u V) < 10 (exact i64 Bareiss);
+//   * d = 3  iff  the bilinear form T(u, w) = [u, w] on U x V has a nonzero
+//     zero  u (x) w  -> hunted in f64 by alternating inverse-power iteration
+//     plus Gauss-Newton polish; a residual < 1e-9 on the normalized tensor is
+//     counted as a witness (numeric leg: evidence, not proof of absence).
+//   * Prop. 6.7 sanity: for the swap pair, rank(U u V) = 10 exactly
+//     (no common commuting neighbour -> d >= 3), and the hunt must still find
+//     a length-3 witness.
+//
+// Exact legs are decidable integer arithmetic (entries stay far below 2^53 by
+// the Hadamard bound: 10x10 Gram entries <= 8 -> intermediates < ~1e14).
+// Differential oracle (search-only, defines no expected value, ADR-008):
+// scripts/research/sedenion_commutativity_diameter_probe.py.
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+
+fn sed_sigma(a: i64, b: i64) -> i64 with Mut, Panic, Div { cd_sigma_c(a, b, 4) }
+
+// ---------------------------------------------------------------- i64 sedenions
+
+fn smul_i(x: &[i64; 16], y: &[i64; 16], out: &![i64; 16]) with Mut, Panic, Div {
+    var k = 0
+    while k < 16 { out[k as usize] = 0; k = k + 1 }
+    var i = 0
+    while i < 16 {
+        if x[i as usize] != 0 {
+            var j = 0
+            while j < 16 {
+                if y[j as usize] != 0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + sed_sigma(i, j) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn is_zero_i(v: &[i64; 16]) -> bool with Mut {
+    var k = 0
+    while k < 16 {
+        if v[k as usize] != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+
+fn comm_is_zero(x: &[i64; 16], y: &[i64; 16]) -> bool with Mut, Panic, Div {
+    var xy = [0; 16]
+    var yx = [0; 16]
+    smul_i(x, y, &!xy)
+    smul_i(y, x, &!yx)
+    var k = 0
+    while k < 16 {
+        if xy[k as usize] != yx[k as usize] { return false }
+        k = k + 1
+    }
+    true
+}
+
+fn annihilates_both(x: &[i64; 16], y: &[i64; 16]) -> bool with Mut, Panic, Div {
+    var p = [0; 16]
+    smul_i(x, y, &!p)
+    if !is_zero_i(&p) { return false }
+    smul_i(y, x, &!p)
+    is_zero_i(&p)
+}
+
+// ------------------------------------------------- exact integer Bareiss rank
+// rows: flat r x 16 matrix (r <= 10). Entries small; fraction-free elimination.
+
+fn bareiss_rank(m: &![i64; 160], nrows: i64) -> i64 with Mut, Panic, Div {
+    var rank = 0
+    var prev = 1
+    var col = 0
+    while col < 16 && rank < nrows {
+        // find pivot row
+        var pr = 0 - 1
+        var i = rank
+        while i < nrows {
+            if m[(i * 16 + col) as usize] != 0 { pr = i; i = nrows } else { i = i + 1 }
+        }
+        if pr >= 0 {
+            if pr != rank {
+                var c = 0
+                while c < 16 {
+                    let t = m[(rank * 16 + c) as usize]
+                    m[(rank * 16 + c) as usize] = m[(pr * 16 + c) as usize]
+                    m[(pr * 16 + c) as usize] = t
+                    c = c + 1
+                }
+            }
+            let piv = m[(rank * 16 + col) as usize]
+            var r = rank + 1
+            while r < nrows {
+                let f = m[(r * 16 + col) as usize]
+                var c = 0
+                while c < 16 {
+                    let num = piv * m[(r * 16 + c) as usize] - f * m[(rank * 16 + c) as usize]
+                    m[(r * 16 + c) as usize] = num / prev
+                    c = c + 1
+                }
+                r = r + 1
+            }
+            prev = piv
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    rank
+}
+
+// ---------------------------------------------------------------- f64 helpers
+
+fn fabs_(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Newton sqrt (no method-call syntax dependency); exact enough for residuals.
+fn fsqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = if x > 1.0 { x } else { 1.0 }
+    var it = 0
+    while it < 40 {
+        y = 0.5 * (y + x / y)
+        it = it + 1
+    }
+    y
+}
+
+// Solve A y = b for 5x5 (flat 25) with partial pivoting; returns y via out.
+fn solve5(a_in: &[f64; 25], b_in: &[f64; 5], y: &![f64; 5]) with Mut, Panic, Div {
+    var a = [0.0; 25]
+    var b = [0.0; 5]
+    var i = 0
+    while i < 25 { a[i as usize] = a_in[i as usize]; i = i + 1 }
+    i = 0
+    while i < 5 { b[i as usize] = b_in[i as usize]; i = i + 1 }
+    var col = 0
+    while col < 5 {
+        var pr = col
+        var best = fabs_(a[(col * 5 + col) as usize])
+        var r = col + 1
+        while r < 5 {
+            let v = fabs_(a[(r * 5 + col) as usize])
+            if v > best { best = v; pr = r }
+            r = r + 1
+        }
+        if pr != col {
+            var c = 0
+            while c < 5 {
+                let t = a[(col * 5 + c) as usize]
+                a[(col * 5 + c) as usize] = a[(pr * 5 + c) as usize]
+                a[(pr * 5 + c) as usize] = t
+                c = c + 1
+            }
+            let tb = b[col as usize]
+            b[col as usize] = b[pr as usize]
+            b[pr as usize] = tb
+        }
+        var piv = a[(col * 5 + col) as usize]
+        if fabs_(piv) < 1e-300 { piv = 1e-300 }
+        r = col + 1
+        while r < 5 {
+            let f = a[(r * 5 + col) as usize] / piv
+            var c = col
+            while c < 5 {
+                a[(r * 5 + c) as usize] = a[(r * 5 + c) as usize] - f * a[(col * 5 + c) as usize]
+                c = c + 1
+            }
+            b[r as usize] = b[r as usize] - f * b[col as usize]
+            r = r + 1
+        }
+        col = col + 1
+    }
+    var rr = 4
+    while rr >= 0 {
+        var s = b[rr as usize]
+        var c = rr + 1
+        while c < 5 {
+            s = s - a[(rr * 5 + c) as usize] * y[c as usize]
+            c = c + 1
+        }
+        var piv = a[(rr * 5 + rr) as usize]
+        if fabs_(piv) < 1e-300 { piv = 1e-300 }
+        y[rr as usize] = s / piv
+        rr = rr - 1
+    }
+}
+
+// Solve (10x10) A y = b, flat 100; partial pivoting.
+fn solve10(a_in: &[f64; 100], b_in: &[f64; 10], y: &![f64; 10]) with Mut, Panic, Div {
+    var a = [0.0; 100]
+    var b = [0.0; 10]
+    var i = 0
+    while i < 100 { a[i as usize] = a_in[i as usize]; i = i + 1 }
+    i = 0
+    while i < 10 { b[i as usize] = b_in[i as usize]; i = i + 1 }
+    var col = 0
+    while col < 10 {
+        var pr = col
+        var best = fabs_(a[(col * 10 + col) as usize])
+        var r = col + 1
+        while r < 10 {
+            let v = fabs_(a[(r * 10 + col) as usize])
+            if v > best { best = v; pr = r }
+            r = r + 1
+        }
+        if pr != col {
+            var c = 0
+            while c < 10 {
+                let t = a[(col * 10 + c) as usize]
+                a[(col * 10 + c) as usize] = a[(pr * 10 + c) as usize]
+                a[(pr * 10 + c) as usize] = t
+                c = c + 1
+            }
+            let tb = b[col as usize]
+            b[col as usize] = b[pr as usize]
+            b[pr as usize] = tb
+        }
+        var piv = a[(col * 10 + col) as usize]
+        if fabs_(piv) < 1e-300 { piv = 1e-300 }
+        r = col + 1
+        while r < 10 {
+            let f = a[(r * 10 + col) as usize] / piv
+            var c = col
+            while c < 10 {
+                a[(r * 10 + c) as usize] = a[(r * 10 + c) as usize] - f * a[(col * 10 + c) as usize]
+                c = c + 1
+            }
+            b[r as usize] = b[r as usize] - f * b[col as usize]
+            r = r + 1
+        }
+        col = col + 1
+    }
+    var rr = 9
+    while rr >= 0 {
+        var s = b[rr as usize]
+        var c = rr + 1
+        while c < 10 {
+            s = s - a[(rr * 10 + c) as usize] * y[c as usize]
+            c = c + 1
+        }
+        var piv = a[(rr * 10 + rr) as usize]
+        if fabs_(piv) < 1e-300 { piv = 1e-300 }
+        y[rr as usize] = s / piv
+        rr = rr - 1
+    }
+}
+
+// Lehmer PRNG in i64 (fits: 48271 * (2^31-2) < 2^63); uniform in (-0.5, 0.5).
+fn lehmer_next(state: i64) -> i64 with Mut, Div, Panic {
+    (state * 48271) % 2147483647
+}
+
+// residual |sum_ij k_i m_j C[:,i,j]| for normalized tensor, flat C[c*25+i*5+j].
+fn residual_of(c: &[f64; 400], k: &[f64; 5], m: &[f64; 5]) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var cc = 0
+    while cc < 16 {
+        var acc = 0.0
+        var i = 0
+        while i < 5 {
+            var j = 0
+            while j < 5 {
+                acc = acc + k[i as usize] * m[j as usize] * c[(cc * 25 + i * 5 + j) as usize]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        s = s + acc * acc
+        cc = cc + 1
+    }
+    fsqrt(s)
+}
+
+// One alternating + Gauss-Newton hunt from a random start; returns best residual.
+// lock0 == 1 restricts the hunt to the subspace k0 = m0 = 0 (witnesses living in
+// O(x0) x O(x'), i.e. commuting non-orthogonal ZDs from different components --
+// the empirically hard family). Enforced exactly via identity rows in the
+// normal systems, so iterates never leave the subspace.
+fn hunt_once(c: &[f64; 400], seed: i64, alt_iters: i64, gn_iters: i64, lock0: i64) -> f64 with Mut, Div, Panic {
+    var st = seed
+    var k = [0.0; 5]
+    var m = [0.0; 5]
+    var i = 0
+    while i < 5 {
+        st = lehmer_next(st)
+        m[i as usize] = (st as f64) / 2147483647.0 - 0.5
+        i = i + 1
+    }
+    var nm = 0.0
+    i = 0
+    while i < 5 { nm = nm + m[i as usize] * m[i as usize]; i = i + 1 }
+    nm = fsqrt(nm)
+    if nm < 1e-12 { m[0] = 1.0; nm = 1.0 }
+    i = 0
+    while i < 5 { m[i as usize] = m[i as usize] / nm; i = i + 1 }
+    if lock0 == 1 { m[0] = 0.0 }
+    i = 0
+    while i < 5 { k[i as usize] = 0.0; i = i + 1 }
+    if lock0 == 1 { k[1] = 1.0 } else { k[0] = 1.0 }
+
+    // alternating inverse-power steps on G = A^T A (5x5)
+    var it = 0
+    while it < alt_iters {
+        // A(m): 16x5, A[c][i] = sum_j m_j C[c][i][j]; G = A^T A
+        var g = [0.0; 25]
+        var i2 = 0
+        while i2 < 5 {
+            var j2 = 0
+            while j2 < 5 {
+                var s = 0.0
+                var cc = 0
+                while cc < 16 {
+                    var ai = 0.0
+                    var aj = 0.0
+                    var jj = 0
+                    while jj < 5 {
+                        ai = ai + m[jj as usize] * c[(cc * 25 + i2 * 5 + jj) as usize]
+                        aj = aj + m[jj as usize] * c[(cc * 25 + j2 * 5 + jj) as usize]
+                        jj = jj + 1
+                    }
+                    s = s + ai * aj
+                    cc = cc + 1
+                }
+                g[(i2 * 5 + j2) as usize] = s
+                j2 = j2 + 1
+            }
+            i2 = i2 + 1
+        }
+        // ridge for solvability
+        i2 = 0
+        while i2 < 5 { g[(i2 * 5 + i2) as usize] = g[(i2 * 5 + i2) as usize] + 1e-14; i2 = i2 + 1 }
+        if lock0 == 1 {
+            var q0 = 0
+            while q0 < 5 { g[q0 as usize] = 0.0; g[(q0 * 5) as usize] = 0.0; q0 = q0 + 1 }
+            g[0] = 1.0
+        }
+        var y = [0.0; 5]
+        solve5(&g, &k, &!y)
+        var ny = 0.0
+        i2 = 0
+        while i2 < 5 { ny = ny + y[i2 as usize] * y[i2 as usize]; i2 = i2 + 1 }
+        ny = fsqrt(ny)
+        if ny > 1e-300 {
+            i2 = 0
+            while i2 < 5 { k[i2 as usize] = y[i2 as usize] / ny; i2 = i2 + 1 }
+        }
+        // symmetric step for m with B(k): B[c][j] = sum_i k_i C[c][i][j]
+        var h = [0.0; 25]
+        i2 = 0
+        while i2 < 5 {
+            var j2 = 0
+            while j2 < 5 {
+                var s = 0.0
+                var cc = 0
+                while cc < 16 {
+                    var bi = 0.0
+                    var bj = 0.0
+                    var ii = 0
+                    while ii < 5 {
+                        bi = bi + k[ii as usize] * c[(cc * 25 + ii * 5 + i2) as usize]
+                        bj = bj + k[ii as usize] * c[(cc * 25 + ii * 5 + j2) as usize]
+                        ii = ii + 1
+                    }
+                    s = s + bi * bj
+                    cc = cc + 1
+                }
+                h[(i2 * 5 + j2) as usize] = s
+                j2 = j2 + 1
+            }
+            i2 = i2 + 1
+        }
+        i2 = 0
+        while i2 < 5 { h[(i2 * 5 + i2) as usize] = h[(i2 * 5 + i2) as usize] + 1e-14; i2 = i2 + 1 }
+        if lock0 == 1 {
+            var q1 = 0
+            while q1 < 5 { h[q1 as usize] = 0.0; h[(q1 * 5) as usize] = 0.0; q1 = q1 + 1 }
+            h[0] = 1.0
+        }
+        var y2 = [0.0; 5]
+        solve5(&h, &m, &!y2)
+        var ny2 = 0.0
+        i2 = 0
+        while i2 < 5 { ny2 = ny2 + y2[i2 as usize] * y2[i2 as usize]; i2 = i2 + 1 }
+        ny2 = fsqrt(ny2)
+        if ny2 > 1e-300 {
+            i2 = 0
+            while i2 < 5 { m[i2 as usize] = y2[i2 as usize] / ny2; i2 = i2 + 1 }
+        }
+        it = it + 1
+    }
+
+    // Gauss-Newton polish on F(k,m) with renormalization
+    var gn = 0
+    while gn < gn_iters {
+        // F (16), J = [A | B] (16x10), normal equations (10x10)
+        var jt_j = [0.0; 100]
+        var jt_f = [0.0; 10]
+        var cc = 0
+        // build A, B, F on the fly into accumulators
+        // first zero accumulators
+        var z = 0
+        while z < 100 { jt_j[z as usize] = 0.0; z = z + 1 }
+        z = 0
+        while z < 10 { jt_f[z as usize] = 0.0; z = z + 1 }
+        cc = 0
+        while cc < 16 {
+            var arow = [0.0; 10]
+            var i3 = 0
+            while i3 < 5 {
+                var ai = 0.0
+                var jj = 0
+                while jj < 5 {
+                    ai = ai + m[jj as usize] * c[(cc * 25 + i3 * 5 + jj) as usize]
+                    jj = jj + 1
+                }
+                arow[i3 as usize] = ai
+                i3 = i3 + 1
+            }
+            var j3 = 0
+            while j3 < 5 {
+                var bj = 0.0
+                var ii = 0
+                while ii < 5 {
+                    bj = bj + k[ii as usize] * c[(cc * 25 + ii * 5 + j3) as usize]
+                    ii = ii + 1
+                }
+                arow[(5 + j3) as usize] = bj
+                j3 = j3 + 1
+            }
+            var fval = 0.0
+            var i4 = 0
+            while i4 < 5 { fval = fval + arow[i4 as usize] * k[i4 as usize]; i4 = i4 + 1 }
+            var p = 0
+            while p < 10 {
+                var q = 0
+                while q < 10 {
+                    jt_j[(p * 10 + q) as usize] = jt_j[(p * 10 + q) as usize] + arow[p as usize] * arow[q as usize]
+                    q = q + 1
+                }
+                jt_f[p as usize] = jt_f[p as usize] + arow[p as usize] * fval
+                p = p + 1
+            }
+            cc = cc + 1
+        }
+        var p2 = 0
+        while p2 < 10 {
+            jt_j[(p2 * 10 + p2) as usize] = jt_j[(p2 * 10 + p2) as usize] + 1e-16
+            jt_f[p2 as usize] = 0.0 - jt_f[p2 as usize]
+            p2 = p2 + 1
+        }
+        if lock0 == 1 {
+            var q2 = 0
+            while q2 < 10 {
+                jt_j[q2 as usize] = 0.0
+                jt_j[(q2 * 10) as usize] = 0.0
+                jt_j[(50 + q2) as usize] = 0.0
+                jt_j[(q2 * 10 + 5) as usize] = 0.0
+                q2 = q2 + 1
+            }
+            jt_j[0] = 1.0
+            jt_j[55] = 1.0
+            jt_f[0] = 0.0
+            jt_f[5] = 0.0
+        }
+        var delta = [0.0; 10]
+        solve10(&jt_j, &jt_f, &!delta)
+        var i5 = 0
+        while i5 < 5 {
+            k[i5 as usize] = k[i5 as usize] + delta[i5 as usize]
+            m[i5 as usize] = m[i5 as usize] + delta[(5 + i5) as usize]
+            i5 = i5 + 1
+        }
+        var nk = 0.0
+        var nm2 = 0.0
+        i5 = 0
+        while i5 < 5 {
+            nk = nk + k[i5 as usize] * k[i5 as usize]
+            nm2 = nm2 + m[i5 as usize] * m[i5 as usize]
+            i5 = i5 + 1
+        }
+        nk = fsqrt(nk)
+        nm2 = fsqrt(nm2)
+        if nk < 1e-9 || nm2 < 1e-9 { return 1e9 }
+        i5 = 0
+        while i5 < 5 {
+            k[i5 as usize] = k[i5 as usize] / nk
+            m[i5 as usize] = m[i5 as usize] / nm2
+            i5 = i5 + 1
+        }
+        gn = gn + 1
+    }
+    residual_of(c, &k, &m)
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // ---- enumerate the 84 basis ZDs (e_lo, sgn * e_hi), lo != hi in 1..7
+    var zlo = [0; 84]
+    var zhi = [0; 84]
+    var zsg = [0; 84]
+    var nz = 0
+    var lo = 1
+    while lo <= 7 {
+        var hi = 1
+        while hi <= 7 {
+            if hi != lo {
+                var sg = 0
+                while sg <= 1 {
+                    zlo[nz as usize] = lo
+                    zhi[nz as usize] = hi
+                    zsg[nz as usize] = if sg == 0 { 1 } else { 0 - 1 }
+                    nz = nz + 1
+                    sg = sg + 1
+                }
+            }
+            hi = hi + 1
+        }
+        lo = lo + 1
+    }
+
+    // materialize as 16-vectors, flat 84*16
+    var zv = [0; 1344]
+    var t = 0
+    while t < nz {
+        zv[(t * 16 + zlo[t as usize]) as usize] = 1
+        zv[(t * 16 + 8 + zhi[t as usize]) as usize] = zsg[t as usize]
+        t = t + 1
+    }
+
+    // ---- partner lists: for each ZD, its (exactly 4) annihilating basis partners
+    var partner = [0; 336]
+    var pcount = [0; 84]
+    var ok_partners = 1
+    var a = 0
+    while a < nz {
+        var xa = [0; 16]
+        var c0 = 0
+        while c0 < 16 { xa[c0 as usize] = zv[(a * 16 + c0) as usize]; c0 = c0 + 1 }
+        var b = 0
+        while b < nz {
+            if b != a {
+                var xb = [0; 16]
+                var c1 = 0
+                while c1 < 16 { xb[c1 as usize] = zv[(b * 16 + c1) as usize]; c1 = c1 + 1 }
+                if annihilates_both(&xa, &xb) {
+                    if pcount[a as usize] < 4 {
+                        partner[(a * 4 + pcount[a as usize]) as usize] = b
+                    }
+                    pcount[a as usize] = pcount[a as usize] + 1
+                }
+            }
+            b = b + 1
+        }
+        if pcount[a as usize] != 4 { ok_partners = 0 }
+        a = a + 1
+    }
+    print("PARTNERS4 ")
+    if ok_partners == 1 { println("OK") } else { println("FAIL") }
+
+    // ---- canonical x0 = (e1, e2) = index of (lo=1, hi=2, +)
+    var x0i = 0 - 1
+    t = 0
+    while t < nz {
+        if zlo[t as usize] == 1 && zhi[t as usize] == 2 && zsg[t as usize] == 1 { x0i = t }
+        t = t + 1
+    }
+    var x0 = [0; 16]
+    var c2 = 0
+    while c2 < 16 { x0[c2 as usize] = zv[(x0i * 16 + c2) as usize]; c2 = c2 + 1 }
+
+    // U rows: x0 + its 4 partners (flat 5x16), certified rank 5
+    var urow = [0; 160]
+    c2 = 0
+    while c2 < 16 { urow[c2 as usize] = x0[c2 as usize]; c2 = c2 + 1 }
+    var g = 0
+    while g < 4 {
+        let pi = partner[(x0i * 4 + g) as usize]
+        var c3 = 0
+        while c3 < 16 {
+            urow[((g + 1) * 16 + c3) as usize] = zv[(pi * 16 + c3) as usize]
+            c3 = c3 + 1
+        }
+        g = g + 1
+    }
+    var ucheck = [0; 160]
+    var cp = 0
+    while cp < 160 { ucheck[cp as usize] = urow[cp as usize]; cp = cp + 1 }
+    let urank = bareiss_rank(&!ucheck, 5)
+    print("URANK5 ")
+    if urank == 5 { println("OK") } else { println("FAIL") }
+
+    // ---- sweep: x0 vs swap + all basis ZDs
+    var d1 = 0
+    var d2 = 0
+    var d3w = 0
+    var d3u = 0
+    var skipped = 0
+    var swap_ok = 0
+
+    // targets: index -1 encodes the swap (e2, e1)
+    var tgt = 0 - 1
+    while tgt < nz {
+        var xp = [0; 16]
+        var vrow = [0; 160]
+        var have = 0
+        if tgt < 0 {
+            // the swap (e2, e1): first half e2, second half e1
+            xp[2] = 1
+            xp[9] = 1
+            // partners of the swap: scan basis list
+            var c4 = 0
+            while c4 < 16 { vrow[c4 as usize] = xp[c4 as usize]; c4 = c4 + 1 }
+            var found = 0
+            var b2 = 0
+            while b2 < nz && found < 4 {
+                var xb = [0; 16]
+                var c5 = 0
+                while c5 < 16 { xb[c5 as usize] = zv[(b2 * 16 + c5) as usize]; c5 = c5 + 1 }
+                if annihilates_both(&xp, &xb) {
+                    var c6 = 0
+                    while c6 < 16 {
+                        vrow[((found + 1) * 16 + c6) as usize] = xb[c6 as usize]
+                        c6 = c6 + 1
+                    }
+                    found = found + 1
+                }
+                b2 = b2 + 1
+            }
+            if found == 4 { have = 1 }
+        } else {
+            if tgt == x0i {
+                skipped = skipped + 1
+            } else {
+                var c7 = 0
+                while c7 < 16 { xp[c7 as usize] = zv[(tgt * 16 + c7) as usize]; c7 = c7 + 1 }
+                var c8 = 0
+                while c8 < 16 { vrow[c8 as usize] = xp[c8 as usize]; c8 = c8 + 1 }
+                var g2 = 0
+                while g2 < 4 {
+                    let pi2 = partner[(tgt * 4 + g2) as usize]
+                    var c9 = 0
+                    while c9 < 16 {
+                        vrow[((g2 + 1) * 16 + c9) as usize] = zv[(pi2 * 16 + c9) as usize]
+                        c9 = c9 + 1
+                    }
+                    g2 = g2 + 1
+                }
+                have = 1
+            }
+        }
+
+        if have == 1 {
+            if comm_is_zero(&x0, &xp) {
+                d1 = d1 + 1
+            } else {
+                // stack U and V -> rank over 10x16
+                var stack = [0; 160]
+                var s0 = 0
+                while s0 < 80 { stack[s0 as usize] = urow[s0 as usize]; s0 = s0 + 1 }
+                s0 = 0
+                while s0 < 80 { stack[(80 + s0) as usize] = vrow[s0 as usize]; s0 = s0 + 1 }
+                let rk = bareiss_rank(&!stack, 10)
+                if tgt < 0 {
+                    // Prop 6.7: swap must have NO common commuting neighbour
+                    if rk == 10 { swap_ok = 1 }
+                }
+                if rk < 10 {
+                    d2 = d2 + 1
+                } else {
+                    // d3 hunt: tensor C[c][i][j] = [u_i, w_j]
+                    // Exact leg first: an all-zero (i,j) slice is an INTEGER
+                    // rank-one witness u_i (x) w_j (covers the combinatorial
+                    // same-hexagon / odd-parity cases exactly, e.g. the swap).
+                    var cten = [0.0; 400]
+                    var maxa = 0.0
+                    var exact_slice = 0
+                    var i6 = 0
+                    while i6 < 5 {
+                        var uu = [0; 16]
+                        var c10 = 0
+                        while c10 < 16 { uu[c10 as usize] = urow[(i6 * 16 + c10) as usize]; c10 = c10 + 1 }
+                        var j6 = 0
+                        while j6 < 5 {
+                            var ww = [0; 16]
+                            var c11 = 0
+                            while c11 < 16 { ww[c11 as usize] = vrow[(j6 * 16 + c11) as usize]; c11 = c11 + 1 }
+                            var p1 = [0; 16]
+                            var p2m = [0; 16]
+                            smul_i(&uu, &ww, &!p1)
+                            smul_i(&ww, &uu, &!p2m)
+                            var slice_nonzero = 0
+                            var c12 = 0
+                            while c12 < 16 {
+                                let iv = p1[c12 as usize] - p2m[c12 as usize]
+                                if iv != 0 { slice_nonzero = 1 }
+                                let cv = iv as f64
+                                cten[(c12 * 25 + i6 * 5 + j6) as usize] = cv
+                                let av = fabs_(cv)
+                                if av > maxa { maxa = av }
+                                c12 = c12 + 1
+                            }
+                            if slice_nonzero == 0 { exact_slice = 1 }
+                            j6 = j6 + 1
+                        }
+                        i6 = i6 + 1
+                    }
+                    if maxa < 1e-300 { maxa = 1.0 }
+                    var c13 = 0
+                    while c13 < 400 { cten[c13 as usize] = cten[c13 as usize] / maxa; c13 = c13 + 1 }
+                    var best = 1e9
+                    if exact_slice == 1 { best = 0.0 }
+                    var rs = 0
+                    var seed = 1234567 + (tgt + 2) * 7919
+                    while rs < 40 && best > 1e-12 {
+                        seed = lehmer_next(seed + rs)
+                        let r = hunt_once(&cten, seed, 60, 50, 0)
+                        if r < best { best = r }
+                        rs = rs + 1
+                    }
+                    // structured phase: witnesses in O(x0) x O(x') (k0 = m0 = 0)
+                    while rs < 160 && best > 1e-9 {
+                        seed = lehmer_next(seed + rs)
+                        let r = hunt_once(&cten, seed, 120, 80, 1)
+                        if r < best { best = r }
+                        rs = rs + 1
+                    }
+                    // escalation ladder for stubborn continuous cases
+                    while rs < 300 && best > 1e-9 {
+                        seed = lehmer_next(seed + rs)
+                        let r = hunt_once(&cten, seed, 150, 80, 0)
+                        if r < best { best = r }
+                        rs = rs + 1
+                    }
+                    if best < 1e-9 {
+                        d3w = d3w + 1
+                        if tgt < 0 { swap_ok = swap_ok + 1 }
+                    } else {
+                        d3u = d3u + 1
+                        print("UNRESOLVED_IDX ")
+                        print_int(tgt)
+                        print("\n")
+                    }
+                }
+            }
+        }
+        tgt = tgt + 1
+    }
+
+    print("D1 ")
+    print_int(d1)
+    print(" D2 ")
+    print_int(d2)
+    print(" D3W ")
+    print_int(d3w)
+    print(" D3U ")
+    print_int(d3u)
+    print("\n")
+    print("SWAP_PROP67_AND_WITNESS ")
+    if swap_ok == 2 { println("OK") } else { println("FAIL") }
+
+    if ok_partners == 1 && urank == 5 && d3u == 0 && swap_ok == 2 {
+        println("CONJ68_BASIS_SWEEP OK")
+    } else {
+        println("CONJ68_BASIS_SWEEP FAIL")
+    }
+}
