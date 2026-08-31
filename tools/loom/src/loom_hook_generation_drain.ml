@@ -529,8 +529,16 @@ let count classification members =
 let digest_regular path =
   try sha256_file "binding" path with _ -> String.make 64 '0'
 
+let marker_directory common =
+  match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_DRAIN_STATE_DIR" with
+  | Some value when value <> "" ->
+      if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
+        failf "drain-state-override-requires-test-mode";
+      value
+  | _ -> Filename.concat common "sounio-coord-runtime/native-hook-drain"
+
 let read_marker common name =
-  let path = Filename.concat common ("sounio-coord-runtime/native-hook-drain/" ^ name) in
+  let path = Filename.concat (marker_directory common) name in
   if Sys.file_exists path then Some (read_file "drain-marker" path |> String.trim) else None
 
 let config_bindings =

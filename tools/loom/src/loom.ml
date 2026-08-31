@@ -13581,6 +13581,8 @@ let main () =
       Loom_hook.run (arguments_after_command ())
     else if command = "hook-generation-drain-snapshot" then
       Loom_hook_generation_drain.run (arguments_after_command ())
+    else if command = "hook-generation-guardian" then
+      Loom_hook_generation_guardian.run (arguments_after_command ())
     else if command = "exec-capability" then
       Loom_exec.run (arguments_after_command ())
     else
