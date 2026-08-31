@@ -2681,14 +2681,29 @@ let reap_sovereign_jobs kernel =
       match job.sovereign_state with
       | Sovereign_complete _ | Sovereign_failed _ -> ()
       | Sovereign_running -> (
-          if pidfd_alive job.sovereign_worker_pidfd then
-            let actual_start =
-              try process_start job.sovereign_worker_pid
-              with _ -> ""
-            in
-            if actual_start <> job.sovereign_worker_start then
-              failf "sovereign-worker-identity-changed";
-          match Unix.waitpid [ WNOHANG ] job.sovereign_worker_pid with
+          let identity_error =
+            if pidfd_alive job.sovereign_worker_pidfd then
+              let actual_start =
+                try Some (process_start job.sovereign_worker_pid)
+                with _ -> None
+              in
+              match actual_start with
+              | Some value when value = job.sovereign_worker_start -> None
+              | Some _ -> Some "sovereign-worker-identity-changed"
+              | None -> Some "sovereign-worker-identity-unreadable"
+            else None
+          in
+          match identity_error with
+          | Some reason ->
+              (try Unix.kill job.sovereign_worker_pid Sys.sigkill with _ -> ());
+              (try ignore (Unix.waitpid [] job.sovereign_worker_pid) with _ -> ());
+              (try Unix.close job.sovereign_worker_pidfd with _ -> ());
+              job.sovereign_state <- Sovereign_failed reason;
+              ignore
+                (append_event kernel.journal "SOVEREIGN_EXEC_REFUSED"
+                   (String.concat ":"
+                      [ job.sovereign_job_id; sha256 reason; "255" ]))
+          | None -> (match Unix.waitpid [ WNOHANG ] job.sovereign_worker_pid with
           | 0, _ -> ()
           | _, status ->
               (try Unix.close job.sovereign_worker_pidfd with _ -> ());
@@ -2742,7 +2757,7 @@ let reap_sovereign_jobs kernel =
               ignore
                 (append_event kernel.journal "SOVEREIGN_EXEC_REFUSED"
                    (String.concat ":"
-                      [ job.sovereign_job_id; sha256 reason; "255" ]))))
+                      [ job.sovereign_job_id; sha256 reason; "255" ])))))
     kernel.sovereign_jobs
 
 let handle_request kernel client line =
