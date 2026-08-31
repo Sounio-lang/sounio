@@ -1524,6 +1524,56 @@ else
     mkdir -p "$(dirname "$sovereign_target")"
     install -m 0444 "$sovereign_source" "$sovereign_target"
   done
+  sovereign_frozen_head="$(
+    manifest_value "$loom_sovereign_product_evidence" source_head
+  )"
+  [[ "$sovereign_frozen_head" =~ ^[0-9a-f]{40}$ ]] &&
+    git -C "$SOURCE_ROOT" cat-file -e "$sovereign_frozen_head^{commit}" ||
+    die "Loom sovereign execution product historical source commit is unavailable"
+  for sovereign_pair in \
+    contract_path:contract_sha256 \
+    semantic_manifest_path:semantic_manifest_sha256 \
+    material_manifest_path:material_manifest_sha256 \
+    sounio_source_path:sounio_source_sha256 \
+    sounio_entrypoint_path:sounio_entrypoint_sha256 \
+    loom_source_path:loom_source_sha256 \
+    exec_source_path:exec_source_sha256 \
+    hook_source_path:hook_source_sha256 \
+    sovereign_source_path:sovereign_source_sha256 \
+    provider_fixture_path:provider_fixture_sha256 \
+    c_stub_path:c_stub_sha256 \
+    dune_path:dune_sha256 \
+    loom_build_path:loom_build_sha256 \
+    installer_path:installer_sha256 \
+    coord_runtime_path:coord_runtime_sha256 \
+    product_gate_path:product_gate_sha256 \
+    freeze_gate_path:freeze_gate_sha256; do
+    sovereign_path_key="${sovereign_pair%%:*}"
+    sovereign_hash_key="${sovereign_pair#*:}"
+    sovereign_relative="$(
+      manifest_value "$loom_sovereign_product_freeze" "$sovereign_path_key"
+    )"
+    sovereign_expected="$(
+      manifest_value "$loom_sovereign_product_freeze" "$sovereign_hash_key"
+    )"
+    [[ -n "$sovereign_relative" && "$sovereign_relative" != /* &&
+      "$sovereign_relative" != *'..'* &&
+      "$sovereign_expected" =~ ^[0-9a-f]{64}$ ]] ||
+      die "Loom sovereign execution product has an unsafe frozen source entry"
+    sovereign_target="$stage/policy/sovereign-execution/$sovereign_relative"
+    sovereign_actual="$(sha256sum "$sovereign_target" | awk '{print $1}')"
+    if [[ "$sovereign_actual" != "$sovereign_expected" ]]; then
+      sovereign_temporary="$sovereign_target.frozen.$$.$RANDOM"
+      git -C "$SOURCE_ROOT" cat-file blob \
+        "$sovereign_frozen_head:$sovereign_relative" >"$sovereign_temporary" ||
+        die "Loom sovereign execution frozen source is unavailable: $sovereign_relative"
+      sovereign_actual="$(sha256sum "$sovereign_temporary" | awk '{print $1}')"
+      [[ "$sovereign_actual" == "$sovereign_expected" ]] ||
+        die "Loom sovereign execution historical source hash diverged: $sovereign_relative"
+      chmod 0444 "$sovereign_temporary"
+      mv "$sovereign_temporary" "$sovereign_target"
+    fi
+  done
   sovereign_change_capsule_sources=(
     "$installer_source"
     "$loom_change_build_source" "$loom_material_change_build_source"
