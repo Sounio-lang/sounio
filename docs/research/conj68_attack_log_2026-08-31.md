@@ -771,3 +771,46 @@ Sounio (o que fez a ghost law) sobre o ideal determinantal, OU (b) instalar
 Singular/msolve e usar degrevlex+FGLM. O ALVO exato: a forma quadrática Q da
 cônica em coords de frame, e a prova de que disc/assinatura é indefinida uniforme
 para d≥3 — expressa em n(a),n(a′),⟨z,z′⟩ e ghost-law. Ainda o núcleo aberto.
+
+## Rodada 20: O GRAU ÍMPAR — possível PROVA via Singular (rota exata do usuário)
+
+Instalei Singular+msolve (sudo apt). Tensor comutador verificado EXATO (2e-8 num
+witness real do census; casa com [u,w] direto). O u-locus de witness =
+{[u]∈ℙ⁴ : rank M(u)≤4} = ideal dos MENORES 5×5 da matriz comutador M(u) (16×5→15
+linhas não-nulas, entradas lineares em u). primdecGTZ sobre ℚ (char 0, exato).
+
+**DESCOBERTA (8/8 configs):** o u-locus é uma curva REDUZIDA de **degree 7 (ÍMPAR)**,
+sempre com uma componente de grau ÍMPAR:
+- Genéricas (6 seeds: 13370001,99998887,60651729,50000917,22222223,33333331):
+  componentes (deg) = 2,2,**3** = 2 cônicas + 1 **CÚBICA**. Total 7.
+- "Planas" (12345678 [a=2e₃−2e₄], 11111119): 1,2,2,2 = 1 **RETA** + 3 cônicas. Total 7.
+Mais: sempre 1 par de pontos COMPLEXOS conjugados (dim1, k3²+2k3k4+2k4², disc<0) +
+origem — irrelevantes (sem pontos reais / triviais).
+
+**MECANISMO DE EXISTÊNCIA (candidato a prova):**
+1. Witness real ⟺ ponto real do determinantal D={rank M(u)≤4}, curva de degree 7.
+2. Um hiperplano real genérico corta D em 7 pontos; conjugação complexa os pareia
+   ⟹ #real ímpar ≥ 1 ⟹ **D tem ponto real** (u real).
+3. u real ⟹ M(u) real de rank≤4 ⟹ ker≠0 sobre ℝ ⟹ **w real** ⟹ WITNESS REAL.
+4. ⟹ diam Γ_C^Z(𝕊)=3. QED (módulo rigor abaixo).
+
+**RESSUSCITA "c₇ ímpar" do R14 no framework CORRETO:** a paridade que força
+existência NÃO é a classe de Euler (c₇, morta em R18 porque vivia em B∖Z), mas o
+**GRAU da curva de witness** (um número c₃/Thom-Porteous de interseção, config-
+independente por ser enumerativo/topológico). Degree 7 ímpar ⟹ ponto real. A
+intuição de paridade estava certa; o objeto era o grau, não a obstrução.
+
+**Rigor restante (a fechar):**
+(a) degree = 7 UNIFORME: ou (i) Thom-Porteous/c₃ do determinantal de rank-efetivo
+    7 (7×5) — cálculo de Chern, config-independente; ou (ii) constância do grau em
+    família plana conexa de pares ZD (medido 7 em 8 pontos). Nota: rank≤4 de 15×5
+    genérico teria codim 11; a codim-3 observada vem da estrutura rank-7 dos §§2-5,
+    então o Porteous é no fibrado EFETIVO E₇, não no 15×5 cru.
+(b) D reduzida (para o argumento de seção-hiperplana): primdecGTZ deu componentes
+    PRIMAS (reduzidas) em todas testadas; falta o geral.
+(c) d≥3: a existência de witness vale p/ todo par; d≥3 é só o enunciado do que o
+    witness significa (caminho de comprimento 3).
+
+Dados exatos: docs/research/data/conj68_ulocus_decomp_13370001.txt (equações das
+componentes, incl. a cúbica ternária 16k2³+...), conj68_ulocus_degrees_8configs.txt.
+Ferramenta: Singular (minor(M,5) + primdecGTZ). Frames exatos via census Sounio.
