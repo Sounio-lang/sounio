@@ -130,10 +130,11 @@ anti-garbling like QIF, and enforce it in the type like neither.
    lattice and its transfer functions, and the proved-disjoint / correlation-aware escape
    valves (§5).
 3. **A soundness result** — no well-typed program contains a first-order anti-garbling —
-   mechanized end to end in Lean for the NS-extended core calculus: the covariance-exactness
-   criterion in general form, the soundness of the source-set abstraction, NS type safety,
-   and the theorem itself — along every evaluation of a well-typed program each Knowledge
-   value reports its true first-order variance (§6).
+   mechanized in Lean for the NS-extended *core calculus* — the covariance-exactness criterion
+   in general form, the soundness of the source-set abstraction, NS type safety, and the
+   theorem itself (along every evaluation of a well-typed program each Knowledge value reports
+   its true first-order variance) — with the correspondence between that calculus and the
+   production checker's E230 rule established by test and sabotage gates, not by proof (§6.4).
 4. **An implementation and evaluation** in the self-hosted Sounio compiler: running
    prototypes and a kernel-checked model that reproduce the defect, establish that the
    rejection is *caused* by source-set propagation (a sabotage-controlled experiment), and a
@@ -718,6 +719,13 @@ operator reached during evaluation. ∎
 | **Partition lemma** — a decomposition invariant to its shared sources has `Cov ≤ 0`; the independence-assuming add is then conservative (`x − x` end: `Cov = −Var a`) | ✅ mechanized — `partition_iff`, `inner_nonpos_of_partition`, `naive_add_conservative_of_partition`, `inner_eq_neg_var_of_full_partition`; with `naive_add_understates_iff` (anti-garbling ⟺ `Cov > 0`) |
 | Sabotage witness in the kernel: `x+x` steps to an inexact value and is untypable for **every** `N`; `measure s + measure s` and the shared-variable `let x = measure s in x + x` untypable at source level; `x + opaque(y)` rejected purely by the ⊤ clause (with `x+y` admitted); `x+y` stays exact | ✅ kernel-checked — `x_plus_x_understates`, `x_plus_x_untypable`, `measure_plus_measure_untypable`, `let_x_plus_x_untypable`, `x_plus_top_untypable`, `x_plus_y_exact` |
 
+**Scope of the mechanization, stated precisely.** What is kernel-checked is the *core calculus*
+of §5 — its type safety, its soundness invariant, and Theorem 6.4 over it. What is *not*
+kernel-checked is the correspondence between that calculus and the production checker (a
+manual argument backed by the four controls and the sabotage gate of §8.2), the interprocedural
+extension (§5.6, not implemented), second-order terms, and the modelling axioms listed below. We
+do not claim the deployed checker is verified; we claim the rule it implements is.
+
 Every ingredient of the theorem now carries a machine proof (`formal/lean4/EpistemicEffectsNS.lean`,
 Lean 4.33.1, Mathlib-free, no `sorry`; axiom footprint ⊆ {`propext`, `Quot.sound`,
 `Classical.choice`}; gate: `scripts/ci/ns_metatheory_lean_gate.sh`). The calculus makes the
@@ -860,7 +868,9 @@ We ask four questions:
 
 **What is measured.** The E230 rule is now **wired into the checker at the real
 `kadd`/`kmul` sites and built from source** (Madaros v0.80.0), so RQ1–RQ3 are answered on
-the wired compiler (below), backed by the kernel-checked soundness model
+the wired compiler (below). Every measurement in this section is of the **intraprocedural** checker: the
+call-summary extension of §5.6 is not implemented, so the false-positive counts of §8.3 are lower
+bounds and every program crossing a call boundary is outside the measured scope, backed by the kernel-checked soundness model
 (`SounioAntiGarblingModel.lean`) and the analysis prototypes. RQ4 is answered in two halves:
 the decision-relevant clinical WARN and the exact anti-garbling contraction on a controlled
 correlated-sum instance are real today, while the end-to-end *two-compartment* patient-flip
@@ -1177,6 +1187,13 @@ one place.
   operator takes a known `ρ`. When the correlation is *unknown* (not zero, not one, not a
   given value), sound propagation needs Fréchet bounds, and the correlation assumption should
   itself become a tag on the type. We do not model this; it is a stated gap.
+
+- **Which shared-source sums real PK models perform is not measured (§8.4).** The flip rate is
+  reported for two sums — an interval sum (ρ = 1, understates) and a phase partition (Cov < 0,
+  over-states) — on one synthetic cohort (deterministic LCG, seed 20260831, released with the
+  artifact). How often deployed PBPK code performs the former versus the latter, and how the rates
+  change once the correlation-aware operators the discipline encourages are adopted, is future
+  work; the paper's claim is the mechanism and its two signs, not a population prevalence.
 
 - **Evaluation is one library, one wired compiler, and a 95-test suite (§8).** RQ1 quantifies one shipping library;
   the class is general to GUM-style propagation but measured on one instance. RQ2's causality

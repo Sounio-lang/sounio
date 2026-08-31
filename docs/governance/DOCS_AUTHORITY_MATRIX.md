@@ -1185,10 +1185,12 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.onn-benchmark-analysis | historical | docs/research/ONN_BENCHMARK_ANALYSIS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ontology-elplus-complete-universe-open-question-2026-08-03 | historical | docs/research/ontology_elplus_complete_universe_open_question_2026-08-03.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.paper-a-antigarbling-skeleton-2026-08-25 | historical | docs/research/paper_A_antigarbling_skeleton_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-artifact.readme | historical | docs/research/paper_A_artifact/README.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.paper-a-merged-2026-08-25 | historical | docs/research/paper_A_MERGED_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.paper-a-ns-metatheory-mechanized-2026-08-30 | historical | docs/research/paper_A_ns_metatheory_mechanized_2026-08-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.paper-a-ns-metatheory-xai-review-2026-08-30 | historical | docs/research/paper_A_ns_metatheory_xai_review_2026-08-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.paper-a-priorart-gate-signoff-2026-08-25 | historical | docs/research/paper_A_priorart_gate_signoff_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.paper-a-prose-review-grok-2026-08-31 | historical | docs/research/paper_A_prose_review_grok_2026-08-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.paper-a-readme | historical | docs/research/paper_A_README.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.paper-a-rq4-mc-adequacy-2026-08-31 | historical | docs/research/paper_A_rq4_mc_adequacy_2026-08-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.paper-a-rq4-two-compartment-flip-2026-08-31 | historical | docs/research/paper_A_rq4_two_compartment_flip_2026-08-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

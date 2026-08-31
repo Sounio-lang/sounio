@@ -1,0 +1,650 @@
+\documentclass[sigplan,review,anonymous,10pt]{acmart}
+\usepackage{listings,booktabs,url}
+\lstset{basicstyle=\ttfamily\footnotesize,breaklines=true,columns=fullflexible,keepspaces=true}
+\settopmatter{printfolios=true}
+\title{Manufacturing Precision Is a Type Error}
+\subtitle{Compile-Time Anti-Garbling for Uncertainty-Typed Languages}
+\author{Anonymous Author(s)}
+\begin{document}
+\begin{quote}
+\textbf{Closed draft, 2026-08-26.} Single-file merge of the per-section drafts (\path{paper_A_*_draft_2026-08-25.md}) in submission order, updated after the E230 gate was \textbf{wired into the production checker, built from source, and verified} (Madaros v0.80.0; integration commit \texttt{4ac63da51f} on base \texttt{06e85a6ada}, branch \path{fable/ns-antigarbling-integration-20260825}, xai+zai math-reviewed). §8's evaluation now reports measured wired-compiler results; only interprocedural parameter projection (§10) remains marked as such. \textbf{Update 2026-08-31:} RQ4's two-compartment flip rate is measured (§8.4; 34.2 \% of true WARNs silenced in the $\rho$ = 1 interval sum, 0 \% in the phase decomposition where the covariance is negative). \textbf{Update 2026-08-30:} the NS-extended metatheory of §6 is now fully mechanized (\path{formal/lean4/EpistemicEffectsNS.lean}) --- Lemma 2, NS progress/preservation, exactness preservation and Theorem 6.4 itself carry kernel proofs; §6.4's table and §6.3 are updated accordingly. Target: PLDI/OOPSLA. Grounding index and prior-art citations: \path{paper_A_README.md}; prior-art sign-off: \path{paper_A_priorart_gate_signoff_2026-08-25.md}. Notation is unified: \texttt{m}=mean, \texttt{v}=variance, \texttt{Cov}/\texttt{$\langle\cdot$,$\cdot\rangle$}=covariance/inner product, \texttt{Knowledge$\langle$T,N$\rangle$}=epistemic type with noise-set \texttt{N}.
+\end{quote}
+
+\begin{abstract}
+
+Libraries that propagate measurement uncertainty --- \path{Measurements.jl}, \texttt{Uncertain$\langle$T$\rangle$}, GUM implementations --- assume the operands of every arithmetic operation are independent. When they are not, the propagated uncertainty is silently \emph{understated}: the program fabricates precision it has not earned. We show this is not a corner case but a shipping defect. In one production uncertainty library, \texttt{mul(x, x)} returns \texttt{2x$^{2}\cdot$var} while \texttt{square(x)} returns the correct \texttt{4x$^{2}\cdot$var} --- the same mathematical operation, two formulas, with nothing routing \texttt{x$\cdot$x} to the sound one; the correlated \texttt{add}/\texttt{sub} pair exhibits a matching directional asymmetry (add understates, sub stays conservative). We recast the problem through the Blackwell / data-processing refinement order already standard in quantitative information flow: a sound uncertainty operation is a \emph{garbling} (information-losing); understating variance is an \emph{anti-garbling} (information-creating), which no correct program may do. We give a type system for an uncertainty-typed language that carries the \textbf{noise-symbol source-set} of each value in its type --- reusing the source-identity idea of affine arithmetic, but in the type rather than in an external analyzer --- and turns the independence assumption into a \textbf{checked precondition}: an independence-assuming operator over operands with non-disjoint (or unknown) source-sets is rejected unless a proved-disjoint certificate holds. We mechanize the soundness theorem in Lean for the core calculus (kernel-checked, Mathlib-free): the naive scalar operation is sound iff the operand covariance is zero, the tracked source-set over-approximates the true support, and along every evaluation of a well-typed program each uncertainty value reports its true first-order variance. We implement the discipline in the Sounio compiler and show it eliminates the defect class while accepting correlated-aware code, evaluated on a physiologically-based pharmacokinetic model where every inter-compartmental sum shares measured rate constants.
+
+\end{abstract}
+\maketitle
+
+\section{Introduction}
+
+A measurement is never a number; it is a number and a doubt. Scientific and engineering software that takes measurements seriously has, over the last decade, learned to keep the doubt attached: \emph{uncertainty-typed} languages and libraries --- \texttt{Uncertain$\langle$T$\rangle$}, \path{Measurements.jl}, GUM tooling --- give a quantity a type like \texttt{Knowledge$\langle$f64$\rangle$} that carries its variance, and propagate that variance automatically through arithmetic, so that a result arrives already annotated with how much it can be trusted. The promise is that uncertainty becomes a first-class, compiler-tracked property rather than a comment in a lab notebook.
+
+That promise rests on a hypothesis the type never states and the compiler never checks: that the operands of every operation are \textbf{statistically independent}. The propagation laws these systems implement --- \texttt{Var(X+Y) = Var(X) + Var(Y)}, \texttt{Var(XY) $\approx$ Y$^{2}$Var(X) + X$^{2}$Var(Y)} --- are the independence special cases of the general laws, which carry an additional covariance term \texttt{±2Cov(X,Y)}. When the operands are correlated, the covariance term is real and the shipped formula omits it. For addition and multiplication the omission runs in one direction: the reported variance is \emph{smaller} than the truth. The program claims more precision than its inputs justify.
+
+This failure is uniquely resistant to discovery, for a reason that has nothing to do with how carefully the code is written. An understated variance produces a \textbf{tighter error bar} --- a more confident, more precise-looking answer. It is the one kind of wrong result that never looks wrong. A test asserting the value is correct passes; a test asserting the uncertainty is not too large passes; only a test written by someone who already knows the correct, larger variance can fail --- that is, only someone who has already found the bug. The defect hides in exactly the blind spot testing cannot cover, because the symptom is indistinguishable from success.
+
+\textbf{It is not hypothetical.} In a production uncertainty library we examined, the operation \texttt{x $\cdot$ x} has two implementations that disagree. Multiplying a value by itself through the general product operator returns a variance of \texttt{2m$^{2}$v}; squaring the same value through the dedicated square operator returns \texttt{4m$^{2}$v} --- twice as much, and correct. The two are the same mathematical operation; both ship; nothing in the library routes \texttt{x $\cdot$ x} to the sound one. The discrepancy is precisely the covariance term the product operator drops, which for \texttt{x $\cdot$ x} is not negligible but equal to the entire result. A programmer who writes \texttt{x * x} gets, silently, half the uncertainty they are owed. The same omission makes correlated addition understate and --- revealingly --- makes correlated \emph{subtraction} overstate, an asymmetry we show is the fingerprint of the underlying error rather than random sloppiness.
+
+\textbf{Our thesis is that manufacturing precision is a type error, and it is the same error as manufacturing information.} Quantitative information flow has a mature theory of when a computation is allowed to change what is known: the Blackwell / data-processing order, in which an admissible transformation is a \emph{garbling} --- it may lose information but never create it. Understating variance is the forbidden move, an \textbf{anti-garbling}: it reports less uncertainty, hence more information, than the operands contain. Read this way, the library's \texttt{x + x} is not merely inaccurate; it violates a conservation law. And conservation laws are what type systems are good at enforcing.
+
+We enforce it. The reason the library cannot condition on \texttt{Cov(X,Y)} is that its scalar representation \texttt{(mean, variance)} cannot express which measurements a value depends on. We restore that information to the type. Borrowing the \emph{noise-symbol} representation of affine arithmetic --- where a value is an affine form over independent per-source symbols and two values are correlated exactly when they share a symbol --- we carry each value's \textbf{source-set} in its type, \texttt{Knowledge$\langle$T, N$\rangle$}. An independence-assuming operator is then well-typed only when its operands' source-sets are provably disjoint; otherwise it is a compile-time error. The programmer discharges it either with a proof that the operands are uncorrelated or by switching to an operator that takes the correlation explicitly. The unsound path does not type-check.
+
+\textbf{What we claim, and what we do not.} Neither half of the mechanism is new on its own, and we are explicit about this up front so the contribution is not mistaken for either piece. Tracking noise-symbol identity to preserve correlations is the defining idea of affine arithmetic (Comba \& Stolfi 1993) and of the Fluctuat static analyzer (Goubault \& Putot) --- but there it lives in an external analyzer that \emph{computes an enclosure} and rejects nothing. The Blackwell/garbling soundness order is standard in quantitative information flow (McIver, Morgan \& Smith; Alvim et al.) --- but there it orders confidentiality channels and measures leakage. Our contribution is their \textbf{intersection}, which neither field occupies: the source-set lifted \emph{into the type} of an uncertainty-typed language, and the independence assumption of uncertainty arithmetic made a \emph{checked precondition} whose violation is a type error with a discharging certificate. We track source identity like affine arithmetic, forbid anti-garbling like QIF, and enforce it in the type like neither.
+
+\textbf{Contributions.}
+
+\begin{enumerate}
+  \item \textbf{A characterization of the defect class} --- independence assumed and unchecked in uncertainty propagation --- grounded in a shipping library, together with its framing as a Blackwell anti-garbling, including the add/sub directional signature that the framing predicts and the source confirms (§2, §4).
+  \item \textbf{A type discipline} that carries the noise-symbol source-set in the type and makes the independence assumption a checked precondition: the E230 rejection rule, the noise-set lattice and its transfer functions, and the proved-disjoint / correlation-aware escape valves (§5).
+  \item \textbf{A soundness result} --- no well-typed program contains a first-order anti-garbling --- mechanized in Lean for the NS-extended \emph{core calculus} --- the covariance-exactness criterion in general form, the soundness of the source-set abstraction, NS type safety, and the theorem itself (along every evaluation of a well-typed program each Knowledge value reports its true first-order variance) --- with the correspondence between that calculus and the production checker's E230 rule established by test and sabotage gates, not by proof (§6.4).
+  \item \textbf{An implementation and evaluation} in the self-hosted Sounio compiler: running prototypes and a kernel-checked model that reproduce the defect, establish that the rejection is \emph{caused} by source-set propagation (a sabotage-controlled experiment), and a clinical case study --- vancomycin therapeutic-drug-monitoring --- where understatement silences the safety warning the system exists to raise (§7, §8).
+\end{enumerate}
+
+The guarantee is deliberately narrow --- first-order, conservative, in the variance channel --- and §10 states its boundaries plainly. Within that scope it eliminates exactly the defect class of §2: the answer that looks too precise to be true becomes the one the compiler refuses to print.
+
+\section{The defect class, by example}
+
+The uncertainty library we study is not careless. Every arithmetic operation in \path{knowledge.sio} is annotated with the exact GUM propagation formula it implements, and each formula is \emph{correct} --- under one assumption stated nowhere in the type and checked nowhere in the code: that the operands are \textbf{statistically independent}. The library ships the independence special case of each GUM formula as if it were the general law. Where the assumption fails, the propagated variance is not merely imprecise; it is biased in a specific, dangerous direction --- \emph{downward}. The program reports more precision than its inputs justify.
+
+We make this concrete with four operations from a single file, then show why the bias survives testing, and close with the realistic case that motivates the whole paper.
+
+\subsection{The same operation, two variances}
+
+Consider squaring an epistemic value. The library offers two ways to compute \texttt{x $\cdot$ x}:
+
+\begin{lstlisting}
+// GUM delta method: Var(XY) ≈ Y^2*Var(X) + X^2*Var(Y)          knowledge.sio:110
+pub fn ep_mul(a: &Epistemic, b: &Epistemic) -> Epistemic {
+    let new_var = b.val * b.val * a.variance + a.val * a.val * b.variance   // :112
+    ...
+}
+
+// Var(X^2) ≈ 4X^2*Var(X)                                        knowledge.sio:150
+pub fn ep_square(a: &Epistemic) -> Epistemic {
+    Epistemic {
+        val: a.val * a.val,
+        variance: 4.0 * a.val * a.val * a.variance,             // :154
+        ...
+    }
+}
+\end{lstlisting}
+
+Evaluate both on the same \texttt{x = (m, v, $\cdot$)}:
+
+\begin{table}[htbp]\centering\small
+\begin{tabular}{p{0.32\linewidth}p{0.32\linewidth}p{0.32\linewidth}}
+\toprule
+Expression & Formula applied & Variance \\
+\midrule
+\texttt{ep\_mul(\&x, \&x)} & \texttt{b$^{2}\cdot$Var(a) + a$^{2}\cdot$Var(b)} with \texttt{a = b = x} & \texttt{m$^{2}$v + m$^{2}$v = 2m$^{2}$v} \\
+\texttt{ep\_square(\&x)} & \texttt{4$\cdot$a$^{2}\cdot$Var(a)} & \texttt{4m$^{2}$v} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\texttt{ep\_square} is right: for \texttt{Y = X$^{2}$}, the delta method gives \path{Var(Y) ≈ (dY/dX)²·Var(X) = (2X)²·Var(X) = 4m²v}. \texttt{ep\_mul(\&x, \&x)} returns \textbf{half} of that. The discrepancy is not rounding --- it is the entire covariance term. The general delta-method formula for a product is
+
+\begin{lstlisting}
+Var(XY) ≈ Y^2*Var(X) + X^2*Var(Y) + 2XY*Cov(X, Y).
+\end{lstlisting}
+
+\texttt{ep\_mul} drops the last term. When \texttt{X} and \texttt{Y} are independent, \texttt{Cov = 0} and the drop is exact. When \texttt{Y} \emph{is} \texttt{X}, \texttt{Cov(X, X) = Var(X) = v}, the missing term is \texttt{2$\cdot$m$\cdot$m$\cdot$v = 2m$^{2}$v}, and the two formulas differ by exactly that amount: \texttt{4m$^{2}$v − 2m$^{2}$v = 2m$^{2}$v}. The library computes both, exposes both, and \textbf{nothing routes \texttt{x $\cdot$ x} to the sound one}: \texttt{ep\_mul(\&x, \&x)} is legal, well-typed, and understates the variance of a squared quantity by a factor of two.
+
+\subsection{The asymmetry the frame predicts}
+
+The same omission runs through addition and subtraction, and it produces a \emph{directional} signature that is itself evidence the diagnosis is right.
+
+\begin{lstlisting}
+// GUM: Var(X+Y) = Var(X) + Var(Y)                            knowledge.sio (ep_add)
+pub fn ep_add(a: &Epistemic, b: &Epistemic) -> Epistemic {
+    ... variance: a.variance + b.variance, ...                 // :96
+}
+
+// GUM: Var(X-Y) = Var(X) + Var(Y)                            knowledge.sio:101
+pub fn ep_sub(a: &Epistemic, b: &Epistemic) -> Epistemic {
+    ... variance: a.variance + b.variance, ...                 // :105
+}
+\end{lstlisting}
+
+Both add the operand variances. The general laws are \texttt{Var(X±Y) = Var(X) + Var(Y) ± 2$\cdot$Cov(X, Y)}: addition \emph{adds} twice the covariance, subtraction \emph{subtracts} it. Evaluate each on maximally-correlated operands (\texttt{Y = X}, \texttt{Cov = v}):
+
+\begin{table}[htbp]\centering\small
+\begin{tabular}{p{0.19\linewidth}p{0.19\linewidth}p{0.19\linewidth}p{0.19\linewidth}p{0.19\linewidth}}
+\toprule
+Expression & Library & True (\texttt{$\rho$ = 1}) & Error & Direction \\
+\midrule
+\texttt{ep\_add(\&x, \&x)} = \texttt{2x} & \texttt{2v} & \texttt{Var(2X) = 4v} & \texttt{−2v} & \textbf{understates} --- unsound \\
+\texttt{ep\_sub(\&x, \&x)} = \texttt{0} & \texttt{2v} & \texttt{Var(0) = 0} & \texttt{+2v} & overstates --- merely conservative \\
+\texttt{ep\_mul(\&x, \&x)} = \texttt{x$^{2}$} & \texttt{2m$^{2}$v} & \texttt{4m$^{2}$v} & \texttt{−2m$^{2}$v} & \textbf{understates} --- unsound \\
+\texttt{ep\_square(\&x)} = \texttt{x$^{2}$} & \texttt{4m$^{2}$v} & \texttt{4m$^{2}$v} & \texttt{0} & sound \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The asymmetry is the tell. Correlated addition and multiplication \textbf{understate} --- they manufacture precision, the failure that matters. Correlated subtraction \textbf{overstates} --- it is wrong, but wrong in the safe direction, reporting \emph{more} uncertainty than the truth. A library that were simply buggy would err in both directions at random. This one errs in exactly the direction predicted by the sign of the dropped covariance term: \texttt{+2Cov} for add, \texttt{−2Cov} for sub. §4 names this the anti-garbling signature --- an operation may only \emph{lose} information (overstate uncertainty), never \emph{create} it (understate) --- and the add/sub split is that criterion read off the source.
+
+\begin{quote}
+A note on the \path{* 99 / 100}, \path{* 98 / 100} confidence multipliers (\texttt{:97}, \texttt{:116}, \ldots{}): these decay a separate integer \texttt{confidence} field and are orthogonal to the variance defect. They are also heuristic rather than derived (a limitation we return to in §10), but they neither cause nor mask the understatement analyzed here.
+\end{quote}
+
+\subsection{Why tests do not catch it}
+
+An understated variance is invisible to ordinary testing for a structural reason: \textbf{the wrong answer is the more attractive one.} A tighter error bar reads as a better result. Nothing about \texttt{ep\_add(\&x, \&x)} returning \texttt{2v} instead of \texttt{4v} looks like a failure --- the value \texttt{2x} is exact, the confidence field is populated, the number is simply \emph{more precise}. A regression test asserting "the answer is within tolerance" passes; a test asserting "the uncertainty is not too large" passes; only a test that already knows the \emph{correct} larger variance --- i.e. a test written by someone who has already spotted the bug --- fails. The library's own test suite (\path{knowledge.sio:290–310}) checks \texttt{ep\_add}, \texttt{ep\_sub}, and \texttt{ep\_mul} on \textbf{independent} operands, where every formula is exact, and so certifies nothing about the correlated case.
+
+The failure is therefore not a coding slip that better testing would have caught. It is a \textbf{missing precondition}: the operations are sound on a domain (independent operands) that the type system neither records nor enforces, and are silently applied outside it. This is precisely the shape a type discipline can address and testing cannot --- the defect is a property of \emph{which values may flow into which operation}, not of any single execution.
+
+\subsection{The instance that matters: shared provenance in a PBPK model}
+
+The correlated case is not exotic. It is the \emph{normal} case whenever two quantities are computed from a common measurement --- which, in a physiologically-based pharmacokinetic (PBPK) model, is every pair of compartment states, because they all descend from the same measured clearance and volume parameters.
+
+Consider a two-compartment model reporting total drug exposure as the sum of central and peripheral AUC:
+
+\begin{lstlisting}
+auc_total = ep_add(&auc_central, &auc_peripheral)
+\end{lstlisting}
+
+Both \texttt{auc\_central} and \texttt{auc\_peripheral} are derived, through the model's ODE solution, from the \emph{same} measured elimination rate constant \texttt{k}. Their errors are strongly positively correlated: an overestimate of \texttt{k} pushes both AUCs the same way. The true variance of the sum includes \texttt{+2$\cdot$Cov(auc\_central, auc\_peripheral) > 0}; \texttt{ep\_add} discards it. Every inter-compartmental sum in the model therefore reports a variance smaller than the truth, and the understatement compounds with each additional compartment.
+
+The clinical consequence is the opposite of academic. The dissertation's therapeutic-drug -monitoring result (vancomycin, rapamycin) issues a \texttt{WARN} when the \emph{upper} credible bound on exposure crosses into toxicity even though the point estimate reads safe. A variance that is understated at every summation \textbf{shrinks that credible bound}, and the \texttt{WARN} that should fire --- the entire safety value of propagating uncertainty --- does not. The defect does not just weaken a number in a table; it silences the alarm the system exists to raise. §8 quantifies this on the real model; here it fixes the stakes: manufacturing precision in an uncertainty library is not a cosmetic inaccuracy but a safety failure, and the operation that commits it type-checks today.
+
+\subsection{Verbatim-source appendix (for the artifact / referee)}
+
+\begin{table}[htbp]\centering\small
+\begin{tabular}{p{0.32\linewidth}p{0.32\linewidth}p{0.32\linewidth}}
+\toprule
+Item & Location & Content \\
+\midrule
+\texttt{ep\_add} variance & \path{stdlib/epistemic/knowledge.sio:96} & \path{a.variance + b.variance} \\
+\texttt{ep\_sub} variance & \texttt{:105} & \path{a.variance + b.variance} \\
+\texttt{ep\_mul} variance & \texttt{:112} & \path{b.val*b.val*a.variance + a.val*a.val*b.variance} \\
+\texttt{ep\_square} variance & \texttt{:154} & \path{4.0 * a.val * a.val * a.variance} \\
+GUM comments (intent) & \texttt{:101, :110, :150} & correct formulas, independence implicit \\
+tests use independent operands only & \texttt{:290--310} & correlated case untested \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Numeric verification} (for \texttt{x = (m, v, $\cdot$)}): \path{ep_add(&x,&x).variance = v+v = 2v} vs \texttt{Var(2X)=4v}; \path{ep_mul(&x,&x).variance = m²v+m²v = 2m²v} vs \path{ep_square(&x).variance = 4m²v}; understatement gaps \texttt{2v} and \texttt{2m$^{2}$v} equal \texttt{2$\cdot$Cov(X,X)} and \texttt{2$\cdot$m$^{2}\cdot$Cov(X,X)} respectively --- the exact dropped covariance terms.
+
+\section{Preliminaries}
+
+We fix four notions the rest of the paper uses. None is new here; §9 places them in the literature.
+
+\textbf{Uncertainty types (the host).} We work in a language where a quantity carries its uncertainty in the type: an \emph{epistemic value} has type \texttt{Knowledge$\langle$T$\rangle$} and, at runtime, a payload of type \texttt{T} together with metadata --- for our purposes a \emph{variance} \texttt{v = Var(X) $\geq$ 0} (and a confidence field, orthogonal to soundness, which we ignore). Arithmetic on \texttt{Knowledge$\langle$T$\rangle$} propagates the variance automatically. This is the setting of \texttt{Uncertain$\langle$T$\rangle$}, \path{Measurements.jl}, and GUM tooling (§9.3).
+
+\textbf{GUM propagation and its hidden hypothesis.} The propagation laws these systems implement are the ISO GUM first-order (delta-method) rules: \texttt{Var(X+Y) = Var(X) + Var(Y) + 2Cov(X,Y)}, \texttt{Var(XY) $\approx$ Y$^{2}$Var(X) + X$^{2}$Var(Y) + 2XY$\cdot$Cov(X,Y)}, and so on. Every implementation we study ships the \textbf{independence special case} --- the same formulas with the covariance term set to zero --- as the operator. The special case is exact iff \texttt{Cov(X,Y) = 0}; applied to correlated operands it understates. Making that hypothesis explicit and checked is the whole paper.
+
+\textbf{Affine forms / noise symbols.} To reason about \emph{which} uncertainty a value carries we use the representation of affine arithmetic (§9.1): a value is an affine form \texttt{x = x$_{0}$ + $\Sigma_{i}$ x$_{i}\varepsilon_{i}$} over independent unit-variance \emph{noise symbols} \texttt{$\varepsilon_{i}$}, one per independent measurement source. Then \texttt{Var(x) = $\Sigma_{i}$ x$_{i}^{2}$}, \texttt{Cov(x,y) = $\Sigma_{i}$ x$_{i}$y$_{i}$} (the inner product), and two values are correlated exactly when they share a symbol with nonzero coefficient. The \textbf{support} of \texttt{x} is the set of symbols on which it has a nonzero coefficient; \textbf{disjoint support $\Rightarrow$ zero covariance} (the converse fails --- §4.4). The type system tracks an over-approximation of each value's support (§5).
+
+\textbf{The Blackwell / data-processing order.} An uncertain quantity is an \emph{experiment} (a channel from the true value to an observation). Blackwell's order compares experiments by informativeness: \texttt{B ⪯ A} iff \texttt{B} is obtainable from \texttt{A} by post-processing through a stochastic channel --- a \textbf{garbling}, which can only lose information (the data-processing inequality). We call an operation that reports \emph{less} uncertainty than its operands justify an \textbf{anti-garbling}; it manufactures information and is forbidden. §4 makes this the soundness criterion, in the variance channel; §9.2 gives its home in quantitative information flow.
+
+\section{Anti-garbling as the soundness criterion}
+
+§2 showed a family of operations that understate variance on correlated operands. To turn "understate" into a checkable property we need a criterion that says, of an uncertainty operation, whether it is \emph{allowed to produce the answer it produces}. That criterion is not application-specific; it is the information-monotonicity law already standard in quantitative information flow, read in the variance channel.
+
+\subsection{Sound operations lose information; anti-garbling creates it}
+
+An uncertain quantity is, operationally, an \emph{experiment}: a channel from the unknown true value to an observation. Blackwell's informativeness order compares two such experiments --- \texttt{A} is \emph{more informative} than \texttt{B} (written \texttt{B ⪯ A}) iff \texttt{B} can be obtained from \texttt{A} by post-processing through a stochastic channel, a \textbf{garbling} (Blackwell 1953). Garbling can only discard information; the data-processing inequality is exactly this monotonicity. The quantitative-information-flow community adopts the same order as its refinement order and its soundness backbone: a program transformation is admissible iff it \emph{refines} (is a garbling of) the original --- McIver, Morgan, Smith et al. (POST 2014); Alvim et al., \emph{The Science of Quantitative Information Flow} (2020).
+
+We instantiate that discipline for numeric uncertainty propagation:
+
+\begin{quote}
+\textbf{Soundness criterion (anti-garbling).} An uncertainty operation is \emph{sound} iff its output experiment is a garbling of the true joint experiment on its operands --- i.e. it never reports \emph{more} information (less uncertainty) than the operands contain. An operation that reports a variance smaller than the truth is an \textbf{anti-garbling}: it manufactures information, and no correct program may contain one.
+\end{quote}
+
+This reframes §2 precisely. \texttt{ep\_sub(\&x,\&x)} overstating variance is a \emph{garbling} --- it throws information away, which the criterion permits (it is merely conservative). \texttt{ep\_add(\&x,\&x)} and \texttt{ep\_mul(\&x,\&x)} understating variance are \emph{anti-garblings} --- they are forbidden. The add/sub asymmetry of §2.2 is the anti-garbling criterion read directly off the sign of the dropped covariance term.
+
+\emph{Scope of this paper.} The full Blackwell order is defined on distributions, and the general "reassociation-is-a-garbling" theorem in that setting is developed separately (companion work on non-associative composition). Paper A needs only the \textbf{second-moment shadow} of the criterion --- the variance channel --- because the defect class of §2 lives entirely there: every operation in question propagates \emph{variance}, and the unsoundness is a variance understatement. We therefore state and enforce the criterion on variance, and prove exactly that fragment.
+
+\subsection{The scalar operators as an independence claim}
+
+Each \texttt{ep\_*} operation implements the GUM propagation law under an unstated hypothesis. For addition, the general law is \texttt{Var(X+Y) = Var(X) + Var(Y) + 2$\cdot$Cov(X,Y)}; \texttt{ep\_add} computes \texttt{Var(X) + Var(Y)}, which equals the truth \textbf{iff \texttt{Cov(X,Y) = 0}}. The scalar representation \texttt{(m, v)} cannot express \texttt{Cov}, so the operator cannot condition on it: it asserts independence unconditionally. The defect of §2 is not a wrong formula --- each formula is the correct \emph{independent-case} law --- but an \textbf{unguarded precondition}: the operator is sound on the sub-domain \texttt{Cov = 0} and is applied on all of it.
+
+Making the criterion checkable therefore reduces to making \texttt{Cov = 0} a property the type can carry and the compiler can verify. §4.3 pins down exactly what must be verified; §5 carries it in the type.
+
+\subsection{The core lemma (kernel-checked)}
+
+We model an uncertain value as an \textbf{affine form} over independent unit-variance noise symbols \texttt{$\varepsilon_{1}$, $\varepsilon_{2}$, \ldots{}} --- \texttt{x = $\Sigma_{i}$ c$_{i}\varepsilon_{i}$} --- the representation of affine arithmetic (Comba--Stolfi 1993). The coefficient vector \emph{is} the value's source identity: two values share a source iff they share a nonzero coefficient on the same \texttt{$\varepsilon_{i}$}. In this model the true variance is \texttt{$\|$c$\|^{2}$}, covariance is the inner product \texttt{$\langle$a,b$\rangle$ = $\Sigma_{i}$ a$_{i}$b$_{i}$}, and addition is componentwise (correlation handled by construction). The scalar \texttt{ep\_add} variance is \texttt{$\|$a$\|^{2}$ + $\|$b$\|^{2}$}, which forgets shared coefficients.
+
+\textbf{Lemma 1 (understatement = twice covariance).} For affine forms \texttt{a, b},
+
+\begin{lstlisting}
+trueAddVar(a,b) − naiveAddVar(a,b) = 2*<a,b>,
+\end{lstlisting}
+
+hence \texttt{naiveAddVar(a,b) = trueAddVar(a,b) $\Leftrightarrow\langle$a,b$\rangle$ = 0}.
+
+\emph{Proof.} \texttt{trueAddVar(a,b) = $\|$a+b$\|^{2}$ = $\|$a$\|^{2}$ + $\|$b$\|^{2}$ + 2$\langle$a,b$\rangle$} and \texttt{naiveAddVar(a,b) = $\|$a$\|^{2}$ + $\|$b$\|^{2}$}; subtract. The general identity is a polynomial identity (\texttt{ring}); the Mathlib-free artifact discharges representative integer witnesses by \texttt{decide}. ∎
+
+This is checked, not asserted. \path{SounioAntiGarblingModel.lean} (Lean 4.33.1, \texttt{\#print axioms} = none, \texttt{sorry = 0}) proves, on witnesses \texttt{x = (1,0)}, \texttt{y = (0,1)}, \texttt{z = (2,1)}:
+
+\begin{itemize}
+  \item \texttt{anti\_garbling\_x\_plus\_x} --- \texttt{naiveAddVar x x < trueAddVar x x} (2 < 4): the §2 \texttt{x+x} understatement, kernel-checked.
+  \item \texttt{anti\_garbling\_gap\_x}, \texttt{anti\_garbling\_gap\_z} --- the gap is exactly \texttt{2$\cdot\langle\cdot$,$\cdot\rangle$} at two coefficient scales.
+  \item \texttt{sound\_under\_disjoint} --- \texttt{naiveAddVar x y = trueAddVar x y}: the scalar add is \emph{exact} when the sources do not overlap.
+  \item \texttt{gap\_zero\_iff\_disjoint\_witness} --- the gap vanishes iff \texttt{$\langle$x,y$\rangle$ = 0} on these witnesses.
+\end{itemize}
+
+\textbf{Corollary (the checkable condition).} \texttt{ep\_add} (and, mutatis mutandis, \texttt{ep\_mul}) is sound on operands \texttt{a, b} iff \texttt{$\langle$a,b$\rangle$ = 0} --- zero covariance. The type system's job is to certify this condition, or reject the operation.
+
+\subsection{What the type can actually certify --- conservative, not exact}
+
+Lemma 1 makes zero \emph{covariance} the exact soundness condition, and covariance is a numeric quantity the type does not know. What the type \emph{can} decide is a \textbf{structural} proxy: whether the operands' noise-symbol \textbf{supports are disjoint} (share no \texttt{$\varepsilon_{i}$}). The two are not the same, and honesty about the gap is load-bearing:
+
+\begin{quote}
+\textbf{Disjoint support $\Rightarrow$ zero covariance, but not conversely.} If \texttt{a} and \texttt{b} share no coefficient then \texttt{$\langle$a,b$\rangle$ = $\Sigma_{i}$ a$_{i}$b$_{i}$ = 0}. The converse fails: \texttt{a = (1,1)}, \texttt{b = (1,−1)} have overlapping support yet \texttt{$\langle$a,b$\rangle$ = 0}. (This corrects an earlier "sound $\Leftrightarrow$ disjoint" phrasing; the necessary-and-sufficient condition is zero covariance, and disjoint support is sufficient only --- codex review, 2026-08-22.)
+\end{quote}
+
+Consequently the type check is \textbf{conservatively sound}: it admits an independence-assuming operator only when it can prove disjoint support, which \emph{implies} \texttt{$\langle$a,b$\rangle$ = 0}, so every admitted operation is genuinely sound (Lemma 1). It may \emph{reject} some sound operations --- the coincidentally-orthogonal-but-overlapping case --- which §5.5 handles with an explicit escape valve rather than by unsound admission. This is the standard soundness/completeness trade of a static discipline, and we take the sound side: a rejected sound program is a nuisance; an admitted anti-garbling is the bug we exist to prevent.
+
+\section{The type system}
+
+The criterion of §4 asks for one fact at every independence-assuming operator: are the operand source-supports provably disjoint? We answer it by carrying the source-support in the type and checking disjointness at the operator. The machinery is a set-valued dataflow --- the source-identity idea of affine arithmetic (Comba--Stolfi; Goubault--Putot's Fluctuat), but lifted \textbf{into the type} and used to \textbf{reject} rather than to enclose.
+
+\subsection{Types carry a noise-symbol source-set}
+
+An epistemic type is \texttt{Knowledge$\langle$T, N$\rangle$}, where \texttt{N} is a \textbf{noise-set} drawn from the lattice
+
+\begin{lstlisting}
+L = (𝒫(S) U {TOP},  <: ),   {}  <:  every finite set  <:  TOP,   join = U (TOP absorbing),
+\end{lstlisting}
+
+\texttt{S} the set of measurement sources. The implementation (\path{ns_contract.sio}) represents \texttt{N} as a 3-state handle: \texttt{−1 = $\top$} (unknown), \texttt{0 = $\emptyset$} (deterministic / no measured source), \texttt{>0} an interned nonempty set. The one rule that makes the lattice sound for our purpose:
+
+\begin{quote}
+\textbf{\texttt{$\top$} is never disjoint from anything.} An unknown source-set is treated as potentially sharing every source --- the conservative top, not a convenient "assume independent" default (\path{ns_contract.sio: ns_disjoint}, \texttt{ns\_union}).
+\end{quote}
+
+\subsection{Formation}
+
+\begin{lstlisting}
+-------------------------------------  (Measure, s fresh)
+G |- measure(v, sigma) : Knowledge<T, {s}>
+
+--------------------------------  (Exact)
+G |- certain(v) : Knowledge<T, {}>
+\end{lstlisting}
+
+A measurement seeds a fresh singleton source; an exact constant carries the empty set. (\texttt{ns\_measure} seeds \texttt{bit(id)}; the sabotage knob of §8.2 replaces this with \texttt{$\emptyset$}.)
+
+\subsection{Transfer}
+
+Copy inherits; independence-assuming binary operators union the operand sets, with \texttt{$\top$} absorbing:
+
+\begin{lstlisting}
+G |- a : Knowledge<T, N>
+-----------------------------  (Copy / Ident)
+G |- copy(a) : Knowledge<T, N>
+\end{lstlisting}
+
+Union is the join of \texttt{L}: \texttt{ns\_union(a,b) = if a=$\top$ ∨ b=$\top$ then $\top$ else a $\cup$ b}. This is a monotone transfer over the value graph; iterated to a least fixpoint it is the standard Kildall dataflow --- realised in \path{ns_dataflow.sio} as \texttt{nsg\_propagate}, whose lattice is \texttt{set-of-sources} where the in-tree escape analyzer's is \texttt{boolean}. Same graph, same fixpoint engine, different lattice: the source-identity analysis is the escape analysis with \texttt{$\cup$} for reachability.
+
+\subsection{The checked precondition (the heart)}
+
+An independence-assuming operator is well-typed \textbf{only} if the operand supports are provably disjoint:
+
+\begin{lstlisting}
+G |- a : Knowledge<T, N_a>    G |- b : Knowledge<T, N_b>    disjoint(N_a, N_b)
+--------------------------------------------------------------------------  (Add-Indep)
+G |- ep_add(a, b) : Knowledge<T, N_a U N_b>
+\end{lstlisting}
+
+where \texttt{disjoint(N$_{a}$, N\_b) := N$_{a}\neq\top$ ∧ N\_b $\neq\top$ ∧ N$_{a}\cap$ N\_b = $\emptyset$}. \texttt{ep\_mul} has the identical side condition (§4's corollary). When the premise \texttt{disjoint(N$_{a}$, N\_b)} fails --- overlapping supports, or either operand \texttt{$\top$} --- the operator is \textbf{rejected}:
+
+\begin{quote}
+\textbf{E230 --- anti-garbling: independence-assuming operation over non-disjoint / unknown noise-symbol sets.}
+\end{quote}
+
+\path{ns_contract.sio: add_flagged} is exactly this predicate (\texttt{if ns\_disjoint(a,b) return false else return true}), validated by the acceptance controls: \texttt{x+x} flagged (shared source), \texttt{x+y} accepted (disjoint), \texttt{x + unknown} flagged (\texttt{$\top$} conservative), and \texttt{ident(x) + x} still flagged (identity survives a copy). E230 is deliberately a distinct diagnostic from \texttt{E222} (R-ORIGIN provenance) so the two rules stay causally separable (§8.2, §5.7).
+
+\subsection{The escape valve --- a proved-disjoint certificate or an explicit covariance}
+
+Because the check is conservative (§4.4), some sound programs are rejected. Two admissions recover them without weakening soundness:
+
+\begin{enumerate}
+  \item \textbf{A proved-disjoint certificate.} Where the programmer (or an oracle pass) can establish \texttt{$\langle$a,b$\rangle$ = 0} for overlapping-but-orthogonal operands, a certificate discharges the premise of (Add-Indep) directly --- the type admits the operation on the strength of the proof, not the support test.
+  \item \textbf{An explicit correlation-aware operator.} For genuinely correlated operands, the sound path is not to suppress the check but to \emph{take the covariance as an argument}: \texttt{gum\_s1\_add\_correlated(a, b, $\rho$)} (in-tree, \path{gum_supplement1.sio}, currently orphaned) propagates \texttt{Var(a) + Var(b) + 2$\rho\surd$(Var(a)Var(b))}. Its typing rule unions the supports with \textbf{no} disjointness premise, because it does not assume independence:
+\end{enumerate}
+
+\begin{lstlisting}
+G |- a : Knowledge<T, N_a>    G |- b : Knowledge<T, N_b>
+--------------------------------------------------------  (Add-Corr)
+G |- add_correlated(a, b, rho) : Knowledge<T, N_a U N_b>
+\end{lstlisting}
+
+The type discipline thus does not forbid correlated arithmetic; it forbids doing it with the operator that \emph{assumes} independence. The programmer's choice of operator becomes a typed claim about correlation, checked against the tracked supports.
+
+\subsection{Interprocedural summaries --- the load-bearing dependency}
+
+The transfer of §5.3 is intraprocedural. Across a call, the source-set of a returned value depends on the callee's body and on which caller-supports flow into which parameters. Two options, and only one is sound: dropping to \texttt{$\top$} at every call boundary (sound but so conservative it rejects almost everything), or \textbf{parametric call-summaries} that substitute caller supports into a callee's abstract source-set. We take the latter; it is the same summary machinery the compiler's memory-reclamation analysis independently requires (the escape analyzer is intraprocedural today for the same reason), so the engineering cost is shared, not doubled. This is the principal implementation dependency and we flag it as such rather than understate it: without interprocedural summaries the conservative default must be \textbf{assume-sharing} --- the exact opposite of the library's assume-independence --- which is sound but noisy, and the summaries are what make the discipline usable.
+
+\subsection{NS and provenance are siblings, not the same rule}
+
+The source-set discipline (NS) sits beside the language's provenance discipline (R-ORIGIN, which asks \emph{measured vs derived}), and the two must not be conflated:
+
+\begin{table}[htbp]\centering\small
+\begin{tabular}{p{0.32\linewidth}p{0.32\linewidth}p{0.32\linewidth}}
+\toprule
+Aspect & R-ORIGIN (provenance) & NS (noise-symbol) \\
+\midrule
+Question & \emph{where} did the value come from? & \emph{which sources'} uncertainty does it carry? \\
+Lattice & scalar origin-kind & source-\textbf{set} (powerset, \texttt{$\cup$}) \\
+Violation & laundering: computed value claims \emph{measured} & anti-garbling: independence assumed between correlated operands \\
+Diagnostic & E222 & \textbf{E230} \\
+Soundness anchor & no-laundering witnesses & \texttt{SounioAntiGarblingModel} (Lemma 1) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+They share the dataflow substrate (§5.3) and the \texttt{TypeEntry} tag mechanism (a trailing \texttt{noise\_set\_id} field beside \texttt{provenance\_id}), but they are distinct abstract domains with distinct diagnostics, kept causally separable precisely so the evaluation of §8.2 can show that disabling NS removes E230 refusals while leaving E222 refusals intact.
+
+\section{Metatheory}
+
+We establish that a well-typed program contains no first-order anti-garbling: at every independence-assuming operator, the operands' true covariance is zero, so the propagated variance is exact rather than understated (§4, Lemma 1). The argument has three parts --- a mechanized type-safety substrate (§6.2), a sound source-set abstraction (§6.3), and a local soundness criterion already proven (§4.3) --- composed in §6.4. Two boundaries are carried as explicit hypotheses of the theorem rather than hidden (§6.5).
+
+\subsection{What type safety alone does \emph{not} give}
+
+It is worth being precise about the gap the discipline must close, because a conventional type-safety result does \textbf{not} close it. Our core calculus already enjoys full type safety (§6.2), and that is not enough: a program can be perfectly well-typed, never get stuck, preserve its types under reduction, and \emph{still} report an understated variance. Type safety guarantees the metadata stays \emph{valid} (a non-negative variance, a bounded confidence); it says nothing about whether that variance is the \emph{correct} one. Anti-garbling is a soundness property one level above type safety, and it needs the source-set the base calculus does not carry. §6.2 makes this concrete by showing that the mechanized dynamic semantics \emph{is} the defective one.
+
+\subsection{The mechanized substrate: type safety, and why it is not soundness}
+
+\path{EpistemicEffectsV2.lean} formalizes a core epistemic-effects calculus: a Knowledge type \texttt{tknow T}, a \texttt{measure}/\texttt{kraw} form carrying scalar GUM metadata \texttt{KMeta = \{gumVar, conf\}}, an effect row with sub-effecting (\texttt{$\subseteq$ₑ}), and the arithmetic operators \texttt{kadd}, \texttt{kmul} typed at \texttt{tknow treal} (\texttt{HasTy}, \texttt{:59--89}). The full type-safety pair is mechanized, Lean 4.33.1:
+
+\begin{itemize}
+  \item \textbf{Progress} --- \texttt{progress'} (\texttt{:223}), \texttt{effect\_progress} (\texttt{:301}): a closed well-typed term is a value or steps.
+  \item \textbf{Preservation} --- \texttt{preservation'} (\texttt{:559}), \texttt{preservation} (\texttt{:626}): typing and effect rows are preserved under \texttt{Step}, with the usual supporting infrastructure (weakening \texttt{:420}, closed substitution \texttt{:504}, canonical forms \texttt{:199--223}).
+  \item \textbf{Metadata validity} --- \texttt{gAddMeta\_valid} (\texttt{:324}), \texttt{gMulMeta\_valid} (\texttt{:342}): the metadata combinators preserve \path{kvalid m := 0 ≤ m.gumVar ∧ 0 ≤ m.conf ∧ m.conf ≤ 1000}.
+\end{itemize}
+
+Here is the sharp point. The operational combinator the calculus reduces \texttt{kadd} through is
+
+\begin{lstlisting}
+def gAddMeta (ma mb : KMeta) : KMeta :=
+  { gumVar := ma.gumVar + mb.gumVar, conf := if ma.conf <= mb.conf then ma.conf else mb.conf }
+                                                                       -- EpistemicEffectsV2.lean:92
+def gMulMeta (x : Int) (ma : KMeta) (y : Int) (mb : KMeta) : KMeta :=
+  { gumVar := y * y * ma.gumVar + x * x * mb.gumVar, ... }              -- :94
+\end{lstlisting}
+
+\texttt{gAddMeta} is \texttt{ep\_add} and \texttt{gMulMeta} is \texttt{ep\_mul} --- \textbf{the very operators of §2}, \texttt{var\_a + var\_b} and \texttt{y$^{2}\cdot$var\_a + x$^{2}\cdot$var\_b}, with no covariance term. So the mechanized semantics faithfully implements the defect, and \texttt{gAddMeta\_valid} proves that the defective add \emph{preserves validity}: \texttt{0 $\leq$ gumVar} is maintained even as the variance is understated. This is the formal statement of §6.1 --- \textbf{validity is preserved; soundness is not} --- and it is exactly why a source-set discipline, not a stronger type-safety proof, is required. The substrate is sound \emph{as a type system} and silent \emph{as an uncertainty accountant}.
+
+\subsection{The source-set analysis is a sound abstract interpretation}
+
+The NS extension of §5 adds a source-set \texttt{N} to the Knowledge type and a disjointness premise to \texttt{t\_kadd}/\texttt{t\_kmul}. Its metatheoretic contribution is one abstraction-soundness fact:
+
+\begin{quote}
+\textbf{Lemma 2 (support over-approximation).} For every value, the tracked noise-set \texttt{N} over-approximates the value's true noise-symbol support: every source that actually contributes to the value's uncertainty is a member of \texttt{N} (with \texttt{$\top$} the trivially-safe over-approximation).
+\end{quote}
+
+\emph{Argument.} The transfer functions of §5.3 are the abstract counterparts of the concrete dependency: \texttt{measure} introduces a fresh symbol (the true support of a new measurement); \texttt{copy} preserves support; \texttt{kadd}/\texttt{kmul} produce a value whose true support is contained in the union of the operands' supports, which the abstract transfer \texttt{$\cup$} computes exactly, and \texttt{$\top$} absorbs the unknown case. Each transfer is monotone on the lattice \texttt{L = (𝒫(S) $\cup$ \{$\top$\}, $\sqsubseteq$)} (§5.1), so the analysis has a least fixpoint (Kildall), and monotonicity plus the local containment at each node give the global over-approximation by the standard abstract-interpretation soundness schema. The engine is realized in \path{ns_dataflow.sio} (\texttt{nsg\_propagate}, the monotone fixpoint) with the escape analyzer's proof obligations, lattice boolean$\rightarrow$set.
+
+Over-approximation is what makes the conservative choices of §5 \emph{sound}, not merely cautious: because \texttt{N} can only \emph{over}-state the true support, \texttt{$\top$}-is-never-disjoint and the assume-sharing interprocedural default (§5.6) can never mistake a correlated pair for a disjoint one. They can only err toward rejecting a sound program --- the completeness side, not the soundness side.
+
+\emph{Mechanization.} Lemma 2 is now a kernel fact rather than a schema: in \path{EpistemicEffectsNS.lean} every runtime Knowledge value \texttt{kraw v m a} carries its true affine form \texttt{a}, its typing rule demands \texttt{Covers N a} (every source of \texttt{a} is a member of \texttt{N}, \texttt{$\top$} trivially), each transfer preserves it (\texttt{covers\_single} for \texttt{measure}, \texttt{covers\_union} for \texttt{kadd}, \texttt{covers\_scale}+\texttt{covers\_union} for the first-order form of \texttt{kmul}), and \texttt{support\_over\_approx} reads the over-approximation off any typing derivation --- so preservation (§6.4) carries it to every value reached during evaluation.
+
+\subsection{The soundness theorem}
+
+\begin{quote}
+\textbf{Theorem (no first-order anti-garbling).} Let \texttt{e} be a program well-typed under the NS-extended system (§5). Then at every independence-assuming operator (\texttt{kadd}/\texttt{kmul}) reached during evaluation of \texttt{e}, the operands have zero covariance, and the propagated first-order variance equals the true first-order variance. Equivalently: no reachable \texttt{kadd}/\texttt{kmul} in a well-typed \texttt{e} is an anti-garbling.
+\end{quote}
+
+\emph{Proof (composition).} Take any independence-assuming operator in \texttt{e}. It type-checks, so by (Add-Indep)/(Mul-Indep) its operand source-sets are provably disjoint: \texttt{N$_{a}\cap$ N\_b = $\emptyset$}, both \texttt{$\neq\top$}. By Lemma 2 the true supports are contained in \texttt{N$_{a}$, N\_b}, hence the true supports are disjoint, hence the true covariance \texttt{$\langle$a,b$\rangle$ = 0} (disjoint support $\Rightarrow$ zero covariance, §4.4). By Lemma 1 (\texttt{SounioAntiGarblingModel}, kernel-checked) zero covariance makes the scalar \texttt{gAddMeta}/\texttt{gMulMeta} variance \emph{exact} --- no understatement. Preservation (\path{EpistemicEffectsV2.preservation}) carries the typing, hence the disjointness premise, along each reduction step, so the guarantee holds not just at the source term but at every operator reached during evaluation. ∎
+
+\textbf{Mechanization status, stated honestly:}
+
+\begin{table}[htbp]\centering\small
+\begin{tabular}{p{0.47\linewidth}p{0.47\linewidth}}
+\toprule
+Ingredient & Status \\
+\midrule
+Base calculus progress + preservation & \checkmark{} mechanized --- \path{EpistemicEffectsV2.lean} (Lean 4.33.1) \\
+\texttt{gAddMeta}/\texttt{gMulMeta} = the §2 operators; validity preserved & \checkmark{} mechanized --- \texttt{gAddMeta\_valid}, \texttt{gMulMeta\_valid} \\
+Local criterion: disjoint support $\Rightarrow$ zero cov $\Rightarrow$ exact (Lemma 1) & \checkmark{} kernel-checked, axiom-free --- \path{SounioAntiGarblingModel.lean} \\
+Analysis soundness: \texttt{N} over-approximates true support (Lemma 2) & \checkmark{} mechanized --- \path{EpistemicEffectsNS.lean}: \texttt{Covers N a} is a typing invariant of runtime values (\texttt{t\_kraw}), preserved by every transfer (\texttt{covers\_single}, \texttt{covers\_union}, \texttt{covers\_scale}), extracted by \texttt{support\_over\_approx}; \texttt{covers\_coeff} gives the nonzero-coefficient form \\
+NS-extended preservation (disjointness premise preserved under Step) & \checkmark{} mechanized --- \path{EpistemicEffectsNS.preservation} (and \texttt{progress}) for the \texttt{N}-annotated \texttt{tknow} \\
+Lemma 1 in \textbf{general form} (all affine forms, not Int witnesses; Mathlib-free) & \checkmark{} mechanized --- \texttt{trueVar\_append}, \texttt{trueVar\_mul} (delta method), \texttt{inner\_disjoint} \\
+Exactness preservation: reported variance = true first-order variance along every step & \checkmark{} mechanized --- \texttt{exact\_preservation}: under the premise the defective \texttt{gAddMeta}/\texttt{gMulMeta} are exact \\
+\textbf{Theorem 6.4} --- no reached independence-assuming operator has correlated operands & \checkmark{} mechanized --- \texttt{typed\_agfree}, \texttt{soundness\_star} (along \texttt{$\Rightarrow$*}) \\
+\textbf{Partition lemma} --- a decomposition invariant to its shared sources has \texttt{Cov $\leq$ 0}; the independence-assuming add is then conservative (\texttt{x − x} end: \texttt{Cov = −Var a}) & \checkmark{} mechanized --- \texttt{partition\_iff}, \texttt{inner\_nonpos\_of\_partition}, \texttt{naive\_add\_conservative\_of\_partition}, \texttt{inner\_eq\_neg\_var\_of\_full\_partition}; with \texttt{naive\_add\_understates\_iff} (anti-garbling $\Leftrightarrow$ \texttt{Cov > 0}) \\
+Sabotage witness in the kernel: \texttt{x+x} steps to an inexact value and is untypable for \textbf{every} \texttt{N}; \texttt{measure s + measure s} and the shared-variable \texttt{let x = measure s in x + x} untypable at source level; \texttt{x + opaque(y)} rejected purely by the $\top$ clause (with \texttt{x+y} admitted); \texttt{x+y} stays exact & \checkmark{} kernel-checked --- \texttt{x\_plus\_x\_understates}, \texttt{x\_plus\_x\_untypable}, \texttt{measure\_plus\_measure\_untypable}, \texttt{let\_x\_plus\_x\_untypable}, \texttt{x\_plus\_top\_untypable}, \texttt{x\_plus\_y\_exact} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Scope of the mechanization, stated precisely.} What is kernel-checked is the \emph{core calculus} of §5 --- its type safety, its soundness invariant, and Theorem 6.4 over it. What is \emph{not} kernel-checked is the correspondence between that calculus and the production checker (a manual argument backed by the four controls and the sabotage gate of §8.2), the interprocedural extension (§5.6, not implemented), second-order terms, and the modelling axioms listed below. We do not claim the deployed checker is verified; we claim the rule it implements is.
+
+Every ingredient of the theorem now carries a machine proof (\path{formal/lean4/EpistemicEffectsNS.lean}, Lean 4.33.1, Mathlib-free, no \texttt{sorry}; axiom footprint $\subseteq$ \{\texttt{propext}, \path{Quot.sound}, \path{Classical.choice}\}; gate: \path{scripts/ci/ns_metatheory_lean_gate.sh}). The calculus makes the ground truth explicit: a runtime Knowledge value carries its true first-order affine form beside the scalar metadata it \emph{reports}, the operational semantics is deliberately the defective one (\texttt{gAddMeta} = \texttt{ep\_add}, no covariance term), and soundness is the separate invariant \texttt{Exact} --- "every value reports its true variance" --- which type safety alone does not give (§6.1) and NS typing does. What is \textbf{not} mechanized, and stated as such: (i) the correspondence between this core calculus and the production checker's E230 rule --- the wire is source-verified and sabotage-gated (§8.2) but not proven equivalent to \texttt{HasTy}; (ii) interprocedural summaries (§5.6), absent from the calculus; (iii) second-order terms (§6.5); (iv) the noise-symbol axiom itself --- distinct \texttt{measure} labels are distinct physical sources, \emph{assumed, not proved}: the type system tracks sources, it does not discover them, and with dishonest labels the calculus under-approximates covariance; (v) the semantics is algebraic --- \texttt{$\langle$a,a$\rangle$} is the variance under independent unit-variance symbols by definition; distributional adequacy is not proved but \textbf{measured} on the RQ4 cohort: a 5 000 $\times$ 1 000-draw Monte Carlo gives Var\_MC/Var\_T = 0.999 (0.857--1.158) and the same WARN decision on 99.4 \% of patients (\path{paper_A_rq4_mc_adequacy_2026-08-31.md}); (vi) \texttt{treal} is modelled by \texttt{Int} --- ring algebra over integer "reals", exact for first-order propagation, no ℝ-valued measure theory claimed --- and Theorem 6.4's \texttt{Exact} hypothesis is load-bearing (a source-level \texttt{kraw} literal can fabricate metadata). Four adversarial reads 2026-08-30/31 --- xAI Grok 4.5, 4.6, 4.6-on-fixes, and Kimi K3 as the independent second vendor: 0 unsound findings, every finding closed by a theorem or stated as a boundary --- \path{paper_A_ns_metatheory_xai_review_2026-08-30.md}.
+
+\subsection{Two boundaries carried as hypotheses}
+
+The theorem is deliberately scoped. Both limits are stated as part of the guarantee, not discovered by a referee:
+
+\begin{itemize}
+  \item \textbf{Conservative, not complete.} The guarantee is \emph{soundness} (no admitted operator is an anti-garbling), not \emph{completeness} (not every sound operator is admitted). The rule keys on disjoint support, which is sufficient but not necessary for zero covariance (§4.4), so it rejects the overlapping-but-orthogonal case. That case is recovered by the escape valve (§5.5), never by unsound admission. Formally: the theorem quantifies over \emph{admitted} operators; it makes no claim that the admitted set is maximal.
+\end{itemize}
+
+\begin{itemize}
+  \item \textbf{The sign of the harm is model-structural (§8.4).} An independence-assuming \texttt{add} understates variance when the shared-source covariance is positive (interval sums, like-signed terms) and over-states it when the covariance is negative (partitions of an invariant, such as the two-compartment phase decomposition). The discipline is indifferent --- E230 and exact propagation apply to both --- but every "silencing" claim in this paper is a \texttt{Cov > 0} statement, and we have measured a case where the same defect produces alarm fatigue instead.
+\end{itemize}
+
+\begin{itemize}
+  \item \textbf{First-order only.} The soundness criterion (Lemma 1) is exact for the \emph{linear} fragment (\texttt{kadd}, and \texttt{kmul} to first order in the delta method). The nonlinear operators (\texttt{ep\_mul}, \texttt{ep\_div}, \texttt{ep\_square}, \texttt{ep\_sqrt}) are delta-method approximations that drop second-order terms, so even under disjoint support a residual second-order discrepancy remains. The theorem therefore guarantees the absence of the \emph{first-order covariance} anti-garbling --- the entire defect class of §2 --- and explicitly not the truncation error of the delta method, which is a separate, symmetric (non-directional) approximation error and not an anti-garbling. Extending the guarantee to second order is future work (it needs the Hessian/second-moment terms the current metadata does not carry).
+\end{itemize}
+
+\section{Implementation}
+
+The discipline is implemented in Sounio, a self-hosted language whose checker (Madaros) is itself written in Sounio. The design reuses three things already in the compiler --- the \texttt{TypeEntry} tag mechanism, the monotone-dataflow engine, and the provenance rule it sits beside --- so the noise-symbol discipline is an \emph{added tag with a join rule}, not a new type parameter threaded through unification from scratch.
+
+\subsection{Where the source-set lives}
+
+A Knowledge type's static data is a \texttt{TypeEntry} record (\path{self-hosted/check/types.sio:139}) that already carries a family of index-tags flowing through the compatibility check \texttt{compat} --- \texttt{unit\_id} (dimensions), \texttt{refinement\_id}, \texttt{algebra\_kind}, \texttt{epistemic\_meta\_id}, \texttt{ontology\_id}, \texttt{knowledge\_epsilon}. The source-set is one more such tag: a trailing field
+
+\begin{lstlisting}
+noise_set_id : i64        // −1 = TOP (unknown), 0 = {}, >0 = interned nonempty set
+\end{lstlisting}
+
+placed \textbf{after} \texttt{provenance\_id} (§7.4), defaulting to \texttt{−1} at every existing \texttt{TypeEntry} construction site (the conservative top). The set itself is interned in a dedicated module \path{self-hosted/check/noise_sets.sio}; \texttt{noise\_set\_id} is a handle into that table, and \texttt{union}/\texttt{disjoint} dereference the handle through the module rather than doing bitwise arithmetic on the id --- the id is an identity, not a mask. (The prototype \path{ns_contract.sio} uses an inline \texttt{i64} bitmask, a bounded 64-source stand-in that validates the \emph{semantics}; the compiler uses the interned-handle representation for the \emph{scale}.)
+
+\subsection{The join site}
+
+The disjointness check has a template already in the tree. \path{compat.sio} handles Knowledge compatibility in its \texttt{TyKnowledge} arm (\textasciitilde{}\texttt{:230}) by comparing \texttt{knowledge\_epsilon}, and it handles model-family compatibility in the \texttt{TyModelFamily} arm (\texttt{:250}) with a \path{a.epistemic_meta_id == b.epistemic_meta_id} "tags must match or incompatible" test --- which is exactly the shape of a source-set join. The independence-assuming binary operators are typed at \path{check.sio} (the \texttt{kadd}/\texttt{kmul} join site, \textasciitilde{}\texttt{:18862}); the NS rule adds, beside the existing \texttt{knowledge\_epsilon} handling, the disjointness premise of §5.4: compute \texttt{disjoint(noise\_set\_id(a), noise\_set\_id(b))} via the \texttt{noise\_sets} module, and on failure raise E230 rather than producing a result type.
+
+\subsection{Phasing (N1--N4)}
+
+The wire is serialized into four behavior-neutral-then-active phases:
+
+\begin{itemize}
+  \item \textbf{N1 --- representation only.} Add the \texttt{noise\_set\_id} field and the \texttt{noise\_sets} module; default every site to \texttt{−1}. The bootstrap and source build are behaviorally identical to before (no rule consults the field yet). This is the safe, large-surface diff.
+  \item \textbf{N2 --- transfer.} Seed a fresh symbol at \texttt{measure}; union at \texttt{kadd}/\texttt{kmul}; inherit at copy/ident; the parametric call-summary substitution for interprocedural flow (§5.6).
+  \item \textbf{N3 --- the gate.} Raise E230 at \texttt{kadd}/\texttt{kmul} when disjointness cannot be proved; the same-source-built sabotage witness (disable only the NS rule $\rightarrow$ the E230 vanishes while E222 stays --- the compiler-level form of §8.2).
+  \item \textbf{N4 --- regression.} The named CI gate \path{scripts/ci/ns_antigarbling_gate.sh} plus the full test suite: compile-fail \path{ns_add_shared_source_rejected.sio} (x+x), \path{ns_add_unknown_conservative.sio}; run-pass \path{ns_add_disjoint_ok.sio}, \path{ns_ident_preserves_source.sio}.
+\end{itemize}
+
+\textbf{Status.} N1--N4 are \textbf{landed in the production checker and verified from a source build} (Madaros v0.80.0; the E230 gate at both \texttt{kadd}/\texttt{kmul} sites, the interned \texttt{noise\_sets} module, the transfer/join dataflow, and the \texttt{SOUNIO\_NS\_DISABLE} sabotage knob). The soundness prototypes (\path{noise_symbols.sio}, \path{ns_dataflow.sio}, \path{ns_contract.sio}) remain the kernel-of-the-argument at the analysis level; §8 now reports the \emph{wired-compiler} results alongside them. The remaining \texttt{[pending wire]} items are the genuinely-future ones named in the closing note (interprocedural parameter projection; the two-compartment clinical model landed 2026-08-31, §8.4).
+
+\subsection{Coexistence with provenance}
+
+\texttt{noise\_set\_id} is deliberately a \emph{separate} field from the provenance tag \texttt{provenance\_id} and from the overloaded \texttt{knowledge\_epsilon} (which already multiplexes transport/diagram/ fairness/grade confidences --- reusing it would collide). The diagnostic E230 is likewise distinct from the provenance diagnostic E222. The two rules share the \texttt{TypeEntry} mechanism and the dataflow substrate but remain independent abstract domains (§5.7), which is what lets the N3 sabotage witness disable one without perturbing the other.
+
+\section{Evaluation}
+
+We ask four questions:
+
+\begin{itemize}
+  \item \textbf{RQ1 --- Is the defect real?} Does the anti-garbling class occur in shipping uncertainty code, and how large is the error?
+  \item \textbf{RQ2 --- Does the type rule cause the rejection?} When the discipline refuses a program, is the refusal attributable to noise-symbol propagation, or could it be an unrelated effect firing coincidentally?
+  \item \textbf{RQ3 --- How precise is the check?} What sound programs does the conservative rule reject, and does the escape valve recover them?
+  \item \textbf{RQ4 --- Does it matter?} In a clinical uncertainty model, does the understatement change a decision the system exists to make?
+\end{itemize}
+
+\textbf{What is measured.} The E230 rule is now \textbf{wired into the checker at the real \texttt{kadd}/\texttt{kmul} sites and built from source} (Madaros v0.80.0), so RQ1--RQ3 are answered on the wired compiler (below). Every measurement in this section is of the \textbf{intraprocedural} checker: the call-summary extension of §5.6 is not implemented, so the false-positive counts of §8.3 are lower bounds and every program crossing a call boundary is outside the measured scope, backed by the kernel-checked soundness model (\path{SounioAntiGarblingModel.lean}) and the analysis prototypes. RQ4 is answered in two halves: the decision-relevant clinical WARN and the exact anti-garbling contraction on a controlled correlated-sum instance are real today, while the end-to-end \emph{two-compartment} patient-flip rate is now measured on the two-compartment extension (§8.4: 34.2 \% silenced in the interval sum, 0 \% in the phase decomposition).
+
+\subsection{RQ1 --- the defect is real, in shipping code}
+
+The anti-garbling class is not hypothetical. In the production uncertainty library \path{stdlib/epistemic/knowledge.sio}, the same operation \texttt{x$\cdot$x} has two implementations with different variances --- \texttt{ep\_mul(\&x,\&x)} returns \texttt{2m$^{2}$v}, \texttt{ep\_square(\&x)} returns the correct \texttt{4m$^{2}$v} (§2.1) --- and nothing routes \texttt{x$\cdot$x} to the sound one. Addition and multiplication understate on any correlated operands; the error is exactly the dropped covariance term \texttt{2$\cdot$Cov} (§2.2, Lemma 1). For maximally correlated operands the understatement is a factor of two in variance --- a factor of \texttt{$\surd$2} in the reported standard deviation --- in the \emph{optimistic} direction. The library's own test suite (\path{knowledge.sio:290–310}) exercises these operators only on independent operands, so the defect ships untested (§2.3).
+
+This establishes the target: a real, silent, safety-relevant unsoundness that current testing does not surface and that no type in the library distinguishes from correct code.
+
+\subsection{RQ2 --- the rejection is caused by noise-symbol propagation}
+
+A type rule that rejects \texttt{x+x} is only meaningful if the rejection is \emph{because of} the shared source, not an artifact of some other check firing. We establish causality with a \textbf{sabotage control}: a single knob that disables noise-symbol set-propagation (measurement nodes seed \texttt{$\emptyset$} instead of a fresh symbol) while leaving every other rule intact. If the \texttt{x+x} refusal is caused by NS, flipping the knob must make exactly that refusal vanish and leave unrelated refusals standing.
+
+\path{ns_contract.sio} encodes this as five acceptance controls. Run today, verbatim:
+
+\begin{lstlisting}
+$ ./bin/souc run docs/research/sounio/ns_contract.sio
+NS contract -- five acceptance controls
+1 x+x flagged (shared source): PASS
+2 x+y accepted (disjoint cert): PASS
+3 unknown conservative (flagged): PASS
+4 ident(x)+x flagged (identity survives): PASS
+5 sabotage: x+x NOT flagged (refusal vanishes): PASS
+ALL FIVE CONTROLS PASS
+\end{lstlisting}
+
+Reading the controls against the type rules of §5:
+
+\begin{table}[htbp]\centering\small
+\begin{tabular}{p{0.32\linewidth}p{0.32\linewidth}p{0.32\linewidth}}
+\toprule
+Control & Tests & §5 rule exercised \\
+\midrule
+1 \texttt{x+x} flagged & shared source $\Rightarrow$ E230 & (Add-Indep) premise fails \\
+2 \texttt{x+y} accepted & disjoint supports $\Rightarrow$ admitted & (Add-Indep) premise holds \\
+3 \texttt{x+$\top$} flagged & unknown never disjoint & §5.1 \texttt{$\top$}-conservatism \\
+4 \texttt{ident(x)+x} flagged & identity survives a copy & §5.3 (Copy) transfer \\
+5 sabotage $\Rightarrow$ \texttt{x+x} clean & \textbf{refusal is caused by NS} & causality witness \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Control 5 is the load-bearing one: with set-propagation removed, \texttt{x+x} is no longer flagged, so the refusal in control 1 is \emph{attributable to} the propagated source-set and not to a coincident effect. The independent dataflow prototype confirms the same distinction on a value graph rather than on scalar handles:
+
+\begin{lstlisting}
+$ ./bin/souc run docs/research/sounio/ns_dataflow.sio
+NS dataflow analysis (source-set fixpoint over the value graph)
+s1 = ADD(x, x): FLAGGED anti-garbling (inputs share a source)
+s2 = ADD(x, y): clean (disjoint sources)
+\end{lstlisting}
+
+\texttt{s1 = x+x} (shared source) is flagged; \texttt{s2 = x+y} (disjoint) is clean --- the same verdict, reached by a monotone least-fixpoint over the graph (§5.3), which is the compile-time form of the check.
+
+\textbf{On the wired compiler, the same causality holds --- measured.} Against the source-built checker (Madaros v0.80.0), \texttt{x + x} (shared source) and \texttt{x + u} (\texttt{u} an unknown-support call return) both raise \texttt{error[E230]}; under \texttt{SOUNIO\_NS\_DISABLE=1} --- which disables \emph{only} the anti-garbling refusal on an otherwise-identical build --- both E230s vanish, while an R-ORIGIN fixture (\path{r_origin_measured_on_sum.sio}) on the \emph{same} build still raises \texttt{E222}. This is the compiler-level form of the causality claim: the refusal is attributable to noise-symbol propagation and is causally separable from the provenance rule. It runs as \path{scripts/ci/ns_antigarbling_gate.sh} (all controls pass). The prototype witness above and this wired witness agree.
+
+\subsection{RQ3 --- precision: what the conservative rule costs}
+
+The check keys on disjoint \emph{support}, which is sufficient but not necessary for zero covariance (§4.4). It is therefore sound but incomplete: it rejects the overlapping-but-orthogonal case --- operands sharing a symbol whose signed coefficients cancel, e.g. \texttt{a = x$_{1}$+x$_{2}$}, \texttt{b = x$_{1}$−x$_{2}$}, with \texttt{$\langle$a,b$\rangle$ = 0}.
+
+\textbf{Measured on the wired compiler.} Across the 95 \texttt{Knowledge}-arithmetic run-pass tests in the suite, the gate raises E230 on \textbf{6}, passes \textbf{77}, and leaves \textbf{11 pre-existing failures unchanged} (all 11 persist under \texttt{SOUNIO\_NS\_DISABLE}, so none is attributable to the rule). Every one of the 6 vanishes under the disable knob (all NS-caused). They break down as: \textbf{5} dataflow-witness tests that deliberately exercise a now-refused op (a shared \texttt{s+s} self-add or an unknown-support operand) --- reconciled by running them under \texttt{SOUNIO\_NS\_DISABLE} (\path{scripts/ci/ns_dataflow_trace_gate.sh}); and \textbf{1} clinical propagation model refused for the \emph{interprocedural-parameter} reason (§10), not a construction case. Two false positives that first surfaced --- a struct-literal \texttt{Knowledge\{..\}} and a module-level \texttt{let} Knowledge, both defaulting their source-set to \texttt{$\top$} --- were genuine seeding gaps and were fixed (those paths now seed \texttt{$\emptyset$}), after which their programs type-check. The residual non-disjoint false-positive class (overlapping-but-orthogonal, and cross-parameter correlation the callee cannot see) is the interprocedural gap, out of this slice.
+
+The escape valve (§5.5) bounds the cost: a rejected sound program is recovered either by a proved-disjoint certificate (discharging the premise on the strength of \texttt{$\langle$a,b$\rangle$=0}) or by switching to the correlation-aware operator \texttt{add\_correlated(a,b,$\rho$)}, which carries the covariance explicitly and needs no disjointness premise. So the conservative rule never \emph{blocks} correct code; it forces correlated arithmetic to be written with the operator that does not assume independence. The false-positive rate on real uncertainty code is the 6-of-95 above (and every one is a \emph{characterized} refusal --- reconcilable witness or the known interprocedural gap --- not an unexplained rejection); the finer breakdown of \emph{which} fix (disjointness certificate vs. correlation-aware operator) each site takes is a study for a larger corpus.
+
+\subsection{RQ4 --- it changes a clinical decision}
+
+The stakes are set by a real, running model. \path{examples/vancomycin_auc_epistemic.sio} (a \texttt{run-pass} example; it runs under the lean\_single engine --- the self-hosted Madaros compiler fails closed on builtin \texttt{Knowledge<T>} arithmetic, E245/E004, \#1706 --- and its engine-portable twin \path{examples/vancomycin_auc_affine.sio} reproduces the same receipt on both engines through \path{stdlib/epistemic/affine}) propagates GUM uncertainty through a vancomycin AUC-guided therapeutic-drug-monitoring chain for a discriminating patient (65 yr male, 70±1 kg, SCr 1.40±0.14 mg/dL, 500 mg q12h):
+
+\begin{lstlisting}
+CrCl (Cockcroft-Gault) = 52.1 mL/min,  u(CrCl) = 5.2
+CL   (Matzke 1984)     = 2.22 L/h,      u(CL)   = 0.22
+AUC_0₋_2₄ (q12h)         = 450 mg*h/L,    u(AUC)  = 44   =>  95% CI [362, 538]
+\end{lstlisting}
+
+The point estimate AUC = 450 reads \textbf{therapeutic}; the credible interval [362, 538] \textbf{crosses the 400 subtherapeutic boundary}, and the epistemic model raises \texttt{WARN: possible subtherapeutic}. The entire clinical value of propagating uncertainty is that this WARN fires where the point estimate is silent --- the decision-flip the deployed point-estimate systems (InsightRx, DoseMeRx, JPKD) cannot produce.
+
+\textbf{The anti-garbling threat to this WARN.} The width of the credible interval \emph{is} the propagated uncertainty. Any operation that understates variance shrinks the interval toward the point estimate and can pull its lower bound back across 400 --- silencing the WARN. The bite lands wherever the model combines two quantities that share a measured source. On a controlled instance: summing two AUC contributions that both descend from the same measured clearance, \texttt{add(auc\_a, auc\_b)} with \texttt{Cov(auc\_a, auc\_b) > 0}, the independence-assuming \texttt{ep\_add} omits \texttt{2$\cdot$Cov}; by Lemma 1 the reported variance is understated by exactly that term, and the interval half-width contracts by \path{√(1 − 2Cov/Var_true)}. For strongly correlated compartments (\texttt{$\rho\rightarrow$ 1}) this is the factor-of-\texttt{$\surd$2} SD contraction of §8.1 --- enough to move a lower bound of 362 above 400 and convert a \texttt{WARN} into a false \texttt{THERAPEUTIC}. When \texttt{Cov < 0} the same omission errs the other way --- the interval \emph{widens} and WARNs become spurious --- so the contraction is a \texttt{Cov > 0} statement; §8.4's measurement below exhibits both signs.
+
+\textbf{Measured (2026-08-31).} The two-compartment extension now exists and the flip rate is measured --- \path{docs/research/sounio/rq4_vanco_two_compartment_flip.sio}, one deterministic cohort of 5,000 patients (weight 45--120 kg, SCr 0.6--2.6 mg/dL, Q and Vp ±30 \% about population, u(weight) = 1 kg, u(SCr) = 10 \%, u(Q) = u(Vp) = 20 \%; 500 mg q12h; 909 true WARNs among 1,669 therapeutic-window point estimates), propagated three ways: first-order affine forms over the measured sources (the truth, \textbf{T}), the shipped scalar \texttt{ep\_*} chain (\textbf{N}), and exact operands with an independence-assuming \emph{final add only} (\textbf{S}, isolating Lemma 1's \texttt{2$\cdot$Cov}). Two shared-source sums a PK library actually performs:
+
+\begin{table}[htbp]\centering\small
+\begin{tabular}{p{0.24\linewidth}p{0.24\linewidth}p{0.24\linewidth}p{0.24\linewidth}}
+\toprule
+shared-source sum & true WARN & silenced by the naive add & Var ratio naive/true \\
+\midrule
+\textbf{B} --- interval sum \texttt{AUC(0--12) + AUC(12--24)}, same CL ($\rho$ = 1) & 909 & \textbf{311 = 34.2 \%} & \textbf{0.500} \\
+\textbf{A} --- two-compartment phase sum \path{A/α + B/β} & 909 & \textbf{0} (62 spurious instead) & 1.204 (final add); \textbf{300.7} (whole chain: 1,894 spurious WARNs, 38 \% of the cohort) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{B is the anti-garbling this section feared, at the size it feared:} with $\rho$ = 1 and equal terms Lemma 1 gives exactly half the variance (the $\surd$2 contraction of §8.1), and it silences one true WARN in three. \textbf{A is an honest null in the feared direction} --- and a finding: the phase covariance is \emph{negative} in 5,000/5,000 patients, because AUC is invariant to Q and Vp and the decomposition into phases is a partition of that invariant --- whatever Q and Vp move into one phase they move out of the other. This is now a theorem of the calculus, not an observation: \texttt{inner\_nonpos\_of\_partition} --- if every shared source of a sum is a \emph{partition source} (the sum is invariant to it: \texttt{coeff (a ++ b) s = 0}, equivalently \texttt{coeff b s = −coeff a s}, \texttt{partition\_iff}), then \texttt{$\langle$a,b$\rangle\leq$ 0} and the independence-assuming add is conservative (\texttt{naive\_add\_conservative\_of\_partition}); at the fully-partitioned end \texttt{$\langle$a,b$\rangle$ = −Var a}. The sign of the harm is predictable from the model's invariances alone, before any coefficient is computed. There the independence-assuming add \emph{over}-states variance, and across the whole chain the over-statement compounds to 300$\times$: garbling rather than anti-garbling, and a different clinical harm (alarm fatigue: 1,894 spurious WARNs) from the same defect. The sign of the covariance decides which harm you get; the discipline does not need to know the sign --- E230 rejects the shared-source \texttt{add} either way, and exact propagation (\texttt{exact\_preservation}) is right in both directions. The first-order truth is the sampling truth here: a Monte Carlo of the same cohort (1 000 draws per patient) gives Var\_MC/Var\_T = 0.999 (0.857--1.158), the same WARN decision on 99.4 \% of patients, and Var\_N/Var\_MC = 300.9 --- the 300$\times$ is not a linearisation artefact (\path{paper_A_rq4_mc_adequacy_2026-08-31.md}). Full record and reproduce line: \path{paper_A_rq4_two_compartment_flip_2026-08-31.md}.
+
+\subsection{Threats to validity}
+
+\begin{itemize}
+  \item \textbf{Construct.} The soundness criterion is enforced on the \emph{variance} (second-moment) channel (§4.1). Non-Gaussian or heavy-tailed uncertainty is under-described by variance; the criterion catches variance understatement, not every distributional anti-garbling.
+  \item \textbf{Internal.} RQ2's causality rests on a single sabotage knob; it is now demonstrated at both the analysis level (the prototype) and the \textbf{compiler level} (E230 vanishes, E222 remains, same source build) --- the two agree. A knob is still one mechanism; a second, independent construction of the causality claim would strengthen it.
+  \item \textbf{External.} RQ1 quantifies one library; the \emph{class} (independence assumed and unchecked) is general to GUM-style propagation, but we measure one instance. RQ4's magnitude is exact on a controlled instance, not a patient-cohort flip rate.
+  \item \textbf{Scope of the guarantee.} Soundness holds on the linear fragment; nonlinear operators (\texttt{mul}, \texttt{div}, \texttt{square}, \texttt{sqrt}) retain a delta-method second-order residual even under disjoint support (§6.3) --- the type prevents the \emph{first-order} covariance anti-garbling, not the truncation error of the delta method itself.
+\end{itemize}
+
+\section{Related work}
+
+Our contribution sits at the intersection of three lines, none of which occupies it. We state each neighbor and the precise delta, so the claim is neither the tracking (30 years old) nor the soundness frame (standard in another domain) but their combination as a compile-time type rule in an uncertainty-typed language.
+
+\subsection{Affine arithmetic and zonotopic static analysis}
+
+Noise-symbol identity is the defining device of \textbf{affine arithmetic} (Comba \& Stolfi 1993): a quantity is \texttt{x$_{0}$ + $\Sigma_{i}$ x$_{i}\varepsilon_{i}$}, and shared \texttt{$\varepsilon_{i}$} between two quantities are exactly their correlation, so \texttt{x − x = 0} and correlated errors do not inflate independently. \textbf{Goubault \& Putot}'s zonotopic abstract domains and the \textbf{Fluctuat} analyzer (\emph{Static Analysis of Finite Precision Computations}, VMCAI 2011; \emph{Perturbed affine arithmetic for invariant computation}, 2008; the logical-product zonotope intersection, 2010) build a static analysis on precisely this representation, tracking correlations between program variables through shared noise symbols to bound finite-precision error in C/Ada.
+
+This is the closest prior work on \emph{source identity}, and we reuse its core idea. The delta is threefold: (i) Fluctuat's noise symbols live in an \textbf{external analyzer} producing an enclosure; ours live \textbf{in the type} and are part of the program's interface. (ii) Fluctuat \textbf{reports} a bound; we \textbf{reject} --- an independence-assuming operator over correlated operands is a \emph{type error} (E230), not a wider interval. (iii) Fluctuat targets roundoff of a fixed computation; we target the \emph{soundness of uncertainty propagation itself}, where the failure is a library computing the wrong variance formula, and the fix is a checked precondition plus a correlation-aware operator. "We track source identity" is not our claim; "we make it a typed, rejecting precondition in an uncertainty language" is.
+
+\subsection{Quantitative information flow and the Blackwell order}
+
+The soundness criterion --- an operation may lose information but never create it --- is the \textbf{data-processing / Blackwell informativeness order} (Blackwell 1953), and the \textbf{quantitative information flow} community has made it the backbone of its refinement theory: McIver, Morgan, Smith, Espinoza \& Meinicke, \emph{Abstract channels and their robust information-leakage ordering} (POST 2014), and Alvim, Chatzikokolakis, McIver, Morgan, Palamidessi \& Smith, \emph{The Science of Quantitative Information Flow} (Springer 2020), identify program refinement with channel garbling and use post-processing monotonicity as the soundness condition --- \texttt{A} refines \texttt{B} iff \texttt{B} is a garbling of \texttt{A}.
+
+We adopt this frame wholesale and say so. The delta is the \emph{domain and the mechanism}: QIF orders \textbf{confidentiality channels} and measures \textbf{leakage}; we order \textbf{uncertainty propagation} in the \textbf{variance channel} and enforce the anti-garbling prohibition as a \textbf{static type rule} at arithmetic operators. Reading \texttt{ep\_add}'s variance understatement as an anti-garbling is, to our knowledge, a new instantiation of the QIF/Blackwell discipline; it is not a new order. (The lift of this frame to non-associative composition --- where reassociation itself becomes a garbling governed by the octonion associator --- is a separate contribution and not claimed here.)
+
+\subsection{Uncertainty-typed languages and libraries}
+
+The systems that carry uncertainty in the type or value are our \emph{host} setting, and are precisely the ones that do \textbf{not} track source identity. \texttt{Uncertain$\langle$T$\rangle$} (Bornholt, Mytkowicz \& McKinley, ASPLOS 2014) represents a value as a sampled distribution and computes over it, but a Monte-Carlo product of a variable with itself does not know it is the same variable unless the samples are shared by construction, and nothing types the fusion. \path{Measurements.jl} (Giordano) propagates GUM uncertainty and \emph{does} track correlations at runtime via a derivative graph --- but as a numeric result, not a type, and with no compile-time rejection of an independence-assuming path. GUM implementations (ISO/IEC 98-3) and \texttt{Ferson} \textbf{p-boxes} give the underlying arithmetic; they are libraries, and fusing two quantities wrong is a numeric mistake, never a type error. Our contribution is exactly the missing enforcement: the source-set in the type, the operator's independence assumption as a checked precondition.
+
+\subsection{Type systems for numerical error}
+
+A parallel line puts \emph{numerical} properties in the type. \textbf{NumFuzz} (Numerical Fuzz: a type system for rounding-error analysis, 2024) and \textbf{Bean} (a language for backward error analysis, 2025), and the broader \emph{type-based approaches to rounding-error analysis} (2025), use linear/sensitivity typing to bound roundoff. These share our shape --- a numeric soundness invariant carried by the type --- but a different invariant: roundoff magnitude, not correlation-soundness of uncertainty propagation. The two are complementary; a value could in principle carry both a sensitivity bound and a noise-set. We borrow the discipline (numeric-property-in-the-type) and contribute a distinct invariant and its dataflow.
+
+\subsection{Information-flow types and probabilistic programming}
+
+The type machinery closest to ours is \textbf{information-flow / taint typing}: a set-valued lattice propagated through the program, with a check at sinks. The noise-set is an IFC-style lattice whose "labels" are measurement sources and whose "sink" is an independence-assuming operator; the reading is novel (covariance-soundness rather than confidentiality), the machinery is familiar, and we position NS as an IFC-shaped discipline for a numeric soundness property. Finally, \textbf{probabilistic programming} (Stan, Pyro) \emph{can} express correlated uncertainty via hierarchical models, but at inference time: a posterior fuses correlations correctly only when the model is hand-structured to, and fusing wrong is a modelling choice, never a compile-time error. We target the opposite regime --- cheap, first-order, static, and \emph{rejecting} --- where the guarantee is that the unsound path does not type-check.
+
+\section{Limitations}
+
+We collect the boundaries stated locally through the paper, so the guarantee's shape is in one place.
+
+\begin{itemize}
+  \item \textbf{Conservative, not complete (§4.4, §6.5).} The check keys on disjoint \emph{support}, which is sufficient but not necessary for zero covariance. It therefore rejects the overlapping-but-orthogonal case (\texttt{a = x$_{1}$+x$_{2}$}, \texttt{b = x$_{1}$−x$_{2}$}, \texttt{$\langle$a,b$\rangle$ = 0}). Such programs are recovered by the escape valve (a proved-disjoint certificate or the correlation-aware operator, §5.5), never by unsound admission. The guarantee is soundness, not maximality of the admitted set.
+\end{itemize}
+
+\begin{itemize}
+  \item \textbf{First-order / variance channel only (§6.5, §8.5).} Soundness is exact for the linear fragment; nonlinear operators (\texttt{mul}, \texttt{div}, \texttt{square}, \texttt{sqrt}) are delta-method approximations that drop second-order terms, so a residual second-order discrepancy survives even under disjoint support. It is a symmetric approximation error, not a directional anti-garbling, and the type prevents the \emph{first-order covariance} anti-garbling --- the entire defect class of §2 --- not the truncation error itself. Non-Gaussian or heavy-tailed uncertainty is likewise under-described by variance; the criterion is a second-moment one.
+\end{itemize}
+
+\begin{itemize}
+  \item \textbf{Interprocedural summaries are the load-bearing dependency (§5.6, §7.3).} The transfer is intraprocedural; sound cross-call source tracking needs parametric call-summaries. Without them the sound default is \emph{assume-sharing} (drop to \texttt{$\top$} at call boundaries), which is sound but noisy. Building the summaries --- shared with the compiler's memory-reclamation analysis --- is the principal engineering cost and is part of the pending wire.
+\end{itemize}
+
+\begin{itemize}
+  \item \textbf{Unknown correlation beyond \{0, 1\} (§9.5).} The escape valve's correlation-aware operator takes a known \texttt{$\rho$}. When the correlation is \emph{unknown} (not zero, not one, not a given value), sound propagation needs Fréchet bounds, and the correlation assumption should itself become a tag on the type. We do not model this; it is a stated gap.
+\end{itemize}
+
+\begin{itemize}
+  \item \textbf{Which shared-source sums real PK models perform is not measured (§8.4).} The flip rate is reported for two sums --- an interval sum ($\rho$ = 1, understates) and a phase partition (Cov < 0, over-states) --- on one synthetic cohort (deterministic LCG, seed 20260831, released with the artifact). How often deployed PBPK code performs the former versus the latter, and how the rates change once the correlation-aware operators the discipline encourages are adopted, is future work; the paper's claim is the mechanism and its two signs, not a population prevalence.
+\end{itemize}
+
+\begin{itemize}
+  \item \textbf{Evaluation is one library, one wired compiler, and a 95-test suite (§8).} RQ1 quantifies one shipping library; the class is general to GUM-style propagation but measured on one instance. RQ2's causality is established at the analysis level (the sabotage control) and awaits its compiler-level form. The corpus false-positive rate (RQ3) and the full two-compartment clinical flip rate (RQ4) are measured on the wired compiler and on the two-compartment extension respectively (§8.4); the RQ4 cohort is synthetic (a deterministic LCG grid over plausible ranges), not a patient registry.
+\end{itemize}
+
+\begin{itemize}
+  \item \textbf{Confidence decay is heuristic.} The \texttt{confidence} field's per-operation decay (\path{× 99/100}, \path{× 98/100}) is not derived from a principle; it is orthogonal to the variance soundness this paper establishes, but it is drift until derived, and we do not defend it.
+\end{itemize}
+
+\section{Conclusion}
+
+Uncertainty-typed languages promise to carry \texttt{± $\sigma$} in the type and propagate it automatically. They keep the promise only where their unstated hypothesis holds --- that the operands of every operation are independent --- and they break it silently everywhere else, because the failure mode is a \emph{tighter} error bar, the one answer that never looks wrong. We showed the failure is not hypothetical: in a shipping library the same operation \texttt{x$\cdot$x} has two variances, and nothing routes the program to the sound one.
+
+The fix is to name the hypothesis and check it. Reading uncertainty propagation through the Blackwell / data-processing order already standard in quantitative information flow, understating variance is an \emph{anti-garbling} --- manufacturing information --- and no correct program may contain one. We carry the noise-symbol source-set of each value in its type, reusing affine arithmetic's source identity but lifting it from an external analyzer into the type, and make the independence assumption of arithmetic a \emph{checked precondition}: an independence-assuming operator over operands whose sources are not provably disjoint is a type error, discharged only by a proof of disjointness or by switching to an operator that takes the correlation explicitly. The core soundness criterion is kernel-checked, and the discipline is wired into the production checker and verified from a source build: on the compiler itself, the number that is too precise to be true no longer type-checks.
+
+The guarantee is deliberately narrow and honestly bounded --- first-order, conservative, variance-channel --- and it eliminates exactly the defect class it targets: the number that looks too precise to be true is the one the compiler now refuses to print. Two directions extend it. Downward, to second order: carrying the delta-method's dropped terms turns the first-order guarantee into a full one. Outward, to non-associative composition: when the affine coefficients live in a non-associative algebra, \emph{reassociating} a product becomes a garbling in its own right, governed by the octonion associator --- the point where this discipline meets a genuinely open question about the Blackwell order and algebraic curvature, and the subject of separate work.
+
+\end{document}
