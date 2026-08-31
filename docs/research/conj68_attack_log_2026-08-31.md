@@ -553,6 +553,36 @@ de pares arbitrários de witnesses.
 > octoniônica, e generalizar — o caminho de RQ→lei→prova que já funcionou
 > três vezes hoje (ghost law, associadores, forma fechada do parceiro).
 
+## Rodada 16: O GOLPE — o primeiro pêncil exato de witnesses
+
+Pipeline do golpe (`conj68_witness_count.sio` + `conj68_pencil_extract.sio`):
+
+1. **Pontos de 9 dígitos** em duas posições da reta traçada (polimento GN a 1e-15).
+2. **Rationalização à mão** (resíduos 0–2 × 10⁻⁹): as retas têm equações
+   INTEIRAS nas coordenadas de frame:
+   - U₂ = span{(3,1,1,−5,0), (0,0,1,−1,1)} (frame de x₀)
+   - W₂ = span{(3,−1,1,0,−4), (0,−1,0,1,1)} (frame de x₂ = (−2e₂, e₃+e₄−e₆−e₇))
+3. **Scan de coeficientes pequenos**: 8 witnesses inteiros no produto das retas,
+   todos obedecendo UMA lei de Möbius δ = (β+6)/(β+2).
+4. **Base canônica**: ŵ₀ = w₀+3w₁, ŵ₁ = w₀+w₁; w(β) = 2ŵ₀ + βŵ₁; as três
+   identidades do pêncil verificadas EXATAS em i64:
+   [u₀,ŵ₀] = 0, [u₁,ŵ₁] = 0, [u₀,ŵ₁] + 2[u₁,ŵ₀] = 0
+   ⟹ **T(u₀+βu₁, 2ŵ₀+βŵ₁) ≡ 0 ∀β — família a 1 parâmetro de witnesses em
+   forma fechada.** (Erro de normalização no primeiro teste — peso 2 no cross
+   — pego e corrigido; endpoints já eram exatos.)
+
+Vetores inteiros do pêncil (sedenion coords):
+U0 = 3e₁+e₄+e₅−5e₆+3e₁₀+5e₁₃+e₁₄−e₁₅; U1 = e₅−e₆+e₇+e₁₂+e₁₃+e₁₄;
+WH0 = −6e₂+12e₃−8e₄+2e₅+6e₆−2e₇+6e₉+2e₁₂−10e₁₃+2e₁₄−12e₁₅;
+WH1 = −6e₂−4e₄+2e₅+2e₆−6e₇+6e₉+2e₁₂−2e₁₃−6e₁₄−4e₁₅.
+
+**Programa pós-golpe:** extrair o segundo pêncil (COMP#3) e o de outras
+configurações; ler a forma octoniônica dos (u₀,u₁,ŵ₀,ŵ₁) em termos do par
+(dicionário, como na ghost law) → construção geral → prova de existência do
+pêncil para toda configuração → **Conjecture 6.8**. O objeto agora é
+algébrico, exato, e generalizável — o formato que rendeu teorema três vezes
+neste log.
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD
