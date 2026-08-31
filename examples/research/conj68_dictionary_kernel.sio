@@ -1,0 +1,732 @@
+// Conjecture 6.8 — DICTIONARY KERNEL attack on the two ghost directions of the
+// generic (rank-9) sector complement.  See attack log Rodadas 4-5.
+//
+// For generic ZD pairs the O x O sector of T has rank 9, so its complement is
+// 7-dim: e0 + {x, x', x~, x~'} + TWO pair-dependent directions that are NOT
+// small lattice vectors.  Hypothesis: they are rational combinations of an
+// algebraic dictionary built from the pair:
+//     dict (octonion, per half-slot) =
+//       { e0, a, b, a', b', z=ab, z'=a'b', ab', a'b, aa', bb' }   (11 entries)
+// giving 22 sedenion columns (w,0) and (0,w).
+//
+// Pipeline (exact where it matters):
+//   1. x1 = (e1,e2) canonical; x2 = random small integer ZD with rank44 = 9.
+//   2. Frames verified by bilateral annihilation; 16 sector commutators C_ij.
+//   3. S: 21 x 22 integer system — 16 rows <C_ij, col_k> = 0 plus 5 rows
+//      excluding the KNOWN complement combos (e0, x, x~, x', x~') in
+//      lambda-space.
+//   4. Nullspace of S mod p (basis extraction), MINUS the spurious kernel of
+//      the column map itself (dictionary dependencies).
+//   5. Rational reconstruction of each nullspace entry (extended Euclid,
+//      |num|,den < sqrt(p)), clear denominators.
+//   6. EXACT integer verification: S · lambda = 0 over Z, v = sum lambda_k
+//      col_k != 0, and v not in span of the knowns (mod-p rank check).
+// Output per pair: NSDIM, and for recovered ghosts the lambda pattern by
+// dictionary name + VERIFY flag.  A uniform lambda pattern across pairs = the
+// closed form of the hidden relations, i.e. the last datum before the real-
+// zero argument for the (b) piece.
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+
+fn sed_sigma(a: i64, b: i64) -> i64 with Mut, Panic, Div { cd_sigma_c(a, b, 4) }
+
+fn smul_i(x: &[i64; 16], y: &[i64; 16], out: &![i64; 16]) with Mut, Panic, Div {
+    var k = 0
+    while k < 16 { out[k as usize] = 0; k = k + 1 }
+    var i = 0
+    while i < 16 {
+        if x[i as usize] != 0 {
+            var j = 0
+            while j < 16 {
+                if y[j as usize] != 0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + sed_sigma(i, j) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn omul_i(x: &[i64; 8], y: &[i64; 8], out: &![i64; 8]) with Mut, Panic, Div {
+    var k = 0
+    while k < 8 { out[k as usize] = 0; k = k + 1 }
+    var i = 0
+    while i < 8 {
+        if x[i as usize] != 0 {
+            var j = 0
+            while j < 8 {
+                if y[j as usize] != 0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + sed_sigma(i, j) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn is_zero16(v: &[i64; 16]) -> bool with Mut {
+    var k = 0
+    while k < 16 {
+        if v[k as usize] != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+
+fn annihilates_both(x: &[i64; 16], y: &[i64; 16]) -> bool with Mut, Panic, Div {
+    var p = [0; 16]
+    smul_i(x, y, &!p)
+    if !is_zero16(&p) { return false }
+    smul_i(y, x, &!p)
+    is_zero16(&p)
+}
+
+fn gcd_i(a0: i64, b0: i64) -> i64 with Mut, Div, Panic {
+    var a = if a0 < 0 { 0 - a0 } else { a0 }
+    var b = if b0 < 0 { 0 - b0 } else { b0 }
+    while b != 0 {
+        let t = a % b
+        a = b
+        b = t
+    }
+    a
+}
+
+fn isqrt_exact(n: i64) -> i64 with Mut, Div, Panic {
+    if n < 0 { return 0 - 1 }
+    var k = 0
+    while k * k < n { k = k + 1 }
+    if k * k == n { k } else { 0 - 1 }
+}
+
+fn lehmer_next(state: i64) -> i64 with Mut, Div, Panic {
+    (state * 48271) % 2147483647
+}
+
+fn perp_basis3(r1: &[i64; 8], r2: &[i64; 8], r3: &[i64; 8], out: &![i64; 32]) -> i64 with Mut, Panic, Div {
+    var m = [0; 21]
+    var c = 0
+    while c < 7 {
+        m[c as usize] = r1[(c + 1) as usize]
+        m[(7 + c) as usize] = r2[(c + 1) as usize]
+        m[(14 + c) as usize] = r3[(c + 1) as usize]
+        c = c + 1
+    }
+    var piv_col = [0; 3]
+    var rank = 0
+    var col = 0
+    while col < 7 && rank < 3 {
+        var pr = 0 - 1
+        var r = rank
+        while r < 3 {
+            if m[(r * 7 + col) as usize] != 0 { pr = r; r = 3 } else { r = r + 1 }
+        }
+        if pr >= 0 {
+            if pr != rank {
+                var c1 = 0
+                while c1 < 7 {
+                    let t = m[(rank * 7 + c1) as usize]
+                    m[(rank * 7 + c1) as usize] = m[(pr * 7 + c1) as usize]
+                    m[(pr * 7 + c1) as usize] = t
+                    c1 = c1 + 1
+                }
+            }
+            let piv = m[(rank * 7 + col) as usize]
+            var r2i = 0
+            while r2i < 3 {
+                if r2i != rank {
+                    let f = m[(r2i * 7 + col) as usize]
+                    if f != 0 {
+                        var c2 = 0
+                        while c2 < 7 {
+                            m[(r2i * 7 + c2) as usize] = piv * m[(r2i * 7 + c2) as usize] - f * m[(rank * 7 + c2) as usize]
+                            c2 = c2 + 1
+                        }
+                        var g = 0
+                        var c3 = 0
+                        while c3 < 7 { g = gcd_i(g, m[(r2i * 7 + c3) as usize]); c3 = c3 + 1 }
+                        var gd = 1
+                        if g > 1 { gd = g }
+                        if gd > 1 {
+                            c3 = 0
+                            while c3 < 7 { m[(r2i * 7 + c3) as usize] = m[(r2i * 7 + c3) as usize] / gd; c3 = c3 + 1 }
+                        }
+                    }
+                }
+                r2i = r2i + 1
+            }
+            piv_col[rank as usize] = col
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    var nout = 0
+    var fc = 0
+    while fc < 7 {
+        var isp = 0
+        var q = 0
+        while q < rank {
+            if piv_col[q as usize] == fc { isp = 1 }
+            q = q + 1
+        }
+        if isp == 0 && nout < 4 {
+            var v = [0; 8]
+            var prodp = 1
+            q = 0
+            while q < rank { prodp = prodp * m[(q * 7 + piv_col[q as usize]) as usize]; q = q + 1 }
+            v[(fc + 1) as usize] = prodp
+            q = 0
+            while q < rank {
+                let pc = piv_col[q as usize]
+                var piv = 1
+                if m[(q * 7 + pc) as usize] != 0 { piv = m[(q * 7 + pc) as usize] }
+                v[(pc + 1) as usize] = (0 - m[(q * 7 + fc) as usize]) * (prodp / piv)
+                q = q + 1
+            }
+            var g2 = 0
+            var c4 = 0
+            while c4 < 8 { g2 = gcd_i(g2, v[c4 as usize]); c4 = c4 + 1 }
+            var g2d = 1
+            if g2 > 1 { g2d = g2 }
+            if g2d > 1 {
+                c4 = 0
+                while c4 < 8 { v[c4 as usize] = v[c4 as usize] / g2d; c4 = c4 + 1 }
+            }
+            c4 = 0
+            while c4 < 8 { out[(nout * 8 + c4) as usize] = v[c4 as usize]; c4 = c4 + 1 }
+            nout = nout + 1
+        }
+        fc = fc + 1
+    }
+    nout
+}
+
+fn build_o_frame(xp: &[i64; 16], grows: &![i64; 64]) -> i64 with Mut, Panic, Div {
+    var arow8 = [0; 8]
+    var brow8 = [0; 8]
+    var q = 0
+    while q < 8 {
+        arow8[q as usize] = xp[q as usize]
+        brow8[q as usize] = xp[(8 + q) as usize]
+        q = q + 1
+    }
+    var z8 = [0; 8]
+    omul_i(&arow8, &brow8, &!z8)
+    var cb = [0; 32]
+    let nc = perp_basis3(&arow8, &brow8, &z8, &!cb)
+    if nc != 4 { return 0 }
+    var nA = 0
+    q = 0
+    while q < 8 { nA = nA + arow8[q as usize] * arow8[q as usize]; q = q + 1 }
+    var gj = 0
+    while gj < 4 {
+        var cj = [0; 8]
+        var c6 = 0
+        while c6 < 8 { cj[c6 as usize] = cb[(gj * 8 + c6) as usize]; c6 = c6 + 1 }
+        var dj = [0; 8]
+        omul_i(&cj, &z8, &!dj)
+        var cand = [0; 16]
+        c6 = 0
+        while c6 < 8 {
+            cand[c6 as usize] = nA * cj[c6 as usize]
+            cand[(8 + c6) as usize] = dj[c6 as usize]
+            c6 = c6 + 1
+        }
+        var okg = annihilates_both(xp, &cand)
+        if !okg {
+            c6 = 0
+            while c6 < 8 { cand[(8 + c6) as usize] = 0 - dj[c6 as usize]; c6 = c6 + 1 }
+            okg = annihilates_both(xp, &cand)
+        }
+        if !okg { return 0 }
+        var g3 = 0
+        c6 = 0
+        while c6 < 16 { g3 = gcd_i(g3, cand[c6 as usize]); c6 = c6 + 1 }
+        var g3d = 1
+        if g3 > 1 { g3d = g3 }
+        if g3d > 1 {
+            c6 = 0
+            while c6 < 16 { cand[c6 as usize] = cand[c6 as usize] / g3d; c6 = c6 + 1 }
+        }
+        c6 = 0
+        while c6 < 16 { grows[(gj * 16 + c6) as usize] = cand[c6 as usize]; c6 = c6 + 1 }
+        gj = gj + 1
+    }
+    1
+}
+
+fn sample_zd(seed_in: i64, xp: &![i64; 16], seed_out: &![i64; 1]) -> i64 with Mut, Panic, Div {
+    var seed = seed_in
+    var a8 = [0; 8]
+    seed = lehmer_next(seed)
+    let i1 = 1 + (seed % 7)
+    seed = lehmer_next(seed)
+    let i2 = 1 + (seed % 7)
+    seed = lehmer_next(seed)
+    a8[i1 as usize] = if (seed % 2) == 0 { 1 } else { 0 - 1 }
+    seed = lehmer_next(seed)
+    if i2 != i1 && (seed % 3) != 0 {
+        seed = lehmer_next(seed)
+        a8[i2 as usize] = if (seed % 2) == 0 { 1 } else { 0 - 1 }
+    }
+    var t0 = [0; 8]
+    var q = 1
+    while q < 8 {
+        seed = lehmer_next(seed)
+        let r3 = seed % 3
+        t0[q as usize] = if r3 == 0 { 0 } else { if r3 == 1 { 1 } else { 0 - 1 } }
+        q = q + 1
+    }
+    seed_out[0] = seed
+    var na = 0
+    var dta = 0
+    q = 0
+    while q < 8 {
+        na = na + a8[q as usize] * a8[q as usize]
+        dta = dta + t0[q as usize] * a8[q as usize]
+        q = q + 1
+    }
+    if na == 0 { return 0 }
+    var tp = [0; 8]
+    var nz = 0
+    q = 0
+    while q < 8 {
+        tp[q as usize] = na * t0[q as usize] - dta * a8[q as usize]
+        if tp[q as usize] != 0 { nz = 1 }
+        q = q + 1
+    }
+    if nz == 0 { return 0 }
+    var gg = 0
+    q = 0
+    while q < 8 { gg = gcd_i(gg, tp[q as usize]); q = q + 1 }
+    var ggd = 1
+    if gg > 1 { ggd = gg }
+    if ggd > 1 {
+        q = 0
+        while q < 8 { tp[q as usize] = tp[q as usize] / ggd; q = q + 1 }
+    }
+    var ntp = 0
+    q = 0
+    while q < 8 { ntp = ntp + tp[q as usize] * tp[q as usize]; q = q + 1 }
+    let kk = isqrt_exact(ntp)
+    if kk <= 0 { return 0 }
+    var b8 = [0; 8]
+    omul_i(&a8, &tp, &!b8)
+    q = 0
+    while q < 8 {
+        xp[q as usize] = kk * a8[q as usize]
+        xp[(8 + q) as usize] = b8[q as usize]
+        q = q + 1
+    }
+    1
+}
+
+// modular helpers
+fn modp(v: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var r = v % p
+    if r < 0 { r = r + p }
+    r
+}
+
+fn inv_mod(a: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var inv = 1
+    var base = modp(a, p)
+    var e = p - 2
+    while e > 0 {
+        if (e % 2) == 1 { inv = (inv * base) % p }
+        base = (base * base) % p
+        e = e / 2
+    }
+    inv
+}
+
+// rational reconstruction of r mod p: find num/den, |num|,den <= ~sqrt(p)
+// returns 1 on success with out = [num, den]
+fn ratrec(r_in: i64, p: i64, out: &![i64; 2]) -> i64 with Mut, Div, Panic {
+    let bound = 46340
+    var r0 = p
+    var r1 = modp(r_in, p)
+    var t0 = 0
+    var t1 = 1
+    while r1 > bound {
+        let q = r0 / r1
+        let r2 = r0 - q * r1
+        let t2 = t0 - q * t1
+        r0 = r1
+        r1 = r2
+        t0 = t1
+        t1 = t2
+    }
+    var den = t1
+    var num = r1
+    if den < 0 { den = 0 - den; num = 0 - num }
+    if den == 0 || den > bound { return 0 }
+    out[0] = num
+    out[1] = den
+    1
+}
+
+fn main() with IO, Mut, Panic, Div {
+    let p = 2147483647
+    // canonical x1 = (e1, e2)
+    var x1 = [0; 16]
+    x1[1] = 1
+    x1[10] = 1
+    var g1 = [0; 64]
+    if build_o_frame(&x1, &!g1) == 0 { println("X1_FRAME FAIL"); return }
+
+    var accepted = 0
+    var seed = 20260831
+    var trial = 0
+    var nsdim_hist = [0; 23]
+    var verify_ok = 0
+    var verify_fail = 0
+
+    while trial < 6000 && accepted < 25 {
+        trial = trial + 1
+        var x2 = [0; 16]
+        var so = [0; 1]
+        let ok2 = sample_zd(seed, &!x2, &!so)
+        seed = so[0]
+        if ok2 == 1 {
+            var g2 = [0; 64]
+            if build_o_frame(&x2, &!g2) == 1 {
+                // sector commutators C_ij (16 of them), each a 16-vector
+                var cmat = [0; 256]
+                var gi = 0
+                while gi < 4 {
+                    var u16 = [0; 16]
+                    var c7 = 0
+                    while c7 < 16 { u16[c7 as usize] = g1[(gi * 16 + c7) as usize]; c7 = c7 + 1 }
+                    var gj = 0
+                    while gj < 4 {
+                        var w16 = [0; 16]
+                        c7 = 0
+                        while c7 < 16 { w16[c7 as usize] = g2[(gj * 16 + c7) as usize]; c7 = c7 + 1 }
+                        var uw = [0; 16]
+                        var wu = [0; 16]
+                        smul_i(&u16, &w16, &!uw)
+                        smul_i(&w16, &u16, &!wu)
+                        c7 = 0
+                        while c7 < 16 {
+                            cmat[((gi * 4 + gj) * 16 + c7) as usize] = uw[c7 as usize] - wu[c7 as usize]
+                            c7 = c7 + 1
+                        }
+                        gj = gj + 1
+                    }
+                    gi = gi + 1
+                }
+                // rank44 filter: only generic rank-9 pairs
+                // (rank of cmat rows mod p)
+                var rmat = [0; 256]
+                var i0 = 0
+                while i0 < 256 { rmat[i0 as usize] = modp(cmat[i0 as usize], p); i0 = i0 + 1 }
+                var rk = 0
+                var col0 = 0
+                while col0 < 16 && rk < 16 {
+                    var pr0 = 0 - 1
+                    var r0i = rk
+                    while r0i < 16 {
+                        if rmat[(r0i * 16 + col0) as usize] != 0 { pr0 = r0i; r0i = 16 } else { r0i = r0i + 1 }
+                    }
+                    if pr0 >= 0 {
+                        if pr0 != rk {
+                            var cc0 = 0
+                            while cc0 < 16 {
+                                let tt0 = rmat[(rk * 16 + cc0) as usize]
+                                rmat[(rk * 16 + cc0) as usize] = rmat[(pr0 * 16 + cc0) as usize]
+                                rmat[(pr0 * 16 + cc0) as usize] = tt0
+                                cc0 = cc0 + 1
+                            }
+                        }
+                        let iv0 = inv_mod(rmat[(rk * 16 + col0) as usize], p)
+                        var r2i0 = rk + 1
+                        while r2i0 < 16 {
+                            let f0 = (rmat[(r2i0 * 16 + col0) as usize] * iv0) % p
+                            if f0 != 0 {
+                                var cc1 = 0
+                                while cc1 < 16 {
+                                    rmat[(r2i0 * 16 + cc1) as usize] = modp(rmat[(r2i0 * 16 + cc1) as usize] - (f0 * rmat[(rk * 16 + cc1) as usize]) % p, p)
+                                    cc1 = cc1 + 1
+                                }
+                            }
+                            r2i0 = r2i0 + 1
+                        }
+                        rk = rk + 1
+                    }
+                    col0 = col0 + 1
+                }
+                if rk == 9 {
+                    accepted = accepted + 1
+                    // dictionary: 11 octonion vectors from the pair
+                    var a18 = [0; 8]
+                    var b18 = [0; 8]
+                    var a28 = [0; 8]
+                    var b28 = [0; 8]
+                    var q = 0
+                    while q < 8 {
+                        a18[q as usize] = x1[q as usize]
+                        b18[q as usize] = x1[(8 + q) as usize]
+                        a28[q as usize] = x2[q as usize]
+                        b28[q as usize] = x2[(8 + q) as usize]
+                        q = q + 1
+                    }
+                    var dict = [0; 88]   // 11 x 8
+                    dict[0] = 1          // e0
+                    var tmp8 = [0; 8]
+                    q = 0
+                    while q < 8 {
+                        dict[(8 + q) as usize] = a18[q as usize]     // a
+                        dict[(16 + q) as usize] = b18[q as usize]    // b
+                        dict[(24 + q) as usize] = a28[q as usize]    // a'
+                        dict[(32 + q) as usize] = b28[q as usize]    // b'
+                        q = q + 1
+                    }
+                    omul_i(&a18, &b18, &!tmp8)
+                    q = 0
+                    while q < 8 { dict[(40 + q) as usize] = tmp8[q as usize]; q = q + 1 }   // z
+                    omul_i(&a28, &b28, &!tmp8)
+                    q = 0
+                    while q < 8 { dict[(48 + q) as usize] = tmp8[q as usize]; q = q + 1 }   // z'
+                    omul_i(&a18, &b28, &!tmp8)
+                    q = 0
+                    while q < 8 { dict[(56 + q) as usize] = tmp8[q as usize]; q = q + 1 }   // ab'
+                    omul_i(&a28, &b18, &!tmp8)
+                    q = 0
+                    while q < 8 { dict[(64 + q) as usize] = tmp8[q as usize]; q = q + 1 }   // a'b
+                    omul_i(&a18, &a28, &!tmp8)
+                    q = 0
+                    while q < 8 { dict[(72 + q) as usize] = tmp8[q as usize]; q = q + 1 }   // aa'
+                    omul_i(&b18, &b28, &!tmp8)
+                    q = 0
+                    while q < 8 { dict[(80 + q) as usize] = tmp8[q as usize]; q = q + 1 }   // bb'
+                    // S: 21 x 22 integer; col k<11: (dict_k, 0); col 11+k: (0, dict_k)
+                    var smat = [0; 462]
+                    var rr = 0
+                    while rr < 16 {
+                        var kk2 = 0
+                        while kk2 < 11 {
+                            var d1 = 0
+                            var d2 = 0
+                            q = 0
+                            while q < 8 {
+                                d1 = d1 + cmat[(rr * 16 + q) as usize] * dict[(kk2 * 8 + q) as usize]
+                                d2 = d2 + cmat[(rr * 16 + 8 + q) as usize] * dict[(kk2 * 8 + q) as usize]
+                                q = q + 1
+                            }
+                            smat[(rr * 22 + kk2) as usize] = d1
+                            smat[(rr * 22 + 11 + kk2) as usize] = d2
+                            kk2 = kk2 + 1
+                        }
+                        rr = rr + 1
+                    }
+                    // known-combo exclusion rows (lambda-space):
+                    // e0: l[0]; x: l[1]+l[13]; x~: l[2]-l[12]; x': l[3]+l[15]; x~': l[4]-l[14]
+                    smat[(16 * 22 + 0) as usize] = 1
+                    smat[(17 * 22 + 1) as usize] = 1
+                    smat[(17 * 22 + 13) as usize] = 1
+                    smat[(18 * 22 + 2) as usize] = 1
+                    smat[(18 * 22 + 12) as usize] = 0 - 1
+                    smat[(19 * 22 + 3) as usize] = 1
+                    smat[(19 * 22 + 15) as usize] = 1
+                    smat[(20 * 22 + 4) as usize] = 1
+                    smat[(20 * 22 + 14) as usize] = 0 - 1
+                    // nullspace mod p of 21x22
+                    var mm = [0; 462]
+                    i0 = 0
+                    while i0 < 462 { mm[i0 as usize] = modp(smat[i0 as usize], p); i0 = i0 + 1 }
+                    var pivc = [0; 21]
+                    var nr = 0
+                    var col = 0
+                    while col < 22 && nr < 21 {
+                        var pr = 0 - 1
+                        var r = nr
+                        while r < 21 {
+                            if mm[(r * 22 + col) as usize] != 0 { pr = r; r = 21 } else { r = r + 1 }
+                        }
+                        if pr >= 0 {
+                            if pr != nr {
+                                var cc = 0
+                                while cc < 22 {
+                                    let tt = mm[(nr * 22 + cc) as usize]
+                                    mm[(nr * 22 + cc) as usize] = mm[(pr * 22 + cc) as usize]
+                                    mm[(pr * 22 + cc) as usize] = tt
+                                    cc = cc + 1
+                                }
+                            }
+                            let iv = inv_mod(mm[(nr * 22 + col) as usize], p)
+                            var rrr = 0
+                            while rrr < 21 {
+                                if rrr != nr {
+                                    let f = (mm[(rrr * 22 + col) as usize] * iv) % p
+                                    if f != 0 {
+                                        var cc2 = 0
+                                        while cc2 < 22 {
+                                            mm[(rrr * 22 + cc2) as usize] = modp(mm[(rrr * 22 + cc2) as usize] - (f * mm[(nr * 22 + cc2) as usize]) % p, p)
+                                            cc2 = cc2 + 1
+                                        }
+                                    }
+                                }
+                                rrr = rrr + 1
+                            }
+                            // normalize pivot row
+                            var cc3 = 0
+                            while cc3 < 22 {
+                                mm[(nr * 22 + cc3) as usize] = (mm[(nr * 22 + cc3) as usize] * iv) % p
+                                cc3 = cc3 + 1
+                            }
+                            pivc[nr as usize] = col
+                            nr = nr + 1
+                        }
+                        col = col + 1
+                    }
+                    let nsdim = 22 - nr
+                    nsdim_hist[nsdim as usize] = nsdim_hist[nsdim as usize] + 1
+                    print("PAIR#")
+                    print_int(accepted)
+                    print(" NSDIM ")
+                    print_int(nsdim)
+                    print(" A=[")
+                    var pz = 0
+                    while pz < 8 { print_int(x2[pz as usize]); print(" "); pz = pz + 1 }
+                    print("] B=[")
+                    pz = 0
+                    while pz < 8 { print_int(x2[(8 + pz) as usize]); print(" "); pz = pz + 1 }
+                    print("]\n")
+                    // extract nullspace basis, reconstruct, verify exactly
+                    var fc = 0
+                    while fc < 22 {
+                        var isp = 0
+                        var qq = 0
+                        while qq < nr {
+                            if pivc[qq as usize] == fc { isp = 1 }
+                            qq = qq + 1
+                        }
+                        if isp == 0 {
+                            // lambda mod p: free col = 1; pivots = -mm[row][fc]
+                            var lam = [0; 22]
+                            lam[fc as usize] = 1
+                            qq = 0
+                            while qq < nr {
+                                lam[pivc[qq as usize] as usize] = modp(0 - mm[(qq * 22 + fc) as usize], p)
+                                qq = qq + 1
+                            }
+                            // rational reconstruction
+                            var num = [0; 22]
+                            var den = [0; 22]
+                            var okrec = 1
+                            var lcmd = 1
+                            qq = 0
+                            while qq < 22 {
+                                var nd = [0; 2]
+                                if ratrec(lam[qq as usize], p, &!nd) == 1 {
+                                    num[qq as usize] = nd[0]
+                                    den[qq as usize] = nd[1]
+                                    let g4 = gcd_i(lcmd, nd[1])
+                                    var g4d = 1
+                                    if g4 > 1 { g4d = g4 }
+                                    lcmd = lcmd * (nd[1] / g4d)
+                                    if lcmd > 1000000 { okrec = 0 }
+                                } else { okrec = 0 }
+                                qq = qq + 1
+                            }
+                            if okrec == 1 {
+                                // integer lambda-hat
+                                var lhat = [0; 22]
+                                qq = 0
+                                while qq < 22 {
+                                    var dq = den[qq as usize]
+                                    if dq == 0 { dq = 1 }
+                                    lhat[qq as usize] = num[qq as usize] * (lcmd / dq)
+                                    qq = qq + 1
+                                }
+                                // exact verify: smat . lhat == 0 (21 rows)
+                                var vfy = 1
+                                var rr2 = 0
+                                while rr2 < 21 {
+                                    var s = 0
+                                    qq = 0
+                                    while qq < 22 { s = s + smat[(rr2 * 22 + qq) as usize] * lhat[qq as usize]; qq = qq + 1 }
+                                    if s != 0 { vfy = 0 }
+                                    rr2 = rr2 + 1
+                                }
+                                // v = sum lhat_k col_k as sedenion; nonzero?
+                                var vsed = [0; 16]
+                                qq = 0
+                                while qq < 11 {
+                                    var q8 = 0
+                                    while q8 < 8 {
+                                        vsed[q8 as usize] = vsed[q8 as usize] + lhat[qq as usize] * dict[(qq * 8 + q8) as usize]
+                                        vsed[(8 + q8) as usize] = vsed[(8 + q8) as usize] + lhat[(11 + qq) as usize] * dict[(qq * 8 + q8) as usize]
+                                        q8 = q8 + 1
+                                    }
+                                    qq = qq + 1
+                                }
+                                if vfy == 1 && !is_zero16(&vsed) {
+                                    verify_ok = verify_ok + 1
+                                    print("  GHOST lam:")
+                                    qq = 0
+                                    while qq < 22 {
+                                        if lhat[qq as usize] != 0 {
+                                            print(" c")
+                                            print_int(qq)
+                                            print(":")
+                                            print_int(lhat[qq as usize])
+                                        }
+                                        qq = qq + 1
+                                    }
+                                    print("\n")
+                                } else if vfy == 0 {
+                                    verify_fail = verify_fail + 1
+                                    println("  GHOST_VERIFY FAIL")
+                                }
+                            } else {
+                                println("  GHOST_RATREC FAIL")
+                            }
+                        }
+                        fc = fc + 1
+                    }
+                }
+            }
+        }
+    }
+    print("ACCEPTED ")
+    print_int(accepted)
+    print("  VERIFY_OK ")
+    print_int(verify_ok)
+    print("  VERIFY_FAIL ")
+    print_int(verify_fail)
+    print("\n")
+    var hh = 0
+    while hh < 23 {
+        if nsdim_hist[hh as usize] > 0 {
+            print("NSDIM_HIST ")
+            print_int(hh)
+            print(" N ")
+            print_int(nsdim_hist[hh as usize])
+            print("\n")
+        }
+        hh = hh + 1
+    }
+    println("CONJ68_DICTIONARY_KERNEL DONE")
+}

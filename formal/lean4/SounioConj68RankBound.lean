@@ -143,4 +143,25 @@ def complementIndependent : Bool :=
 
 theorem complement_independent : complementIndependent = true := by native_decide
 
+/-! ## The sector (O × O) ghost law — Rodada 6
+
+For the O(x) × O(x') sector the image drops two MORE dimensions:
+    im(T|O×O) ⊥ (n(A')·z + n(A)·z', 0)  and  (0, n(A')·z + n(A)·z'),
+z = ab, z' = a'b' — the norm-normalized sum of the Γ_O-invariants.  Found by
+the dictionary-kernel pipeline (mod-p nullspace + rational reconstruction +
+exact ℤ verification, 25/25 generic pairs, VERIFY_FAIL = 0); explains the
+(z+z') stratum seen earlier as the n(A) = n(A') case.  Hence rank(T|₄ₓ₄) ≤ 9
+(measured tight).  Canonical instance: pair (e₁,e₂) vs (e₂,e₃) has
+n = n' = 1, z = e₃, z' = e₁, so the ghosts are e₁+e₃ and e₉+e₁₁. -/
+
+def ghost1 : Vec := vadd (e 1) (e 3)
+def ghost2 : Vec := vadd (e 9) (e 11)
+
+def ghostOrthogonal : Bool :=
+  (uFrame.drop 1).all (fun u => (vFrame.drop 1).all (fun w =>
+    let c := comm u w
+    dot c ghost1 == 0 && dot c ghost2 == 0))
+
+theorem ghost_orthogonal_canonical : ghostOrthogonal = true := by native_decide
+
 end SounioConj68RankBound

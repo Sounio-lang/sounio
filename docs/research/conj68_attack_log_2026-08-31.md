@@ -215,6 +215,42 @@ kernel exato ℚ do setor para pares racionais genéricos (via bigrat ou lifting
 mod-p com reconstrução racional) → forma fechada das 2 direções em função do
 par → aí sim o argumento topológico de zero real tem os dados que precisa.
 
+## Rodada 6 (mesmo dia): A LEI DOS FANTASMAS — o teorema setorial completo
+
+Runner novo: `examples/research/conj68_dictionary_kernel.sio` — pipeline
+dicionário algébrico (11 vetores × 2 slots) → kernel mod-p → **reconstrução
+racional** (Euclides estendido, |num|,den < √p) → **verificação exata sobre ℤ**.
+Soundness total: o mod-p é bússola, o veredito é inteiro.
+
+**Resultado:** as duas direções-fantasma do complemento setorial genérico são,
+em TODOS os pares (25/25 no pipeline com VERIFY_FAIL=0; 143/143 no runner de
+estrutura com o teste dedicado — nohold = 0 em ambos os estratos):
+
+> **im(T|O×O) ⊥ (n(A′)·z + n(A)·z′, 0) e (0, n(A′)·z + n(A)·z′)**
+> — a soma dos invariantes de Γ_O **normalizados pelas normas**: z/n(A) + z′/n(A′).
+
+Corolários imediatos:
+1. **rank(T|₄ₓ₄) ≤ 9 explicado**: complemento setorial = e₀ ⊕
+   span{x, x̃, x′, x̃′, v₅, v₆} — as 6 direções puras, todas agora nomeadas.
+2. **O estrato ~50 % da Rodada 5 resolvido**: a lei (z+z′) crua era o caso
+   n(A) = n(A′). Nenhum mistério restante nos dados.
+3. Estratos especiais (NSDIM 10) têm relações ADICIONAIS com caras
+   (2z + ab′, 0), (−2z + bb′, 0) — estrutura extra dos rank-7, a caracterizar.
+
+Lean atualizado (`SounioConj68RankBound.lean`, LEAN_OK): teorema
+`ghost_orthogonal_canonical` — os fantasmas do par canônico (e₁+e₃, e₉+e₁₁)
+⊥ aos 16 comutadores setoriais, kernel-verified.
+
+**Estado da peça (b) após a rodada:** o quociente setorial é agora um mapa
+bilinear explícito ℝ⁴×ℝ⁴ → ℝ⁹ com TODAS as relações lineares nomeadas em
+forma fechada. O que falta é apenas (i) provar as duas identidades-fantasma
+algebricamente (candidato: expandir ⟨[u,w], (n′z+nz′,0)⟩ com u=(Nc,·),
+w=(N′d,·) via Moufang — agora um alvo concreto de ~1 página), e (ii) o
+argumento de zero real para o mapa ℝ⁴×ℝ⁴ → ℝ⁹ específico — com a observação
+de que 9 = dim genérico e Stiefel–Hopf não obstrui em (4,4,9), o zero forçado
+virá das identidades, não da topologia genérica: provavelmente da estrutura
+de composição n(ab)=n(a)n(b) que as normalizações z/n sugerem.
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD
