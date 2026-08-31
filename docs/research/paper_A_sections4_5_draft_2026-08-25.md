@@ -1,3 +1,18 @@
+<!-- docs:meta
+topic_id: repo.docs.research.paper-a-sections4-5-draft-2026-08-25
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.paper-a-sections4-5-draft-2026-08-25
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Paper A — §4 *Anti-garbling as the soundness criterion* + §5 *The type system* (full draft, 2026-08-25)
 
 > Draft prose for the technical core. §4 is grounded in

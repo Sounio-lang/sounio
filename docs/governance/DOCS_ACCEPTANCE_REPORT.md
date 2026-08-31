@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.governance.acceptan
 
 # Docs Acceptance Report
 
-This is the editor-in-chief acceptance snapshot generated from `docs/governance/topic-registry.v1.json`.
+This is the editor-in-chief acceptance snapshot for the documentation-governance wave.
 
 ## Verdict
 
@@ -17,49 +17,17 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 - Dual-canon sync contract is active across repo docs, website docs, and localized docs metadata.
 - Historical and archived repo docs are labeled and redirected back to the current canonical surface through the authority matrix.
 
-## Scope Summary
+## Scope, ownership, locale and evidence numbers
 
-- Total governed topics: 1293
-- Repo-backed topics: 1143
-- Website-backed topics: 163
-- Dual-canon topics: 13
-- Authority count `archived`: 25
-- Authority count `dual`: 13
-- Authority count `historical`: 401
-- Authority count `repo_only`: 704
-- Authority count `website_only`: 150
+This file intentionally does not carry whole-corpus counts (total governed topics, per-authority
+and per-owner breakdowns, evidence-bearing topics, the validation-surface list). Every one of
+those numbers is a pure function of every governed doc present in the tree at scan time, so a
+snapshot committed by one PR goes stale the instant any *other* PR adds or removes a governed doc
+-- even though neither PR touched the other one's files. Get the live numbers on demand instead
+of trusting a committed snapshot that races against concurrent merges:
 
-## Ownership Summary
+    node scripts/docs/report_acceptance.mjs
 
-- A0: 1 topics
-- A1: 1 topics
-- A2: 722 topics
-- A3: 10 topics
-- A4: 31 topics
-- A5: 35 topics
-- A6: 436 topics
-- A7: 57 topics
-
-## Locale Acceptance
-
-- Docs collection topics with full six-locale coverage: 37/37
-- All governed website docs topics are present in `en`, `pt`, `el`, `zh`, `ja`, and `es`.
-- English-only website collections allowed by policy and marked in the registry: tutorials: 42; showcases: 63; blog: 21
-
-## Evidence-Bearing Topics
-
-- repo.docs.implementation.paper-artifact-packaging-spec: scripts/paper/package_paper_artifacts.sh, scripts/paper/paper_submission_pack.sh
-- repo.frontdoor.docs-index: docs/governance/DOCS_AUTHORITY_MATRIX.md
-- repo.governance.acceptance-report: docs/governance/topic-registry.v1.json, docs/governance/DOCS_AUTHORITY_MATRIX.md
-- repo.governance.authority-matrix: docs/governance/topic-registry.v1.json
-- website.docs.gpu: artifacts/omega/gpu_runtime_attest_gate.v1.json
-- website.docs.vancomycin-uncertainty: website/public/docs/assets/vancomycin-ship/check_pass.png
-
-## Validation Surfaces
-
-- `bash paper/reproduce.sh`
-- `bash scripts/check_docs_consistency.sh`
-- `bash scripts/check_docs_registry.sh`
-- `bash scripts/fast_gate.sh`
-- `node website/scripts/check-docs-parity.mjs`
-- `npm --prefix website run check:quality`
+Per-topic governance (metadata headers, locale coverage, evidence artifacts, broken links) stays
+gated exactly as before, from `docs/governance/topic-registry.v1.json`; only the aggregate corpus counters
+moved out of the committed, gated surface.

@@ -1,3 +1,18 @@
+<!-- docs:meta
+topic_id: repo.docs.research.paper-a-section2-draft-2026-08-25
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.paper-a-section2-draft-2026-08-25
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Paper A — §2 *The defect class, by example* (full draft, 2026-08-25)
 
 > Draft prose for §2 of the anti-garbling paper. All code is verbatim from
