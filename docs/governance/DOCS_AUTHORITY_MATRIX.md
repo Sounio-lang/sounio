@@ -772,6 +772,9 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.garden.seeds.2026-05-10-epistemic-fermentation | repo_only | docs/internal/garden/seeds/2026-05-10-epistemic-fermentation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-07-11-the-zero-of-encounter | repo_only | docs/internal/garden/seeds/2026-07-11-the-zero-of-encounter.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-07-26-fpga-acceleration-opportunity | repo_only | docs/internal/garden/seeds/2026-07-26-fpga-acceleration-opportunity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.garden.seeds.2026-08-29-pharos-loss-ledger | repo_only | docs/internal/garden/seeds/2026-08-29-pharos-loss-ledger.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.garden.seeds.2026-08-30-convergence-detector | repo_only | docs/internal/garden/seeds/2026-08-30-convergence-detector.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.garden.seeds.2026-08-31-unknown-typed-by-cause | repo_only | docs/internal/garden/seeds/2026-08-31-unknown-typed-by-cause.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.templates.seed | repo_only | docs/internal/garden/templates/seed.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.bootstrap-seed-policy | repo_only | docs/internal/implementation/BOOTSTRAP_SEED_POLICY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.codex-claude-parallel-contract | repo_only | docs/internal/implementation/CODEX_CLAUDE_PARALLEL_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
