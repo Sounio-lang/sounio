@@ -27,8 +27,10 @@ What is mechanized here, and how it composes into Paper A's Theorem 6.4
   reduction — at `kadd_red`/`kmul_red` the disjointness premise + Lemma 2 + Lemma 1 make
   the defective scalar combinators `gAddMeta`/`gMulMeta` *exact*.
 * **Theorem 6.4 as stated.** `typed_agfree`: no independence-assuming operator inside a
-  well-typed term has operands with nonzero covariance; `soundness_star` carries typing,
-  exactness and anti-garbling-freedom along `Steps` (⇒*), i.e. to every *reached* operator.
+  well-typed term *whose operands are already runtime values* has nonzero covariance —
+  `AGFree` is value-restricted by design, because an operator only computes at a redex;
+  `soundness_star` re-establishes it on every term along `Steps` (⇒*), so the check is live
+  at every operator actually *reached*.
 * **The sabotage witness, in the kernel.** `x + x` on one source: the (unchanged,
   defective) operational semantics steps from an exact term to an inexact one
   (`x_plus_x_understates`, gap `= 2⟨x,x⟩`), and the NS type system rejects that very
@@ -39,9 +41,14 @@ What is mechanized here, and how it composes into Paper A's Theorem 6.4
 The operational semantics is **deliberately the defective one** (`gAddMeta` = `ep_add`,
 `gMulMeta` = `ep_mul`, no covariance term): the discipline lives entirely in the types.
 
-Design notes. Sources are `Nat` labels; each `measure` site names its source, and the
-"measurement = fresh noise symbol" modelling axiom is what makes labels sources (two sites
-sharing a label is an over-approximation, never an under-approximation). `Aff` allows
+Design notes. Sources are `Nat` labels; each `measure` site names its source. **Modelling
+axiom (honest labelling), assumed not proved:** distinct labels are distinct physical sources.
+Under that axiom two sites sharing a label only over-approximate; WITHOUT it — two physically
+correlated sites given distinct labels — the calculus under-approximates the true covariance,
+and every theorem below is relative to the axiom (Paper A §6.4 residual (iv)). The type
+system tracks sources; it does not discover them. **Scope:** `trueVar a = ⟨a,a⟩` is the
+variance of `Σ c_s ε_s` under independent unit-variance symbols *by definition*; no
+distributional / sampling semantics is modelled — Lemma 1 and Theorem 6.4 are algebraic. `Aff` allows
 duplicate sources — `coeff` sums them — so `a ++ b` is exact affine addition and no
 canonical form is needed. Nothing in this file is `noncomputable`; every witness is `decide`.
 
@@ -532,8 +539,10 @@ def Exact : Expr → Prop
   | .lit_real _ => True
   | .var _ => True
 
-/-- `AGFree e`: no independence-assuming operator in `e` whose operands are runtime values
-    has nonzero covariance — "no operator in `e` is an anti-garbling". -/
+/-- `AGFree e`: no independence-assuming operator in `e` WHOSE OPERANDS ARE RUNTIME VALUES
+    has nonzero covariance. Value-restricted on purpose: an operator computes only at a redex,
+    and `soundness_star` re-derives `AGFree` on every reduct, so the restriction loses no
+    reached operator. -/
 def AGFree : Expr → Prop
   | .kadd a b =>
       (∀ x ma a' y mb b', a = .kraw (.lit_real x) ma a' → b = .kraw (.lit_real y) mb b' →
@@ -1230,8 +1239,8 @@ theorem exact_preservation {e T E} (h : HasTy [] e T E) {e'} (hs : e ⇒ e') (hx
 -- §N. Theorem 6.4 — no first-order anti-garbling at any reached operator
 -- ================================================================
 
-/-- Every independence-assuming operator inside a well-typed term has zero-covariance
-    operands (whenever they are runtime values). Pure consequence of the typing premise
+/-- Every independence-assuming operator inside a well-typed term whose operands are
+    runtime values has zero-covariance operands. Pure consequence of the typing premise
     `nsDisjoint` + Lemma 2 + `inner_disjoint`; no reduction involved. -/
 theorem typed_agfree {Γ e T E} (h : HasTy Γ e T E) : AGFree e := by
   induction h with
@@ -1385,6 +1394,48 @@ theorem measure_plus_measure_untypable' {Γ e T E} (h : HasTy Γ e T E) (he : e 
 theorem measure_plus_measure_untypable : ∀ Γ T E, ¬ HasTy Γ (.kadd mx mx) T E :=
   fun _ _ _ h => measure_plus_measure_untypable' h rfl
 
+theorem invVar {Γ e T E} (h : HasTy Γ e T E) {n} (he : e = .var n) : lookupCtx Γ n = some T := by
+  induction h with
+  | t_var Γ' n' T' hlk => injection he with h1; subst h1; exact hlk
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+theorem invLet {Γ e T E} (h : HasTy Γ e T E) {u b} (he : e = .letE u b) :
+    ∃ T₁ E₁ E₂, HasTy Γ u T₁ E₁ ∧ HasTy (T₁ :: Γ) b T E₂ := by
+  induction h with
+  | t_let Γ' T₁ T₂ E₁ E₂ e' body hu hb _ _ =>
+    injection he with h1 h2; subst h1; subst h2; exact ⟨T₁, E₁, E₂, hu, hb⟩
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
+/-- The shared-VARIABLE body `x + x` (de Bruijn `var 0 + var 0`) is untypable whenever the
+    bound variable carries a Knowledge type — both operands look up the SAME `N`, which is
+    never disjoint from itself unless empty… and here it is `{0}`. -/
+theorem var_plus_var_untypable' {Γ e T E} (h : HasTy Γ e T E)
+    (he : e = .kadd (.var 0) (.var 0)) (hΓ : ∃ Γ' T', Γ = (.tknow T' (nsSingle 0)) :: Γ') : False := by
+  induction h with
+  | t_kadd Γ Na Nb E₁ E₂ a b ha hb hd _ _ =>
+    injection he with hea heb; subst hea; subst heb
+    rcases hΓ with ⟨Γ', T', rfl⟩
+    have la := invVar ha rfl
+    have lb := invVar hb rfl
+    simp only [lookupCtx, Option.some.injEq] at la lb
+    injection la with la1 la2; injection lb with lb1 lb2
+    subst la2; subst lb2
+    have hf : nsDisjoint (nsSingle 0) (nsSingle 0) = false := by decide
+    rw [hf] at hd; exact Bool.noConfusion hd
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he hΓ
+  | _ => exact Expr.noConfusion he
+
+/-- **The §8.2 shared-variable control, at source level.** `let x = measure(·, s) in x + x`
+    is untypable: (Measure) fixes `x : Knowledge⟨ℝ, {s}⟩`, both uses of `x` look up that
+    same `{s}`, and `{s}` is not disjoint from itself. (Grok 4.6 round 3, items 9/10b.) -/
+theorem let_x_plus_x_untypable : ∀ Γ T E, ¬ HasTy Γ (.letE mx (.kadd (.var 0) (.var 0))) T E := by
+  intro Γ T E h
+  rcases invLet h rfl with ⟨T₁, E₁, E₂, hu, hb⟩
+  rcases invMeasure hu rfl with ⟨T', hT₁⟩; subst hT₁
+  exact var_plus_var_untypable' hb rfl ⟨Γ, T', rfl⟩
+
 /-- `x + y` on disjoint sources: admitted, with result set `{0} ∪ {1}`. -/
 theorem x_plus_y_typable :
     HasTy [] (.kadd xk yk) (.tknow .treal (nsUnion (nsSingle 0) (nsSingle 1)))
@@ -1427,4 +1478,5 @@ end Sounio.EpistemicEffectsNS
 #print axioms Sounio.EpistemicEffectsNS.x_plus_x_untypable
 #print axioms Sounio.EpistemicEffectsNS.x_plus_top_untypable
 #print axioms Sounio.EpistemicEffectsNS.measure_plus_measure_untypable
+#print axioms Sounio.EpistemicEffectsNS.let_x_plus_x_untypable
 #print axioms Sounio.EpistemicEffectsNS.x_plus_x_understates
