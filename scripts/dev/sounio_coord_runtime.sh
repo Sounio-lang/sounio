@@ -1588,7 +1588,8 @@ native_hook_caller_is_exact_harness() {
   case "$harness" in
     codex) [[ "$NATIVE_HOOK_CALLER_COMMAND" == codex ]] ;;
     claude)
-      [[ "$NATIVE_HOOK_CALLER_COMMAND" == claude ]] ||
+      [[ "$NATIVE_HOOK_CALLER_COMMAND" == claude ||
+        "$NATIVE_HOOK_CALLER_COMMAND" == claude.exe ]] ||
         [[ "$NATIVE_HOOK_CALLER_COMMAND" == node &&
           "$NATIVE_HOOK_CALLER_CMDLINE" == *'/@anthropic-ai/claude-code/'* &&
           "$NATIVE_HOOK_CALLER_CMDLINE" == *'cli.js'* ]]
