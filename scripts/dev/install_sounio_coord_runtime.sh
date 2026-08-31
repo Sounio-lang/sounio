@@ -240,6 +240,73 @@ activate_runtime() {
         "$(manifest_value "$manifest" loom_product_activation_operational_manifest_sha256)" ]] ||
       die "installed product ExecIngress is not bound to its frozen Sounio authority and OCaml runtime: $runtime_id"
   fi
+  if grep -q '^capability=loom-sovereign-execution-kernel-product-v1$' "$manifest"; then
+    local sovereign_capsule="$version_dir/policy/sovereign-execution"
+    local sovereign_product="$sovereign_capsule/tools/loom/sovereign_execution_kernel_product.runtime.v1"
+    grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" &&
+      grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$manifest" &&
+      [[ -x "$version_dir/bin/sounio-loom-runtime" &&
+        -x "$version_dir/bin/sounio-loom-sovereign-execution-kernel" ]] ||
+      die "installed sovereign execution product omits its native hook, OCaml kernel, or Sounio action 9042: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_sovereign_product_manifest_sha256 "$sovereign_product"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_sovereign_product_contract_sha256 \
+      "$sovereign_capsule/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_sovereign_product_evidence_sha256 \
+      "$sovereign_capsule/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_sovereign_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-sovereign-execution-kernel"
+    [[ "$(manifest_value "$sovereign_product" semantic_authority)" == Sounio &&
+      "$(manifest_value "$sovereign_product" semantic_action)" == 9042 &&
+      "$(manifest_value "$sovereign_product" grant_is_bearer)" == false &&
+      "$(manifest_value "$sovereign_product" exported_token)" == false &&
+      "$(manifest_value "$sovereign_product" exported_handle)" == false &&
+      "$(manifest_value "$sovereign_product" interface_release_authority)" == zero &&
+      "$(manifest_value "$sovereign_product" same_uid_peer_isolation)" == true &&
+      "$(manifest_value "$sovereign_product" production_activation)" == true &&
+      "$(manifest_value "$sovereign_product" exec_attached)" == true &&
+      "$(manifest_value "$sovereign_product" semantic_manifest_sha256)" == \
+        11a9099d8870646afc3b38302cbc98a257eb284784375cb4011be30214b42f71 &&
+      "$(manifest_value "$sovereign_product" material_manifest_sha256)" == \
+        2045439f1a07d737a0cb8370ad080a80cd0715db2966863539f3c0794d14d7e3 &&
+      "$(manifest_value "$sovereign_product" sounio_runtime_sha256)" == \
+        "$(manifest_value "$manifest" loom_sovereign_runtime_sha256)" ]] ||
+      die "installed sovereign execution product is not bound to frozen Sounio action 9042: $runtime_id"
+    local sovereign_pair sovereign_path_key sovereign_hash_key
+    local sovereign_rel sovereign_expected sovereign_actual
+    for sovereign_pair in \
+      contract_path:contract_sha256 \
+      semantic_manifest_path:semantic_manifest_sha256 \
+      material_manifest_path:material_manifest_sha256 \
+      sounio_source_path:sounio_source_sha256 \
+      sounio_entrypoint_path:sounio_entrypoint_sha256 \
+      loom_source_path:loom_source_sha256 \
+      exec_source_path:exec_source_sha256 \
+      hook_source_path:hook_source_sha256 \
+      sovereign_source_path:sovereign_source_sha256 \
+      provider_fixture_path:provider_fixture_sha256 \
+      c_stub_path:c_stub_sha256 \
+      dune_path:dune_sha256 \
+      loom_build_path:loom_build_sha256 \
+      installer_path:installer_sha256 \
+      coord_runtime_path:coord_runtime_sha256 \
+      product_gate_path:product_gate_sha256 \
+      freeze_gate_path:freeze_gate_sha256; do
+      sovereign_path_key="${sovereign_pair%%:*}"
+      sovereign_hash_key="${sovereign_pair#*:}"
+      sovereign_rel="$(manifest_value "$sovereign_product" "$sovereign_path_key")"
+      [[ -n "$sovereign_rel" && "$sovereign_rel" != /* &&
+        "$sovereign_rel" != *'..'* ]] ||
+        die "installed sovereign product source path is unsafe: $sovereign_rel"
+      sovereign_expected="$(manifest_value "$sovereign_product" "$sovereign_hash_key")"
+      sovereign_actual="$(sha256sum "$sovereign_capsule/$sovereign_rel" | awk '{print $1}')"
+      [[ "$sovereign_actual" == "$sovereign_expected" ]] ||
+        die "installed sovereign execution product source drifted: $sovereign_rel"
+    done
+  fi
   if grep -q '^capability=loom-truthful-lane-health-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-lane-health-runtime" && \
@@ -657,6 +724,30 @@ loom_product_exec_ingress_sources=(
   "$SOURCE_ROOT/tools/loom/src/loom_pty_stubs.c"
   "$SOURCE_ROOT/tools/loom/src/dune"
 )
+loom_sovereign_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_sovereign_execution_kernel.sh"
+loom_sovereign_source="$SOURCE_ROOT/stdlib/coordination/loom_sovereign_execution_kernel_authority.sio"
+loom_sovereign_entrypoint="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel_authority_main.sio"
+loom_sovereign_semantic_freeze="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel.freeze.v1"
+loom_sovereign_material_freeze="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel_material.runtime.v1"
+loom_sovereign_product_freeze="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel_product.runtime.v1"
+loom_sovereign_product_contract="$SOURCE_ROOT/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md"
+loom_sovereign_product_evidence="$SOURCE_ROOT/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt"
+loom_sovereign_product_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_execution_kernel_product_selftest.sh"
+loom_sovereign_product_freeze_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_execution_kernel_product_freeze_selftest.sh"
+loom_sovereign_sources=(
+  "$SOURCE_ROOT/tools/loom/src/loom.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_exec.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_sovereign_exec.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_sovereign_provider_fixture.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_pty_stubs.c"
+  "$SOURCE_ROOT/tools/loom/src/dune"
+  "$SOURCE_ROOT/scripts/dev/build_sounio_loom.sh"
+  "$SOURCE_ROOT/scripts/dev/install_sounio_coord_runtime.sh"
+  "$SOURCE_ROOT/scripts/dev/sounio_coord_runtime.sh"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_execution_kernel_product_selftest.sh"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_execution_kernel_product_freeze_selftest.sh"
+)
 [[ -x "$installer_source" ]] || die "runtime installer source missing or not executable: $installer_source"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
@@ -702,6 +793,12 @@ loom_product_exec_ingress_sources=(
   die "Loom witness-epoch-handoff build entrypoint missing or not executable: $loom_witness_epoch_handoff_build_source"
 [[ -x "$loom_witness_epoch_transparency_build_source" ]] || \
   die "Loom witness-epoch-transparency build entrypoint missing or not executable: $loom_witness_epoch_transparency_build_source"
+[[ -x "$loom_sovereign_build_source" && -f "$loom_sovereign_source" &&
+  -f "$loom_sovereign_entrypoint" && -f "$loom_sovereign_semantic_freeze" &&
+  -f "$loom_sovereign_material_freeze" && -f "$loom_sovereign_product_freeze" &&
+  -f "$loom_sovereign_product_contract" && -f "$loom_sovereign_product_evidence" &&
+  -x "$loom_sovereign_product_gate" && -x "$loom_sovereign_product_freeze_gate" ]] ||
+  die "Loom sovereign execution product source bundle is incomplete"
 [[ -f "$loom_continuity_entrypoint" && -f "$loom_continuity_module" ]] || \
   die "Loom native Sounio continuity source bundle is incomplete"
 [[ -f "$loom_language_authority_entrypoint" && \
@@ -780,6 +877,8 @@ done
   -f "$loom_project/src/loom_exec.ml" && \
   -f "$loom_project/src/loom_exec_ingress.ml" && \
   -f "$loom_project/src/loom_hook.ml" && \
+  -f "$loom_project/src/loom_sovereign_exec.ml" && \
+  -f "$loom_project/src/loom_sovereign_provider_fixture.ml" && \
   -f "$loom_project/src/loom_lane_health.ml" && \
   -f "$loom_project/src/loom_witness.ml" && \
   -f "$loom_project/src/loom_witness_epoch.ml" && \
@@ -827,7 +926,18 @@ loom_witness_mesh_v1_binary="$loom_project/_build/default/src/sounio-loom-witnes
 loom_witness_epoch_handoff_binary="$loom_project/_build/default/src/sounio-loom-witness-epoch-handoff-runtime"
 loom_witness_epoch_transparency_binary="$loom_project/_build/default/src/sounio-loom-witness-epoch-transparency-runtime"
 loom_product_activation_resident_binary="$loom_project/.runtime/sounio-loom-resident-membrane-runtime-v5"
+loom_sovereign_binary="$loom_project/_build/default/src/sounio-loom-sovereign-execution-kernel"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
+[[ -x "$loom_sovereign_binary" ]] || \
+  die "Loom build omitted frozen Sounio action 9042"
+loom_sovereign_expected_sha="$(manifest_value "$loom_sovereign_semantic_freeze" executable_sha256)"
+loom_sovereign_actual_sha="$(sha256sum "$loom_sovereign_binary" | awk '{print $1}')"
+[[ "$loom_sovereign_actual_sha" == "$loom_sovereign_expected_sha" ]] || \
+  die "Loom Sounio action 9042 runtime failed frozen hash verification"
+loom_sovereign_probe="$(printf '0\n' | "$loom_sovereign_binary")"
+[[ "$loom_sovereign_probe" == \
+  'SOUNIO_SOVEREIGN_EXECUTION_KERNEL_SELFTEST PASS cases=14' ]] || \
+  die "Loom Sounio action 9042 failed its install probe"
 [[ -x "$loom_language_authority_binary" ]] || \
   die "Loom build omitted its frozen Sounio language-authority runtime"
 [[ -x "$loom_custody_transfer_binary" ]] || \
@@ -1063,6 +1173,8 @@ bundle_sources=(
   "$loom_project/src/loom_epistemic.ml" "$loom_project/src/loom_exec.ml"
   "$loom_project/src/loom_exec_ingress.ml"
   "$loom_project/src/loom_hook.ml"
+  "$loom_project/src/loom_sovereign_exec.ml"
+  "$loom_project/src/loom_sovereign_provider_fixture.ml"
   "$loom_project/src/loom_lane_health.ml"
   "$loom_project/src/loom_witness.ml"
   "$loom_project/src/loom_witness_epoch.ml"
@@ -1101,6 +1213,11 @@ bundle_sources=(
   "$loom_product_activation_build" "$loom_product_activation_gate"
   "$loom_product_exec_ingress_freeze" "$loom_product_exec_ingress_contract"
   "$loom_product_exec_ingress_evidence"
+  "$loom_sovereign_build_source" "$loom_sovereign_source"
+  "$loom_sovereign_entrypoint" "$loom_sovereign_semantic_freeze"
+  "$loom_sovereign_material_freeze" "$loom_sovereign_product_freeze"
+  "$loom_sovereign_product_contract" "$loom_sovereign_product_evidence"
+  "$loom_sovereign_product_gate" "$loom_sovereign_product_freeze_gate"
   "$loom_project/src/loom_membrane.ml"
   "$loom_project/src/loom_peer_activation_capsule.ml"
   "$loom_project/src/loom_resident.ml"
@@ -1154,7 +1271,8 @@ else
     "$stage/policy/product-activation/scripts/dev" \
     "$stage/policy/product-activation/scripts/ci" \
     "$stage/policy/product-exec-ingress/tools/loom/evidence" \
-    "$stage/policy/product-exec-ingress/tools/loom/src"
+    "$stage/policy/product-exec-ingress/tools/loom/src" \
+    "$stage/policy/sovereign-execution"
   install -m 0755 "$runtime_source" "$stage/bin/sounio-coord-runtime"
   install -m 0755 "$causal_source" "$stage/bin/sounio-coord-causal-runtime"
   install -m 0755 "$agentd_source" "$stage/bin/sounio-agentd-runtime"
@@ -1163,6 +1281,8 @@ else
   install -m 0755 "$fleet_model_generator" "$stage/bin/sounio-fleet-tla-sabotage"
   install -m 0755 "$fleet_trace_verifier" "$stage/bin/sounio-fleet-trace-verify"
   install -m 0755 "$loom_binary" "$stage/bin/sounio-loom-runtime"
+  install -m 0555 "$loom_sovereign_binary" \
+    "$stage/bin/sounio-loom-sovereign-execution-kernel"
   install -m 0755 "$loom_language_authority_binary" \
     "$stage/bin/sounio-loom-language-authority-runtime"
   install -m 0644 "$loom_language_authority_freeze" \
@@ -1237,11 +1357,36 @@ else
     install -m 0444 "$product_exec_ingress_source" \
       "$stage/policy/product-exec-ingress/tools/loom/src/$(basename "$product_exec_ingress_source")"
   done
+  sovereign_capsule_sources=(
+    "$loom_sovereign_source" "$loom_sovereign_entrypoint"
+    "$loom_sovereign_semantic_freeze" "$loom_sovereign_material_freeze"
+    "$loom_sovereign_product_freeze" "$loom_sovereign_product_contract"
+    "$loom_sovereign_product_evidence" "$loom_sovereign_build_source"
+    "${loom_sovereign_sources[@]}"
+  )
+  for sovereign_source in "${sovereign_capsule_sources[@]}"; do
+    sovereign_relative="${sovereign_source#"$SOURCE_ROOT/"}"
+    sovereign_target="$stage/policy/sovereign-execution/$sovereign_relative"
+    mkdir -p "$(dirname "$sovereign_target")"
+    install -m 0444 "$sovereign_source" "$sovereign_target"
+  done
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
   coord_runtime_sha256="$(sha256sum "$stage/bin/sounio-coord-runtime" | awk '{print $1}')"
   loom_runtime_sha256="$(sha256sum "$stage/bin/sounio-loom-runtime" | awk '{print $1}')"
+  loom_sovereign_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-sovereign-execution-kernel" | awk '{print $1}'
+  )"
+  loom_sovereign_product_manifest_sha256="$(
+    sha256sum "$stage/policy/sovereign-execution/tools/loom/sovereign_execution_kernel_product.runtime.v1" | awk '{print $1}'
+  )"
+  loom_sovereign_product_contract_sha256="$(
+    sha256sum "$stage/policy/sovereign-execution/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md" | awk '{print $1}'
+  )"
+  loom_sovereign_product_evidence_sha256="$(
+    sha256sum "$stage/policy/sovereign-execution/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt" | awk '{print $1}'
+  )"
   loom_language_authority_policy_manifest_sha256="$(
     sha256sum "$stage/policy/language-authority/tools/loom/language_authority.freeze.v1" | awk '{print $1}'
   )"
@@ -1339,6 +1484,20 @@ else
       "$loom_product_exec_ingress_reference_runtime_sha256"
     printf 'loom_product_exec_ingress_reference_runtime_match=%s\n' \
       "$loom_product_exec_ingress_reference_runtime_match"
+    printf 'loom_sovereign_language=Sounio\n'
+    printf 'loom_sovereign_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_sovereign_operational_kernel=OCaml\n'
+    printf 'loom_sovereign_action=9042\n'
+    printf 'loom_sovereign_semantic_manifest_sha256=11a9099d8870646afc3b38302cbc98a257eb284784375cb4011be30214b42f71\n'
+    printf 'loom_sovereign_material_manifest_sha256=2045439f1a07d737a0cb8370ad080a80cd0715db2966863539f3c0794d14d7e3\n'
+    printf 'loom_sovereign_runtime_sha256=%s\n' \
+      "$loom_sovereign_runtime_sha256"
+    printf 'loom_sovereign_product_manifest_sha256=%s\n' \
+      "$loom_sovereign_product_manifest_sha256"
+    printf 'loom_sovereign_product_contract_sha256=%s\n' \
+      "$loom_sovereign_product_contract_sha256"
+    printf 'loom_sovereign_product_evidence_sha256=%s\n' \
+      "$loom_sovereign_product_evidence_sha256"
     printf 'loom_continuity_language=Sounio\n'
     printf 'loom_continuity_engine=lean_single\n'
     printf 'loom_obligation_language=Sounio\n'
@@ -1384,7 +1543,7 @@ else
     printf 'capability=loom-native-agent-hook-v1\n'
     printf 'capability=loom-runtime-authority-capsule-v1\n'
     printf 'capability=loom-product-launch-dark-attachment-v1\n'
-    printf 'capability=loom-product-exec-ingress-dark-attachment-v1\n'
+    printf 'capability=loom-sovereign-execution-kernel-product-v1\n'
     printf 'capability=loom-truthful-lane-health-v1\n'
     printf 'capability=loom-nondestructive-health-reconcile-v1\n'
     printf 'capability=loom-native-hook-binary-attestation-v1\n'

@@ -160,6 +160,8 @@ command -v openssl >/dev/null 2>&1 || {
 }
 
 dune build --root "$ROOT_DIR/tools/loom" src/loom.exe
+SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
+  "$SCRIPT_DIR/build_sounio_loom_sovereign_execution_kernel.sh"
 if [[ -z "${SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT:-}" || \
   -z "${SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT:-}" ]]; then
   prepare_frozen_toolchain

@@ -732,7 +732,7 @@ let audited_leaf executable =
   let name = basename_lower canonical in
   let info = Unix.stat canonical in
   within "/usr/bin" canonical
-  && one_of name [ "true"; "false"; "printf"; "pwd" ]
+  && one_of name [ "true"; "false"; "printf"; "pwd"; "sleep" ]
   && info.st_kind = S_REG
   && info.st_uid = 0
   && info.st_perm land 0o022 = 0

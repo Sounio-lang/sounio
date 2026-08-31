@@ -113,9 +113,15 @@ let load_gate root environment =
   exact material "same_uid_peer_isolation" "true";
   exact material "production_gate_ready" "true";
   exact material "causal_sabotage" "PASS";
+  let sibling_runtime =
+    Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
+      "sounio-loom-sovereign-execution-kernel"
+  in
   let runtime =
-    Filename.concat root
-      "tools/loom/_build/default/src/sounio-loom-sovereign-execution-kernel"
+    if Sys.file_exists sibling_runtime then sibling_runtime
+    else
+      Filename.concat root
+        "tools/loom/_build/default/src/sounio-loom-sovereign-execution-kernel"
   in
   let runtime_sha256 = Loom_exec.required semantic "executable_sha256" in
   if sha256_file runtime <> runtime_sha256 then

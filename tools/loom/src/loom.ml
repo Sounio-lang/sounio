@@ -3500,7 +3500,7 @@ let launch_guardian paths agent lane session_id cwd command instance_id
       in
       exit code
   | guardian_pid ->
-      let deadline = Unix.gettimeofday () +. 8.0 in
+      let deadline = Unix.gettimeofday () +. 30.0 in
       let rec wait () =
         if Unix.gettimeofday () >= deadline then (
           (try Unix.kill guardian_pid Sys.sigkill with _ -> ());
@@ -4034,7 +4034,7 @@ let input_request paths data =
           instance
       | _ -> failf "invalid interactive ATTACHED response fields")
 
-let start_command ?(launch_source = "start") ?(ready_timeout = 8.0) cli =
+let start_command ?(launch_source = "start") ?(ready_timeout = 30.0) cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
   let agent = required cli "--agent" in

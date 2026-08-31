@@ -1569,6 +1569,15 @@ native_hook_parent_identity() {
     NATIVE_HOOK_SOURCE_SHA="$(manifest_field "$manifest" source_sha)"
     [[ -n "$NATIVE_HOOK_RUNTIME_ID" && -n "$NATIVE_HOOK_SOURCE_SHA" ]] || return 1
     NATIVE_HOOK_WAKE_ELIGIBLE=1
+    if [[ "${SOUNIO_COORD_RUNTIME_MODE:-}" == installed-selftest &&
+      "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 ]]; then
+      case "$STATE_DIR" in
+        "${TMPDIR:-/tmp}"/sounio-loom-native-hook.*/coord)
+          NATIVE_HOOK_WAKE_ELIGIBLE=0
+          ;;
+        *) return 1 ;;
+      esac
+    fi
   fi
 }
 
