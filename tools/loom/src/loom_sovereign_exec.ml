@@ -273,6 +273,11 @@ let parse_record label content =
     body_lines;
   (table, expected)
 
+let record_field table key =
+  match Hashtbl.find_opt table key with
+  | Some value -> value
+  | None -> failf "sovereign-result-field-missing:%s" key
+
 let environment_from_record record =
   let lines = String.split_on_char '\n' record in
   let table = Hashtbl.create 64 in
@@ -790,10 +795,10 @@ let present_result ~instance ~generation ~job_id ~payload_sha256 =
         let state = Loom_exec.required table "state" in
         if state <> "COMPLETED" then failf "sovereign-result-state:%s" state;
         let stdout_text =
-          hex_decode "stdout" (Loom_exec.required table "stdout_hex")
+          hex_decode "stdout" (record_field table "stdout_hex")
         in
         let stderr_text =
-          hex_decode "stderr" (Loom_exec.required table "stderr_hex")
+          hex_decode "stderr" (record_field table "stderr_hex")
         in
         exact table "stdout_sha256" (sha256 stdout_text);
         exact table "stderr_sha256" (sha256 stderr_text);
