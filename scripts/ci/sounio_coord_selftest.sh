@@ -33,6 +33,40 @@ run_coord() {
   SOUNIO_COORD_DIR="$STATE" "$TOOL" "$@"
 }
 
+# A busy state lock must create bounded backpressure rather than a retry storm.
+mkdir -p "$STATE"
+exec 9>"$STATE/.claims.lock"
+flock -x 9
+(
+  cd "$REPO"
+  run_coord scope --agent lock-waiter --lane contention --intent 'wait for lock'
+) >"$TEST_ROOT/lock-wait.out" 2>"$TEST_ROOT/lock-wait.err" &
+lock_wait_pid=$!
+sleep 0.2
+kill -0 "$lock_wait_pid" 2>/dev/null || fail 'contended client did not wait for the state lock'
+flock -u 9
+wait "$lock_wait_pid" || fail "contended client failed after lock release: $(cat "$TEST_ROOT/lock-wait.err")"
+grep -qE '^SCOPED claim_id=lock-waiter--contention' "$TEST_ROOT/lock-wait.out" || \
+  fail 'contended client did not progress after lock release'
+(
+  cd "$REPO"
+  run_coord release --agent lock-waiter --lane contention --reason 'lock selftest complete'
+) >/dev/null
+
+flock -x 9
+set +e
+timeout_output="$(
+  cd "$REPO"
+  SOUNIO_COORD_LOCK_WAIT_SECONDS=1 run_coord scope \
+    --agent lock-timeout --lane contention --intent 'must time out' 2>&1
+)"
+timeout_status=$?
+set -e
+flock -u 9
+[[ $timeout_status -ne 0 ]] || fail 'contended client ignored its state-lock timeout'
+grep -q 'state lock timed out after 1s' <<<"$timeout_output" || \
+  fail "state-lock timeout was not classified: $timeout_output"
+
 output="$(
   cd "$REPO"
   run_coord claim --agent agent-a --lane parser --ttl-seconds 600 \

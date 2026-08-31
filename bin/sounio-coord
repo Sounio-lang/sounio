@@ -36,6 +36,7 @@ Environment:
   SOUNIO_AGENT_ID                default agent identifier for claim commands
   SOUNIO_COORD_TTL_SECONDS       claim lease duration (default: 14400)
   SOUNIO_COORD_DIR               shared state directory override
+  SOUNIO_COORD_LOCK_WAIT_SECONDS state-lock wait bound (default: 30)
 
 Examples:
   bin/sounio-coord status
@@ -81,6 +82,10 @@ ACKS_DIR="$STATE_DIR/message-acks"
 EVENT_LOG="$STATE_DIR/events.log"
 mkdir -p "$CLAIMS_DIR" "$MESSAGES_DIR" "$ACKS_DIR"
 
+LOCK_WAIT_SECONDS="${SOUNIO_COORD_LOCK_WAIT_SECONDS:-30}"
+[[ "$LOCK_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
+  die "SOUNIO_COORD_LOCK_WAIT_SECONDS must be a positive integer"
+
 NOW_EPOCH="$(date +%s)"
 NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 shopt -s nullglob
@@ -100,21 +105,26 @@ cleanup_lock() {
 trap cleanup_lock EXIT
 
 acquire_state_lock() {
-  local action="$1" lock_dir lock_epoch
+  local action="$1" lock_dir lock_epoch now_epoch deadline
   if command -v flock >/dev/null 2>&1; then
     exec {LOCK_FD}>"$STATE_DIR/.claims.lock"
-    flock -n "$LOCK_FD" || die "coordination state is being changed; retry $action"
+    flock -w "$LOCK_WAIT_SECONDS" "$LOCK_FD" || \
+      die "coordination state lock timed out after ${LOCK_WAIT_SECONDS}s while changing $action"
     return 0
   fi
 
   lock_dir="$STATE_DIR/.claims.lock.d"
-  if ! mkdir "$lock_dir" 2>/dev/null; then
+  deadline=$((SECONDS + LOCK_WAIT_SECONDS))
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    now_epoch="$(date +%s)"
     lock_epoch="$(stat -c %Y "$lock_dir" 2>/dev/null || printf 0)"
-    if [[ "$lock_epoch" =~ ^[0-9]+$ ]] && ((NOW_EPOCH - lock_epoch > 30)); then
+    if [[ "$lock_epoch" =~ ^[0-9]+$ ]] && ((now_epoch - lock_epoch > LOCK_WAIT_SECONDS)); then
       rmdir "$lock_dir" 2>/dev/null || true
     fi
-    mkdir "$lock_dir" 2>/dev/null || die "coordination state is being changed; retry $action"
-  fi
+    ((SECONDS < deadline)) || \
+      die "coordination state lock timed out after ${LOCK_WAIT_SECONDS}s while changing $action"
+    sleep 0.1
+  done
   LOCK_TO_CLEAN="$lock_dir"
 }
 
