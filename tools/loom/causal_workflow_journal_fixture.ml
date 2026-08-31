@@ -12,11 +12,15 @@ let option_int = function Some value -> string_of_int value | None -> "absent"
 
 let print_snapshot label snapshot =
   Printf.printf
-    "%s phase=%s sequence=%d compile_count=%d ticket_count=%d launch_count=%d head_sha256=%s controller_generation=%s start_receipt=%s run_pid_identity=%s exit_code=%s stdout_sha256=%s stderr_sha256=%s result_record=%s attestation_record=%s\n%!"
+    "%s phase=%s sequence=%d compile_count=%d ticket_count=%d launch_count=%d result_count=%d attestation_count=%d head_sha256=%s controller_generation=%s start_receipt=%s unit_invocation_id=%s material_pid=%s material_start_tick=%s material_cgroup=%s barrier_nonce=%s run_pid_identity=%s exit_code=%s stdout_sha256=%s stderr_sha256=%s result_record=%s attestation_record=%s\n%!"
     label (Loom_causal_workflow.phase_name snapshot.Loom_causal_workflow.phase)
     snapshot.sequence snapshot.compile_count snapshot.ticket_count
-    snapshot.launch_count snapshot.head_sha256 snapshot.controller_generation
-    (option_value snapshot.start_receipt) (option_value snapshot.run_pid_identity)
+    snapshot.launch_count snapshot.result_count snapshot.attestation_count
+    snapshot.head_sha256 snapshot.controller_generation
+    (option_value snapshot.start_receipt) (option_value snapshot.unit_invocation_id)
+    (option_value snapshot.material_pid) (option_value snapshot.material_start_tick)
+    (option_value snapshot.material_cgroup) (option_value snapshot.barrier_nonce)
+    (option_value snapshot.run_pid_identity)
     (option_int snapshot.exit_code) (option_value snapshot.stdout_sha256)
     (option_value snapshot.stderr_sha256) (option_value snapshot.result_record)
     (option_value snapshot.attestation_record)
@@ -76,11 +80,21 @@ let phase_b ~repo_root ~state_root =
   let running =
     mark_run_launched ~repo_root ~state_root ~workflow_id
       ~start_receipt:(identity "run-start-receipt-v1")
+      ~unit_invocation_id:(identity "unit-invocation-id-v1")
+      ~material_pid:(identity "material-pid-v1")
+      ~material_start_tick:(identity "material-start-tick-v1")
+      ~material_cgroup:(identity "material-cgroup-v1")
+      ~barrier_nonce:(identity "barrier-nonce-v1")
       ~run_pid_identity:(identity "run-pid-identity-v1")
   in
   expect_refused "duplicate-launch" (fun () ->
       mark_run_launched ~repo_root ~state_root ~workflow_id
         ~start_receipt:(identity "run-start-receipt-v2")
+        ~unit_invocation_id:(identity "unit-invocation-id-v2")
+        ~material_pid:(identity "material-pid-v2")
+        ~material_start_tick:(identity "material-start-tick-v2")
+        ~material_cgroup:(identity "material-cgroup-v2")
+        ~barrier_nonce:(identity "barrier-nonce-v2")
         ~run_pid_identity:(identity "run-pid-identity-v2"));
   if running.launch_count <> 1 then failf "fixture-launch-count-diverged";
   let measured =
@@ -103,7 +117,8 @@ let phase_b ~repo_root ~state_root =
   in
   ignore measured; ignore closed; ignore attest_armed; ignore attest_running;
   if final.phase <> Attested_closed || final.compile_count <> 1 ||
-     final.ticket_count <> 1 || final.launch_count <> 1 then
+     final.ticket_count <> 1 || final.launch_count <> 1 ||
+     final.result_count <> 1 || final.attestation_count <> 1 then
     failf "fixture-final-state-diverged";
   print_snapshot
     "PHASE_B_COMPLETE recompile=REFUSED duplicate_ticket=REFUSED duplicate_launch=REFUSED"
@@ -189,14 +204,29 @@ let material_command command =
       print_snapshot "MATERIAL_RUN_ARMED" snapshot;
       wait_if (command = "material-arm-run-wait")
   | "material-mark-running" | "material-mark-running-wait" ->
-      require_arity 7;
+      require_arity 12;
       let snapshot =
         mark_run_launched ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
           ~workflow_id:Sys.argv.(4) ~start_receipt:Sys.argv.(5)
-          ~run_pid_identity:Sys.argv.(6)
+          ~unit_invocation_id:Sys.argv.(6) ~material_pid:Sys.argv.(7)
+          ~material_start_tick:Sys.argv.(8) ~material_cgroup:Sys.argv.(9)
+          ~barrier_nonce:Sys.argv.(10) ~run_pid_identity:Sys.argv.(11)
       in
-      print_snapshot "MATERIAL_RUNNING" snapshot;
+      print_snapshot "MATERIAL_RUNNING_IN_EXEC" snapshot;
       wait_if (command = "material-mark-running-wait")
+  | "material-release-replay" ->
+      require_arity 12;
+      print_endline
+        (admit_exec_release ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+           ~workflow_id:Sys.argv.(4) ~guardian_generation:Sys.argv.(5)
+           ~unit_invocation_id:Sys.argv.(6) ~material_pid:Sys.argv.(7)
+           ~material_start_tick:Sys.argv.(8) ~material_cgroup:Sys.argv.(9)
+           ~run_grant_generation:Sys.argv.(10) ~barrier_nonce:Sys.argv.(11))
+  | "material-claim-final" ->
+      require_arity 5;
+      print_endline
+        (claim_after_attestation ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)
+           ~workflow_id:Sys.argv.(4))
   | "material-record-result" ->
       require_arity 10;
       seal_run_result ~repo_root:Sys.argv.(2) ~state_root:Sys.argv.(3)

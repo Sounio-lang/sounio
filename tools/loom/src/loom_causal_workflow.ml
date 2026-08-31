@@ -98,6 +98,14 @@ type policy = {
   runtime : string;
 }
 
+type mid_exec_policy = {
+  mid_exec_manifest_sha256 : string;
+  mid_exec_semantics_sha256 : string;
+  release_decision : string;
+  claim_decision : string;
+  mid_exec_runtime : string;
+}
+
 let load_policy ~repo_root =
   let repo_root = Unix.realpath repo_root in
   let manifest_path =
@@ -152,6 +160,52 @@ let load_policy ~repo_root =
   { manifest_sha256 = pinned_manifest_sha256;
     semantics_sha256 = required manifest "semantics_sha256" |> digest "semantics";
     runtime }
+
+let load_mid_exec_policy ~repo_root =
+  let repo_root = Unix.realpath repo_root in
+  let manifest_path =
+    match Sys.getenv_opt "SOUNIO_LOOM_CAUSAL_MID_EXEC_MANIFEST" with
+    | Some path -> path
+    | None -> Filename.concat repo_root "tools/loom/causal_workflow_mid_exec.freeze.v1"
+  in
+  ignore (require_regular_file manifest_path);
+  let expected = "7dfe285941220f7c3ef62948ec97f87584e7f8cb473da0203a76f5b23cdeca3e" in
+  if sha256_file manifest_path <> expected then
+    failf "causal-workflow-mid-exec-manifest-hash-mismatch";
+  let manifest = parse_manifest manifest_path in
+  exact manifest "schema" "loom-causal-workflow-mid-exec-freeze-v1";
+  exact manifest "stage" "SEMANTICS_FROZEN";
+  exact manifest "producing_language" "Sounio";
+  exact manifest "language_role" "SEMANTIC_AUTHORITY";
+  exact manifest "action" "9037";
+  exact manifest "subordinate_contract" "mid-exec-v1";
+  List.iter
+    (fun key ->
+      let path = Filename.concat repo_root (required manifest (key ^ "_path")) in
+      ignore (require_regular_file path);
+      if sha256_file path <> required manifest (key ^ "_sha256") then
+        failf "causal-workflow-mid-exec-%s-hash-mismatch" key)
+    [ "contract"; "source"; "entrypoint"; "build_script"; "selftest";
+      "first_manifest"; "first_evidence"; "freeze_evidence";
+      "parent_9037_manifest"; "toolchain_wrapper"; "toolchain_compiler" ];
+  let runtime =
+    match Sys.getenv_opt "SOUNIO_LOOM_CAUSAL_MID_EXEC_RUNTIME" with
+    | Some path -> path
+    | None ->
+        Filename.concat repo_root
+          "tools/loom/_build/default/src/sounio-loom-causal-workflow-mid-exec"
+  in
+  let runtime = Unix.realpath runtime in
+  let stat = require_regular_file runtime in
+  if stat.st_perm land 0o111 = 0 then
+    failf "causal-workflow-mid-exec-runtime-not-executable";
+  if sha256_file runtime <> required manifest "executable_sha256" then
+    failf "causal-workflow-mid-exec-runtime-hash-mismatch";
+  { mid_exec_manifest_sha256 = expected;
+    mid_exec_semantics_sha256 = required manifest "semantics_sha256" |> digest "mid-exec-semantics";
+    release_decision = required manifest "release_decision";
+    claim_decision = required manifest "claim_decision";
+    mid_exec_runtime = runtime }
 
 let write_all descriptor value =
   let bytes = Bytes.of_string value in
@@ -515,26 +569,26 @@ let parse_event (policy : policy) expected_sequence expected_previous expected_k
 
 type phase =
   | Waiting_compile | Compile_armed | Compile_running | Compiled_closed
-  | Run_armed | Running | Run_measured | Run_closed | Attest_armed
+  | Run_armed | Material_running_in_exec | Run_measured | Run_closed | Attest_armed
   | Attest_running | Attested_closed | Refused_poisoned
 
 let phase_code = function
   | Waiting_compile -> 0 | Compile_armed -> 1 | Compile_running -> 2
-  | Compiled_closed -> 3 | Run_armed -> 4 | Running -> 5
+  | Compiled_closed -> 3 | Run_armed -> 4 | Material_running_in_exec -> 5
   | Run_measured -> 6 | Run_closed -> 7 | Attest_armed -> 8
   | Attest_running -> 9 | Attested_closed -> 10 | Refused_poisoned -> 11
 
 let phase_name = function
   | Waiting_compile -> "WAITING_COMPILE" | Compile_armed -> "COMPILE_ARMED"
   | Compile_running -> "COMPILE_RUNNING" | Compiled_closed -> "COMPILED_CLOSED"
-  | Run_armed -> "RUN_ARMED" | Running -> "RUNNING"
+  | Run_armed -> "RUN_ARMED" | Material_running_in_exec -> "MATERIAL_RUNNING_IN_EXEC"
   | Run_measured -> "RUN_MEASURED" | Run_closed -> "RUN_CLOSED"
   | Attest_armed -> "ATTEST_ARMED" | Attest_running -> "ATTEST_RUNNING"
   | Attested_closed -> "ATTESTED_CLOSED" | Refused_poisoned -> "REFUSED_POISONED"
 
 let phase_of_code = function
   | 0 -> Waiting_compile | 1 -> Compile_armed | 2 -> Compile_running
-  | 3 -> Compiled_closed | 4 -> Run_armed | 5 -> Running
+  | 3 -> Compiled_closed | 4 -> Run_armed | 5 -> Material_running_in_exec
   | 6 -> Run_measured | 7 -> Run_closed | 8 -> Attest_armed
   | 9 -> Attest_running | 10 -> Attested_closed | 11 -> Refused_poisoned
   | _ -> failf "causal-workflow-phase-invalid"
@@ -552,6 +606,8 @@ type snapshot = {
   compile_count : int;
   ticket_count : int;
   launch_count : int;
+  result_count : int;
+  attestation_count : int;
   compile_receipt : string option;
   artifact_record : string option;
   artifact_handle : string option;
@@ -559,6 +615,11 @@ type snapshot = {
   run_grant : string option;
   run_grant_generation : string option;
   start_receipt : string option;
+  unit_invocation_id : string option;
+  material_pid : string option;
+  material_start_tick : string option;
+  material_cgroup : string option;
+  barrier_nonce : string option;
   run_pid_identity : string option;
   result_record : string option;
   result_handle : string option;
@@ -588,9 +649,12 @@ let initial_snapshot event =
     controller_generation = field fields "controller_generation" |> digest "controller-generation";
     source_sha256 = field fields "source_sha256" |> digest "source";
     phase = Waiting_compile; compile_count = 0; ticket_count = 0;
-    launch_count = 0; compile_receipt = None; artifact_record = None;
+    launch_count = 0; result_count = 0; attestation_count = 0;
+    compile_receipt = None; artifact_record = None;
     artifact_handle = None; run_ticket = None; run_grant = None;
-    run_grant_generation = None; start_receipt = None;
+    run_grant_generation = None; start_receipt = None; unit_invocation_id = None;
+    material_pid = None; material_start_tick = None; material_cgroup = None;
+    barrier_nonce = None;
     run_pid_identity = None; result_record = None; result_handle = None;
     exit_code = None; stdout_sha256 = None; stderr_sha256 = None;
     attestation_record = None; attestation_handle = None;
@@ -640,14 +704,24 @@ let apply_transition (policy : policy) (snapshot : snapshot) (event : event) =
         failf "causal-workflow-run-ticket-mismatch";
       { base with launch_count = 1;
         start_receipt = Some (field fields "start_receipt" |> digest "start-receipt");
+        unit_invocation_id =
+          Some (field fields "unit_invocation_id" |> digest "unit-invocation-id");
+        material_pid = Some (field fields "material_pid" |> digest "material-pid");
+        material_start_tick =
+          Some (field fields "material_start_tick" |> digest "material-start-tick");
+        material_cgroup =
+          Some (field fields "material_cgroup" |> digest "material-cgroup");
+        barrier_nonce = Some (field fields "barrier_nonce" |> digest "barrier-nonce");
         run_pid_identity = Some (field fields "run_pid_identity" |> digest "run-pid") }
   | "RUN_RESULT_SEALED", 6 ->
+      if snapshot.result_count <> 0 then failf "causal-workflow-duplicate-result-refused";
       let exit_code = int_field fields "exit_code" in
       if exit_code < 0 || exit_code > 255 then
         failf "causal-workflow-exit-code-invalid";
       let stdout_sha256 = field fields "stdout_sha256" |> digest "stdout" in
       let stderr_sha256 = field fields "stderr_sha256" |> digest "stderr" in
       { base with
+        result_count = 1;
         result_record = Some (field fields "result_record" |> digest "result-record");
         result_handle = Some (field fields "result_handle" |> digest "result-handle");
         exit_code = Some exit_code; stdout_sha256 = Some stdout_sha256;
@@ -663,12 +737,17 @@ let apply_transition (policy : policy) (snapshot : snapshot) (event : event) =
   | "ATTEST_ARMED", 8 -> base
   | "ATTEST_STARTED", 9 -> base
   | "ATTEST_CLOSED", 10 ->
+      if snapshot.attestation_count <> 0 then
+        failf "causal-workflow-duplicate-attestation-refused";
+      if snapshot.result_count <> 1 then
+        failf "causal-workflow-attestation-result-count-refused";
       let artifact_record = field fields "artifact_record" |> digest "artifact-record" in
       let result_record = field fields "result_record" |> digest "result-record" in
       if artifact_record <> require_option "artifact-record" snapshot.artifact_record ||
          result_record <> require_option "result-record" snapshot.result_record then
         failf "causal-workflow-attestation-lineage-mismatch";
       { base with
+        attestation_count = 1;
         attestation_record =
           Some (field fields "attestation_record" |> digest "attestation-record");
         attestation_handle =
@@ -836,23 +915,96 @@ let commit_run_ticket ~repo_root ~state_root ~workflow_id ~run_ticket
       ("run_grant", run_grant); ("run_grant_generation", run_grant_generation);
       ("artifact_record", artifact_record) ]
 
+let witness_fields snapshot =
+  [ ("guardian_generation", snapshot.guardian_generation);
+    ("unit_invocation_id", require_option "unit-invocation-id" snapshot.unit_invocation_id);
+    ("material_pid", require_option "material-pid" snapshot.material_pid);
+    ("material_start_tick",
+     require_option "material-start-tick" snapshot.material_start_tick);
+    ("material_cgroup", require_option "material-cgroup" snapshot.material_cgroup);
+    ("run_grant_generation",
+     require_option "run-grant-generation" snapshot.run_grant_generation);
+    ("barrier_nonce", require_option "barrier-nonce" snapshot.barrier_nonce) ]
+
 let mark_run_launched ~repo_root ~state_root ~workflow_id ~start_receipt
-    ~run_pid_identity =
+    ~unit_invocation_id ~material_pid ~material_start_tick ~material_cgroup
+    ~barrier_nonce ~run_pid_identity =
   let snapshot = load_snapshot ~repo_root ~state_root ~workflow_id in
   let run_ticket = require_option "run-ticket" snapshot.run_ticket in
   append_transition ~repo_root ~state_root ~workflow_id ~kind:"RUN_LAUNCHED"
-    ~transition:5 ~expected:Run_armed ~next:Running
+    ~transition:5 ~expected:Run_armed ~next:Material_running_in_exec
     ~extra_fields:[ ("run_ticket", run_ticket); ("start_receipt", start_receipt);
+      ("guardian_generation", snapshot.guardian_generation);
+      ("unit_invocation_id", unit_invocation_id); ("material_pid", material_pid);
+      ("material_start_tick", material_start_tick);
+      ("material_cgroup", material_cgroup); ("barrier_nonce", barrier_nonce);
+      ("run_grant_generation",
+       require_option "run-grant-generation" snapshot.run_grant_generation);
       ("run_pid_identity", run_pid_identity) ]
+
+let clear_bit word bit = word land lnot (1 lsl bit)
+
+let receipt_line label outcome decision snapshot =
+  Printf.sprintf "%s outcome=%s sounio_decision=%s witness_sha256=%s sequence=%d"
+    label outcome decision
+    (sha256 (snapshot.guardian_generation ^ snapshot.head_sha256)) snapshot.sequence
+
+let admit_exec_release ~repo_root ~state_root ~workflow_id ~guardian_generation
+    ~unit_invocation_id ~material_pid ~material_start_tick ~material_cgroup
+    ~run_grant_generation ~barrier_nonce =
+  let policy = load_mid_exec_policy ~repo_root in
+  let snapshot = load_snapshot ~repo_root ~state_root ~workflow_id in
+  if snapshot.phase <> Material_running_in_exec then
+    failf "causal-workflow-release-phase-refused";
+  let equal label supplied persisted =
+    digest label supplied = require_option label persisted
+  in
+  let word0 = 3071 in
+  let word0 =
+    if digest "guardian-generation" guardian_generation = snapshot.guardian_generation
+    then word0 else clear_bit word0 1
+  in
+  let word0 = if equal "unit-invocation-id" unit_invocation_id snapshot.unit_invocation_id then word0 else clear_bit word0 2 in
+  let word0 = if equal "material-pid" material_pid snapshot.material_pid then word0 else clear_bit word0 3 in
+  let word0 = if equal "material-start-tick" material_start_tick snapshot.material_start_tick then word0 else clear_bit word0 4 in
+  let word0 = if equal "material-cgroup" material_cgroup snapshot.material_cgroup then word0 else clear_bit word0 5 in
+  let word0 = if equal "run-grant-generation" run_grant_generation snapshot.run_grant_generation then word0 else clear_bit word0 6 in
+  let word0 = if equal "barrier-nonce" barrier_nonce snapshot.barrier_nonce then word0 else clear_bit word0 11 in
+  let frame = Printf.sprintf "9037 1 %d 1045\n" word0 in
+  let code, output = process_exchange policy.mid_exec_runtime frame in
+  let decision = String.split_on_char '\n' output |> List.hd in
+  if code = 0 && starts_with output (policy.release_decision ^ "\n") then
+    receipt_line "EXEC_RELEASE_RECEIPT" "ADMITTED" decision snapshot
+  else if code = 42 && starts_with decision "SOUNIO_CAUSAL_WORKFLOW_MID_EXEC DENY" then
+    receipt_line "EXEC_RELEASE_RECEIPT" "REFUSED" decision snapshot
+  else
+    failf "causal-workflow-sounio-release-unexpected:%d:%s" code output
+
+let claim_after_attestation ~repo_root ~state_root ~workflow_id =
+  let policy = load_mid_exec_policy ~repo_root in
+  let snapshot = load_snapshot ~repo_root ~state_root ~workflow_id in
+  if snapshot.phase <> Attested_closed || snapshot.compile_count <> 1 ||
+     snapshot.ticket_count <> 1 || snapshot.launch_count <> 1 ||
+     snapshot.result_count <> 1 || snapshot.attestation_count <> 1 then
+    failf "causal-workflow-final-claim-counts-refused";
+  ignore (witness_fields snapshot);
+  let code, output =
+    process_exchange policy.mid_exec_runtime "9037 2 4095 1365\n"
+  in
+  let decision = String.split_on_char '\n' output |> List.hd in
+  if code <> 0 || not (starts_with output (policy.claim_decision ^ "\n")) then
+    failf "causal-workflow-sounio-claim-unexpected:%d:%s" code output;
+  receipt_line "FINAL_CLAIM_RECEIPT" "ADMITTED" decision snapshot
 
 let seal_run_result ~repo_root ~state_root ~workflow_id ~exit_code
     ~stdout_sha256 ~stderr_sha256 ~result_record ~result_handle =
+  let snapshot = load_snapshot ~repo_root ~state_root ~workflow_id in
   append_transition ~repo_root ~state_root ~workflow_id
-    ~kind:"RUN_RESULT_SEALED" ~transition:6 ~expected:Running ~next:Run_measured
-    ~extra_fields:[ ("exit_code", string_of_int exit_code);
-      ("stdout_sha256", stdout_sha256);
-      ("stderr_sha256", stderr_sha256);
-      ("result_record", result_record); ("result_handle", result_handle) ]
+    ~kind:"RUN_RESULT_SEALED" ~transition:6 ~expected:Material_running_in_exec ~next:Run_measured
+    ~extra_fields:(witness_fields snapshot @
+      [ ("exit_code", string_of_int exit_code); ("stdout_sha256", stdout_sha256);
+        ("stderr_sha256", stderr_sha256); ("result_record", result_record);
+        ("result_handle", result_handle) ])
 
 let string_of_bool value = if value then "true" else "false"
 
