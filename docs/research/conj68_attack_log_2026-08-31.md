@@ -814,3 +814,25 @@ intuição de paridade estava certa; o objeto era o grau, não a obstrução.
 Dados exatos: docs/research/data/conj68_ulocus_decomp_13370001.txt (equações das
 componentes, incl. a cúbica ternária 16k2³+...), conj68_ulocus_degrees_8configs.txt.
 Ferramenta: Singular (minor(M,5) + primdecGTZ). Frames exatos via census Sounio.
+
+### R20b — rigor do revisor forte incorporado (3 checks; o resultado sobrevive)
+
+1. **REDUÇÃO (o check que podia matar):** eu tinha impresso pd[i][2] (o RADICAL/primo),
+   não a componente primária pd[i][1] — logo não tinha prova de que E é reduzido.
+   Verificado direto: deg(E)=deg(radical(E))=7, MESMO grau. A não-redução (reduce=6≠0)
+   está só nas componentes EMBEBIDAS de dim menor (par complexo + origem); a curva
+   top-dimensional (dim 1 proj) é REDUZIDA grau 7. Seção-hiperplana aplica-se. SOBREVIVE.
+2. **PORTEOUS ERRADO:** "Thom-Porteous no fibrado efetivo E₇" NÃO serve — E₇ é exatamente
+   o fibrado que §6/R18 mostrou não existir sobre Z (reintroduziria o objeto morto). O
+   argumento certo de uniformidade é **constância do grau em família PLANA conexa** de
+   pares ZD (conexidade via transitividade de [GZ26]); grau localmente constante onde
+   dim D=1 ⟹ ≡7. GAP real = **locus ruim** onde dim D salta p/ 2 (aí o grau nada diz).
+3. **CAÇA AO LOCUS RUIM (falsificador):** check mod-p rápido (minor+std+dim, sem primdec)
+   em ~17 configs distintas (8 primdec ℚ + 9 mod-p novas): TODAS dim(D)=2 (codim 3), deg=7.
+   ZERO anomalias. Não achei o par com codim<3; descartá-lo é o que resta em aberto.
+
+**d≥3 NUNCA usado:** a prova dá witness p/ TODO par (força, não buraco); d≥3 entra só na
+leitura do witness como caminho de comprimento 3. Manuscrito §8 reescrito como o
+"argumento de grau ímpar" (rota viva; substitui o placeholder construtivo/discriminante —
+o grau ímpar dispensa provar disc≥0 de cada cônica). Rigor restante delimitado: (a)
+deg D=7 uniforme via flatness+conexidade, fechando o locus-ruim; (b) redução top-dim geral.

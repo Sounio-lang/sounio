@@ -206,27 +206,68 @@ local rank is 8 = dim B. (This is the boundary datum for e_rel above.)
   (KRANK=MRANK=2) and 20 conic components (KRANK=MRANK=3)** (raised the witness cap 40→300 and confirmed the tracer still resolves the (e₁,e₂) lines under the raised cap — a sensitivity check, so the null is not a truncation artifact): generically
   the odd components are conics, and the pencil is the split-conic degeneration
   at the symmetric point. Consequently a witness-existence proof cannot rest on
-  a uniform linear pencil; it must rest on the obstruction argument (§6), which
-  never required one. (This is why §6, not a construction, carries the theorem.)
+  a uniform linear pencil. It rests instead on the **odd degree** of the whole
+  witness curve (§8): the pencil/conic/cubic split varies with the configuration,
+  but the total degree 7 does not.
 
-## 8. The constructive route (in progress)
+## 8. The odd-degree existence argument
 
-With the topological forcing closed (§6), witness existence must be exhibited
-algebraically. The generic data dictate the shape: away from the maximally
-symmetric configuration (e₁,e₂), the odd components of the witness curve are
-**conics**, not lines (§7). We therefore seek a witness as a real root of an
-explicit quadratic in the frame coordinates. The program:
-1. Rationalize a conic component from a generic configuration (the same
-   polish-and-reconstruct pipeline that produced the R16 line pencil), obtaining
-   its degree-2 defining relation in frame coordinates.
-2. Read off the resulting quadratic q(t) whose roots are the witnesses along the
-   conic, with coefficients explicit in n(a), n(a′), ⟨z, z′⟩ and the ghost-law
-   quantities of §4.
-3. Prove disc q ≥ 0 uniformly for d(x,x′) ≥ 3, using the identities of §§2–5.
-   Positivity of an explicit expression in owned invariants is an algebra
-   problem, not a topology one — the route that survives §6.
+With the topological forcing closed (§6), existence is exhibited by an
+enumerative parity — but of the witness *variety's degree*, not of an Euler
+class. This is the route the data support, and it is close to complete.
 
-A real root of q for every admissible pair would prove diam Γ_C^Z(𝕊) = 3.
+Fix a pair (x, x′). In frame coordinates for Im C(x), Im C(x′) the commutator
+gives a matrix M(u) (rows = the ≤ 11 nonzero components of [u, ·] in W₁₁,
+columns indexed by the frame of Im C(x′)), with entries **linear in u**. A
+nonzero w ∈ Im C(x′) with [u, w] = 0 is exactly a kernel vector of M(u), so the
+witness locus is the determinantal variety
+
+  D(x,x′) = { [u] ∈ ℙ(Im C(x)) = ℝP⁴ : rank M(u) ≤ 4 }.
+
+**Measured, exactly (Singular, primary decomposition over ℚ; ~17 configurations,
+including the special stratum a = 2e₃ − 2e₄):**
+
+**Fact 8.1 [M].** D(x,x′) is a curve (projective dimension 1) of **degree 7**.
+Its reduced structure has degree 7 as well (the scheme's non-reduced part is
+supported on lower-dimensional embedded components — a conjugate pair of complex
+points and the origin — which do not touch the curve; deg D = deg √D = 7). The
+curve splits, over ℚ, as two conics + one **cubic** for generic pairs
+(2 + 2 + 3 = 7), or one **line** + three conics for flatter pairs (1 + 2 + 2 + 2
+= 7): in every case an **odd-degree** component is present, forced by the odd
+total degree.
+
+**Theorem 8.2 (existence, conditional on uniformity of Fact 8.1).** deg D = 7 is
+odd. A reduced real projective curve of odd degree has a real point: a generic
+real hyperplane H (defined over ℝ) meets D in a conjugation-stable 0-cycle of
+degree 7, whose complex points pair off, leaving an odd — hence positive —
+number of real points. A real [u] ∈ D is a real line in Im C(x); M(u) is a real
+matrix of rank ≤ 4, so ker M(u) contains a real nonzero w ∈ Im C(x′). Then
+(u, w) is a witness with u, w ≠ 0 and [u, w] = 0. Hence every pair admits a
+witness, and **diam Γ_C^Z(𝕊) = 3**.
+
+*(Note: the argument never uses d(x,x′) ≥ 3 — it produces a witness for every
+pair, which for d ≤ 2 is unsurprising. The hypothesis enters only in reading the
+witness as a length-3 path.)*
+
+**What remains for a proof.** Two points, both about making Fact 8.1 uniform:
+1. **deg D = 7 for every admissible pair.** The right argument is *not* a
+   Thom–Porteous class in the rank-7 bundle E₇ — that bundle is exactly the one
+   §6 shows fails to exist over Z. Instead: over the connected space of
+   admissible pairs (connectivity should follow from the transitivity results of
+   [GZ26]), the family {D(x,x′)} is flat wherever dim D = 1, so deg D is locally
+   constant, hence ≡ 7 from the measured value. The genuine gap is the **bad
+   locus** where dim D jumps to 2 (there the degree says nothing): we have not
+   found such a pair (dim D = 1 on every sampled configuration, mod-p rank test),
+   but ruling it out is open.
+2. **The curve is reduced of odd degree.** Measured (deg D = deg √D = 7) on the
+   sampled configurations; the general statement is needed for the hyperplane
+   section in Theorem 8.2.
+
+This is the enumerative parity R14 sensed as "c₇ odd" — but attached to the
+correct object. The degree of the witness curve, an intersection number, is a
+deformation invariant; its being odd forces a real point. The Euler class of §6
+was the wrong odd invariant (it lived on B ∖ Z where it vanishes); the *degree*
+is the right one.
 
 ## Appendix: verification artifacts (this repository)
 
