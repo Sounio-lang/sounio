@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pireus-spark-pair-reservation
+  namespace: beagle
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pireus-spark-pair-admission
+  namespace: beagle
+data:
+  state: BOOTSTRAP
+  epoch: "1"
+  holder: bootstrap
+  allowWorkload: "false"
+  sounioSourceSha256: REPLACED_BY_INSTALLER
+  semanticsFreezeSha256: REPLACED_BY_INSTALLER
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: pireus-spark-pair-fence
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+        scope: "*"
+  validations:
+    - expression: >-
+        !(
+          (has(object.spec.nodeName) && object.spec.nodeName in ['spark-3c59', 'spark-8e54']) ||
+          (has(object.spec.tolerations) && object.spec.tolerations.exists(t,
+            (t.key == 'pireus.sounio.dev/spark-pair' || (t.key == '' && t.operator == 'Exists')) &&
+            (!has(t.effect) || t.effect == '' || t.effect == 'NoSchedule')
+          ))
+        ) ||
+        (
+          (object.metadata.namespace == 'kube-system' &&
+            object.spec.serviceAccountName in [
+              'cilium', 'cilium-envoy', 'coredns', 'multus', 'kube-proxy',
+              'whereabouts'
+            ]) ||
+          (object.metadata.namespace == 'kube-system' &&
+            object.spec.serviceAccountName == 'default' &&
+            object.spec.containers.all(c,
+              c.image == 'nvcr.io/nvidia/k8s-device-plugin:v0.18.0')) ||
+          (object.metadata.namespace == 'ceph-csi-cephfs' &&
+            object.spec.serviceAccountName == 'cephfs-csi-nodeplugin') ||
+          (object.metadata.namespace == 'ceph-csi-rbd' &&
+            object.spec.serviceAccountName == 'rbd-csi-nodeplugin') ||
+          (object.metadata.namespace == 'nvidia-network-operator' &&
+            object.spec.serviceAccountName == 'node-feature-discovery') ||
+          (object.metadata.namespace == 'darwin-observability-system' &&
+            object.spec.serviceAccountName == 'darwin-node-exporter')
+        ) ||
+        (
+          object.metadata.namespace == 'slurm-pilot' &&
+          object.metadata.labels['app.kubernetes.io/name'] == 'slurmd' &&
+          object.metadata.labels['app.kubernetes.io/instance'] == 'slurm-pilot-worker-spark' &&
+          object.spec.serviceAccountName == 'default' &&
+          object.metadata.ownerReferences.exists(o,
+            o.controller == true &&
+            o.kind == 'NodeSet' &&
+            o.name == 'slurm-pilot-worker-spark' &&
+            o.uid == 'de6c8806-eaa2-4d6a-9c25-d9c202f298ba'
+          ) &&
+          object.spec.containers.exists(c,
+            c.name == 'slurmd' &&
+            c.image == 'ghcr.io/slinkyproject/slurmd:25.11-ubuntu24.04' &&
+            has(c.resources.requests) && has(c.resources.limits) &&
+            c.resources.requests['nvidia.com/gpu'] == quantity('1') &&
+            c.resources.limits['nvidia.com/gpu'] == quantity('1')
+          ) &&
+          params.data.state in [
+            'UNINITIALIZED', 'SLURM_OWNED', 'DRAINING_SLURM', 'SLURM_QUIESCENT',
+            'DETACHING_SLURMD', 'SLURM_RESTORING', 'RECOVERY_REQUIRED'
+          ]
+        ) ||
+        (
+          object.metadata.namespace == 'beagle' &&
+          object.spec.serviceAccountName == 'pireus-spark-pair-reservation' &&
+          object.metadata.name in [
+            'pireus-spark-reservation-3c59',
+            'pireus-spark-reservation-8e54'
+          ] &&
+          object.metadata.labels['pireus.sounio.dev/spark-pair-reservation'] == 'true' &&
+          object.metadata.labels['pireus.sounio.dev/spark-pair-epoch'] == params.data.epoch &&
+          object.metadata.annotations['pireus.sounio.dev/spark-pair-holder'] == params.data.holder &&
+          ((object.metadata.name == 'pireus-spark-reservation-3c59' &&
+            object.spec.nodeSelector['kubernetes.io/hostname'] == 'spark-3c59') ||
+           (object.metadata.name == 'pireus-spark-reservation-8e54' &&
+            object.spec.nodeSelector['kubernetes.io/hostname'] == 'spark-8e54')) &&
+          object.spec.containers.size() == 1 &&
+          object.spec.containers[0].name == 'reservation' &&
+          object.spec.containers[0].image == 'ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517' &&
+          object.spec.containers[0].resources.requests['nvidia.com/gpu'] == quantity('1') &&
+          object.spec.containers[0].resources.limits['nvidia.com/gpu'] == quantity('1') &&
+          params.data.state in [
+            'K8S_RESERVING', 'K8S_OWNED', 'K8S_RELEASING',
+            'VERIFYING_GPU_CLEAN', 'SLURM_RESTORING', 'RECOVERY_REQUIRED'
+          ]
+        )
+      message: Spark GPU Pods require the current Pireus Lease epoch and an admitted material role.
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: pireus-spark-pair-fence
+spec:
+  policyName: pireus-spark-pair-fence
+  paramRef:
+    name: pireus-spark-pair-admission
+    namespace: beagle
+    parameterNotFoundAction: Deny
+  validationActions: [Deny]
