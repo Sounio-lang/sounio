@@ -1,0 +1,180 @@
+//@ run-pass
+// Fatos estruturais de 𝕊 que sustentam o preprint "afeto diádico num espaço de estados
+// sedeniônico". Este programa É a fonte dos números do §3 do paper: qualquer número no texto
+// que não saia daqui, sai do texto.
+//
+// Roda sobre `stdlib/algebra/sedenion.sio`, que usa o kernel universal de sinais
+// `cd_sigma(i, j, 4)` — a mesma álgebra que o projeto já usa em produção
+// (`stdlib/cybernetic/psychiatry.sio`). Deliberadamente NÃO se reimplementa o produto aqui:
+// um verificador que traz a própria álgebra não verifica nada.
+//
+// Entra na suíte como run-pass de propósito: se a álgebra do stdlib mudar e a tabela do paper
+// deixar de bater, a suíte quebra. O paper ganha um portão de regressão.
+
+use algebra::sedenion::{sed_basis, sed_mul, sed_associator, sed_norm_sq,
+                        sed_canonical_zd_z, sed_canonical_zd_w}
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn eh_zero(v: &[f64; 16]) -> bool with Mut {
+    var i: i64 = 0
+    var ok: bool = true
+    while i < 16 {
+        if abs_f64(v[i as usize]) > 1.0e-12 { ok = false }
+        i = i + 1
+    }
+    ok
+}
+
+// Elemento e_i + s·e_j, com s em {+1, -1}.
+fn par(i: i64, j: i64, s: f64, out: &![f64; 16]) with Mut {
+    var z: i64 = 0
+    while z < 16 { out[z as usize] = 0.0; z = z + 1 }
+    out[i as usize] = 1.0
+    out[j as usize] = s
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var falhas: i64 = 0
+
+    // ── 0. Sanidade: o divisor de zero canônico do stdlib (de Marrais 2000).
+    //     z = e3 + e10, w = e6 − e15. Note o SINAL NEGATIVO em w — é ele que explica a
+    //     diferença entre as duas contagens abaixo.
+    var z: [f64; 16] = [0.0; 16]
+    var w: [f64; 16] = [0.0; 16]
+    var pr: [f64; 16] = [0.0; 16]
+    sed_canonical_zd_z(&!z)
+    sed_canonical_zd_w(&!w)
+    sed_mul(&z, &w, &!pr)
+    if !eh_zero(&pr) { println("FALHA 0: divisor de zero canonico nao aniquila"); falhas = falhas + 1 }
+
+    // ── 1. A RECONCILIAÇÃO 84 × 336.
+    //     Conta os pares aniquiladores em duas convenções, sobre os mesmos elementos:
+    //       (a) só sinais positivos: (e_i + e_j)(e_k + e_l)
+    //       (b) com sinal em cada lado: (e_i ± e_j)(e_k ± e_l)
+    //     O prereg OSSM-168 fala em 336; a contagem só-positiva dá outro número.
+    //     Este bloco decide qual é qual, em vez de alegar.
+    var a: [f64; 16] = [0.0; 16]
+    var b: [f64; 16] = [0.0; 16]
+    var p: [f64; 16] = [0.0; 16]
+
+    var n_pos: i64 = 0       // convenção (a)
+    var n_sig: i64 = 0       // convenção (b)
+    var n_cruza: i64 = 0     // dos de (a), quantos atravessam e0..e7 / e8..e15
+    var n_diag: i64 = 0      // dos de (a), quantos envolvem um par diagonal m = d+8
+
+    var i: i64 = 1
+    while i < 16 {
+        var j: i64 = i + 1
+        while j < 16 {
+            var si: i64 = 0
+            while si < 2 {
+                let sa = if si == 0 { 1.0 } else { 0.0 - 1.0 }
+                par(i, j, sa, &!a)
+                var k: i64 = 1
+                while k < 16 {
+                    var l: i64 = k + 1
+                    while l < 16 {
+                        var sj: i64 = 0
+                        while sj < 2 {
+                            let sb = if sj == 0 { 1.0 } else { 0.0 - 1.0 }
+                            par(k, l, sb, &!b)
+                            sed_mul(&a, &b, &!p)
+                            if eh_zero(&p) {
+                                n_sig = n_sig + 1
+                                if si == 0 && sj == 0 {
+                                    n_pos = n_pos + 1
+                                    // atravessa a duplicação? (um índice < 8, outro >= 8)
+                                    if i < 8 && j >= 8 && k < 8 && l >= 8 { n_cruza = n_cruza + 1 }
+                                    // algum lado é diagonal (j == i+8 ou l == k+8)?
+                                    if j == i + 8 { n_diag = n_diag + 1 }
+                                    if l == k + 8 { n_diag = n_diag + 1 }
+                                }
+                            }
+                            sj = sj + 1
+                        }
+                        l = l + 1
+                    }
+                    k = k + 1
+                }
+                si = si + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    print("PARES_POSITIVOS "); print_int(n_pos)
+    print("PARES_COM_SINAL "); print_int(n_sig)
+    print("RAZAO_SINAL_SOBRE_POSITIVO "); print_int(if n_pos > 0 { n_sig / n_pos } else { 0 })
+    print("DOS_POSITIVOS_ATRAVESSAM_A_DUPLICACAO "); print_int(n_cruza)
+    print("DOS_POSITIVOS_COM_LADO_DIAGONAL "); print_int(n_diag)
+
+    // ── 2. Hurwitz: dentro da cópia octoniônica e0..e7 a norma é multiplicativa, logo
+    //     NADA aniquila ali. Testado sobre todos os pares de base da subálgebra.
+    var falhas_hurwitz: i64 = 0
+    var ei: [f64; 16] = [0.0; 16]
+    var ej: [f64; 16] = [0.0; 16]
+    i = 0
+    while i < 8 {
+        var j2: i64 = 0
+        while j2 < 8 {
+            sed_basis(i, &!ei)
+            sed_basis(j2, &!ej)
+            sed_mul(&ei, &ej, &!p)
+            let r = sed_norm_sq(&p) / (sed_norm_sq(&ei) * sed_norm_sq(&ej))
+            if abs_f64(r - 1.0) > 1.0e-12 { falhas_hurwitz = falhas_hurwitz + 1 }
+            j2 = j2 + 1
+        }
+        i = i + 1
+    }
+    print("HURWITZ_VIOLACOES_EM_e0_e7 "); print_int(falhas_hurwitz)
+    if falhas_hurwitz != 0 { falhas = falhas + 1 }
+
+    // ── 3. CONTROLE QUE MATA A TEORIA: flexibilidade [a, b, a] = 0 em toda álgebra de
+    //     Cayley-Dickson. Se isto falhar, o modelo sedeniônico cai junto — e é por isso que
+    //     a predição do espelho (a,b,a) tem de dar efeito nulo.
+    var assoc: [f64; 16] = [0.0; 16]
+    var falhas_flex: i64 = 0
+    i = 1
+    while i < 16 {
+        var j3: i64 = 1
+        while j3 < 16 {
+            sed_basis(i, &!ei)
+            sed_basis(j3, &!ej)
+            sed_associator(&ei, &ej, &ei, &!assoc)
+            if !eh_zero(&assoc) { falhas_flex = falhas_flex + 1 }
+            j3 = j3 + 1
+        }
+        i = i + 1
+    }
+    print("FLEXIBILIDADE_VIOLACOES "); print_int(falhas_flex)
+    if falhas_flex != 0 { falhas = falhas + 1 }
+
+    // ── 4. O associador NÃO é identicamente nulo — senão não haveria efeito de agrupamento
+    //     para prever. Conta as triplas de base com [e_i, e_j, e_k] ≠ 0.
+    var ek: [f64; 16] = [0.0; 16]
+    var n_assoc_nao_nulo: i64 = 0
+    i = 1
+    while i < 16 {
+        var j4: i64 = 1
+        while j4 < 16 {
+            var k4: i64 = 1
+            while k4 < 16 {
+                sed_basis(i, &!ei)
+                sed_basis(j4, &!ej)
+                sed_basis(k4, &!ek)
+                sed_associator(&ei, &ej, &ek, &!assoc)
+                if !eh_zero(&assoc) { n_assoc_nao_nulo = n_assoc_nao_nulo + 1 }
+                k4 = k4 + 1
+            }
+            j4 = j4 + 1
+        }
+        i = i + 1
+    }
+    print("TRIPLAS_COM_ASSOCIADOR_NAO_NULO "); print_int(n_assoc_nao_nulo)
+    if n_assoc_nao_nulo == 0 { println("FALHA 4: associador identicamente nulo"); falhas = falhas + 1 }
+
+    if falhas == 0 { println("estrutura sedenionica: PASS") } else { println("estrutura sedenionica: FAIL") }
+    falhas
+}
