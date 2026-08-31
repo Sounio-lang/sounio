@@ -134,7 +134,7 @@ let load_gate root environment =
   let result =
     Loom_exec.run_process ~input:frame ~environment ~cwd:root runtime []
   in
-  let decision = trim result.output in
+  let decision = Loom_exec.first_line result.output in
   if result.code <> 0 || decision <> expected then
     failf "sovereign-production-gate-refused:%d:%s" result.code decision;
   { semantic_sha256 = semantic_manifest_sha256;
