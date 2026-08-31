@@ -30,7 +30,7 @@ Claims-Forbidden:  novelty; full covariance soundness; physical independence; ca
 Assumptions:       at most 64 directly representable source identities; overflow and invalid handles saturate to unknown/top; only exact single-parameter identity bodies preserve a call result handle
 Write-Set:         self-hosted/check/noise_sets.sio, self-hosted/check/types.sio, self-hosted/check/check.sio, self-hosted/check/epistemic.sio, bootstrap wiring, NS witnesses, and NS gates
 Read-Set:          Knowledge construction, Add/Mul checking, branch and loop joins, assignment, and direct-call projection
-Positive-Witness:  tests/run-pass/ns_handle_validity.sio
+Positive-Witness:  tests/run-pass/ns_handle_validity.sio (bounded standalone model control; not a production-table probe)
 Negative-Witness:  tests/compile-fail/ns_add_shared_source_rejected.sio; tests/compile-fail/ns_add_unknown_conservative.sio
 Acceptance-Gate:   scripts/ci/ns_antigarbling_gate.sh
 Integration-Target: current origin/main through PR #2336
@@ -60,6 +60,10 @@ Authoritative-Only-If: the named gate passes with its sabotage controls, current
   checker tracks a bounded static identity abstraction, not an empirical model.
 - **compile refusal != runtime validation**: E245 still blocks general run-level
   Knowledge arithmetic, and an E230 witness does not establish runtime parity.
+- **bounded model control != production-table evidence**:
+  `tests/run-pass/ns_handle_validity.sio` mirrors the relevant handle operations
+  at cap 64; the current-source N3 gate, not that standalone witness, owns the
+  integrated checker claim at the production cap of 4096.
 - **executable != claim-ready**: the gate proves the stated compiler behavior,
   not novelty, full covariance semantics, or scientific validation.
 
