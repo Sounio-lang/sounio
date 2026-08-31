@@ -162,15 +162,32 @@ term, and the interval half-width contracts by `√(1 − 2Cov/Var_true)`. For s
 correlated compartments (`ρ → 1`) this is the factor-of-`√2` SD contraction of §8.1 — enough
 to move a lower bound of 362 above 400 and convert a `WARN` into a false `THERAPEUTIC`.
 
-**Honest scope.** The *shared-source sum* is the two-compartment AUC case; the shipped
-clinical model (`stdlib/clinical/vancomycin_pbpk.sio`) is a one-compartment approximation
-whose two-compartment/AUC extension is explicitly stubbed as future work (`vancomycin_pbpk.sio:49,52`).
-So RQ4 is answered in two honest halves: (i) the decision-relevant WARN and its numbers are
-real and run today; (ii) the anti-garbling contraction that threatens it is quantified
-exactly on a controlled correlated-sum instance via Lemma 1. Embedding it in the full
-two-compartment vancomycin model — and measuring how many patients flip — is **[pending
-wire]** plus the model's two-compartment extension, and we state it as such rather than
-reporting a full-model flip rate we have not run.
+**Measured (2026-08-31).** The two-compartment extension now exists and the flip rate is
+measured — `docs/research/sounio/rq4_vanco_two_compartment_flip.sio`, one deterministic cohort
+of 5,000 patients (weight 45–120 kg, SCr 0.6–2.6 mg/dL, Q and Vp ±30 % about population,
+u(weight) = 1 kg, u(SCr) = 10 %, u(Q) = u(Vp) = 20 %; 500 mg q12h; 909 true WARNs among 1,669
+therapeutic-window point estimates), propagated three ways: first-order affine forms over the
+measured sources (the truth, **T**), the shipped scalar `ep_*` chain (**N**), and exact operands
+with an independence-assuming *final add only* (**S**, isolating Lemma 1's `2·Cov`). Two
+shared-source sums a PK library actually performs:
+
+| shared-source sum | true WARN | silenced by the naive add | Var ratio naive/true |
+|---|---|---|---|
+| **B** — interval sum `AUC(0–12) + AUC(12–24)`, same CL (ρ = 1) | 909 | **311 = 34.2 %** | **0.500** |
+| **A** — two-compartment phase sum `A/α + B/β` | 909 | **0** (62 spurious instead) | 1.204 (final add); **300.7** (whole chain: 1,894 spurious WARNs, 38 % of the cohort) |
+
+**B is the anti-garbling this section feared, at the size it feared:** with ρ = 1 and equal
+terms Lemma 1 gives exactly half the variance (the √2 contraction of §8.1), and it silences one
+true WARN in three. **A is an honest null in the feared direction** — and a finding: the phase
+covariance is *negative* in 5,000/5,000 patients, because AUC is invariant to Q and Vp and the
+decomposition into phases is a partition of that invariant — whatever Q and Vp move into one
+phase they move out of the other. There the independence-assuming add *over*-states variance,
+and across the whole chain the over-statement compounds to 300×: garbling rather than
+anti-garbling, and a different clinical harm (alarm fatigue: 1,894 spurious WARNs) from the same
+defect. The sign of the covariance decides which harm you get; the discipline does not need to
+know the sign — E230 rejects the shared-source `add` either way, and exact propagation
+(`exact_preservation`) is right in both directions. Full record and reproduce line:
+`paper_A_rq4_two_compartment_flip_2026-08-31.md`.
 
 ### 8.5 Threats to validity
 

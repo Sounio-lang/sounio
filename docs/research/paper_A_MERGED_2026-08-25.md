@@ -16,7 +16,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.paper
 # Manufacturing Precision Is a Type Error
 ## Compile-Time Anti-Garbling for Uncertainty-Typed Languages
 
-> **Closed draft, 2026-08-26.** Single-file merge of the per-section drafts (`paper_A_*_draft_2026-08-25.md`) in submission order, updated after the E230 gate was **wired into the production checker, built from source, and verified** (Madaros v0.80.0; integration commit `4ac63da51f` on base `06e85a6ada`, branch `fable/ns-antigarbling-integration-20260825`, xai+zai math-reviewed). §8's evaluation now reports measured wired-compiler results; only genuinely-future items (the two-compartment clinical model in §8.4, and interprocedural parameter projection in §10) remain marked as such. **Update 2026-08-30:** the NS-extended metatheory of §6 is now fully mechanized (`formal/lean4/EpistemicEffectsNS.lean`) — Lemma 2, NS progress/preservation, exactness preservation and Theorem 6.4 itself carry kernel proofs; §6.4's table and §6.3 are updated accordingly. Target: PLDI/OOPSLA. Grounding index and prior-art citations: `paper_A_README.md`; prior-art sign-off: `paper_A_priorart_gate_signoff_2026-08-25.md`. Notation is unified: `m`=mean, `v`=variance, `Cov`/`⟨·,·⟩`=covariance/inner product, `Knowledge⟨T,N⟩`=epistemic type with noise-set `N`.
+> **Closed draft, 2026-08-26.** Single-file merge of the per-section drafts (`paper_A_*_draft_2026-08-25.md`) in submission order, updated after the E230 gate was **wired into the production checker, built from source, and verified** (Madaros v0.80.0; integration commit `4ac63da51f` on base `06e85a6ada`, branch `fable/ns-antigarbling-integration-20260825`, xai+zai math-reviewed). §8's evaluation now reports measured wired-compiler results; only interprocedural parameter projection (§10) remains marked as such. **Update 2026-08-31:** RQ4's two-compartment flip rate is measured (§8.4; 34.2 % of true WARNs silenced in the ρ = 1 interval sum, 0 % in the phase decomposition where the covariance is negative). **Update 2026-08-30:** the NS-extended metatheory of §6 is now fully mechanized (`formal/lean4/EpistemicEffectsNS.lean`) — Lemma 2, NS progress/preservation, exactness preservation and Theorem 6.4 itself carry kernel proofs; §6.4's table and §6.3 are updated accordingly. Target: PLDI/OOPSLA. Grounding index and prior-art citations: `paper_A_README.md`; prior-art sign-off: `paper_A_priorart_gate_signoff_2026-08-25.md`. Notation is unified: `m`=mean, `v`=variance, `Cov`/`⟨·,·⟩`=covariance/inner product, `Knowledge⟨T,N⟩`=epistemic type with noise-set `N`.
 
 ## Abstract
 
@@ -748,6 +748,13 @@ discovered by a referee:
   (§5.5), never by unsound admission. Formally: the theorem quantifies over *admitted*
   operators; it makes no claim that the admitted set is maximal.
 
+- **The sign of the harm is model-structural (§8.4).** An independence-assuming `add`
+  understates variance when the shared-source covariance is positive (interval sums, like-signed
+  terms) and over-states it when the covariance is negative (partitions of an invariant, such as
+  the two-compartment phase decomposition). The discipline is indifferent — E230 and exact
+  propagation apply to both — but every "silencing" claim in this paper is a `Cov > 0`
+  statement, and we have measured a case where the same defect produces alarm fatigue instead.
+
 - **First-order only.** The soundness criterion (Lemma 1) is exact for the *linear* fragment
   (`kadd`, and `kmul` to first order in the delta method). The nonlinear operators
   (`ep_mul`, `ep_div`, `ep_square`, `ep_sqrt`) are delta-method approximations that drop
@@ -818,7 +825,7 @@ module, the transfer/join dataflow, and the `SOUNIO_NS_DISABLE` sabotage knob). 
 soundness prototypes (`noise_symbols.sio`, `ns_dataflow.sio`, `ns_contract.sio`) remain the
 kernel-of-the-argument at the analysis level; §8 now reports the *wired-compiler* results
 alongside them. The remaining `[pending wire]` items are the genuinely-future ones named in
-the closing note (two-compartment clinical model, interprocedural parameter projection).
+the closing note (interprocedural parameter projection; the two-compartment clinical model landed 2026-08-31, §8.4).
 
 ### 7.4 Coexistence with provenance
 
@@ -851,8 +858,8 @@ the wired compiler (below), backed by the kernel-checked soundness model
 (`SounioAntiGarblingModel.lean`) and the analysis prototypes. RQ4 is answered in two halves:
 the decision-relevant clinical WARN and the exact anti-garbling contraction on a controlled
 correlated-sum instance are real today, while the end-to-end *two-compartment* patient-flip
-rate awaits the clinical model's two-compartment extension (§8.4) — the one part still marked
-**[pending wire]**.
+rate is now measured on the two-compartment extension (§8.4: 34.2 % silenced in the interval
+sum, 0 % in the phase decomposition).
 
 ### 8.1 RQ1 — the defect is real, in shipping code
 
@@ -988,16 +995,36 @@ clearance, `add(auc_a, auc_b)` with `Cov(auc_a, auc_b) > 0`, the independence-as
 term, and the interval half-width contracts by `√(1 − 2Cov/Var_true)`. For strongly
 correlated compartments (`ρ → 1`) this is the factor-of-`√2` SD contraction of §8.1 — enough
 to move a lower bound of 362 above 400 and convert a `WARN` into a false `THERAPEUTIC`.
+When `Cov < 0` the same omission errs the other way — the interval *widens* and WARNs become
+spurious — so the contraction is a `Cov > 0` statement; §8.4's measurement below exhibits both
+signs.
 
-**Honest scope.** The *shared-source sum* is the two-compartment AUC case; the shipped
-clinical model (`stdlib/clinical/vancomycin_pbpk.sio`) is a one-compartment approximation
-whose two-compartment/AUC extension is explicitly stubbed as future work (`vancomycin_pbpk.sio:49,52`).
-So RQ4 is answered in two honest halves: (i) the decision-relevant WARN and its numbers are
-real and run today; (ii) the anti-garbling contraction that threatens it is quantified
-exactly on a controlled correlated-sum instance via Lemma 1. Embedding it in the full
-two-compartment vancomycin model — and measuring how many patients flip — is **[pending
-wire]** plus the model's two-compartment extension, and we state it as such rather than
-reporting a full-model flip rate we have not run.
+**Measured (2026-08-31).** The two-compartment extension now exists and the flip rate is
+measured — `docs/research/sounio/rq4_vanco_two_compartment_flip.sio`, one deterministic cohort
+of 5,000 patients (weight 45–120 kg, SCr 0.6–2.6 mg/dL, Q and Vp ±30 % about population,
+u(weight) = 1 kg, u(SCr) = 10 %, u(Q) = u(Vp) = 20 %; 500 mg q12h; 909 true WARNs among 1,669
+therapeutic-window point estimates), propagated three ways: first-order affine forms over the
+measured sources (the truth, **T**), the shipped scalar `ep_*` chain (**N**), and exact operands
+with an independence-assuming *final add only* (**S**, isolating Lemma 1's `2·Cov`). Two
+shared-source sums a PK library actually performs:
+
+| shared-source sum | true WARN | silenced by the naive add | Var ratio naive/true |
+|---|---|---|---|
+| **B** — interval sum `AUC(0–12) + AUC(12–24)`, same CL (ρ = 1) | 909 | **311 = 34.2 %** | **0.500** |
+| **A** — two-compartment phase sum `A/α + B/β` | 909 | **0** (62 spurious instead) | 1.204 (final add); **300.7** (whole chain: 1,894 spurious WARNs, 38 % of the cohort) |
+
+**B is the anti-garbling this section feared, at the size it feared:** with ρ = 1 and equal
+terms Lemma 1 gives exactly half the variance (the √2 contraction of §8.1), and it silences one
+true WARN in three. **A is an honest null in the feared direction** — and a finding: the phase
+covariance is *negative* in 5,000/5,000 patients, because AUC is invariant to Q and Vp and the
+decomposition into phases is a partition of that invariant — whatever Q and Vp move into one
+phase they move out of the other. There the independence-assuming add *over*-states variance,
+and across the whole chain the over-statement compounds to 300×: garbling rather than
+anti-garbling, and a different clinical harm (alarm fatigue: 1,894 spurious WARNs) from the same
+defect. The sign of the covariance decides which harm you get; the discipline does not need to
+know the sign — E230 rejects the shared-source `add` either way, and exact propagation
+(`exact_preservation`) is right in both directions. Full record and reproduce line:
+`paper_A_rq4_two_compartment_flip_2026-08-31.md`.
 
 ### 8.5 Threats to validity
 
@@ -1138,8 +1165,9 @@ one place.
   the class is general to GUM-style propagation but measured on one instance. RQ2's causality
   is established at the analysis level (the sabotage control) and awaits its compiler-level
   form. The corpus false-positive rate (RQ3) and the full two-compartment clinical flip rate
-  (RQ4) are **pending the checker wire** (N3–N4) and, for RQ4, the model's two-compartment
-  extension.
+  (RQ4) are measured on the wired compiler and on the two-compartment extension respectively
+  (§8.4); the RQ4 cohort is synthetic (a deterministic LCG grid over plausible ranges), not a
+  patient registry.
 
 - **Confidence decay is heuristic.** The `confidence` field's per-operation decay
   (`× 99/100`, `× 98/100`) is not derived from a principle; it is orthogonal to the variance
