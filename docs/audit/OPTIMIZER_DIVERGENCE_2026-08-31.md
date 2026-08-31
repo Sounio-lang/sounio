@@ -266,6 +266,58 @@ The last two are the interesting pair: the identical body is correct as a local
 function and correct as an imported one — the defect needs the *chained
 assignment* specifically.
 
+### The 51 that remain — a SECOND defect, not the same one
+
+The DSE fix removed 587. The remainder splits:
+
+    36  exit code changes    23 lorenz_i256_step*, 6 solver_portfolio*, 7 assorted
+    15  output changes       all numeric: complex_arithmetic, polynomial_ops,
+                             gum_euler_ode, gum_iso_budget_ode, pbpk_caffeine,
+                             test_fem, test_integral_eq, optimization_nelder_mead,
+                             epistemic_nuclear_decay, nlme_test, gum_reporting,
+                             correlated_eq_identity, gtt_reassignment_topology,
+                             clinical_dyadic_non_reduction_{,native_}witness
+
+`complex_arithmetic.sio` fails exactly one of its 18 sub-tests under `-O`
+("sqrt negative"), `polynomial_ops.sio` exactly one of 19 ("roots repeated").
+Both are single wrong values, not a collapsed program.
+
+**Reproducer** (with that file's own hand-written math functions in scope):
+
+    let r = sqrt_f64(1.0)
+    print_f64(atan2_f64(0.0, 0.0 - 1.0))
+
+    without -O   3.141593    correct
+    with    -O   3.933087
+
+3.933087 − 3.141593 = 0.791495, which is exactly `atan_f64(1.0)` as that file
+computes it. So `atan2_f64` reaches its `atan_f64(y / x) + pi` branch and the
+inner call behaves as though it received 1.0 instead of `0.0 / -1.0`.
+
+**The preceding call is the trigger.** Remove the `sqrt_f64` line and the same
+`atan2_f64` call is correct. `sqrt_f64` runs a 60-iteration Newton loop;
+`atan_f64` runs a 40-iteration Taylor loop.
+
+### Ruled out for this second defect
+
+    a preceding atan_f64 instead of sqrt_f64      correct -- the trigger is sqrt_f64
+    atan_f64 called directly, any input           identical under both builds
+    atan2_f64 called directly, no preceding call  identical under both builds
+    struct fields as call arguments               identical
+    an inline division inside a call argument     identical, with and without a
+                                                  preceding sqrt_f64
+    a stale parameter                             sqrt_f64(K) then atan_f64(0.0)
+                                                  returns 0 for K = 1, 4, 0.25 --
+                                                  the corrupted value does not
+                                                  track the previous argument
+
+The defect needs the branch chain inside `atan2_f64` AND a preceding `sqrt_f64`.
+Neither alone reproduces. This is not the call_args/DSE fault fixed above -- that
+one is fixed and this survives it.
+
+**Root cause not found.** Recorded at this depth so the next attempt starts from
+a two-line reproducer and six dead hypotheses rather than from 51 files.
+
 ## What this does NOT establish
 
 **Where the defect is.** 632 programs is not 632 bugs — the corpus gate's own
