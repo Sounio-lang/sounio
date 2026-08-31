@@ -288,6 +288,36 @@ que o mapa bilinear EXPLÍCITO T̄: ℝ⁴×ℝ⁴ → ℝ⁹ (o quociente pelas
 agora todas conhecidas) tem zero não-trivial para toda configuração (x,x′).
 Um único lema de existência real, sobre um objeto totalmente explícito.
 
+## Rodada 8 (mesmo dia): dois mecanismos de redução eliminados — o lema mora no mapa completo
+
+Runner: `examples/research/conj68_sylvester_scan.sio` (scan fraco + caça forte
+alternante/GN com lock0 + z-busca caso-(i) no leque comum).
+
+**Medições (30 pares genéricos, caça forte):**
+- `STRONG_FULL = 0.000000` em todos — witnesses no espaço 5×5 completo SEMPRE
+  existem (consistente com 145/145 anteriores).
+- `STRONG_SECTOR` com pisos 0.05–0.9 mesmo com 120 restarts pesados:
+  **witnesses setoriais (O×O) NÃO existem para pares genéricos** — as
+  componentes-x são essenciais (k₀ dos witnesses: 0.35–0.87). O ansatz de
+  Sylvester setorial (c ⊥ z′, confirmado nos witnesses INTEIROS dos pares
+  duros) não é o mecanismo universal.
+- `CASE1_ZFAN` (witness ortogonal com invariante comum z no leque 3-dim
+  {z ⊥ 1,a,b,a′,b′}, u(z) = s·x + L(z) afim): pisos 0.08–0.72 na maioria —
+  **caso-(i) tampouco é universal**. |uw| dos witnesses reais varia de ~0 a 1:
+  a variedade de witnesses é positivo-dimensional e mista (nem ortogonal, nem
+  setorial, nem alinhada).
+
+**Estado do lema final após a rodada:** a existência de zero vive
+irredutivelmente no mapa completo T: ℝ⁵×ℝ⁵ → ℝ¹¹ (posto 11 provado, kernel 14,
+deficit de Segre 3). Os dois caminhos de redução natural estão eliminados com
+dados; o que sobra é o argumento global — de posse, agora, de TODAS as
+relações lineares em forma fechada e da anatomia dos witnesses (k₀,m₀ ≠ 0
+genéricos, mistura contínua entre os casos). Candidatos restantes: (α) grau
+ímpar/classe de Euler de uma seção construída das 14 relações do kernel;
+(β) argumento de deformação: a variedade de witnesses é conexa-dimensional
+positiva nos dados — provar que não pode colapsar a vazio ao variar (x,x′)
+no espaço conexo de configurações, via um invariante topológico da família.
+
 ## Próximos degraus
 
 1. **Sweep racional geral** (além da base): amostragem densa de pares ZD

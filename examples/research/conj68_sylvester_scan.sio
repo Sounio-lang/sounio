@@ -1,0 +1,1403 @@
+// Conjecture 6.8 — SYLVESTER ANSATZ scan for the final real-zero lemma.
+// See attack log Rodadas 6-7.
+//
+// Target lemma: the explicit sector map T̄ (u,w) = [u,w], u ∈ O(x), w ∈ O(x'),
+// has a nontrivial zero for every pair.  Observed mechanism (integer witnesses
+// of the hard pairs): the witness satisfies  c ⊥ z'  and  g ⊥ z  — exactly the
+// associative-model Sylvester solvability condition for E2: (gz')c = (cz)g
+// (cz ~ z'c conjugate in a quaternion algebra iff equal traces, and
+// Re(cz) = 0 = Re(z'c) iff c ⊥ z, z' — the first is free, the second is the
+// ansatz).
+//
+// This probe measures, per generic pair:
+//   RES_FULL: min over random c ∈ W (4-dim) of sigma_min(M(c)),
+//   RES_PERP: same but c restricted to W ∩ z'^⊥ (3-dim),
+// where M(c) is the 16×4 matrix g ↦ [u(c), w(g)] over the O(x') frame.
+// sigma_min → 0 means: that c admits a g-kernel = sector witness.
+// If RES_PERP → 0 for all pairs, the Sylvester ansatz is confirmed and the
+// existence proof reduces to: (i) the g-system is singular somewhere on the
+// 3-space (one determinantal condition), (ii) associator control.
+// Search: random directions + local jitter descent (f64), exact frames.
+
+fn cd_sigma_c(a: i64, b: i64, bits: i64) -> i64 with Mut, Panic, Div {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_c(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_c(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_c(a_lo, 0, bits - 1) }
+        return 0 - cd_sigma_c(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - cd_sigma_c(0, a_lo, bits - 1) }
+    cd_sigma_c(b_lo, a_lo, bits - 1)
+}
+
+fn sed_sigma(a: i64, b: i64) -> i64 with Mut, Panic, Div { cd_sigma_c(a, b, 4) }
+
+// f64 sedenion multiply (structure constants exact, coefficients f64)
+fn smul_f(x: &[f64; 16], y: &[f64; 16], out: &![f64; 16]) with Mut, Panic, Div {
+    var k = 0
+    while k < 16 { out[k as usize] = 0.0; k = k + 1 }
+    var i = 0
+    while i < 16 {
+        if x[i as usize] != 0.0 {
+            var j = 0
+            while j < 16 {
+                if y[j as usize] != 0.0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + (sed_sigma(i, j) as f64) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn smul_i(x: &[i64; 16], y: &[i64; 16], out: &![i64; 16]) with Mut, Panic, Div {
+    var k = 0
+    while k < 16 { out[k as usize] = 0; k = k + 1 }
+    var i = 0
+    while i < 16 {
+        if x[i as usize] != 0 {
+            var j = 0
+            while j < 16 {
+                if y[j as usize] != 0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + sed_sigma(i, j) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn omul_i(x: &[i64; 8], y: &[i64; 8], out: &![i64; 8]) with Mut, Panic, Div {
+    var k = 0
+    while k < 8 { out[k as usize] = 0; k = k + 1 }
+    var i = 0
+    while i < 8 {
+        if x[i as usize] != 0 {
+            var j = 0
+            while j < 8 {
+                if y[j as usize] != 0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + sed_sigma(i, j) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn is_zero16(v: &[i64; 16]) -> bool with Mut {
+    var k = 0
+    while k < 16 {
+        if v[k as usize] != 0 { return false }
+        k = k + 1
+    }
+    true
+}
+
+fn annihilates_both(x: &[i64; 16], y: &[i64; 16]) -> bool with Mut, Panic, Div {
+    var p = [0; 16]
+    smul_i(x, y, &!p)
+    if !is_zero16(&p) { return false }
+    smul_i(y, x, &!p)
+    is_zero16(&p)
+}
+
+fn gcd_i(a0: i64, b0: i64) -> i64 with Mut, Div, Panic {
+    var a = if a0 < 0 { 0 - a0 } else { a0 }
+    var b = if b0 < 0 { 0 - b0 } else { b0 }
+    while b != 0 {
+        let t = a % b
+        a = b
+        b = t
+    }
+    a
+}
+
+fn isqrt_exact(n: i64) -> i64 with Mut, Div, Panic {
+    if n < 0 { return 0 - 1 }
+    var k = 0
+    while k * k < n { k = k + 1 }
+    if k * k == n { k } else { 0 - 1 }
+}
+
+fn lehmer_next(state: i64) -> i64 with Mut, Div, Panic {
+    (state * 48271) % 2147483647
+}
+
+fn fabs_(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn fsqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = if x > 1.0 { x } else { 1.0 }
+    var it = 0
+    while it < 40 {
+        y = 0.5 * (y + x / y)
+        it = it + 1
+    }
+    y
+}
+
+fn perp_basis3(r1: &[i64; 8], r2: &[i64; 8], r3: &[i64; 8], out: &![i64; 32]) -> i64 with Mut, Panic, Div {
+    var m = [0; 21]
+    var c = 0
+    while c < 7 {
+        m[c as usize] = r1[(c + 1) as usize]
+        m[(7 + c) as usize] = r2[(c + 1) as usize]
+        m[(14 + c) as usize] = r3[(c + 1) as usize]
+        c = c + 1
+    }
+    var piv_col = [0; 3]
+    var rank = 0
+    var col = 0
+    while col < 7 && rank < 3 {
+        var pr = 0 - 1
+        var r = rank
+        while r < 3 {
+            if m[(r * 7 + col) as usize] != 0 { pr = r; r = 3 } else { r = r + 1 }
+        }
+        if pr >= 0 {
+            if pr != rank {
+                var c1 = 0
+                while c1 < 7 {
+                    let t = m[(rank * 7 + c1) as usize]
+                    m[(rank * 7 + c1) as usize] = m[(pr * 7 + c1) as usize]
+                    m[(pr * 7 + c1) as usize] = t
+                    c1 = c1 + 1
+                }
+            }
+            let piv = m[(rank * 7 + col) as usize]
+            var r2i = 0
+            while r2i < 3 {
+                if r2i != rank {
+                    let f = m[(r2i * 7 + col) as usize]
+                    if f != 0 {
+                        var c2 = 0
+                        while c2 < 7 {
+                            m[(r2i * 7 + c2) as usize] = piv * m[(r2i * 7 + c2) as usize] - f * m[(rank * 7 + c2) as usize]
+                            c2 = c2 + 1
+                        }
+                        var g = 0
+                        var c3 = 0
+                        while c3 < 7 { g = gcd_i(g, m[(r2i * 7 + c3) as usize]); c3 = c3 + 1 }
+                        var gd = 1
+                        if g > 1 { gd = g }
+                        if gd > 1 {
+                            c3 = 0
+                            while c3 < 7 { m[(r2i * 7 + c3) as usize] = m[(r2i * 7 + c3) as usize] / gd; c3 = c3 + 1 }
+                        }
+                    }
+                }
+                r2i = r2i + 1
+            }
+            piv_col[rank as usize] = col
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    var nout = 0
+    var fc = 0
+    while fc < 7 {
+        var isp = 0
+        var q = 0
+        while q < rank {
+            if piv_col[q as usize] == fc { isp = 1 }
+            q = q + 1
+        }
+        if isp == 0 && nout < 4 {
+            var v = [0; 8]
+            var prodp = 1
+            q = 0
+            while q < rank { prodp = prodp * m[(q * 7 + piv_col[q as usize]) as usize]; q = q + 1 }
+            v[(fc + 1) as usize] = prodp
+            q = 0
+            while q < rank {
+                let pc = piv_col[q as usize]
+                var piv = 1
+                if m[(q * 7 + pc) as usize] != 0 { piv = m[(q * 7 + pc) as usize] }
+                v[(pc + 1) as usize] = (0 - m[(q * 7 + fc) as usize]) * (prodp / piv)
+                q = q + 1
+            }
+            var g2 = 0
+            var c4 = 0
+            while c4 < 8 { g2 = gcd_i(g2, v[c4 as usize]); c4 = c4 + 1 }
+            var g2d = 1
+            if g2 > 1 { g2d = g2 }
+            if g2d > 1 {
+                c4 = 0
+                while c4 < 8 { v[c4 as usize] = v[c4 as usize] / g2d; c4 = c4 + 1 }
+            }
+            c4 = 0
+            while c4 < 8 { out[(nout * 8 + c4) as usize] = v[c4 as usize]; c4 = c4 + 1 }
+            nout = nout + 1
+        }
+        fc = fc + 1
+    }
+    nout
+}
+
+fn build_o_frame(xp: &[i64; 16], grows: &![i64; 64]) -> i64 with Mut, Panic, Div {
+    var arow8 = [0; 8]
+    var brow8 = [0; 8]
+    var q = 0
+    while q < 8 {
+        arow8[q as usize] = xp[q as usize]
+        brow8[q as usize] = xp[(8 + q) as usize]
+        q = q + 1
+    }
+    var z8 = [0; 8]
+    omul_i(&arow8, &brow8, &!z8)
+    var cb = [0; 32]
+    let nc = perp_basis3(&arow8, &brow8, &z8, &!cb)
+    if nc != 4 { return 0 }
+    var nA = 0
+    q = 0
+    while q < 8 { nA = nA + arow8[q as usize] * arow8[q as usize]; q = q + 1 }
+    var gj = 0
+    while gj < 4 {
+        var cj = [0; 8]
+        var c6 = 0
+        while c6 < 8 { cj[c6 as usize] = cb[(gj * 8 + c6) as usize]; c6 = c6 + 1 }
+        var dj = [0; 8]
+        omul_i(&cj, &z8, &!dj)
+        var cand = [0; 16]
+        c6 = 0
+        while c6 < 8 {
+            cand[c6 as usize] = nA * cj[c6 as usize]
+            cand[(8 + c6) as usize] = dj[c6 as usize]
+            c6 = c6 + 1
+        }
+        var okg = annihilates_both(xp, &cand)
+        if !okg {
+            c6 = 0
+            while c6 < 8 { cand[(8 + c6) as usize] = 0 - dj[c6 as usize]; c6 = c6 + 1 }
+            okg = annihilates_both(xp, &cand)
+        }
+        if !okg { return 0 }
+        var g3 = 0
+        c6 = 0
+        while c6 < 16 { g3 = gcd_i(g3, cand[c6 as usize]); c6 = c6 + 1 }
+        var g3d = 1
+        if g3 > 1 { g3d = g3 }
+        if g3d > 1 {
+            c6 = 0
+            while c6 < 16 { cand[c6 as usize] = cand[c6 as usize] / g3d; c6 = c6 + 1 }
+        }
+        c6 = 0
+        while c6 < 16 { grows[(gj * 16 + c6) as usize] = cand[c6 as usize]; c6 = c6 + 1 }
+        gj = gj + 1
+    }
+    1
+}
+
+fn sample_zd(seed_in: i64, xp: &![i64; 16], seed_out: &![i64; 1]) -> i64 with Mut, Panic, Div {
+    var seed = seed_in
+    var a8 = [0; 8]
+    seed = lehmer_next(seed)
+    let i1 = 1 + (seed % 7)
+    seed = lehmer_next(seed)
+    let i2 = 1 + (seed % 7)
+    seed = lehmer_next(seed)
+    a8[i1 as usize] = if (seed % 2) == 0 { 1 } else { 0 - 1 }
+    seed = lehmer_next(seed)
+    if i2 != i1 && (seed % 3) != 0 {
+        seed = lehmer_next(seed)
+        a8[i2 as usize] = if (seed % 2) == 0 { 1 } else { 0 - 1 }
+    }
+    var t0 = [0; 8]
+    var q = 1
+    while q < 8 {
+        seed = lehmer_next(seed)
+        let r3 = seed % 3
+        t0[q as usize] = if r3 == 0 { 0 } else { if r3 == 1 { 1 } else { 0 - 1 } }
+        q = q + 1
+    }
+    seed_out[0] = seed
+    var na = 0
+    var dta = 0
+    q = 0
+    while q < 8 {
+        na = na + a8[q as usize] * a8[q as usize]
+        dta = dta + t0[q as usize] * a8[q as usize]
+        q = q + 1
+    }
+    if na == 0 { return 0 }
+    var tp = [0; 8]
+    var nz = 0
+    q = 0
+    while q < 8 {
+        tp[q as usize] = na * t0[q as usize] - dta * a8[q as usize]
+        if tp[q as usize] != 0 { nz = 1 }
+        q = q + 1
+    }
+    if nz == 0 { return 0 }
+    var gg = 0
+    q = 0
+    while q < 8 { gg = gcd_i(gg, tp[q as usize]); q = q + 1 }
+    var ggd = 1
+    if gg > 1 { ggd = gg }
+    if ggd > 1 {
+        q = 0
+        while q < 8 { tp[q as usize] = tp[q as usize] / ggd; q = q + 1 }
+    }
+    var ntp = 0
+    q = 0
+    while q < 8 { ntp = ntp + tp[q as usize] * tp[q as usize]; q = q + 1 }
+    let kk = isqrt_exact(ntp)
+    if kk <= 0 { return 0 }
+    var b8 = [0; 8]
+    omul_i(&a8, &tp, &!b8)
+    q = 0
+    while q < 8 {
+        xp[q as usize] = kk * a8[q as usize]
+        xp[(8 + q) as usize] = b8[q as usize]
+        q = q + 1
+    }
+    1
+}
+
+// sigma_min^2 of a 16x4 f64 matrix (columns m0..m3): smallest eigenvalue of
+// the 4x4 Gram via inverse power iteration with tiny ridge.
+fn sigmin2_16x4(m: &[f64; 64]) -> f64 with Mut, Panic, Div {
+    var g = [0.0; 16]
+    var i = 0
+    while i < 4 {
+        var j = 0
+        while j < 4 {
+            var s = 0.0
+            var r = 0
+            while r < 16 {
+                s = s + m[(r * 4 + i) as usize] * m[(r * 4 + j) as usize]
+                r = r + 1
+            }
+            g[(i * 4 + j) as usize] = s
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // inverse power iteration: solve (G + eps I) y = v
+    var v = [0.5; 4]
+    var lam = 1e300
+    var it = 0
+    while it < 60 {
+        // solve 4x4 via Gaussian elimination each iteration (small)
+        var a = [0.0; 16]
+        var b = [0.0; 4]
+        var t = 0
+        while t < 16 { a[t as usize] = g[t as usize]; t = t + 1 }
+        t = 0
+        while t < 4 { a[(t * 4 + t) as usize] = a[(t * 4 + t) as usize] + 1e-18; b[t as usize] = v[t as usize]; t = t + 1 }
+        var col = 0
+        while col < 4 {
+            var pr = col
+            var best = fabs_(a[(col * 4 + col) as usize])
+            var r2 = col + 1
+            while r2 < 4 {
+                let vv = fabs_(a[(r2 * 4 + col) as usize])
+                if vv > best { best = vv; pr = r2 }
+                r2 = r2 + 1
+            }
+            if pr != col {
+                var c2 = 0
+                while c2 < 4 {
+                    let tt = a[(col * 4 + c2) as usize]
+                    a[(col * 4 + c2) as usize] = a[(pr * 4 + c2) as usize]
+                    a[(pr * 4 + c2) as usize] = tt
+                    c2 = c2 + 1
+                }
+                let tb = b[col as usize]
+                b[col as usize] = b[pr as usize]
+                b[pr as usize] = tb
+            }
+            var piv = a[(col * 4 + col) as usize]
+            if fabs_(piv) < 1e-300 { piv = 1e-300 }
+            r2 = col + 1
+            while r2 < 4 {
+                let f = a[(r2 * 4 + col) as usize] / piv
+                var c3 = col
+                while c3 < 4 {
+                    a[(r2 * 4 + c3) as usize] = a[(r2 * 4 + c3) as usize] - f * a[(col * 4 + c3) as usize]
+                    c3 = c3 + 1
+                }
+                b[r2 as usize] = b[r2 as usize] - f * b[col as usize]
+                r2 = r2 + 1
+            }
+            col = col + 1
+        }
+        var y = [0.0; 4]
+        var rr = 3
+        while rr >= 0 {
+            var s2 = b[rr as usize]
+            var c4 = rr + 1
+            while c4 < 4 {
+                s2 = s2 - a[(rr * 4 + c4) as usize] * y[c4 as usize]
+                c4 = c4 + 1
+            }
+            var piv2 = a[(rr * 4 + rr) as usize]
+            if fabs_(piv2) < 1e-300 { piv2 = 1e-300 }
+            y[rr as usize] = s2 / piv2
+            rr = rr - 1
+        }
+        var ny = 0.0
+        var t2 = 0
+        while t2 < 4 { ny = ny + y[t2 as usize] * y[t2 as usize]; t2 = t2 + 1 }
+        ny = fsqrt(ny)
+        if ny < 1e-300 { return 0.0 }
+        t2 = 0
+        while t2 < 4 { v[t2 as usize] = y[t2 as usize] / ny; t2 = t2 + 1 }
+        // Rayleigh quotient
+        var rq = 0.0
+        var i2 = 0
+        while i2 < 4 {
+            var acc = 0.0
+            var j2 = 0
+            while j2 < 4 { acc = acc + g[(i2 * 4 + j2) as usize] * v[j2 as usize]; j2 = j2 + 1 }
+            rq = rq + v[i2 as usize] * acc
+            i2 = i2 + 1
+        }
+        lam = rq
+        it = it + 1
+    }
+    lam
+}
+
+fn solve5(a_in: &[f64; 25], b_in: &[f64; 5], y: &![f64; 5]) with Mut, Panic, Div {
+    var a = [0.0; 25]
+    var b = [0.0; 5]
+    var i = 0
+    while i < 25 { a[i as usize] = a_in[i as usize]; i = i + 1 }
+    i = 0
+    while i < 5 { b[i as usize] = b_in[i as usize]; i = i + 1 }
+    var col = 0
+    while col < 5 {
+        var pr = col
+        var best = fabs_(a[(col * 5 + col) as usize])
+        var r = col + 1
+        while r < 5 {
+            let v = fabs_(a[(r * 5 + col) as usize])
+            if v > best { best = v; pr = r }
+            r = r + 1
+        }
+        if pr != col {
+            var c = 0
+            while c < 5 {
+                let t = a[(col * 5 + c) as usize]
+                a[(col * 5 + c) as usize] = a[(pr * 5 + c) as usize]
+                a[(pr * 5 + c) as usize] = t
+                c = c + 1
+            }
+            let tb = b[col as usize]
+            b[col as usize] = b[pr as usize]
+            b[pr as usize] = tb
+        }
+        var piv = a[(col * 5 + col) as usize]
+        if fabs_(piv) < 1e-300 { piv = 1e-300 }
+        r = col + 1
+        while r < 5 {
+            let f = a[(r * 5 + col) as usize] / piv
+            var c = col
+            while c < 5 {
+                a[(r * 5 + c) as usize] = a[(r * 5 + c) as usize] - f * a[(col * 5 + c) as usize]
+                c = c + 1
+            }
+            b[r as usize] = b[r as usize] - f * b[col as usize]
+            r = r + 1
+        }
+        col = col + 1
+    }
+    var rr = 4
+    while rr >= 0 {
+        var s = b[rr as usize]
+        var c = rr + 1
+        while c < 5 {
+            s = s - a[(rr * 5 + c) as usize] * y[c as usize]
+            c = c + 1
+        }
+        var piv = a[(rr * 5 + rr) as usize]
+        if fabs_(piv) < 1e-300 { piv = 1e-300 }
+        y[rr as usize] = s / piv
+        rr = rr - 1
+    }
+}
+
+fn solve10(a_in: &[f64; 100], b_in: &[f64; 10], y: &![f64; 10]) with Mut, Panic, Div {
+    var a = [0.0; 100]
+    var b = [0.0; 10]
+    var i = 0
+    while i < 100 { a[i as usize] = a_in[i as usize]; i = i + 1 }
+    i = 0
+    while i < 10 { b[i as usize] = b_in[i as usize]; i = i + 1 }
+    var col = 0
+    while col < 10 {
+        var pr = col
+        var best = fabs_(a[(col * 10 + col) as usize])
+        var r = col + 1
+        while r < 10 {
+            let v = fabs_(a[(r * 10 + col) as usize])
+            if v > best { best = v; pr = r }
+            r = r + 1
+        }
+        if pr != col {
+            var c = 0
+            while c < 10 {
+                let t = a[(col * 10 + c) as usize]
+                a[(col * 10 + c) as usize] = a[(pr * 10 + c) as usize]
+                a[(pr * 10 + c) as usize] = t
+                c = c + 1
+            }
+            let tb = b[col as usize]
+            b[col as usize] = b[pr as usize]
+            b[pr as usize] = tb
+        }
+        var piv = a[(col * 10 + col) as usize]
+        if fabs_(piv) < 1e-300 { piv = 1e-300 }
+        r = col + 1
+        while r < 10 {
+            let f = a[(r * 10 + col) as usize] / piv
+            var c = col
+            while c < 10 {
+                a[(r * 10 + c) as usize] = a[(r * 10 + c) as usize] - f * a[(col * 10 + c) as usize]
+                c = c + 1
+            }
+            b[r as usize] = b[r as usize] - f * b[col as usize]
+            r = r + 1
+        }
+        col = col + 1
+    }
+    var rr = 9
+    while rr >= 0 {
+        var s = b[rr as usize]
+        var c = rr + 1
+        while c < 10 {
+            s = s - a[(rr * 10 + c) as usize] * y[c as usize]
+            c = c + 1
+        }
+        var piv = a[(rr * 10 + rr) as usize]
+        if fabs_(piv) < 1e-300 { piv = 1e-300 }
+        y[rr as usize] = s / piv
+        rr = rr - 1
+    }
+}
+
+fn residual_of(c: &[f64; 400], k: &[f64; 5], m: &[f64; 5]) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var cc = 0
+    while cc < 16 {
+        var acc = 0.0
+        var i = 0
+        while i < 5 {
+            var j = 0
+            while j < 5 {
+                acc = acc + k[i as usize] * m[j as usize] * c[(cc * 25 + i * 5 + j) as usize]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        s = s + acc * acc
+        cc = cc + 1
+    }
+    fsqrt(s)
+}
+
+// strong hunt (alternating inverse power + Gauss-Newton), lock0 optional;
+// returns residual and the witness in kout/mout.
+fn hunt_once(c: &[f64; 400], seed: i64, alt_iters: i64, gn_iters: i64, lock0: i64,
+             kout: &![f64; 5], mout: &![f64; 5]) -> f64 with Mut, Div, Panic {
+    var st = seed
+    var k = [0.0; 5]
+    var m = [0.0; 5]
+    var i = 0
+    while i < 5 {
+        st = lehmer_next(st)
+        m[i as usize] = (st as f64) / 2147483647.0 - 0.5
+        i = i + 1
+    }
+    var nm = 0.0
+    i = 0
+    while i < 5 { nm = nm + m[i as usize] * m[i as usize]; i = i + 1 }
+    nm = fsqrt(nm)
+    if nm < 1e-12 { m[0] = 1.0; nm = 1.0 }
+    i = 0
+    while i < 5 { m[i as usize] = m[i as usize] / nm; i = i + 1 }
+    if lock0 == 1 { m[0] = 0.0 }
+    i = 0
+    while i < 5 { k[i as usize] = 0.0; i = i + 1 }
+    if lock0 == 1 { k[1] = 1.0 } else { k[0] = 1.0 }
+    var it = 0
+    while it < alt_iters {
+        var g = [0.0; 25]
+        var i2 = 0
+        while i2 < 5 {
+            var j2 = 0
+            while j2 < 5 {
+                var s = 0.0
+                var cc = 0
+                while cc < 16 {
+                    var ai = 0.0
+                    var aj = 0.0
+                    var jj = 0
+                    while jj < 5 {
+                        ai = ai + m[jj as usize] * c[(cc * 25 + i2 * 5 + jj) as usize]
+                        aj = aj + m[jj as usize] * c[(cc * 25 + j2 * 5 + jj) as usize]
+                        jj = jj + 1
+                    }
+                    s = s + ai * aj
+                    cc = cc + 1
+                }
+                g[(i2 * 5 + j2) as usize] = s
+                j2 = j2 + 1
+            }
+            i2 = i2 + 1
+        }
+        i2 = 0
+        while i2 < 5 { g[(i2 * 5 + i2) as usize] = g[(i2 * 5 + i2) as usize] + 1e-14; i2 = i2 + 1 }
+        if lock0 == 1 {
+            var q0 = 0
+            while q0 < 5 { g[q0 as usize] = 0.0; g[(q0 * 5) as usize] = 0.0; q0 = q0 + 1 }
+            g[0] = 1.0
+        }
+        var y = [0.0; 5]
+        solve5(&g, &k, &!y)
+        var ny = 0.0
+        i2 = 0
+        while i2 < 5 { ny = ny + y[i2 as usize] * y[i2 as usize]; i2 = i2 + 1 }
+        ny = fsqrt(ny)
+        if ny > 1e-300 {
+            i2 = 0
+            while i2 < 5 { k[i2 as usize] = y[i2 as usize] / ny; i2 = i2 + 1 }
+        }
+        var h = [0.0; 25]
+        i2 = 0
+        while i2 < 5 {
+            var j2 = 0
+            while j2 < 5 {
+                var s = 0.0
+                var cc = 0
+                while cc < 16 {
+                    var bi = 0.0
+                    var bj = 0.0
+                    var ii = 0
+                    while ii < 5 {
+                        bi = bi + k[ii as usize] * c[(cc * 25 + ii * 5 + i2) as usize]
+                        bj = bj + k[ii as usize] * c[(cc * 25 + ii * 5 + j2) as usize]
+                        ii = ii + 1
+                    }
+                    s = s + bi * bj
+                    cc = cc + 1
+                }
+                h[(i2 * 5 + j2) as usize] = s
+                j2 = j2 + 1
+            }
+            i2 = i2 + 1
+        }
+        i2 = 0
+        while i2 < 5 { h[(i2 * 5 + i2) as usize] = h[(i2 * 5 + i2) as usize] + 1e-14; i2 = i2 + 1 }
+        if lock0 == 1 {
+            var q1 = 0
+            while q1 < 5 { h[q1 as usize] = 0.0; h[(q1 * 5) as usize] = 0.0; q1 = q1 + 1 }
+            h[0] = 1.0
+        }
+        var y2 = [0.0; 5]
+        solve5(&h, &m, &!y2)
+        var ny2 = 0.0
+        i2 = 0
+        while i2 < 5 { ny2 = ny2 + y2[i2 as usize] * y2[i2 as usize]; i2 = i2 + 1 }
+        ny2 = fsqrt(ny2)
+        if ny2 > 1e-300 {
+            i2 = 0
+            while i2 < 5 { m[i2 as usize] = y2[i2 as usize] / ny2; i2 = i2 + 1 }
+        }
+        it = it + 1
+    }
+    var gn = 0
+    while gn < gn_iters {
+        var jt_j = [0.0; 100]
+        var jt_f = [0.0; 10]
+        var z = 0
+        while z < 100 { jt_j[z as usize] = 0.0; z = z + 1 }
+        z = 0
+        while z < 10 { jt_f[z as usize] = 0.0; z = z + 1 }
+        var cc = 0
+        while cc < 16 {
+            var arow = [0.0; 10]
+            var i3 = 0
+            while i3 < 5 {
+                var ai = 0.0
+                var jj = 0
+                while jj < 5 {
+                    ai = ai + m[jj as usize] * c[(cc * 25 + i3 * 5 + jj) as usize]
+                    jj = jj + 1
+                }
+                arow[i3 as usize] = ai
+                i3 = i3 + 1
+            }
+            var j3 = 0
+            while j3 < 5 {
+                var bj = 0.0
+                var ii = 0
+                while ii < 5 {
+                    bj = bj + k[ii as usize] * c[(cc * 25 + ii * 5 + j3) as usize]
+                    ii = ii + 1
+                }
+                arow[(5 + j3) as usize] = bj
+                j3 = j3 + 1
+            }
+            var fval = 0.0
+            var i4 = 0
+            while i4 < 5 { fval = fval + arow[i4 as usize] * k[i4 as usize]; i4 = i4 + 1 }
+            var p = 0
+            while p < 10 {
+                var q = 0
+                while q < 10 {
+                    jt_j[(p * 10 + q) as usize] = jt_j[(p * 10 + q) as usize] + arow[p as usize] * arow[q as usize]
+                    q = q + 1
+                }
+                jt_f[p as usize] = jt_f[p as usize] + arow[p as usize] * fval
+                p = p + 1
+            }
+            cc = cc + 1
+        }
+        var p2 = 0
+        while p2 < 10 {
+            jt_j[(p2 * 10 + p2) as usize] = jt_j[(p2 * 10 + p2) as usize] + 1e-16
+            jt_f[p2 as usize] = 0.0 - jt_f[p2 as usize]
+            p2 = p2 + 1
+        }
+        if lock0 == 1 {
+            var q2 = 0
+            while q2 < 10 {
+                jt_j[q2 as usize] = 0.0
+                jt_j[(q2 * 10) as usize] = 0.0
+                jt_j[(50 + q2) as usize] = 0.0
+                jt_j[(q2 * 10 + 5) as usize] = 0.0
+                q2 = q2 + 1
+            }
+            jt_j[0] = 1.0
+            jt_j[55] = 1.0
+            jt_f[0] = 0.0
+            jt_f[5] = 0.0
+        }
+        var delta = [0.0; 10]
+        solve10(&jt_j, &jt_f, &!delta)
+        var i5 = 0
+        while i5 < 5 {
+            k[i5 as usize] = k[i5 as usize] + delta[i5 as usize]
+            m[i5 as usize] = m[i5 as usize] + delta[(5 + i5) as usize]
+            i5 = i5 + 1
+        }
+        var nk = 0.0
+        var nm2 = 0.0
+        i5 = 0
+        while i5 < 5 {
+            nk = nk + k[i5 as usize] * k[i5 as usize]
+            nm2 = nm2 + m[i5 as usize] * m[i5 as usize]
+            i5 = i5 + 1
+        }
+        nk = fsqrt(nk)
+        nm2 = fsqrt(nm2)
+        if nk < 1e-9 || nm2 < 1e-9 { return 1e9 }
+        i5 = 0
+        while i5 < 5 {
+            k[i5 as usize] = k[i5 as usize] / nk
+            m[i5 as usize] = m[i5 as usize] / nm2
+            i5 = i5 + 1
+        }
+        gn = gn + 1
+    }
+    var i6 = 0
+    while i6 < 5 { kout[i6 as usize] = k[i6 as usize]; mout[i6 as usize] = m[i6 as usize]; i6 = i6 + 1 }
+    residual_of(c, &k, &m)
+}
+
+// integer basis of the perp of 4 pure octonion rows inside Im(O): 3 vectors
+fn perp_basis4(r1: &[i64; 8], r2: &[i64; 8], r3: &[i64; 8], r4: &[i64; 8], out: &![i64; 24]) -> i64 with Mut, Panic, Div {
+    var m = [0; 28]
+    var c = 0
+    while c < 7 {
+        m[c as usize] = r1[(c + 1) as usize]
+        m[(7 + c) as usize] = r2[(c + 1) as usize]
+        m[(14 + c) as usize] = r3[(c + 1) as usize]
+        m[(21 + c) as usize] = r4[(c + 1) as usize]
+        c = c + 1
+    }
+    var piv_col = [0; 4]
+    var rank = 0
+    var col = 0
+    while col < 7 && rank < 4 {
+        var pr = 0 - 1
+        var r = rank
+        while r < 4 {
+            if m[(r * 7 + col) as usize] != 0 { pr = r; r = 4 } else { r = r + 1 }
+        }
+        if pr >= 0 {
+            if pr != rank {
+                var c1 = 0
+                while c1 < 7 {
+                    let t = m[(rank * 7 + c1) as usize]
+                    m[(rank * 7 + c1) as usize] = m[(pr * 7 + c1) as usize]
+                    m[(pr * 7 + c1) as usize] = t
+                    c1 = c1 + 1
+                }
+            }
+            let piv = m[(rank * 7 + col) as usize]
+            var r2i = 0
+            while r2i < 4 {
+                if r2i != rank {
+                    let f = m[(r2i * 7 + col) as usize]
+                    if f != 0 {
+                        var c2 = 0
+                        while c2 < 7 {
+                            m[(r2i * 7 + c2) as usize] = piv * m[(r2i * 7 + c2) as usize] - f * m[(rank * 7 + c2) as usize]
+                            c2 = c2 + 1
+                        }
+                        var g = 0
+                        var c3 = 0
+                        while c3 < 7 { g = gcd_i(g, m[(r2i * 7 + c3) as usize]); c3 = c3 + 1 }
+                        var gd = 1
+                        if g > 1 { gd = g }
+                        if gd > 1 {
+                            c3 = 0
+                            while c3 < 7 { m[(r2i * 7 + c3) as usize] = m[(r2i * 7 + c3) as usize] / gd; c3 = c3 + 1 }
+                        }
+                    }
+                }
+                r2i = r2i + 1
+            }
+            piv_col[rank as usize] = col
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    var nout = 0
+    var fc = 0
+    while fc < 7 {
+        var isp = 0
+        var q = 0
+        while q < rank {
+            if piv_col[q as usize] == fc { isp = 1 }
+            q = q + 1
+        }
+        if isp == 0 && nout < 3 {
+            var v = [0; 8]
+            var prodp = 1
+            q = 0
+            while q < rank { prodp = prodp * m[(q * 7 + piv_col[q as usize]) as usize]; q = q + 1 }
+            v[(fc + 1) as usize] = prodp
+            q = 0
+            while q < rank {
+                let pc = piv_col[q as usize]
+                var piv = 1
+                if m[(q * 7 + pc) as usize] != 0 { piv = m[(q * 7 + pc) as usize] }
+                v[(pc + 1) as usize] = (0 - m[(q * 7 + fc) as usize]) * (prodp / piv)
+                q = q + 1
+            }
+            var g2 = 0
+            var c4 = 0
+            while c4 < 8 { g2 = gcd_i(g2, v[c4 as usize]); c4 = c4 + 1 }
+            var g2d = 1
+            if g2 > 1 { g2d = g2 }
+            if g2d > 1 {
+                c4 = 0
+                while c4 < 8 { v[c4 as usize] = v[c4 as usize] / g2d; c4 = c4 + 1 }
+            }
+            c4 = 0
+            while c4 < 8 { out[(nout * 8 + c4) as usize] = v[c4 as usize]; c4 = c4 + 1 }
+            nout = nout + 1
+        }
+        fc = fc + 1
+    }
+    nout
+}
+
+fn omul_f(x: &[f64; 8], y: &[f64; 8], out: &![f64; 8]) with Mut, Panic, Div {
+    var k = 0
+    while k < 8 { out[k as usize] = 0.0; k = k + 1 }
+    var i = 0
+    while i < 8 {
+        if x[i as usize] != 0.0 {
+            var j = 0
+            while j < 8 {
+                if y[j as usize] != 0.0 {
+                    let t = i ^ j
+                    out[t as usize] = out[t as usize] + (sed_sigma(i, j) as f64) * x[i as usize] * y[j as usize]
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn main() with IO, Mut, Panic, Div {
+    // canonical x1 = (e1,e2): frame + W basis (first halves of gens)
+    var x1 = [0; 16]
+    x1[1] = 1
+    x1[10] = 1
+    var g1 = [0; 64]
+    if build_o_frame(&x1, &!g1) == 0 { println("X1 FAIL"); return }
+
+    var seed = 777001
+    var accepted = 0
+    var trial = 0
+    var worst_perp = 0.0
+    var worst_full = 0.0
+    while trial < 6000 && accepted < 30 {
+        trial = trial + 1
+        var x2 = [0; 16]
+        var so = [0; 1]
+        let ok2 = sample_zd(seed, &!x2, &!so)
+        seed = so[0]
+        if ok2 == 1 {
+            var g2 = [0; 64]
+            if build_o_frame(&x2, &!g2) == 1 {
+                accepted = accepted + 1
+                // z' = A'B' (octonion) for the perp constraint on c
+                var a28 = [0; 8]
+                var b28 = [0; 8]
+                var q = 0
+                while q < 8 { a28[q as usize] = x2[q as usize]; b28[q as usize] = x2[(8 + q) as usize]; q = q + 1 }
+                var zp8 = [0; 8]
+                omul_i(&a28, &b28, &!zp8)
+                // beta_k = <c_k, z'> where c_k = first half of gen k of x1
+                var beta = [0.0; 4]
+                var nb2 = 0.0
+                var gi = 0
+                while gi < 4 {
+                    var s = 0.0
+                    q = 0
+                    while q < 8 { s = s + (g1[(gi * 16 + q) as usize] as f64) * (zp8[q as usize] as f64); q = q + 1 }
+                    beta[gi as usize] = s
+                    nb2 = nb2 + s * s
+                    gi = gi + 1
+                }
+                // scan: random alpha in R^4 (FULL) and projected (PERP)
+                var best_full = 1e300
+                var best_perp = 1e300
+                var mode = 0
+                while mode < 2 {
+                    var sctr = 0
+                    var bestv = 1e300
+                    var balpha = [0.0; 4]
+                    while sctr < 400 {
+                        var alpha = [0.0; 4]
+                        var t3 = 0
+                        while t3 < 4 {
+                            seed = lehmer_next(seed)
+                            alpha[t3 as usize] = (seed as f64) / 2147483647.0 - 0.5
+                            t3 = t3 + 1
+                        }
+                        if sctr > 200 {
+                            // jitter around current best
+                            t3 = 0
+                            let sc = 0.3 * (1.0 - ((sctr - 200) as f64) / 220.0)
+                            while t3 < 4 {
+                                alpha[t3 as usize] = balpha[t3 as usize] + sc * alpha[t3 as usize]
+                                t3 = t3 + 1
+                            }
+                        }
+                        if mode == 1 && nb2 > 1e-12 {
+                            // project onto beta-perp
+                            var dp = 0.0
+                            t3 = 0
+                            while t3 < 4 { dp = dp + alpha[t3 as usize] * beta[t3 as usize]; t3 = t3 + 1 }
+                            t3 = 0
+                            while t3 < 4 { alpha[t3 as usize] = alpha[t3 as usize] - (dp / nb2) * beta[t3 as usize]; t3 = t3 + 1 }
+                        }
+                        var nal = 0.0
+                        t3 = 0
+                        while t3 < 4 { nal = nal + alpha[t3 as usize] * alpha[t3 as usize]; t3 = t3 + 1 }
+                        if nal > 1e-12 {
+                            nal = fsqrt(nal)
+                            // u = sum alpha_k gen_k (f64, normalized)
+                            var u16 = [0.0; 16]
+                            t3 = 0
+                            while t3 < 16 {
+                                var acc = 0.0
+                                var k4 = 0
+                                while k4 < 4 {
+                                    acc = acc + alpha[k4 as usize] * (g1[(k4 * 16 + t3) as usize] as f64)
+                                    k4 = k4 + 1
+                                }
+                                u16[t3 as usize] = acc / nal
+                                t3 = t3 + 1
+                            }
+                            // M: 16 x 4, columns comm(u, gen'_j)
+                            var mcol = [0.0; 64]
+                            var gj2 = 0
+                            while gj2 < 4 {
+                                var w16 = [0.0; 16]
+                                t3 = 0
+                                while t3 < 16 { w16[t3 as usize] = g2[(gj2 * 16 + t3) as usize] as f64; t3 = t3 + 1 }
+                                // normalize w for scale-free sigma
+                                var nw = 0.0
+                                t3 = 0
+                                while t3 < 16 { nw = nw + w16[t3 as usize] * w16[t3 as usize]; t3 = t3 + 1 }
+                                nw = fsqrt(nw)
+                                if nw < 1e-300 { nw = 1.0 }
+                                t3 = 0
+                                while t3 < 16 { w16[t3 as usize] = w16[t3 as usize] / nw; t3 = t3 + 1 }
+                                var uw = [0.0; 16]
+                                var wu = [0.0; 16]
+                                smul_f(&u16, &w16, &!uw)
+                                smul_f(&w16, &u16, &!wu)
+                                t3 = 0
+                                while t3 < 16 {
+                                    mcol[(t3 * 4 + gj2) as usize] = uw[t3 as usize] - wu[t3 as usize]
+                                    t3 = t3 + 1
+                                }
+                                gj2 = gj2 + 1
+                            }
+                            let s2 = sigmin2_16x4(&mcol)
+                            if s2 < bestv {
+                                bestv = s2
+                                t3 = 0
+                                while t3 < 4 { balpha[t3 as usize] = alpha[t3 as usize] / nal; t3 = t3 + 1 }
+                            }
+                        }
+                        sctr = sctr + 1
+                    }
+                    if mode == 0 { best_full = bestv } else { best_perp = bestv }
+                    mode = mode + 1
+                }
+                // ---- STRONG phase: full 5x5 tensor, lock0 (sector) vs general
+                var u5 = [0; 160]
+                var v5 = [0; 160]
+                var t5 = 0
+                while t5 < 16 { u5[t5 as usize] = x1[t5 as usize]; v5[t5 as usize] = x2[t5 as usize]; t5 = t5 + 1 }
+                var gi5 = 0
+                while gi5 < 4 {
+                    t5 = 0
+                    while t5 < 16 {
+                        u5[((gi5 + 1) * 16 + t5) as usize] = g1[(gi5 * 16 + t5) as usize]
+                        v5[((gi5 + 1) * 16 + t5) as usize] = g2[(gi5 * 16 + t5) as usize]
+                        t5 = t5 + 1
+                    }
+                    gi5 = gi5 + 1
+                }
+                var cten = [0.0; 400]
+                var maxa = 0.0
+                var it5 = 0
+                while it5 < 5 {
+                    var uu5 = [0; 16]
+                    t5 = 0
+                    while t5 < 16 { uu5[t5 as usize] = u5[(it5 * 16 + t5) as usize]; t5 = t5 + 1 }
+                    var jt5 = 0
+                    while jt5 < 5 {
+                        var ww5 = [0; 16]
+                        t5 = 0
+                        while t5 < 16 { ww5[t5 as usize] = v5[(jt5 * 16 + t5) as usize]; t5 = t5 + 1 }
+                        var p15 = [0; 16]
+                        var p25 = [0; 16]
+                        smul_i(&uu5, &ww5, &!p15)
+                        smul_i(&ww5, &uu5, &!p25)
+                        t5 = 0
+                        while t5 < 16 {
+                            let cv = (p15[t5 as usize] - p25[t5 as usize]) as f64
+                            cten[(t5 * 25 + it5 * 5 + jt5) as usize] = cv
+                            let av = fabs_(cv)
+                            if av > maxa { maxa = av }
+                            t5 = t5 + 1
+                        }
+                        jt5 = jt5 + 1
+                    }
+                    it5 = it5 + 1
+                }
+                if maxa < 1e-300 { maxa = 1.0 }
+                t5 = 0
+                while t5 < 400 { cten[t5 as usize] = cten[t5 as usize] / maxa; t5 = t5 + 1 }
+                var kbest = [0.0; 5]
+                var mbest = [0.0; 5]
+                var ktmp = [0.0; 5]
+                var mtmp = [0.0; 5]
+                var sec_res = 1e9
+                var rs5 = 0
+                var sd5 = 909090 + accepted * 6007
+                while rs5 < 120 && sec_res > 1e-11 {
+                    sd5 = lehmer_next(sd5 + rs5)
+                    let r5 = hunt_once(&cten, sd5, 120, 80, 1, &!ktmp, &!mtmp)
+                    if r5 < sec_res { sec_res = r5 }
+                    rs5 = rs5 + 1
+                }
+                var full_res = 1e9
+                rs5 = 0
+                while rs5 < 80 && full_res > 1e-11 {
+                    sd5 = lehmer_next(sd5 + rs5)
+                    let r5 = hunt_once(&cten, sd5, 80, 60, 0, &!ktmp, &!mtmp)
+                    if r5 < full_res {
+                        full_res = r5
+                        t5 = 0
+                        while t5 < 5 { kbest[t5 as usize] = ktmp[t5 as usize]; mbest[t5 as usize] = mtmp[t5 as usize]; t5 = t5 + 1 }
+                    }
+                    rs5 = rs5 + 1
+                }
+                print("PAIR#")
+                print_int(accepted)
+                print(" SCAN_FULL ")
+                println(fsqrt(best_full))
+                print("        SCAN_PERP ")
+                println(fsqrt(best_perp))
+                print("        STRONG_SECTOR ")
+                println(sec_res)
+                print("        STRONG_FULL ")
+                println(full_res)
+                if full_res < 1e-9 {
+                    print("        WITNESS k0 ")
+                    println(kbest[0])
+                    print("                m0 ")
+                    println(mbest[0])
+                    // is the witness ORTHOGONAL (uw = 0, case-(i)) or merely
+                    // commuting (case-(ii))?  |uw| ~ 0 decides.
+                    var uf = [0.0; 16]
+                    var wf = [0.0; 16]
+                    t5 = 0
+                    while t5 < 16 {
+                        var au = 0.0
+                        var aw = 0.0
+                        var k6 = 0
+                        while k6 < 5 {
+                            au = au + kbest[k6 as usize] * (u5[(k6 * 16 + t5) as usize] as f64)
+                            aw = aw + mbest[k6 as usize] * (v5[(k6 * 16 + t5) as usize] as f64)
+                            k6 = k6 + 1
+                        }
+                        uf[t5 as usize] = au
+                        wf[t5 as usize] = aw
+                        t5 = t5 + 1
+                    }
+                    var nu = 0.0
+                    var nw2 = 0.0
+                    t5 = 0
+                    while t5 < 16 { nu = nu + uf[t5 as usize] * uf[t5 as usize]; nw2 = nw2 + wf[t5 as usize] * wf[t5 as usize]; t5 = t5 + 1 }
+                    nu = fsqrt(nu)
+                    nw2 = fsqrt(nw2)
+                    if nu > 1e-300 && nw2 > 1e-300 {
+                        t5 = 0
+                        while t5 < 16 { uf[t5 as usize] = uf[t5 as usize] / nu; wf[t5 as usize] = wf[t5 as usize] / nw2; t5 = t5 + 1 }
+                        var pw = [0.0; 16]
+                        smul_f(&uf, &wf, &!pw)
+                        var npw = 0.0
+                        t5 = 0
+                        while t5 < 16 { npw = npw + pw[t5 as usize] * pw[t5 as usize]; t5 = t5 + 1 }
+                        print("                |uw| ")
+                        println(fsqrt(npw))
+                    }
+                }
+                if sec_res > worst_full { worst_full = sec_res }
+                if fsqrt(best_perp) > worst_perp { worst_perp = fsqrt(best_perp) }
+                // ---- CASE-(i) z-fan search: common invariant z ⊥ {1,a,b,a',b'},
+                // u(z) = s·x + L(z) affine (hexagon frame), w(z) likewise;
+                // minimize |u(z)·w(z)| over the 3-dim fan and 4 sign combos.
+                var a18f = [0.0; 8]
+                var b18f = [0.0; 8]
+                var a28f = [0.0; 8]
+                var b28f = [0.0; 8]
+                var qf = 0
+                while qf < 8 {
+                    a18f[qf as usize] = x1[qf as usize] as f64
+                    b18f[qf as usize] = x1[(8 + qf) as usize] as f64
+                    a28f[qf as usize] = (x2[qf as usize] as f64)
+                    b28f[qf as usize] = (x2[(8 + qf) as usize] as f64)
+                    qf = qf + 1
+                }
+                // normalize primed halves to unit
+                var na2f = 0.0
+                var nb2f = 0.0
+                qf = 0
+                while qf < 8 { na2f = na2f + a28f[qf as usize] * a28f[qf as usize]; nb2f = nb2f + b28f[qf as usize] * b28f[qf as usize]; qf = qf + 1 }
+                na2f = fsqrt(na2f)
+                nb2f = fsqrt(nb2f)
+                if na2f > 1e-300 && nb2f > 1e-300 {
+                    qf = 0
+                    while qf < 8 { a28f[qf as usize] = a28f[qf as usize] / na2f; b28f[qf as usize] = b28f[qf as usize] / nb2f; qf = qf + 1 }
+                }
+                // fan basis (integer): perp of {a1,b1,A',B'}
+                var a1i = [0; 8]
+                var b1i = [0; 8]
+                var a2i = [0; 8]
+                var b2i = [0; 8]
+                qf = 0
+                while qf < 8 {
+                    a1i[qf as usize] = x1[qf as usize]
+                    b1i[qf as usize] = x1[(8 + qf) as usize]
+                    a2i[qf as usize] = x2[qf as usize]
+                    b2i[qf as usize] = x2[(8 + qf) as usize]
+                    qf = qf + 1
+                }
+                var fan = [0; 24]
+                let nfan = perp_basis4(&a1i, &b1i, &a2i, &b2i, &!fan)
+                var case1 = 1e300
+                if nfan == 3 {
+                    // hexagon frames: side 1 c,d from gen1 of g1; ac, ad
+                    var c1f = [0.0; 8]
+                    var d1f = [0.0; 8]
+                    var c2f = [0.0; 8]
+                    var d2f = [0.0; 8]
+                    qf = 0
+                    while qf < 8 {
+                        c1f[qf as usize] = g1[qf as usize] as f64
+                        d1f[qf as usize] = g1[(8 + qf) as usize] as f64
+                        c2f[qf as usize] = g2[qf as usize] as f64
+                        d2f[qf as usize] = g2[(8 + qf) as usize] as f64
+                        qf = qf + 1
+                    }
+                    // normalize both halves of each partner to unit
+                    var nc1 = 0.0
+                    var nd1 = 0.0
+                    var nc2 = 0.0
+                    var nd2 = 0.0
+                    qf = 0
+                    while qf < 8 {
+                        nc1 = nc1 + c1f[qf as usize] * c1f[qf as usize]
+                        nd1 = nd1 + d1f[qf as usize] * d1f[qf as usize]
+                        nc2 = nc2 + c2f[qf as usize] * c2f[qf as usize]
+                        nd2 = nd2 + d2f[qf as usize] * d2f[qf as usize]
+                        qf = qf + 1
+                    }
+                    nc1 = fsqrt(nc1)
+                    nd1 = fsqrt(nd1)
+                    nc2 = fsqrt(nc2)
+                    nd2 = fsqrt(nd2)
+                    qf = 0
+                    while qf < 8 {
+                        c1f[qf as usize] = c1f[qf as usize] / nc1
+                        d1f[qf as usize] = d1f[qf as usize] / nd1
+                        c2f[qf as usize] = c2f[qf as usize] / nc2
+                        d2f[qf as usize] = d2f[qf as usize] / nd2
+                        qf = qf + 1
+                    }
+                    var ac1 = [0.0; 8]
+                    var ad1 = [0.0; 8]
+                    var ac2 = [0.0; 8]
+                    var ad2 = [0.0; 8]
+                    omul_f(&a18f, &c1f, &!ac1)
+                    omul_f(&a18f, &d1f, &!ad1)
+                    omul_f(&a28f, &c2f, &!ac2)
+                    omul_f(&a28f, &d2f, &!ad2)
+                    var sct = 0
+                    var bzeta = [0.0; 3]
+                    while sct < 500 {
+                        var zeta = [0.0; 3]
+                        var t7 = 0
+                        while t7 < 3 {
+                            seed = lehmer_next(seed)
+                            zeta[t7 as usize] = (seed as f64) / 2147483647.0 - 0.5
+                            t7 = t7 + 1
+                        }
+                        if sct > 250 {
+                            let scj = 0.3 * (1.0 - ((sct - 250) as f64) / 270.0)
+                            t7 = 0
+                            while t7 < 3 { zeta[t7 as usize] = bzeta[t7 as usize] + scj * zeta[t7 as usize]; t7 = t7 + 1 }
+                        }
+                        // z octonion
+                        var z8f = [0.0; 8]
+                        t7 = 0
+                        while t7 < 8 {
+                            var acc = 0.0
+                            var b7 = 0
+                            while b7 < 3 {
+                                acc = acc + zeta[b7 as usize] * (fan[(b7 * 8 + t7) as usize] as f64)
+                                b7 = b7 + 1
+                            }
+                            z8f[t7 as usize] = acc
+                            t7 = t7 + 1
+                        }
+                        var nz = 0.0
+                        t7 = 0
+                        while t7 < 8 { nz = nz + z8f[t7 as usize] * z8f[t7 as usize]; t7 = t7 + 1 }
+                        if nz > 1e-12 {
+                            nz = fsqrt(nz)
+                            t7 = 0
+                            while t7 < 8 { z8f[t7 as usize] = z8f[t7 as usize] / nz; t7 = t7 + 1 }
+                            // l-coords side 1: z = l1 ad - l2 ac - l3 c + l4 d
+                            var l1 = 0.0
+                            var l2 = 0.0
+                            var l3 = 0.0
+                            var l4 = 0.0
+                            var m1 = 0.0
+                            var m2 = 0.0
+                            var m3 = 0.0
+                            var m4 = 0.0
+                            t7 = 0
+                            while t7 < 8 {
+                                l1 = l1 + z8f[t7 as usize] * ad1[t7 as usize]
+                                l2 = l2 - z8f[t7 as usize] * ac1[t7 as usize]
+                                l3 = l3 - z8f[t7 as usize] * c1f[t7 as usize]
+                                l4 = l4 + z8f[t7 as usize] * d1f[t7 as usize]
+                                m1 = m1 + z8f[t7 as usize] * ad2[t7 as usize]
+                                m2 = m2 - z8f[t7 as usize] * ac2[t7 as usize]
+                                m3 = m3 - z8f[t7 as usize] * c2f[t7 as usize]
+                                m4 = m4 + z8f[t7 as usize] * d2f[t7 as usize]
+                                t7 = t7 + 1
+                            }
+                            // u(z) = s x + l1 (c,d) + l2 (d,-c) + l3 (ad,ac) + l4 (ac,-ad), s=1
+                            var su = 0
+                            while su < 2 {
+                                let sgu = if su == 0 { 1.0 } else { 0.0 - 1.0 }
+                                var uf2 = [0.0; 16]
+                                t7 = 0
+                                while t7 < 8 {
+                                    uf2[t7 as usize] = sgu * a18f[t7 as usize] + l1 * c1f[t7 as usize] + l2 * d1f[t7 as usize] + l3 * ad1[t7 as usize] + l4 * ac1[t7 as usize]
+                                    uf2[(8 + t7) as usize] = sgu * b18f[t7 as usize] + l1 * d1f[t7 as usize] - l2 * c1f[t7 as usize] + l3 * ac1[t7 as usize] - l4 * ad1[t7 as usize]
+                                    t7 = t7 + 1
+                                }
+                                var sw = 0
+                                while sw < 2 {
+                                    let sgw = if sw == 0 { 1.0 } else { 0.0 - 1.0 }
+                                    var wf2 = [0.0; 16]
+                                    t7 = 0
+                                    while t7 < 8 {
+                                        wf2[t7 as usize] = sgw * a28f[t7 as usize] + m1 * c2f[t7 as usize] + m2 * d2f[t7 as usize] + m3 * ad2[t7 as usize] + m4 * ac2[t7 as usize]
+                                        wf2[(8 + t7) as usize] = sgw * b28f[t7 as usize] + m1 * d2f[t7 as usize] - m2 * c2f[t7 as usize] + m3 * ac2[t7 as usize] - m4 * ad2[t7 as usize]
+                                        t7 = t7 + 1
+                                    }
+                                    var pr16 = [0.0; 16]
+                                    smul_f(&uf2, &wf2, &!pr16)
+                                    var np16 = 0.0
+                                    var nu16 = 0.0
+                                    var nw16 = 0.0
+                                    t7 = 0
+                                    while t7 < 16 {
+                                        np16 = np16 + pr16[t7 as usize] * pr16[t7 as usize]
+                                        nu16 = nu16 + uf2[t7 as usize] * uf2[t7 as usize]
+                                        nw16 = nw16 + wf2[t7 as usize] * wf2[t7 as usize]
+                                        t7 = t7 + 1
+                                    }
+                                    if nu16 > 1e-12 && nw16 > 1e-12 {
+                                        let r16 = np16 / (nu16 * nw16)
+                                        if r16 < case1 {
+                                            case1 = r16
+                                            t7 = 0
+                                            while t7 < 3 { bzeta[t7 as usize] = zeta[t7 as usize]; t7 = t7 + 1 }
+                                        }
+                                    }
+                                    sw = sw + 1
+                                }
+                                su = su + 1
+                            }
+                        }
+                        sct = sct + 1
+                    }
+                }
+                print("        CASE1_ZFAN ")
+                println(fsqrt(case1))
+            }
+        }
+    }
+    print("ACCEPTED ")
+    print_int(accepted)
+    print("\nWORST_FULL ")
+    println(worst_full)
+    print("WORST_PERP ")
+    println(worst_perp)
+    println("CONJ68_SYLVESTER_SCAN DONE")
+}
