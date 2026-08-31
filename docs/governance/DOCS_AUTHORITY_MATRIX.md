@@ -464,6 +464,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.windows-assert-a64-parity.trig-builtins | repo_only | docs/audit/windows_assert_a64_parity/TRIG_BUILTINS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.worktree-audit-check-leak-2026-06-23 | repo_only | docs/audit/WORKTREE_AUDIT_CHECK_LEAK_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.worktree-branch-governance-audit-2026-06-20 | repo_only | docs/audit/WORKTREE_BRANCH_GOVERNANCE_AUDIT_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.wrong-answer-divergence-2026-08-31 | repo_only | docs/audit/WRONG_ANSWER_DIVERGENCE_2026-08-31.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ws-c1-merge-dce-cost-2026-08-19 | repo_only | docs/audit/WS_C1_MERGE_DCE_COST_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ws-c2-lean-single-seed-only-surface-map-2026-08-19 | repo_only | docs/audit/WS_C2_LEAN_SINGLE_SEED_ONLY_SURFACE_MAP_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ws-f-close-acceptance-2026-08-16 | repo_only | docs/audit/WS_F_CLOSE_ACCEPTANCE_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
