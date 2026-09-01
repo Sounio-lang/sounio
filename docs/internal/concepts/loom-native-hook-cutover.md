@@ -48,6 +48,22 @@ This is an affirmative absence proof. Merely failing to observe a Python hook,
 or deleting its file while a process still has the command cached, is not
 evidence that the legacy generation is absent.
 
+## Operational State Machine
+
+The bridge-free runtime is installed first as the immutable `native-next`
+generation while `current` remains on the legacy-compatible runtime. The four
+provider configurations then move atomically to `native-next`, after which the
+guardian records action-9046 preparation and signed Codex, Claude, Cursor, and
+Grok canaries. Causally absent old presences may be quarantined by action 9047;
+live old processes must exit or restart under the native configuration.
+
+Only the candidate OCaml command `hook-generation-cutover-admit`, executing the
+installed frozen Sounio action 9046 from its immutable policy capsule, may admit
+the final `native-next` to `current` pointer transition. The installer trusts
+the native command exit status, not JSON parsing in shell, and leaves `current`
+unchanged on missing policy, missing `--cutover-root`, timeout, `DRAINING`, or
+any fail-closed result.
+
 ## Provider Dialects
 
 The raw provider dialect remains part of the authority input even after event

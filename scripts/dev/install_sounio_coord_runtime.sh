@@ -17,6 +17,7 @@ Options:
   --runtime-dir PATH       shared runtime root override
   --stage                  install and validate without changing current
   --activate RUNTIME_ID    activate an already installed version
+  --cutover-root PATH      repository whose Sounio 9046 drain admits a legacy-to-native activation
   --list                   list installed versions
   -h, --help               show this help
 USAGE
@@ -41,6 +42,40 @@ verify_manifest_binary_sha256() {
   actual="$(sha256sum "$binary" | awk '{print $1}')"
   [[ "$actual" == "$expected" ]] || \
     die "installed runtime binary hash mismatch: $key expected=$expected actual=$actual"
+}
+
+require_native_cutover_admission() {
+  local previous_bundle="$1" version_dir="$2" manifest="$3"
+  local runtime_id admission_output admission_rc
+  [[ -n "$previous_bundle" ]] || return 0
+  [[ -e "$previous_bundle/hooks/sounio_coord_agent_hook_runtime.py" || \
+    -e "$previous_bundle/hooks/sounio_coord_agent_hook.py" ]] || return 0
+  [[ ! -e "$version_dir/hooks/sounio_coord_agent_hook_runtime.py" && \
+    ! -e "$version_dir/hooks/sounio_coord_agent_hook.py" ]] || return 0
+  runtime_id="$(manifest_value "$manifest" runtime_id)"
+  grep -q '^capability=loom-native-hook-generation-drain-v1$' "$manifest" ||
+    die "bridge-free activation omits frozen Sounio action 9046: $runtime_id"
+  [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+    -x "$version_dir/bin/sounio-loom-native-hook-generation-drain" ]] ||
+    die "bridge-free activation omits the native drain kernel or Sounio action 9046: $runtime_id"
+  [[ -L "$RUNTIME_ROOT/native-next" && \
+    "$(readlink -f "$RUNTIME_ROOT/native-next")" == "$version_dir" ]] ||
+    die "bridge-free activation target is not the selected native-next generation: $runtime_id"
+  [[ -n "$CUTOVER_ROOT" ]] ||
+    die "legacy-to-native activation requires --cutover-root and a CUTOVER_READY receipt"
+  [[ "$(git -C "$CUTOVER_ROOT" rev-parse --show-toplevel 2>/dev/null || true)" == \
+    "$CUTOVER_ROOT" ]] || die "cutover root is not a Git worktree: $CUTOVER_ROOT"
+  set +e
+  admission_output="$(
+    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" \
+      "$version_dir/bin/sounio-loom-runtime" hook-generation-cutover-admit \
+        --cwd "$CUTOVER_ROOT" 9>&- 2>&1
+  )"
+  admission_rc=$?
+  set -e
+  ((admission_rc == 0)) ||
+    die "Sounio action 9046 refused legacy-to-native activation: $admission_output"
+  printf '%s\n' "$admission_output"
 }
 
 ensure_obligation_activation() {
@@ -187,6 +222,23 @@ activate_runtime() {
     verify_manifest_binary_sha256 "$manifest" \
       loom_native_hook_generation_reconcile_runtime_sha256 \
       "$version_dir/bin/sounio-loom-native-hook-generation-reconcile"
+  fi
+  if grep -q '^capability=loom-native-hook-generation-drain-v1$' "$manifest"; then
+    local drain_capsule="$version_dir/policy/native-hook-generation-drain"
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-native-hook-generation-drain" ]] || \
+      die "installed runtime declares generation drain without Loom or frozen Sounio action 9046: $runtime_id"
+    [[ "$(manifest_value "$manifest" loom_native_hook_generation_drain_semantics_sha256)" == \
+      00c5d07b77434b37844e3704dd935d04367646c4f8541a8cce77bc143deb46a3 && \
+      "$(manifest_value "$manifest" loom_native_hook_generation_drain_manifest_sha256)" == \
+      9a40674a135a4c4f43ae0ba8a2658eba32e311b6cedaad5c26124eb6de657ca1 ]] || \
+      die "installed generation drain is not bound to frozen Sounio action 9046: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_native_hook_generation_drain_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-native-hook-generation-drain"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_native_hook_generation_drain_manifest_sha256 \
+      "$drain_capsule/tools/loom/native_hook_generation_drain.freeze.v1"
   fi
   if grep -q '^capability=loom-runtime-authority-capsule-v1$' "$manifest"; then
     local authority_capsule="$version_dir/policy/language-authority"
@@ -693,6 +745,7 @@ activate_runtime() {
       fi
     fi
   fi
+  require_native_cutover_admission "$previous_bundle" "$version_dir" "$manifest"
   [[ ! -e "$RUNTIME_ROOT/current" || -L "$RUNTIME_ROOT/current" ]] || \
     die "refusing to replace non-symlink runtime path: $RUNTIME_ROOT/current"
   link_tmp="$RUNTIME_ROOT/.current.$$.$RANDOM"
@@ -703,7 +756,7 @@ activate_runtime() {
     ensure_output="$(
       SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$control_state" \
         "$version_dir/bin/sounio-coord-runtime" obligation-supervisor-ensure \
-        --interval-seconds 2 --timeout-seconds 180 9>&- 2>&1
+        --interval-seconds 2 9>&- 2>&1
     )"
     ensure_rc=$?
     set -e
@@ -769,12 +822,14 @@ RUNTIME_ROOT="${SOUNIO_COORD_RUNTIME_DIR:-$GIT_COMMON_DIR/sounio-coord-runtime}"
 action=install
 activate_id=''
 activate_after_install=1
+CUTOVER_ROOT=''
 while (($#)); do
   case "$1" in
     --source-root) (($# >= 2)) || die "$1 requires a value"; SOURCE_ROOT="$2"; shift 2 ;;
     --runtime-dir) (($# >= 2)) || die "$1 requires a value"; RUNTIME_ROOT="$2"; shift 2 ;;
     --stage) action=install; activate_after_install=0; shift ;;
     --activate) (($# >= 2)) || die "$1 requires a value"; action=activate; activate_id="$2"; shift 2 ;;
+    --cutover-root) (($# >= 2)) || die "$1 requires a value"; CUTOVER_ROOT="$2"; shift 2 ;;
     --list) action=list; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown installer option: $1" ;;
@@ -782,6 +837,9 @@ while (($#)); do
 done
 
 SOURCE_ROOT="$(cd "$SOURCE_ROOT" && pwd -P)"
+if [[ -n "$CUTOVER_ROOT" ]]; then
+  CUTOVER_ROOT="$(cd "$CUTOVER_ROOT" && pwd -P)"
+fi
 mkdir -p "$RUNTIME_ROOT/versions"
 RUNTIME_ROOT="$(cd "$RUNTIME_ROOT" && pwd -P)"
 exec 9>"$RUNTIME_ROOT/.install.lock"
@@ -854,6 +912,24 @@ loom_native_hook_cutover_codex_config="$SOURCE_ROOT/.codex/hooks.json"
 loom_native_hook_cutover_claude_config="$SOURCE_ROOT/.claude/settings.json"
 loom_native_hook_cutover_cursor_config="$SOURCE_ROOT/.cursor/hooks.json"
 loom_native_hook_cutover_grok_config="$SOURCE_ROOT/.grok/hooks/loom-native.json"
+loom_native_hook_generation_drain_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_native_hook_generation_drain.sh"
+loom_native_hook_generation_drain_entrypoint="$SOURCE_ROOT/tools/loom/native_hook_generation_drain_authority_main.sio"
+loom_native_hook_generation_drain_module="$SOURCE_ROOT/stdlib/coordination/loom_native_hook_generation_drain_authority.sio"
+loom_native_hook_generation_drain_freeze="$SOURCE_ROOT/tools/loom/native_hook_generation_drain.freeze.v1"
+loom_native_hook_generation_drain_capsule_relpaths=(
+  "tools/loom/GARDEN_NATIVE_HOOK_GENERATION_DRAIN_V1.md"
+  "stdlib/coordination/loom_native_hook_generation_drain_authority.sio"
+  "tools/loom/native_hook_generation_drain_authority_main.sio"
+  "scripts/dev/build_sounio_loom_native_hook_generation_drain.sh"
+  "scripts/ci/sounio_loom_native_hook_generation_drain_selftest.sh"
+  "scripts/ci/sounio_loom_native_hook_generation_drain_freeze_selftest.sh"
+  "tools/loom/native_hook_generation_drain.first.v1"
+  "tools/loom/evidence/loom-native-hook-generation-drain-first-v1-20260831.txt"
+  "tools/loom/evidence/loom-native-hook-generation-drain-frozen-v1-20260831.txt"
+  "tools/loom/native_hook_cutover.freeze.v1"
+  "bin/souc"
+  "bin/souc-lean-single-x86_64"
+)
 loom_native_hook_generation_reconcile_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_native_hook_generation_reconcile.sh"
 loom_native_hook_generation_reconcile_entrypoint="$SOURCE_ROOT/tools/loom/native_hook_generation_reconcile_authority_main.sio"
 loom_native_hook_generation_reconcile_module="$SOURCE_ROOT/stdlib/coordination/loom_native_hook_generation_reconcile_authority.sio"
@@ -993,6 +1069,8 @@ loom_change_sources=(
   die "Loom language-authority build entrypoint missing or not executable: $loom_language_authority_build_source"
 [[ -x "$loom_native_hook_cutover_build_source" ]] || \
   die "Loom native-hook cutover build entrypoint missing or not executable: $loom_native_hook_cutover_build_source"
+[[ -x "$loom_native_hook_generation_drain_build_source" ]] || \
+  die "Loom native-hook generation-drain build entrypoint missing or not executable: $loom_native_hook_generation_drain_build_source"
 [[ -x "$loom_native_hook_generation_reconcile_build_source" ]] || \
   die "Loom native-hook generation-reconcile build entrypoint missing or not executable: $loom_native_hook_generation_reconcile_build_source"
 [[ -x "$loom_custody_transfer_build_source" ]] || \
@@ -1044,6 +1122,10 @@ loom_change_sources=(
   -f "$loom_native_hook_cutover_cursor_config" && \
   -f "$loom_native_hook_cutover_grok_config" ]] || \
   die "Loom frozen Sounio native-hook cutover bundle is incomplete"
+[[ -f "$loom_native_hook_generation_drain_entrypoint" && \
+  -f "$loom_native_hook_generation_drain_module" && \
+  -f "$loom_native_hook_generation_drain_freeze" ]] || \
+  die "Loom frozen Sounio native-hook generation-drain bundle is incomplete"
 [[ -f "$loom_native_hook_generation_reconcile_entrypoint" && \
   -f "$loom_native_hook_generation_reconcile_module" && \
   -f "$loom_native_hook_generation_reconcile_freeze" ]] || \
@@ -1174,6 +1256,7 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 loom_binary="$loom_project/_build/default/src/loom.exe"
 loom_language_authority_binary="$loom_project/.runtime/sounio-loom-language-authority-runtime"
 loom_native_hook_cutover_binary="$loom_project/.runtime/sounio-loom-native-hook-cutover"
+loom_native_hook_generation_drain_binary="$loom_project/.runtime/sounio-loom-native-hook-generation-drain"
 loom_native_hook_generation_reconcile_binary="$loom_project/.runtime/sounio-loom-native-hook-generation-reconcile"
 loom_custody_transfer_binary="$loom_project/_build/default/src/sounio-loom-custody-transfer-runtime"
 loom_execution_outcome_binary="$loom_project/.runtime/sounio-loom-execution-outcome-runtime"
@@ -1195,6 +1278,14 @@ loom_sovereign_binary="$loom_project/_build/default/src/sounio-loom-sovereign-ex
 loom_change_binary="$loom_project/_build/default/src/sounio-loom-sovereign-change-kernel"
 loom_material_change_binary="$loom_project/_build/default/src/sounio-loom-sovereign-material-change"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
+[[ -x "$loom_native_hook_generation_drain_binary" ]] || \
+  die "Loom build omitted frozen Sounio action 9046"
+loom_native_hook_generation_drain_expected_sha="$(
+  manifest_value "$loom_native_hook_generation_drain_freeze" executable_sha256
+)"
+[[ "$(sha256sum "$loom_native_hook_generation_drain_binary" | awk '{print $1}')" == \
+  "$loom_native_hook_generation_drain_expected_sha" ]] || \
+  die "Loom Sounio action 9046 runtime failed frozen hash verification"
 [[ -x "$loom_native_hook_generation_reconcile_binary" ]] || \
   die "Loom build omitted frozen Sounio action 9047"
 loom_native_hook_generation_reconcile_expected_sha="$(
@@ -1545,6 +1636,10 @@ bundle_sources=(
   "$loom_project/src/loom_peer_activation_capsule.ml"
   "$loom_project/src/loom_resident.ml"
 )
+for relative_path in "${loom_native_hook_generation_drain_capsule_relpaths[@]}"; do
+  bundle_sources+=("$SOURCE_ROOT/$relative_path")
+done
+bundle_sources+=("$loom_native_hook_generation_drain_freeze")
 
 source_sha=unknown
 source_state=unversioned
@@ -1592,6 +1687,7 @@ else
     "$stage/policy/native-hook-cutover/tools/loom" \
     "$stage/policy/native-hook-cutover/stdlib/coordination" \
     "$stage/policy/native-hook-cutover/configs" \
+    "$stage/policy/native-hook-generation-drain" \
     "$stage/policy/product-activation/tools/loom" \
     "$stage/policy/product-activation/stdlib/coordination" \
     "$stage/policy/product-activation/scripts/dev" \
@@ -1624,6 +1720,16 @@ else
     "$stage/policy/language-authority/stdlib/coordination/loom_language_authority.sio"
   install -m 0555 "$loom_native_hook_cutover_binary" \
     "$stage/bin/sounio-loom-native-hook-cutover"
+  install -m 0555 "$loom_native_hook_generation_drain_binary" \
+    "$stage/bin/sounio-loom-native-hook-generation-drain"
+  for relative_path in "${loom_native_hook_generation_drain_capsule_relpaths[@]}"; do
+    mkdir -p "$(dirname "$stage/policy/native-hook-generation-drain/$relative_path")"
+    install -m 0444 "$SOURCE_ROOT/$relative_path" \
+      "$stage/policy/native-hook-generation-drain/$relative_path"
+  done
+  mkdir -p "$stage/policy/native-hook-generation-drain/tools/loom"
+  install -m 0444 "$loom_native_hook_generation_drain_freeze" \
+    "$stage/policy/native-hook-generation-drain/tools/loom/native_hook_generation_drain.freeze.v1"
   install -m 0555 "$loom_native_hook_generation_reconcile_binary" \
     "$stage/bin/sounio-loom-native-hook-generation-reconcile"
   install -m 0444 "$loom_native_hook_cutover_freeze" \
@@ -1889,6 +1995,9 @@ else
   loom_native_hook_cutover_claude_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/claude.json" | awk '{print $1}')"
   loom_native_hook_cutover_cursor_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/cursor.json" | awk '{print $1}')"
   loom_native_hook_cutover_grok_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/grok.json" | awk '{print $1}')"
+  loom_native_hook_generation_drain_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-native-hook-generation-drain" | awk '{print $1}'
+  )"
   loom_native_hook_generation_reconcile_runtime_sha256="$(
     sha256sum "$stage/bin/sounio-loom-native-hook-generation-reconcile" | awk '{print $1}'
   )"
@@ -1960,6 +2069,11 @@ else
     printf 'loom_native_hook_cutover_grok_config_sha256=%s\n' \
       "$loom_native_hook_cutover_grok_config_sha256"
     printf 'loom_native_hook_cutover_python_bridge_absent=true\n'
+    printf 'loom_native_hook_generation_drain_action=9046\n'
+    printf 'loom_native_hook_generation_drain_semantics_sha256=00c5d07b77434b37844e3704dd935d04367646c4f8541a8cce77bc143deb46a3\n'
+    printf 'loom_native_hook_generation_drain_manifest_sha256=9a40674a135a4c4f43ae0ba8a2658eba32e311b6cedaad5c26124eb6de657ca1\n'
+    printf 'loom_native_hook_generation_drain_runtime_sha256=%s\n' \
+      "$loom_native_hook_generation_drain_runtime_sha256"
     printf 'loom_native_hook_generation_reconcile_action=9047\n'
     printf 'loom_native_hook_generation_reconcile_semantics_sha256=63733afa5f88bb5bc867ce59f5a7b481927b0126096d602c3bdf949b25935fff\n'
     printf 'loom_native_hook_generation_reconcile_manifest_sha256=a38fcb98dbaeb68b1913aec07b1646d8e965249a1bb05a01427327a78aea7cd7\n'
@@ -2084,6 +2198,7 @@ else
     printf 'capability=loom-durable-execution-outcome-v1\n'
     printf 'capability=loom-native-agent-hook-v1\n'
     printf 'capability=loom-native-hook-cutover-v1\n'
+    printf 'capability=loom-native-hook-generation-drain-v1\n'
     printf 'capability=loom-native-hook-generation-reconcile-v1\n'
     printf 'capability=loom-runtime-authority-capsule-v1\n'
     printf 'capability=loom-product-launch-dark-attachment-v1\n'

@@ -9,10 +9,11 @@ Usage: scripts/dev/install_sounio_loom_native_hooks.sh \
   --target-root PATH [--source-root PATH] --activate
 
 Atomically promote the repository's native LOOM hook configurations into a
-serialized control checkout. The command verifies the active immutable runtime,
+serialized control checkout. The command verifies the staged immutable runtime,
 holds both a repository-wide promotion lock and the target worktree index lock,
-keeps an audit backup, runs production-mode policyless canaries, and rolls all
-four provider configuration files back on any failure.
+keeps the legacy current generation unchanged, runs production-mode policyless
+canaries, records the Sounio 9046 guardian boundary, and rolls all four provider
+configuration files back on any failure.
 
 Options:
   --target-root PATH  control checkout receiving the hook configurations
@@ -66,6 +67,13 @@ validate_candidate_config() {
     die 'candidate Cursor hooks do not pin one physical runtime generation'
   [[ "$(grep -Fc 'readlink -f' "$grok")" -eq 6 ]] ||
     die 'candidate Grok hooks do not pin one physical runtime generation'
+  [[ "$(grep -Fc '/native-next' "$codex")" -eq 5 && \
+    "$(grep -Fc '/native-next' "$claude")" -eq 6 && \
+    "$(grep -Fc '/native-next' "$cursor")" -eq 6 && \
+    "$(grep -Fc '/native-next' "$grok")" -eq 6 ]] ||
+    die 'candidate hooks do not bind every event to native-next'
+  ! grep -Fq '/current' "$codex" "$claude" "$cursor" "$grok" ||
+    die 'candidate hooks still resolve the legacy current selector'
   grep -Fq '"failClosed": true' "$cursor" ||
     die 'candidate Cursor hooks are not fail closed'
   ! grep -Eq '"matcher": "[^"]*(Bash|Exec)' "$codex" "$claude" ||
@@ -143,15 +151,25 @@ TARGET_GIT_DIR="$(git -C "$TARGET_ROOT" rev-parse --path-format=absolute --git-d
 TARGET_COMMON_DIR="$(git -C "$TARGET_ROOT" rev-parse --path-format=absolute --git-common-dir)"
 RUNTIME_ROOT="${SOUNIO_COORD_RUNTIME_DIR:-$TARGET_COMMON_DIR/sounio-coord-runtime}"
 STATE_ROOT="${SOUNIO_COORD_DIR:-$TARGET_COMMON_DIR/sounio-coord-state}"
-RUNTIME_BUNDLE="$(readlink -f "$RUNTIME_ROOT/current" 2>/dev/null || true)"
-[[ -n "$RUNTIME_BUNDLE" ]] || die "active shared runtime is missing: $RUNTIME_ROOT/current"
+LEGACY_BUNDLE="$(readlink -f "$RUNTIME_ROOT/current" 2>/dev/null || true)"
+RUNTIME_BUNDLE="$(readlink -f "$RUNTIME_ROOT/native-next" 2>/dev/null || true)"
+[[ -n "$LEGACY_BUNDLE" ]] || die "legacy shared runtime is missing: $RUNTIME_ROOT/current"
+[[ -n "$RUNTIME_BUNDLE" ]] || die "staged native runtime is missing: $RUNTIME_ROOT/native-next"
+[[ "$LEGACY_BUNDLE" != "$RUNTIME_BUNDLE" ]] ||
+  die 'legacy current and native-next must be distinct generations'
+[[ -e "$LEGACY_BUNDLE/hooks/sounio_coord_agent_hook_runtime.py" || \
+  -e "$LEGACY_BUNDLE/hooks/sounio_coord_agent_hook.py" ]] ||
+  die 'current runtime is not the legacy hook generation being drained'
+LEGACY_RUNTIME_ID="$(manifest_value "$LEGACY_BUNDLE/manifest" runtime_id)"
+LEGACY_RUNTIME_SHA256="$(sha256sum "$LEGACY_BUNDLE/manifest" | awk '{print $1}')"
 RUNTIME_MANIFEST="$RUNTIME_BUNDLE/manifest"
 [[ -f "$RUNTIME_MANIFEST" && -x "$RUNTIME_BUNDLE/bin/sounio-loom-runtime" ]] ||
-  die 'active shared runtime is incomplete'
+  die 'staged native runtime is incomplete'
 for capability in loom-native-agent-hook-v1 loom-native-hook-binary-attestation-v1 \
-    loom-runtime-authority-capsule-v1 loom-native-hook-cutover-v1; do
+    loom-runtime-authority-capsule-v1 loom-native-hook-cutover-v1 \
+    loom-native-hook-generation-drain-v1; do
   grep -q "^capability=$capability$" "$RUNTIME_MANIFEST" ||
-    die "active shared runtime omits capability=$capability"
+    die "staged native runtime omits capability=$capability"
 done
 verify_manifest_file "$RUNTIME_MANIFEST" loom_runtime_sha256 \
   "$RUNTIME_BUNDLE/bin/sounio-loom-runtime"
@@ -180,10 +198,11 @@ for provider in codex claude cursor grok; do
 done
 [[ "$(manifest_value "$RUNTIME_MANIFEST" loom_native_hook_cutover_semantics_sha256)" == \
   27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882 ]] ||
-  die 'active runtime is not bound to frozen Sounio action 9045 semantics'
+  die 'staged runtime is not bound to frozen Sounio action 9045 semantics'
 [[ ! -e "$RUNTIME_BUNDLE/hooks/sounio_coord_agent_hook.py" && \
   ! -e "$RUNTIME_BUNDLE/hooks/sounio_coord_agent_hook_runtime.py" ]] ||
-  die 'active runtime still contains the Python hook bridge'
+  die 'staged runtime still contains the Python hook bridge'
+CURRENT_SELECTOR_SHA256="$(sha256sum "$LEGACY_BUNDLE/manifest" | awk '{print $1}')"
 
 mkdir -p "$TARGET_COMMON_DIR/sounio-loom-native-hook-promotions"
 exec 9>"$TARGET_COMMON_DIR/sounio-loom-native-hook-promotions/.promotion.lock"
@@ -324,12 +343,20 @@ if [[ "${SOUNIO_LOOM_NATIVE_HOOK_PROMOTION_SABOTAGE_AFTER_SWAP:-0}" == 1 ]]; the
   esac
 fi
 
+GUARDIAN_RECEIPT="$TXN_DIR/guardian.json"
+SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
+  "$RUNTIME_BUNDLE/bin/sounio-loom-runtime" hook-generation-guardian \
+    --cwd "$TARGET_ROOT" --apply > "$GUARDIAN_RECEIPT"
+grep -Fq '"state":"PREPARED"' "$GUARDIAN_RECEIPT" ||
+  die 'Sounio 9046 guardian did not prepare the staged generation boundary'
+
 CANARY_ROOT="$TXN_DIR/canary"
 CANARY_REPO="$CANARY_ROOT/policyless"
 CANARY_RECEIPT="$CANARY_REPO/.git/sounio-loom-language-authority/agent-hook.tsv"
 mkdir -p "$CANARY_REPO/bin"
 git init -q "$CANARY_REPO"
 cp "$TARGET_ROOT/bin/sounio-coord" "$CANARY_REPO/bin/"
+ln -s "$RUNTIME_ROOT" "$CANARY_REPO/.git/sounio-coord-runtime"
 
 run_provider_canary() {
   local provider="$1" harness_name="$2" dialect="$3"
@@ -344,7 +371,7 @@ run_provider_canary() {
   cp "$(command -v bash)" "$harness"
   chmod 0755 "$harness"
   printf '%s\n' "$lane" > "$provider_root/lane"
-  hook_command='runtime_dir="$(readlink -f "$SOUNIO_COORD_RUNTIME_DIR/current")" && test -n "$runtime_dir" && exec env SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT="$runtime_dir/policy/language-authority" SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_ROOT="$runtime_dir/policy/native-hook-cutover" "$runtime_dir/bin/sounio-loom-runtime" agent-hook --agent '"$provider"
+  hook_command='runtime_dir="$(readlink -f "$SOUNIO_COORD_RUNTIME_DIR/native-next")" && test -n "$runtime_dir" && exec env SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT="$runtime_dir/policy/language-authority" SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_ROOT="$runtime_dir/policy/native-hook-cutover" "$runtime_dir/bin/sounio-loom-runtime" agent-hook --agent '"$provider"
   case "$provider" in
     codex)
       printf -v start_event '{"hook_event_name":"SessionStart","session_id":"%s","cwd":"%s"}' \
@@ -445,12 +472,26 @@ run_provider_canary() {
   fi
   [[ "$(grep -Fc $'provider='"$provider"$'\tdialect='"$dialect" "$CANARY_RECEIPT")" -eq "$expected_receipts" ]] ||
     die "policyless $provider promotion canary emitted the wrong provider-bound receipt count"
+  "$RUNTIME_BUNDLE/bin/sounio-loom-runtime" hook-generation-canary \
+    --cwd "$TARGET_ROOT" --provider "$provider" --canary-root "$CANARY_REPO" \
+    --output "$provider_root/start.out" --expect 'Sounio coordination joined:' \
+    --apply > "$provider_root/action-9046-canary.json"
+  grep -Fq '"state":"RECORDED"' "$provider_root/action-9046-canary.json" ||
+    die "Sounio 9046 did not record the $provider canary"
 }
 
 run_provider_canary codex codex snake
 run_provider_canary claude claude snake
 run_provider_canary cursor cursor-agent cursor-camel
 run_provider_canary grok grok grok-camel
+
+CANARY_SET_RECEIPT="$TXN_DIR/canary-set.json"
+"$RUNTIME_BUNDLE/bin/sounio-loom-runtime" hook-generation-canary --verify \
+  --cwd "$TARGET_ROOT" > "$CANARY_SET_RECEIPT"
+grep -Fq '"mask":15' "$CANARY_SET_RECEIPT" ||
+  die 'Sounio 9046 did not verify the four-provider canary mask'
+grep -Fq '"four_provider_complete":true' "$CANARY_SET_RECEIPT" ||
+  die 'Sounio 9046 four-provider canary set is incomplete'
 
 [[ "$(grep -c 'decision=ALLOW' "$CANARY_RECEIPT")" -eq 13 ]] ||
   die 'four-provider policyless canary did not emit thirteen ALLOW receipts'
@@ -460,6 +501,10 @@ run_provider_canary grok grok grok-camel
   die 'four-provider policyless canary did not bind every event to Sounio action 9045'
 [[ "$(git -C "$TARGET_ROOT" rev-parse HEAD)" == "$TARGET_HEAD" ]] ||
   die 'target HEAD changed while the promotion lock was active'
+[[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$LEGACY_BUNDLE" && \
+  "$(sha256sum "$LEGACY_BUNDLE/manifest" | awk '{print $1}')" == \
+    "$CURRENT_SELECTOR_SHA256" ]] ||
+  die 'legacy current generation changed during native entry promotion'
 [[ "$(sha256sum "$TARGET_CODEX" | awk '{print $1}')" == \
   "$(sha256sum "$CANDIDATE_CODEX" | awk '{print $1}')" && \
   "$(sha256sum "$TARGET_CLAUDE" | awk '{print $1}')" == \
@@ -480,6 +525,10 @@ run_provider_canary grok grok grok-camel
   printf 'target_head=%s\n' "$TARGET_HEAD"
   printf 'runtime_id=%s\n' "$(manifest_value "$RUNTIME_MANIFEST" runtime_id)"
   printf 'runtime_bundle_sha256=%s\n' "$(manifest_value "$RUNTIME_MANIFEST" bundle_sha256)"
+  printf 'runtime_selector=native-next\n'
+  printf 'legacy_current_runtime_id=%s\n' "$LEGACY_RUNTIME_ID"
+  printf 'legacy_current_manifest_sha256=%s\n' "$LEGACY_RUNTIME_SHA256"
+  printf 'legacy_current_unchanged=true\n'
   printf 'codex_config_sha256=%s\n' "$(sha256sum "$TARGET_CODEX" | awk '{print $1}')"
   printf 'claude_config_sha256=%s\n' "$(sha256sum "$TARGET_CLAUDE" | awk '{print $1}')"
   printf 'cursor_config_sha256=%s\n' "$(sha256sum "$TARGET_CURSOR" | awk '{print $1}')"
@@ -493,6 +542,10 @@ run_provider_canary grok grok grok-camel
   printf 'canary_allow_receipts=13\n'
   printf 'canary_runtime_capsule_receipts=13\n'
   printf 'canary_action_9045_receipts=13\n'
+  printf 'canary_action_9046_mask=15\n'
+  printf 'guardian_action_9046_prepared=true\n'
+  printf 'native_entry_open=true\n'
+  printf 'bridge_free_current=false\n'
   printf 'canary_providers=codex+claude+cursor+grok\n'
   printf 'result=ACTIVATED\n'
 } > "$TXN_DIR/receipt.v1"

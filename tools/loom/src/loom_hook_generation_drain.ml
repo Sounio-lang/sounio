@@ -92,13 +92,15 @@ let boolean label = function
   | "false" -> false
   | value -> failf "%s-not-boolean:%s" label value
 
-let rec find_source_root path =
-  let candidate = Filename.concat path "tools/loom/native_hook_generation_drain.freeze.v1" in
+let rec find_operational_root path =
+  let candidate = Filename.concat path ".git" in
   if Sys.file_exists candidate then path
   else
     let parent = Filename.dirname path in
-    if parent = path then failf "source-root-not-found:%s" path
-    else find_source_root parent
+    if parent = path then failf "operational-root-not-found:%s" path
+    else find_operational_root parent
+
+let find_source_root = find_operational_root
 
 let resolve_relative base value =
   if Filename.is_relative value then Filename.concat base value else value
@@ -147,7 +149,7 @@ let choose_authority_runtime root manifest =
         if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
           failf "authority-runtime-override-requires-test-mode";
         value
-    | _ -> if Sys.file_exists repository_runtime then repository_runtime else installed_runtime
+    | _ -> if Sys.file_exists installed_runtime then installed_runtime else repository_runtime
   in
   let stat = require_regular_file "authority-runtime" selected in
   if stat.st_perm land 0o111 = 0 then failf "authority-runtime-not-executable";
@@ -162,13 +164,25 @@ let verify_manifest_file root manifest path_key hash_key reason =
   if sha256_file reason path <> expected then failf "%s-hash-mismatch" reason
 
 let load_policy root =
-  let path =
+  let installed_policy_root =
+    Filename.concat
+      (Filename.dirname (Filename.dirname (Unix.realpath Sys.executable_name)))
+      "policy/native-hook-generation-drain"
+  in
+  let installed_manifest =
+    Filename.concat installed_policy_root
+      "tools/loom/native_hook_generation_drain.freeze.v1"
+  in
+  let path, policy_root =
     match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_GENERATION_DRAIN_MANIFEST" with
     | Some value when value <> "" ->
         if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
           failf "freeze-manifest-override-requires-test-mode";
-        value
-    | _ -> Filename.concat root "tools/loom/native_hook_generation_drain.freeze.v1"
+        (value, root)
+    | _ when Sys.file_exists installed_manifest ->
+        (installed_manifest, installed_policy_root)
+    | _ ->
+        (Filename.concat root "tools/loom/native_hook_generation_drain.freeze.v1", root)
   in
   if sha256_file "freeze-manifest" path <> pinned_manifest_sha256 then
     failf "freeze-manifest-hash-mismatch";
@@ -187,7 +201,7 @@ let load_policy root =
     "inventory-completeness-rule-removed";
   List.iter
     (fun (path_key, hash_key, reason) ->
-      verify_manifest_file root manifest path_key hash_key reason)
+      verify_manifest_file policy_root manifest path_key hash_key reason)
     [ ("garden_path", "garden_sha256", "garden");
       ("source_path", "source_sha256", "authority-source");
       ("entrypoint_path", "entrypoint_sha256", "authority-entrypoint");
@@ -962,7 +976,7 @@ let snapshot_json policy observation frame output decision =
     policy.executable_sha256 (sha256 frame) (sha256 output) (json_escape output)
     (observation.members |> List.map member_json |> String.concat ",")
 
-let evaluate root observation =
+let evaluate_with_decision root observation =
   let policy = load_policy root in
   let frame = authority_frame policy observation in
   let result = Loom_hook.run_process ~input:frame ~timeout_seconds:5.0 ~cwd:root policy.runtime [] in
@@ -971,7 +985,11 @@ let evaluate root observation =
   let expected_code = if decision = "DRAINING" || decision = "CUTOVER_READY" then 0 else 42 in
   if result.code <> expected_code then
     failf "authority-exit-mismatch:decision=%s:expected=%d:observed=%d" decision expected_code result.code;
-  (snapshot_json policy observation frame output decision, expected_code)
+  (snapshot_json policy observation frame output decision, expected_code, decision)
+
+let evaluate root observation =
+  let snapshot, code, _decision = evaluate_with_decision root observation in
+  (snapshot, code)
 
 let attach_ui_attestation common snapshot =
   if String.length snapshot = 0 || snapshot.[String.length snapshot - 1] <> '}' then
@@ -1007,6 +1025,22 @@ let evaluate_live root =
   let common = git_common_dir root in
   (attach_ui_attestation common snapshot, code)
 
+let cutover_observation observation =
+  let affirmative_absence =
+    observation.legacy = 0 && observation.unknown = 0
+    && observation.unresponsive = 0
+  in
+  { observation with activation_requested = true;
+    zero_legacy_claimed = affirmative_absence }
+
+let evaluate_cutover_live root observation =
+  let snapshot, _authority_code, decision =
+    evaluate_with_decision root (cutover_observation observation)
+  in
+  let common = git_common_dir root in
+  let signed_snapshot = attach_ui_attestation common snapshot in
+  (signed_snapshot, if decision = "CUTOVER_READY" then 0 else 42)
+
 let fail_closed_json reason =
   Printf.sprintf
     "{\"schema\":\"loom-native-hook-generation-drain-snapshot-v1\",\"action\":9046,\"stage\":\"SEMANTICS_FROZEN\",\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"authority_observed\":false,\"decision\":\"FAIL_CLOSED\",\"decision_code\":424,\"admitted\":false,\"cutover_ready\":false,\"cutover_command_exposed\":false,\"block_reason\":\"%s\",\"snapshot_utc\":\"\",\"inventory\":{\"fresh\":false,\"complete\":false,\"classification_complete\":false,\"process_generation_bound\":false,\"hook_capability_bound\":false,\"sha256\":\"\",\"total\":0,\"classified\":0,\"native\":0,\"legacy\":0,\"unknown\":0,\"unresponsive\":0},\"bindings\":{\"current_runtime_id\":\"\",\"candidate_runtime_id\":\"\",\"old_runtime_bound\":false,\"candidate_runtime_bound\":false,\"candidate_config_bound\":false,\"final_config_bound\":false,\"old_runtime_sha256\":\"\",\"candidate_runtime_sha256\":\"\",\"config_pair_sha256\":\"\"},\"canaries\":{\"mask\":0,\"required_mask\":15,\"four_provider_complete\":false},\"rollback_pair_tested\":false,\"native_entry_open\":false,\"bridge_free_candidate\":false,\"current_legacy_bridge\":false,\"authority\":{\"manifest_sha256\":\"%s\",\"semantics_sha256\":\"%s\",\"executable_sha256\":\"\",\"frame_sha256\":\"\",\"output_sha256\":\"\",\"output\":\"\"},\"members\":[]}"
@@ -1014,7 +1048,7 @@ let fail_closed_json reason =
 
 let live_json ~cwd =
   try
-    let root = find_source_root (Unix.realpath cwd) in
+    let root = find_operational_root (Unix.realpath cwd) in
     fst (evaluate_live root)
   with error -> fail_closed_json (Printexc.to_string error)
 
@@ -1031,11 +1065,32 @@ let run arguments =
   try
     let cwd, fixture = parse_arguments arguments in
     let cwd = Option.value ~default:(Unix.getcwd ()) cwd |> Unix.realpath in
-    let root = find_source_root cwd in
+    let root = find_operational_root cwd in
     let json, code =
       match fixture with
       | Some path -> evaluate root (fixture_observation path)
       | None -> evaluate_live root
+    in
+    print_endline json;
+    code
+  with error ->
+    print_endline (fail_closed_json (Printexc.to_string error));
+    42
+
+let run_cutover_admit arguments =
+  try
+    let cwd, fixture = parse_arguments arguments in
+    let cwd = Option.value ~default:(Unix.getcwd ()) cwd |> Unix.realpath in
+    let root = find_operational_root cwd in
+    let json, code =
+      match fixture with
+      | Some path ->
+          let snapshot, _authority_code, decision =
+            evaluate_with_decision root
+              (fixture_observation path |> cutover_observation)
+          in
+          (snapshot, if decision = "CUTOVER_READY" then 0 else 42)
+      | None -> evaluate_cutover_live root (live_observation root)
     in
     print_endline json;
     code

@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-native-hook-promotion.XXXXXX")"
 RUNTIME_ROOT="${SOUNIO_COORD_RUNTIME_DIR:-$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)/sounio-coord-runtime}"
 STATE_ROOT="${SOUNIO_COORD_DIR:-$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)/sounio-coord-state}"
+DRAIN_STATE_ROOT="$TEST_ROOT/drain-state"
 INSTALLER="$ROOT_DIR/scripts/dev/install_sounio_loom_native_hooks.sh"
 
 cleanup() {
@@ -29,6 +30,7 @@ create_target() {
   git -C "$target" add .codex/hooks.json .claude/settings.json bin/sounio-coord
   git -C "$target" -c user.name='LOOM selftest' -c user.email='loom-selftest@invalid' \
     commit -q -m 'fixture'
+  ln -s "$RUNTIME_ROOT" "$target/.git/sounio-coord-runtime"
 }
 
 config_sha() {
@@ -45,11 +47,15 @@ config_sha() {
 
 [[ -x "$INSTALLER" ]] || fail 'promotion installer is not executable'
 [[ -L "$RUNTIME_ROOT/current" ]] || fail 'shared runtime is not active'
+[[ -L "$RUNTIME_ROOT/native-next" ]] || fail 'staged native runtime is not selected'
+legacy_before="$(readlink -f "$RUNTIME_ROOT/current")"
 
 positive="$TEST_ROOT/positive"
 create_target "$positive"
 output="$(
   SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
+    SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+    SOUNIO_LOOM_NATIVE_HOOK_DRAIN_STATE_DIR="$DRAIN_STATE_ROOT" \
     "$INSTALLER" --source-root "$ROOT_DIR" --target-root "$positive" --activate
 )"
 grep -q '^LOOM_NATIVE_HOOKS_ACTIVATED ' <<< "$output" ||
@@ -81,6 +87,18 @@ grep -q '^canary_runtime_capsule_receipts=13$' "$receipt" ||
   fail 'positive promotion did not retain its runtime-capsule proof'
 grep -q '^canary_action_9045_receipts=13$' "$receipt" ||
   fail 'positive promotion did not retain its Sounio action 9045 proof'
+grep -q '^canary_action_9046_mask=15$' "$receipt" ||
+  fail 'positive promotion did not retain its Sounio action 9046 canary mask'
+grep -q '^guardian_action_9046_prepared=true$' "$receipt" ||
+  fail 'positive promotion did not retain its Sounio action 9046 guardian proof'
+grep -q '^runtime_selector=native-next$' "$receipt" ||
+  fail 'positive promotion did not bind native-next'
+grep -q '^legacy_current_unchanged=true$' "$receipt" ||
+  fail 'positive promotion did not prove the legacy current remained unchanged'
+grep -q '^bridge_free_current=false$' "$receipt" ||
+  fail 'positive promotion prematurely claimed bridge-free current'
+[[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$legacy_before" ]] ||
+  fail 'positive promotion changed the current runtime selector'
 grep -q '^canary_providers=codex+claude+cursor+grok$' "$receipt" ||
   fail 'positive promotion did not retain its four-provider binding'
 for provider in codex claude cursor grok; do
@@ -96,6 +114,8 @@ rollback_before="$(config_sha "$rollback")"
 set +e
 rollback_output="$(
   SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
+  SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+  SOUNIO_LOOM_NATIVE_HOOK_DRAIN_STATE_DIR="$DRAIN_STATE_ROOT" \
   SOUNIO_LOOM_NATIVE_HOOK_PROMOTION_SABOTAGE_AFTER_SWAP=1 \
     "$INSTALLER" --source-root "$ROOT_DIR" --target-root "$rollback" --activate 2>&1
 )"
@@ -116,6 +136,8 @@ create_target "$dirty"
 printf 'dirty\n' >> "$dirty/.codex/hooks.json"
 dirty_before="$(config_sha "$dirty")"
 if SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
+  SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+  SOUNIO_LOOM_NATIVE_HOOK_DRAIN_STATE_DIR="$DRAIN_STATE_ROOT" \
   "$INSTALLER" --source-root "$ROOT_DIR" --target-root "$dirty" --activate \
   >/dev/null 2>&1; then
   fail 'promotion accepted a dirty target hook configuration'
@@ -128,6 +150,8 @@ create_target "$locked"
 printf 'foreign-index-lock\n' > "$locked/.git/index.lock"
 locked_before="$(config_sha "$locked")"
 if SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
+  SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+  SOUNIO_LOOM_NATIVE_HOOK_DRAIN_STATE_DIR="$DRAIN_STATE_ROOT" \
   "$INSTALLER" --source-root "$ROOT_DIR" --target-root "$locked" --activate \
   >/dev/null 2>&1; then
   fail 'promotion ignored an existing target Git index lock'
@@ -138,4 +162,4 @@ grep -q '^foreign-index-lock$' "$locked/.git/index.lock" ||
   fail 'promotion removed a foreign target Git index lock'
 
 printf '%s\n' \
-  'sounio-loom-native-hook-promotion-selftest: PASS promotion=atomic runtime=manifest-bound git_index=locked policyless_canary=13-ALLOW lifecycle_receipts=12 codex_cleanup_receipts=1 providers=codex+claude+cursor+grok action=9045 rollback=exact dirty_target=refused foreign_lock=preserved python_oracle=absent rust_oracle=absent'
+  'sounio-loom-native-hook-promotion-selftest: PASS promotion=atomic selector=native-next legacy_current=unchanged runtime=manifest-bound git_index=locked policyless_canary=13-ALLOW lifecycle_receipts=12 codex_cleanup_receipts=1 providers=codex+claude+cursor+grok action=9045+9046 guardian=prepared canary_mask=15 rollback=exact dirty_target=refused foreign_lock=preserved python_oracle=absent rust_oracle=absent'

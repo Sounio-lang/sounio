@@ -13590,6 +13590,8 @@ let main () =
       Loom_hook_generation_canary.run (arguments_after_command ())
     else if command = "hook-generation-drain-snapshot" then
       Loom_hook_generation_drain.run (arguments_after_command ())
+    else if command = "hook-generation-cutover-admit" then
+      Loom_hook_generation_drain.run_cutover_admit (arguments_after_command ())
     else if command = "hook-generation-guardian" then
       Loom_hook_generation_guardian.run (arguments_after_command ())
     else if command = "hook-generation-reconcile" then

@@ -128,6 +128,25 @@ legacy=0
 unknown=0
 expect_decision cutover-ready CUTOVER_READY 0
 
+set +e
+cutover_ready_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 "$LOOM" \
+  hook-generation-cutover-admit --cwd "$ROOT_DIR" \
+  --fixture "$TEST_ROOT/cutover-ready.fixture" 2>&1)"
+cutover_ready_rc=$?
+cutover_draining_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 "$LOOM" \
+  hook-generation-cutover-admit --cwd "$ROOT_DIR" \
+  --fixture "$TEST_ROOT/draining.fixture" 2>&1)"
+cutover_draining_rc=$?
+set -e
+[[ "$cutover_ready_rc" -eq 0 && \
+  "$cutover_ready_output" == *'"decision":"CUTOVER_READY"'* && \
+  "$cutover_ready_output" == *'"cutover_ready":true'* ]] ||
+  fail "native cutover admission rejected the ready Sounio receipt: $cutover_ready_output"
+[[ "$cutover_draining_rc" -eq 42 && \
+  "$cutover_draining_output" != *'"decision":"CUTOVER_READY"'* && \
+  "$cutover_draining_output" == *'"cutover_ready":false'* ]] ||
+  fail "native cutover admission accepted a non-absent generation: $cutover_draining_output"
+
 fixture_defaults
 activation_requested=true
 zero_legacy_claimed=true
@@ -220,15 +239,21 @@ for _attempt in 1 2 3 4 5; do
   live_output="$("$LOOM" hook-generation-drain-snapshot --cwd "$ROOT_DIR" 2>&1)"
   live_rc=$?
   set -e
-  if [[ "$live_rc" -eq 42 && "$live_output" == *'"authority_observed":true'* ]]; then
+  if [[ "$live_rc" -eq 42 && "$live_output" == *'"cutover_ready":false'* ]]; then
     break
   fi
 done
-[[ "$live_rc" -eq 42 && "$live_output" == *'"authority_observed":true'* && \
-  "$live_output" == *'"cutover_command_exposed":false'* && \
-  "$live_output" == *'"current_legacy_bridge":true'* && \
-  "$live_output" == *'"bridge_free_candidate":true'* ]] ||
-  fail "live observation did not produce a Sounio refusal: $live_output"
+[[ "$live_rc" -eq 42 && "$live_output" == *'"cutover_ready":false'* && \
+  "$live_output" == *'"cutover_command_exposed":false'* ]] ||
+  fail "live observation did not fail closed: $live_output"
+if [[ "$live_output" == *'"authority_observed":true'* ]]; then
+  [[ "$live_output" == *'"current_legacy_bridge":true'* && \
+    "$live_output" == *'"bridge_free_candidate":true'* ]] ||
+    fail "live Sounio refusal lost its generation topology: $live_output"
+else
+  [[ "$live_output" == *'"decision":"FAIL_CLOSED"'* ]] ||
+    fail "live operational drift was not classified fail closed: $live_output"
+fi
 
 ! grep -Fq 'cockpit-snapshot' "$ROOT_DIR/tools/loom/src/loom_hook_generation_drain.ml" ||
   fail 'OCaml observer still calls the shell cockpit snapshot'
@@ -245,4 +270,4 @@ grep -Fq 'refreshDrain' "$ROOT_DIR/tools/loom/src/loom_ui.ml" ||
   fail "forbidden Python or Rust executable ran: $(tr '\n' ' ' < "$FORBIDDEN_LOG")"
 
 printf '%s\n' \
-  'sounio-loom-native-hook-generation-drain-ocaml-selftest: PASS semantic_authority=Sounio operational_realization=OCaml direct_state_inventory=true kernel_process_binding=true stable_double_snapshot=true incomplete_inventory=DENY673 false_zero=DENY680 generation_or_capability_unbound=DENY675 canary_or_rollback_incomplete=DENY678 config_unbound=DENY672 arithmetic_invalid=DENY674 runtime_tamper=fail_closed manifest_tamper=fail_closed manifest_missing=fail_closed forbidden_python_rust_exec=absent ui_route=wired cutover_command=hidden_until_ready'
+  'sounio-loom-native-hook-generation-drain-ocaml-selftest: PASS semantic_authority=Sounio operational_realization=OCaml direct_state_inventory=true kernel_process_binding=true stable_double_snapshot=true incomplete_inventory=DENY673 false_zero=DENY680 generation_or_capability_unbound=DENY675 canary_or_rollback_incomplete=DENY678 config_unbound=DENY672 arithmetic_invalid=DENY674 runtime_tamper=fail_closed manifest_tamper=fail_closed manifest_missing=fail_closed live_drift=fail_closed forbidden_python_rust_exec=absent ui_route=wired cutover_command=native+hidden_until_ready'

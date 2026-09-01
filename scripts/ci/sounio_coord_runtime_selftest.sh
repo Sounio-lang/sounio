@@ -92,6 +92,7 @@ cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_cutover.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_generation_drain.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_generation_reconcile.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_custody_transfer.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_execution_outcome.sh" \
@@ -125,6 +126,8 @@ cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_receipt_admit.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_canary_ocaml_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_drain_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_drain_freeze_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_reconcile_ocaml_selftest.sh" \
   "$REPO/scripts/ci/"
 mkdir -p "$REPO/tools/loom/src"
@@ -133,6 +136,10 @@ cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v1" \
   "$ROOT_DIR/tools/loom/native_hook_cutover_authority_main.sio" \
   "$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1" \
+  "$ROOT_DIR/tools/loom/GARDEN_NATIVE_HOOK_GENERATION_DRAIN_V1.md" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_drain_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_drain.freeze.v1" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_drain.first.v1" \
   "$ROOT_DIR/tools/loom/native_hook_generation_reconcile_authority_main.sio" \
   "$ROOT_DIR/tools/loom/native_hook_generation_reconcile.freeze.v1" \
   "$ROOT_DIR/tools/loom/execution_authority.freeze.v2" "$REPO/tools/loom/"
@@ -193,12 +200,18 @@ cp "$ROOT_DIR/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md" \
   "$ROOT_DIR/tools/loom/sovereign_material_change.freeze.v2" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v2" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v3" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v4" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v5" \
   "$REPO/tools/loom/"
 mkdir -p "$REPO/tools/loom/evidence"
 cp "$ROOT_DIR/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v2-20260831.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v3-20260901.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v4-20260901.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v5-20260901.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-drain-first-v1-20260831.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-drain-frozen-v1-20260831.txt" \
   "$REPO/tools/loom/evidence/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
@@ -248,6 +261,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
 cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_native_hook_cutover_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_native_hook_generation_drain_authority.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_native_hook_generation_reconcile_authority.sio" \
   "$REPO/stdlib/coordination/"
@@ -310,6 +325,160 @@ git -C "$REPO" cat-file -e "$native_hook_cutover_toolchain_commit^{commit}" ||
   fail 'native hook cutover frozen toolchain commit is unavailable through the source alternate'
 git -C "$REPO" worktree add -q -b second-lane "$SECOND"
 RUNTIME_ROOT="$REPO/.git/sounio-coord-runtime"
+
+# Protocol-v3 runtimes predating ensure timeouts accept only the interval option.
+# A live control service must still transfer when such a runtime is reactivated.
+COMPAT_RUNTIME_ROOT="$TEST_ROOT/cross-generation-runtime"
+COMPAT_PREVIOUS_ID='p3-compat-previous'
+COMPAT_TARGET_ID='p3-compat-target'
+mkdir -p "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_PREVIOUS_ID/bin" \
+  "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_TARGET_ID/bin"
+cat > "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_PREVIOUS_ID/manifest" <<EOF
+runtime_id=$COMPAT_PREVIOUS_ID
+protocol_version=3
+EOF
+cat > "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_TARGET_ID/manifest" <<EOF
+runtime_id=$COMPAT_TARGET_ID
+protocol_version=3
+EOF
+cat > "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_PREVIOUS_ID/bin/sounio-coord-runtime" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  obligation-supervisor-status)
+    printf 'LOOM_OBLIGATION_SUPERVISOR_STATUS state=live pid=41 replayed_utc=fixture count=0 unclosed=0\n'
+    ;;
+  obligation-supervisor-ensure)
+    printf 'LOOM_OBLIGATION_SUPERVISOR_ENSURED state=already-running pid=41 pid_start=1 replayed_utc=fixture\n'
+    ;;
+esac
+EOF
+cat > "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_TARGET_ID/bin/sounio-coord-runtime" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  obligation-supervisor-ensure)
+    shift
+    for argument in "$@"; do
+      [[ "$argument" != --timeout-seconds ]] || {
+        printf '%s\n' 'error: --timeout-seconds is only valid for obligation-supervisor-stop' >&2
+        exit 64
+      }
+    done
+    printf 'LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted pid=42 pid_start=2 replayed_utc=fixture\n'
+    ;;
+esac
+EOF
+chmod 0555 \
+  "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_PREVIOUS_ID/bin/sounio-coord-runtime" \
+  "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_TARGET_ID/bin/sounio-coord-runtime"
+ln -s "versions/$COMPAT_PREVIOUS_ID" "$COMPAT_RUNTIME_ROOT/current"
+compat_activation_output="$(
+  cd "$REPO"
+  scripts/dev/install_sounio_coord_runtime.sh \
+    --runtime-dir "$COMPAT_RUNTIME_ROOT" --activate "$COMPAT_TARGET_ID"
+)"
+grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted pid=42 ' \
+  <<< "$compat_activation_output" || \
+  fail 'cross-generation activation passed a target-incompatible ensure timeout'
+grep -q "^ACTIVATED runtime_id=$COMPAT_TARGET_ID " <<< "$compat_activation_output" || \
+  fail 'cross-generation activation did not select the compatibility target'
+[[ "$(readlink -f "$COMPAT_RUNTIME_ROOT/current")" == \
+  "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_TARGET_ID" ]] || \
+  fail 'cross-generation activation did not commit the compatibility target'
+
+# A legacy bridge may cross into a bridge-free generation only through the
+# native action-9046 admission command. Missing and DRAINING receipts must leave
+# current byte-for-byte selected on the legacy generation.
+CUTOVER_RUNTIME_ROOT="$TEST_ROOT/cutover-runtime"
+CUTOVER_PREVIOUS_ID='p3-cutover-legacy'
+CUTOVER_TARGET_ID='p3-cutover-native'
+mkdir -p "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/bin" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/hooks" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/policy/native-hook-generation-drain/tools/loom"
+cp "$ROOT_DIR/tools/loom/native_hook_generation_drain.freeze.v1" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/policy/native-hook-generation-drain/tools/loom/"
+printf 'runtime_id=%s\nprotocol_version=3\n' "$CUTOVER_PREVIOUS_ID" \
+  > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/manifest"
+printf 'legacy-bridge-fixture\n' \
+  > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/hooks/sounio_coord_agent_hook_runtime.py"
+cat > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/bin/sounio-coord-runtime" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-loom-native-hook-generation-drain" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'SOUNIO_NATIVE_HOOK_GENERATION_DRAIN CUTOVER_READY semantic_authority=Sounio action=9046'
+EOF
+cat > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-loom-runtime" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == hook-generation-cutover-admit ]] || exit 64
+if [[ "${SOUNIO_CUTOVER_TRANSPORT_FIXTURE:-draining}" == ready ]]; then
+  printf '%s\n' '{"schema":"loom-native-hook-generation-drain-snapshot-v1","semantic_authority":"Sounio","action":9046,"decision":"CUTOVER_READY","cutover_ready":true}'
+  exit 0
+fi
+printf '%s\n' '{"schema":"loom-native-hook-generation-drain-snapshot-v1","semantic_authority":"Sounio","action":9046,"decision":"DRAINING","cutover_ready":false}'
+exit 42
+EOF
+cat > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-coord-runtime" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod 0555 \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/bin/sounio-coord-runtime" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-coord-runtime" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-loom-runtime" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-loom-native-hook-generation-drain"
+cutover_authority_sha="$(sha256sum \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-loom-native-hook-generation-drain" | awk '{print $1}')"
+cat > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/manifest" <<EOF
+runtime_id=$CUTOVER_TARGET_ID
+protocol_version=3
+loom_native_hook_generation_drain_semantics_sha256=00c5d07b77434b37844e3704dd935d04367646c4f8541a8cce77bc143deb46a3
+loom_native_hook_generation_drain_manifest_sha256=9a40674a135a4c4f43ae0ba8a2658eba32e311b6cedaad5c26124eb6de657ca1
+loom_native_hook_generation_drain_runtime_sha256=$cutover_authority_sha
+capability=loom-native-hook-generation-drain-v1
+EOF
+ln -s "versions/$CUTOVER_PREVIOUS_ID" "$CUTOVER_RUNTIME_ROOT/current"
+ln -s "versions/$CUTOVER_TARGET_ID" "$CUTOVER_RUNTIME_ROOT/native-next"
+set +e
+cutover_missing_output="$(
+  cd "$REPO"
+  scripts/dev/install_sounio_coord_runtime.sh \
+    --runtime-dir "$CUTOVER_RUNTIME_ROOT" --activate "$CUTOVER_TARGET_ID" 2>&1
+)"
+cutover_missing_rc=$?
+cutover_draining_output="$(
+  cd "$REPO"
+  scripts/dev/install_sounio_coord_runtime.sh \
+    --runtime-dir "$CUTOVER_RUNTIME_ROOT" --activate "$CUTOVER_TARGET_ID" \
+    --cutover-root "$REPO" 2>&1
+)"
+cutover_draining_rc=$?
+set -e
+[[ "$cutover_missing_rc" -ne 0 && \
+  "$cutover_missing_output" == *'requires --cutover-root and a CUTOVER_READY receipt'* ]] ||
+  fail 'bridge-free activation did not fail closed without a cutover root'
+[[ "$cutover_draining_rc" -ne 0 && \
+  "$cutover_draining_output" == *'Sounio action 9046 refused legacy-to-native activation'* && \
+  "$cutover_draining_output" == *'"decision":"DRAINING"'* ]] ||
+  fail 'bridge-free activation accepted a DRAINING receipt'
+[[ "$(readlink -f "$CUTOVER_RUNTIME_ROOT/current")" == \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID" ]] ||
+  fail 'refused bridge-free activation changed current'
+cutover_ready_output="$(
+  cd "$REPO"
+  SOUNIO_CUTOVER_TRANSPORT_FIXTURE=ready \
+    scripts/dev/install_sounio_coord_runtime.sh \
+      --runtime-dir "$CUTOVER_RUNTIME_ROOT" --activate "$CUTOVER_TARGET_ID" \
+      --cutover-root "$REPO"
+)"
+grep -q '"decision":"CUTOVER_READY"' <<< "$cutover_ready_output" ||
+  fail 'bridge-free activation omitted its native CUTOVER_READY receipt'
+grep -q "^ACTIVATED runtime_id=$CUTOVER_TARGET_ID " <<< "$cutover_ready_output" ||
+  fail 'bridge-free activation did not select its admitted generation'
+[[ "$(readlink -f "$CUTOVER_RUNTIME_ROOT/current")" == \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID" ]] ||
+  fail 'CUTOVER_READY activation did not commit current'
 
 output="$(cd "$REPO" && SOUNIO_COORD_RUNTIME_MODE=local bin/sounio-coord runtime-info)"
 grep -q '^selection=local$' <<< "$output" || fail 'launcher did not report its local fallback'
