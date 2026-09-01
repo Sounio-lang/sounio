@@ -2080,7 +2080,15 @@ fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTy
                 }
                 None => {}
             }
-            ty_knowledge(inner_ty, eps_val)
+            // Mirror of the persistence in epistemic.sio's check_knowledge_type:
+            // the annotation's provenance category becomes TypeEntry payload
+            // (dropped here until 2026-09-01). This is the path Madaros actually
+            // takes; leaving this twin unwired would keep the erasure alive in
+            // exactly the engine that matters. Lane: SOUNIO-KNOWLEDGE-BOUNDARY-PROVENANCE.
+            var ty = ty_knowledge(inner_ty, eps_val)
+            let prov = meta.provenance
+            ty.knowledge_provenance_kind = prov.kind
+            ty
         }
         None => {
             checker_note_type_error_mut(c)
@@ -9885,7 +9893,17 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
         return
     }
     if !knowledge_call_boundary_compatible(provided_ty, expected_ty) {
-        checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0)
+        // Name the failing slot: a refusal is evidence for the cause it
+        // names. Epsilon keeps E036 (it predates this); a provenance-leg
+        // failure is E244. (The validity leg is payload-flattened until the
+        // date-parser slice of SOUNIO-KNOWLEDGE-BOUNDARY-PROVENANCE lands.)
+        let pmeta2 = knowledge_meta_from_ty(provided_ty)
+        let rmeta2 = knowledge_meta_from_ty(expected_ty)
+        if !provenance_subsumes(knowledge_meta_provenance(pmeta2), knowledge_meta_provenance(rmeta2)) {
+            checker_report_error_at_inplace(c, call_span, 244, 0, 0, 0)
+        } else {
+            checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0)
+        }
     }
 }
 
@@ -14988,6 +15006,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 176 { print("struct constructor is private in its defining module") }
     else if code == 177 { print("enum constructor is private in its defining module") }
     else if code == 221 { print("this math function is bound for typechecking but the native backend cannot emit it; the call would compile and then die on an illegal instruction at run time") }
+    else if code == 244 { print("Knowledge provenance boundary mismatch: the argument's provenance cannot satisfy the parameter's requirement (trusted classes: Source, Literature, Measured)") }
     else if code == 245 { print("arithmetic between two Knowledge<T> values is not supported by this compiler; the operation typechecks but has no lowering, so it would produce a wrong value or crash at runtime") }
     else if code == 200 { print("Forgettable type requires ZD effect: exact annihilation is only possible via zero-divisor algebra (sedenions). Division algebras cannot satisfy this guarantee. Add `with ZD` to your function signature.") }
     else if code == 201 { print("ExactlyPrivate<T> requires ZD effect: exact data-contribution removal is only possible via sedenion annihilation. Differential privacy (epsilon-bounded) does not suffice. Add `with ZD` to your function signature.") }
@@ -25818,7 +25837,16 @@ impl Checker {
         if knowledge_call_boundary_compatible(provided_ty, expected_ty) {
             self
         } else {
-            self.report_error_at(call_span, 36, 0, 0, 0)
+            // Mirror of the in-place site: name the failing slot (E244 for
+            // provenance, E036 otherwise). Both copies carry the rule — the
+            // codebase's twin-drift history says so.
+            let pm = knowledge_meta_from_ty(provided_ty)
+            let rm = knowledge_meta_from_ty(expected_ty)
+            if !provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm)) {
+                self.report_error_at(call_span, 244, 0, 0, 0)
+            } else {
+                self.report_error_at(call_span, 36, 0, 0, 0)
+            }
         }
     }
 
