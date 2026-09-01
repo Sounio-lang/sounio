@@ -13872,6 +13872,103 @@ impl Lowerer {
         }
     }
 
+    // SECOND PASS, scoped to one block.
+    //
+    // A branch tail very often names a local that the SAME branch declares:
+    //
+    //     ExprKind::ExprIdent => {
+    //         var c2 = c
+    //         (c2, ident_ty)          <- the tail names c2
+    //     }
+    //
+    // The resolver walks the AST without lowering the arm, so c2 is not in the
+    // local stack and has no layout to read. The arm then answers empty, and
+    // because every arm must agree, ONE silent arm in thirty-three answers
+    // empty for the whole match. Rather than lower the block twice, look the
+    // name up in the block's own declarations and resolve THAT initializer.
+    fn block_decl_direct_struct_name(self, blk: &Block, name: Name) -> Name with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result = ir_empty_name()
+        while true {
+            match *current {
+                Some(list) => {
+                    let st = &(*list).head
+                    if st.kind == StmtKind::StmtLet || st.kind == StmtKind::StmtVar {
+                        if ir_name_eq(st.name, name) && !self.opt_expr_is_ident_named(&st.expr, name) {
+                            result = self.opt_expr_direct_struct_name(&st.expr)
+                        }
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    fn block_decl_tuple0_struct_name(self, blk: &Block, name: Name) -> Name with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result = ir_empty_name()
+        while true {
+            match *current {
+                Some(list) => {
+                    let st = &(*list).head
+                    if st.kind == StmtKind::StmtLet || st.kind == StmtKind::StmtVar {
+                        if ir_name_eq(st.name, name) && !self.opt_expr_is_ident_named(&st.expr, name) {
+                            result = self.opt_expr_tuple0_struct_name(&st.expr)
+                        }
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    // `var x = x` would send the two scanners above back into themselves.
+    // Nothing else can: every other initializer shape descends into the AST.
+    fn opt_expr_is_ident_named(self, e_opt: &Option<Box<Expr>>, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        match *e_opt {
+            Some(e) => (*e).kind == ExprKind::ExprIdent && ir_name_eq((*e).name, name),
+            _ => false,
+        }
+    }
+
+    fn opt_expr_direct_struct_name(self, e_opt: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+        match *e_opt {
+            Some(e) => self.expr_direct_struct_name(&(*e)),
+            _ => ir_empty_name(),
+        }
+    }
+
+    fn expr_tuple0_struct_name_via_block(self, e: &Expr, blk: &Block) -> Name with Mut, Panic, Div, Alloc {
+        // `(c2, ty)`: slot 0 names a local this block declares.
+        if (*e).kind == ExprKind::ExprTupleLit {
+            match (*e).args {
+                Some(lst) => {
+                    if (*lst).head.kind == ExprKind::ExprIdent {
+                        return self.block_decl_direct_struct_name(blk, (*lst).head.name)
+                    }
+                    return ir_empty_name()
+                }
+                _ => return ir_empty_name(),
+            }
+        }
+        // the pair itself, declared by this block
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.block_decl_tuple0_struct_name(blk, (*e).name)
+        }
+        ir_empty_name()
+    }
+
+    fn opt_expr_tuple0_struct_name_via_block(self, e_opt: &Option<Box<Expr>>, blk: &Block) -> Name with Mut, Panic, Div, Alloc {
+        match *e_opt {
+            Some(e) => self.expr_tuple0_struct_name_via_block(&(*e), blk),
+            _ => ir_empty_name(),
+        }
+    }
+
     fn block_tail_tuple0_struct_name(self, blk: &Block) -> Name with Mut, Panic, Div, Alloc {
         var current = &(*blk).stmts
         var result = ir_empty_name()
@@ -13881,6 +13978,9 @@ impl Lowerer {
                     let stmt_ref = &(*list).head
                     if stmt_ref.kind == StmtKind::StmtExpr {
                         result = self.opt_expr_tuple0_struct_name(&stmt_ref.expr)
+                        if result.len == 0 {
+                            result = self.opt_expr_tuple0_struct_name_via_block(&stmt_ref.expr, blk)
+                        }
                     } else {
                         result = ir_empty_name()
                     }
