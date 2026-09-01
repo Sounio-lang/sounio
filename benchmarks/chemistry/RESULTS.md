@@ -1517,6 +1517,47 @@ than asserted past the instrument.
 
 ---
 
+## 7.5b Step bisection in the aligned regime — where the offset no longer hides it
+
+§7.3's bisection ran in the **published** regime, where a 2.66e-06 constant
+offset dominates and would mask anything smaller. The informative run is the
+aligned one, where that offset is gone and the residual is 2e-11.
+
+```sh
+python3 benchmarks/chemistry/rep_resolution.py --dir <aligned tree>
+```
+
+Deviation from Cantera at `rtol=1e-12`, three step sizes:
+
+| sp | dt=1e-8 | dt=5e-9 | dt=2.5e-9 | r(1,2) | r(2,3) |
+|---|---|---|---|---|---|
+| H2 | 2.442e-12 | 2.441e-12 | 2.439e-12 | 1.000 | 1.001 |
+| H | 2.008e-11 | 2.008e-11 | 2.005e-11 | 1.000 | 1.002 |
+| O | 2.053e-11 | 2.053e-11 | 2.049e-11 | 1.000 | 1.002 |
+| O2 | 2.016e-12 | 2.013e-12 | 2.014e-12 | 1.001 | 1.000 |
+| OH | 1.976e-11 | 1.975e-11 | 1.972e-11 | 1.001 | 1.002 |
+| H2O | 2.074e-11 | 2.074e-11 | 2.070e-11 | 1.000 | 1.002 |
+| HO2 | 3.136e-12 | 3.140e-12 | 3.141e-12 | 0.999 | 1.000 |
+| H2O2 | 8.137e-12 | 8.172e-12 | 8.145e-12 | 0.996 | 1.003 |
+
+**Ratio 1.000, to three decimals, across a factor of four in step size.** Even
+with the constant removed, the remaining 2e-11 is *not* step-dependent: a
+fourth-order truncation error would have fallen by 256 over this range. The
+residual is a fixed offset at both scales.
+
+The aligned oracle floor measured in the same run is **1.416e-11**, against a
+worst residual of 2.074e-11 — ratio **1.46**. So the two statements hold
+together and neither rescues the other:
+
+- the residual is **not truncation**, at either regime or any step tried;
+- the residual is **not resolvable** as a real disagreement, because it sits at
+  1.46× the oracle's own uncertainty.
+
+What it *is* cannot be determined with this instrument. §7.7 decomposes what
+can be measured and states plainly what cannot.
+
+---
+
 ## 7.6 The truncation curve in time — the checkpoint sits at its minimum
 
 Truncation measured at one instant says nothing about the integrator elsewhere
