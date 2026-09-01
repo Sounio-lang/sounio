@@ -1606,7 +1606,8 @@ native_hook_caller_is_exact_harness() {
     grok)
       [[ "$NATIVE_HOOK_CALLER_COMMAND" == grok ]] ||
         [[ "$NATIVE_HOOK_CALLER_COMMAND" == grok-*-linux-x86_64 &&
-          "$NATIVE_HOOK_CALLER_CMDLINE" == */bin/grok* ]]
+          ( "$NATIVE_HOOK_CALLER_CMDLINE" == grok\ * ||
+            "$NATIVE_HOOK_CALLER_CMDLINE" == */bin/grok\ * ) ]]
       ;;
     *) return 1 ;;
   esac

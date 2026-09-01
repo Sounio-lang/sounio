@@ -1152,6 +1152,27 @@ output="$(
 )"
 grep -q 'agent=claude lane=session-runtime-test' <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared hook runtime'
+shared_grok_harness="$TEST_ROOT/grok-1.0.0-linux-x86_64"
+cp "$(command -v bash)" "$shared_grok_harness"
+chmod 0755 "$shared_grok_harness"
+output="$(
+  cd "$SECOND"
+  event='{"sessionId":"runtime-grok-test","cwd":"'"$SECOND"'","workspaceRoot":"'"$SECOND"'","hookEventName":"session_start"}'
+  SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
+    SOUNIO_LOOM_HOOK_TEST_MODE=1 bash -c \
+      'exec -a grok "$@"' _ "$shared_grok_harness" -c \
+      'printf "%s\n" "$1" | bin/sounio-loom agent-hook --agent grok' _ "$event"
+)"
+grep -q 'agent=grok lane=session-runtime-grok-test' <<< "$output" || \
+  fail 'versioned Grok executable with argv0=grok was not admitted'
+(
+  cd "$SECOND"
+  event='{"sessionId":"runtime-grok-test","cwd":"'"$SECOND"'","workspaceRoot":"'"$SECOND"'","hookEventName":"session_end"}'
+  SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
+    SOUNIO_LOOM_HOOK_TEST_MODE=1 bash -c \
+      'exec -a grok "$@"' _ "$shared_grok_harness" -c \
+      'printf "%s\n" "$1" | bin/sounio-loom agent-hook --agent grok' _ "$event"
+)
 output="$(cd "$SECOND" && bin/sounio-agentd runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared agentd runtime'
