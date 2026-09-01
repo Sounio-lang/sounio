@@ -424,8 +424,22 @@ percent-level profile of §2.3.
 
 ### 2.6 Adiabatic provenance: the README's magnitudes reproduce
 
-Reintroducing `reac - nu` in `gri30_h2_adiabatic_replica.py` (working copy,
-not committed), ignition delay, dt = 5e-9:
+```sh
+python3 benchmarks/chemistry/rep_adiabatic_bug.py --quick    # 1100 K and 2000 K
+python3 benchmarks/chemistry/rep_adiabatic_bug.py            # all four
+```
+
+> **Provenance, corrected 2026-09-01.** This table was first measured by
+> reintroducing `reac - nu` in a working copy of
+> `gri30_h2_adiabatic_replica.py` that was never committed, and the frozen
+> snapshot did not even ship the replica. `rep_adiabatic_bug.py` is that
+> harness, committed; it monkey-patches the versioned module's `uv_rhs` rather
+> than carrying its own chemistry, so it cannot drift from the replica it
+> characterises. The replica now ships in the snapshot. Reproduced to every
+> printed digit: 674.9575 / 675.6025 / +0.096 % and 46.3075 / 50.2675 /
+> +8.552 %.
+
+Ignition delay at the time of maximum d[H2O]/dt, dt = 5e-9:
 
 | T₀ (K) | correct (µs) | under the bug (µs) | error | README |
 |---|---|---|---|---|
@@ -434,8 +448,28 @@ not committed), ignition delay, dt = 5e-9:
 | 1700 | 78.9775 | 81.9575 | +3.773% | — |
 | 2000 | 46.3075 | 50.2675 | **+8.552%** | **8.6%** |
 
-Both documented anchors reproduce. Every sign is positive: the defect always
-delays ignition, consistent with removing a radical source.
+Both documented anchors reproduce. On this criterion every sign is positive:
+the defect always delays ignition, consistent with removing a radical source.
+
+**A variable the README does not declare, found by the committed harness.**
+The replica exposes two delay definitions — the time of maximum d[H2O]/dt
+and the time of maximum dT/dt — and the harness prints both, because a defect
+that moved only one would be suspect. They disagree:
+
+| T₀ (K) | error, d[H2O]/dt criterion | error, dT/dt criterion |
+|---|---|---|
+| 1100 | **+0.096 %** | **−2.375 %** |
+| 2000 | **+8.552 %** | +9.947 % |
+
+At 1100 K the sign flips. A defect that shifts the H2O-rate delay by 0.1 %
+shifts the temperature-rise delay by 2.4 % *the other way*, which says the
+dT/dt peak is broad and ill-conditioned there at this step, not that the
+defect accelerates ignition. The README's anchors — 0.1 % and 8.6 % — are
+reproduced **on the d[H2O]/dt criterion only**, and the README does not say
+which criterion it used. That omission is now a documented ambiguity rather
+than a silent assumption, and it is the kind of unstated protocol variable
+§6.3 instance (8) is about: a documentation number with no resolution label
+and no definition of the quantity it measures.
 
 ### 2.7 The shipped isothermal path is correct
 

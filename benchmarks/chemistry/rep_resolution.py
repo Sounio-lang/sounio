@@ -36,6 +36,15 @@ REPORT = ["H2", "H", "O", "O2", "OH", "H2O", "HO2", "H2O2"]
 ALL10 = REPORT + ["N2", "AR"]
 
 
+def _sib(name):
+    """Sibling module: ../oracles/ in the frozen snapshot, beside it upstream."""
+    for cand in (os.path.join(HERE, os.pardir, "oracles", name),
+                 os.path.join(HERE, name)):
+        if os.path.exists(cand):
+            return cand
+    raise FileNotFoundError(name)
+
+
 def _load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
@@ -62,7 +71,7 @@ def main():
                          "gri30_h2_python_replica.py (default: beside this file)")
     args = ap.parse_args()
 
-    d = args.dir or HERE
+    d = args.dir or os.path.dirname(_sib("gri30_h2_cantera_parity.py"))
     cwd = os.getcwd()
     os.chdir(d)
     can = _load("can_res", os.path.join(d, "gri30_h2_cantera_parity.py"))
