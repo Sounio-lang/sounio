@@ -211,6 +211,7 @@ activate_runtime() {
     done
   fi
   if grep -q '^capability=loom-native-hook-generation-reconcile-v1$' "$manifest"; then
+    local reconcile_capsule="$version_dir/policy/native-hook-generation-reconcile"
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-native-hook-generation-reconcile" ]] || \
       die "installed runtime declares generation reconciliation without Loom or frozen Sounio action 9047: $runtime_id"
@@ -222,6 +223,9 @@ activate_runtime() {
     verify_manifest_binary_sha256 "$manifest" \
       loom_native_hook_generation_reconcile_runtime_sha256 \
       "$version_dir/bin/sounio-loom-native-hook-generation-reconcile"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_native_hook_generation_reconcile_manifest_sha256 \
+      "$reconcile_capsule/tools/loom/native_hook_generation_reconcile.freeze.v1"
   fi
   if grep -q '^capability=loom-native-hook-generation-drain-v1$' "$manifest"; then
     local drain_capsule="$version_dir/policy/native-hook-generation-drain"
@@ -935,6 +939,20 @@ loom_native_hook_generation_reconcile_build_source="$SOURCE_ROOT/scripts/dev/bui
 loom_native_hook_generation_reconcile_entrypoint="$SOURCE_ROOT/tools/loom/native_hook_generation_reconcile_authority_main.sio"
 loom_native_hook_generation_reconcile_module="$SOURCE_ROOT/stdlib/coordination/loom_native_hook_generation_reconcile_authority.sio"
 loom_native_hook_generation_reconcile_freeze="$SOURCE_ROOT/tools/loom/native_hook_generation_reconcile.freeze.v1"
+loom_native_hook_generation_reconcile_capsule_relpaths=(
+  "tools/loom/GARDEN_NATIVE_HOOK_GENERATION_RECONCILE_V1.md"
+  "stdlib/coordination/loom_native_hook_generation_reconcile_authority.sio"
+  "tools/loom/native_hook_generation_reconcile_authority_main.sio"
+  "scripts/dev/build_sounio_loom_native_hook_generation_reconcile.sh"
+  "scripts/ci/sounio_loom_native_hook_generation_reconcile_selftest.sh"
+  "scripts/ci/sounio_loom_native_hook_generation_reconcile_freeze_selftest.sh"
+  "tools/loom/native_hook_generation_reconcile.first.v1"
+  "tools/loom/evidence/loom-native-hook-generation-reconcile-first-v1-20260901.txt"
+  "tools/loom/evidence/loom-native-hook-generation-reconcile-frozen-v1-20260901.txt"
+  "tools/loom/native_hook_generation_drain.freeze.v1"
+  "bin/souc"
+  "bin/souc-lean-single-x86_64"
+)
 loom_custody_transfer_entrypoint="$SOURCE_ROOT/tools/loom/custody_transfer_main.sio"
 loom_custody_transfer_module="$SOURCE_ROOT/stdlib/coordination/loom_custody_transfer.sio"
 loom_custody_transfer_freeze="$SOURCE_ROOT/tools/loom/custody_transfer.freeze.v1"
@@ -1642,6 +1660,10 @@ for relative_path in "${loom_native_hook_generation_drain_capsule_relpaths[@]}";
   bundle_sources+=("$SOURCE_ROOT/$relative_path")
 done
 bundle_sources+=("$loom_native_hook_generation_drain_freeze")
+for relative_path in "${loom_native_hook_generation_reconcile_capsule_relpaths[@]}"; do
+  bundle_sources+=("$SOURCE_ROOT/$relative_path")
+done
+bundle_sources+=("$loom_native_hook_generation_reconcile_freeze")
 
 source_sha=unknown
 source_state=unversioned
@@ -1734,6 +1756,14 @@ else
     "$stage/policy/native-hook-generation-drain/tools/loom/native_hook_generation_drain.freeze.v1"
   install -m 0555 "$loom_native_hook_generation_reconcile_binary" \
     "$stage/bin/sounio-loom-native-hook-generation-reconcile"
+  for relative_path in "${loom_native_hook_generation_reconcile_capsule_relpaths[@]}"; do
+    mkdir -p "$(dirname "$stage/policy/native-hook-generation-reconcile/$relative_path")"
+    install -m 0444 "$SOURCE_ROOT/$relative_path" \
+      "$stage/policy/native-hook-generation-reconcile/$relative_path"
+  done
+  mkdir -p "$stage/policy/native-hook-generation-reconcile/tools/loom"
+  install -m 0444 "$loom_native_hook_generation_reconcile_freeze" \
+    "$stage/policy/native-hook-generation-reconcile/tools/loom/native_hook_generation_reconcile.freeze.v1"
   install -m 0444 "$loom_native_hook_cutover_freeze" \
     "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover.freeze.v1"
   install -m 0444 "$loom_native_hook_cutover_entrypoint" \

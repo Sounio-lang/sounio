@@ -57,15 +57,7 @@ let cause_code = function
 
 let bit word shift enabled = if enabled then word lor (1 lsl shift) else word
 
-let rec find_source_root path =
-  let marker =
-    Filename.concat path "tools/loom/native_hook_generation_reconcile.freeze.v1"
-  in
-  if Sys.file_exists marker then path
-  else
-    let parent = Filename.dirname path in
-    if parent = path then failf "source-root-not-found:%s" path
-    else find_source_root parent
+let find_source_root = Loom_hook_generation_drain.find_source_root
 
 let verify_manifest_file root manifest path_key hash_key reason =
   let path = Filename.concat root (required "freeze-manifest" manifest path_key) in
@@ -104,14 +96,25 @@ let choose_runtime root manifest =
   Unix.realpath selected
 
 let load_policy root =
-  let path =
+  let installed_policy_root =
+    Filename.concat
+      (Filename.dirname (Filename.dirname (Unix.realpath Sys.executable_name)))
+      "policy/native-hook-generation-reconcile"
+  in
+  let installed_manifest =
+    Filename.concat installed_policy_root
+      "tools/loom/native_hook_generation_reconcile.freeze.v1"
+  in
+  let path, policy_root =
     match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_GENERATION_RECONCILE_MANIFEST" with
     | Some value when value <> "" ->
         if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
           failf "freeze-manifest-override-requires-test-mode";
-        value
+        (value, root)
+    | _ when Sys.file_exists installed_manifest ->
+        (installed_manifest, installed_policy_root)
     | _ ->
-        Filename.concat root "tools/loom/native_hook_generation_reconcile.freeze.v1"
+        (Filename.concat root "tools/loom/native_hook_generation_reconcile.freeze.v1", root)
   in
   if sha256_file "freeze-manifest" path <> pinned_manifest_sha256 then
     failf "freeze-manifest-hash-mismatch";
@@ -132,7 +135,7 @@ let load_policy root =
   exact "freeze-manifest" manifest "disposable_oracle_executed" "false";
   List.iter
     (fun (path_key, hash_key, reason) ->
-      verify_manifest_file root manifest path_key hash_key reason)
+      verify_manifest_file policy_root manifest path_key hash_key reason)
     [ ("garden_path", "garden_sha256", "garden");
       ("source_path", "source_sha256", "authority-source");
       ("entrypoint_path", "entrypoint_sha256", "authority-entrypoint");
