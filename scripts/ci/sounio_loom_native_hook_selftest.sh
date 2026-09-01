@@ -37,6 +37,17 @@ PROCESS_EXIT_SCRIPT="$TEST_ROOT/native-hook-process-exit-harness.sh"
 PROCESS_EXIT_LOG="$TEST_ROOT/native-hook-process-exit.log"
 PROCESS_EXIT_ID="native-process-exit-$$"
 PROCESS_EXIT_LANE="session-${PROCESS_EXIT_ID:0:24}"
+SESSION_CLOSE_SCRIPT="$TEST_ROOT/native-hook-session-close-harness.sh"
+SESSION_CLOSE_ID="native-close-provider-exit-$$"
+SESSION_CLOSE_LANE="session-${SESSION_CLOSE_ID:0:24}"
+SESSION_CLOSE_READY="$TEST_ROOT/native-hook-session-close.ready"
+SESSION_CLOSE_CONTINUE="$TEST_ROOT/native-hook-session-close.continue"
+SESSION_CLOSE_LOG="$TEST_ROOT/native-hook-session-close.log"
+SESSION_CLOSE_SABOTAGE_ID="native-close-sabotage-$$"
+SESSION_CLOSE_SABOTAGE_LANE="session-${SESSION_CLOSE_SABOTAGE_ID:0:24}"
+SESSION_CLOSE_SABOTAGE_READY="$TEST_ROOT/native-hook-session-close-sabotage.ready"
+SESSION_CLOSE_SABOTAGE_CONTINUE="$TEST_ROOT/native-hook-session-close-sabotage.continue"
+SESSION_CLOSE_SABOTAGE_LOG="$TEST_ROOT/native-hook-session-close-sabotage.log"
 
 cleanup() {
   tmux -S "$TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
@@ -82,6 +93,32 @@ wait_for_endpoint_absence() {
       return 0
     fi
     sleep 0.1
+  done
+  return 1
+}
+
+wait_for_hook_state_absence() {
+  local agent="$1" lane="$2" attempt key
+  key="${agent}--${lane}"
+  for attempt in $(seq 1 300); do
+    if [[ ! -f "$COORD_DIR/claims/$key.claim" && \
+      ! -f "$COORD_DIR/process-presences/$key.presence" && \
+      ! -f "$COORD_DIR/hook-capabilities/$key.capability" && \
+      ! -f "$COORD_DIR/endpoints/$key.endpoint" ]]; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  return 1
+}
+
+wait_for_log_pattern() {
+  local path="$1" pattern="$2" attempt
+  for attempt in $(seq 1 300); do
+    if [[ -f "$path" ]] && grep -Fq "$pattern" "$path"; then
+      return 0
+    fi
+    sleep 0.05
   done
   return 1
 }
@@ -164,6 +201,18 @@ set -e
 [[ "$direct_rc" -ne 0 && \
   "$direct_output" == *'requires the matching OCaml runtime parent'* ]] ||
   fail "direct shell registration was not refused: rc=$direct_rc output=$direct_output"
+
+set +e
+direct_close_output="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" hook-session-close --agent codex \
+  --lane "$SESSION_LANE" --session-id "$SESSION_ID" \
+  --reason 'unauthorized direct shell close' 2>&1)"
+direct_close_rc=$?
+set -e
+[[ "$direct_close_rc" -ne 0 && \
+  "$direct_close_output" == *'requires the matching OCaml runtime parent'* ]] ||
+  fail "direct shell close was not refused: rc=$direct_close_rc output=$direct_close_output"
+[[ -f "$capability_file" ]] || fail 'direct shell close removed the native capability'
 
 exec_session="exec-shell-selftest-$$"
 set +e
@@ -283,6 +332,23 @@ run_hook "$post_event"
 [[ "$HOOK_RC" -eq 0 ]] || fail "native PostToolUse failed: rc=$HOOK_RC output=$HOOK_OUTPUT"
 
 session_end="{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$ROOT_DIR\"}"
+capability_generation_backup="$TEST_ROOT/native-hook-capability-generation.backup"
+cp "$capability_file" "$capability_generation_backup"
+sed -i 's/^generation=.*/generation=process-tampered-g999-1-1/' "$capability_file"
+run_hook "$session_end"
+[[ "$HOOK_RC" -eq 2 && \
+  "$HOOK_OUTPUT" == *'native hook session close capability generation mismatch'* ]] ||
+  fail "tampered close generation was not refused: rc=$HOOK_RC output=$HOOK_OUTPUT"
+mv "$capability_generation_backup" "$capability_file"
+presence_file="$COORD_DIR/process-presences/codex--$SESSION_LANE.presence"
+presence_backup="$TEST_ROOT/native-hook-presence-close.backup"
+cp "$presence_file" "$presence_backup"
+sed -i 's/^session_id=.*/session_id=tampered-session/' "$presence_file"
+run_hook "$session_end"
+[[ "$HOOK_RC" -eq 2 && \
+  "$HOOK_OUTPUT" == *'native hook session close presence mismatch'* ]] ||
+  fail "tampered close presence was not refused: rc=$HOOK_RC output=$HOOK_OUTPUT"
+mv "$presence_backup" "$presence_file"
 run_hook "$session_end"
 [[ "$HOOK_RC" -eq 0 ]] || fail "native SessionEnd failed: rc=$HOOK_RC output=$HOOK_OUTPUT"
 if SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
@@ -445,6 +511,69 @@ status="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
 command -v tmux >/dev/null 2>&1 || fail 'tmux is required for the native endpoint fixture'
 cp "$(command -v bash)" "$TMUX_HARNESS"
 chmod 0755 "$TMUX_HARNESS"
+cat >"$SESSION_CLOSE_SCRIPT" <<'HARNESS'
+#!/usr/bin/env bash
+set -euo pipefail
+
+loom="$1"
+root="$2"
+session_id="$3"
+ready="$4"
+continue="$5"
+sabotage="$6"
+session_start="{\"hook_event_name\":\"SessionStart\",\"session_id\":\"$session_id\",\"cwd\":\"$root\"}"
+session_end="{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$session_id\",\"cwd\":\"$root\"}"
+printf '%s\n' "$session_start" | "$loom" agent-hook --agent codex
+printf '%s\n' "$session_end" | env \
+  SOUNIO_LOOM_SELFTEST_CLOSE_READY="$ready" \
+  SOUNIO_LOOM_SELFTEST_CLOSE_CONTINUE="$continue" \
+  SOUNIO_LOOM_SELFTEST_DISABLE_ATOMIC_CLOSE="$sabotage" \
+  "$loom" agent-hook --agent codex
+HARNESS
+chmod 0755 "$SESSION_CLOSE_SCRIPT"
+
+"$TMUX_HARNESS" "$SESSION_CLOSE_SCRIPT" "$LOOM" "$ROOT_DIR" \
+  "$SESSION_CLOSE_ID" "$SESSION_CLOSE_READY" "$SESSION_CLOSE_CONTINUE" 0 \
+  >"$SESSION_CLOSE_LOG" 2>&1 &
+session_close_provider_pid=$!
+wait_for_file "$SESSION_CLOSE_READY" ||
+  fail "provider-exit close fixture did not reach its attested barrier: $(cat "$SESSION_CLOSE_LOG" 2>/dev/null || true)"
+kill -TERM "$session_close_provider_pid"
+: >"$SESSION_CLOSE_CONTINUE"
+wait "$session_close_provider_pid" 2>/dev/null || true
+wait_for_hook_state_absence codex "$SESSION_CLOSE_LANE" ||
+  fail "atomic SessionEnd left state after provider exit: $(cat "$SESSION_CLOSE_LOG" 2>/dev/null || true)"
+wait_for_log_pattern "$COORD_DIR/hook-session-lifecycle/events.tsv" \
+  $'action=CLOSED\tagent=codex\tlane='"$SESSION_CLOSE_LANE"$'\tsession_id_sha256=' ||
+  fail 'atomic SessionEnd omitted its provider-exit closure receipt'
+if grep -Fq $'action=CLOSE_FAILED\tagent=codex\tlane='"$SESSION_CLOSE_LANE"$'\tsession_id_sha256=' \
+  "$COORD_DIR/hook-session-lifecycle/events.tsv"; then
+  fail 'atomic SessionEnd recorded CLOSE_FAILED after provider exit'
+fi
+
+"$TMUX_HARNESS" "$SESSION_CLOSE_SCRIPT" "$LOOM" "$ROOT_DIR" \
+  "$SESSION_CLOSE_SABOTAGE_ID" "$SESSION_CLOSE_SABOTAGE_READY" \
+  "$SESSION_CLOSE_SABOTAGE_CONTINUE" 1 >"$SESSION_CLOSE_SABOTAGE_LOG" 2>&1 &
+session_close_sabotage_provider_pid=$!
+wait_for_file "$SESSION_CLOSE_SABOTAGE_READY" ||
+  fail "atomic-close sabotage did not reach its attested barrier: $(cat "$SESSION_CLOSE_SABOTAGE_LOG" 2>/dev/null || true)"
+kill -TERM "$session_close_sabotage_provider_pid"
+: >"$SESSION_CLOSE_SABOTAGE_CONTINUE"
+wait "$session_close_sabotage_provider_pid" 2>/dev/null || true
+wait_for_log_pattern "$DECISION_LOG" \
+  $'decision=DENY\treason=atomic-session-close-rule-disabled\tagent=codex\tlane='"$SESSION_CLOSE_SABOTAGE_LANE"$'\tevent=SessionEnd' ||
+  fail "atomic-close sabotage did not causally refuse: $(cat "$SESSION_CLOSE_SABOTAGE_LOG" 2>/dev/null || true)"
+[[ -f "$COORD_DIR/claims/codex--$SESSION_CLOSE_SABOTAGE_LANE.claim" && \
+  -f "$COORD_DIR/process-presences/codex--$SESSION_CLOSE_SABOTAGE_LANE.presence" && \
+  -f "$COORD_DIR/hook-capabilities/codex--$SESSION_CLOSE_SABOTAGE_LANE.capability" ]] ||
+  fail 'atomic-close sabotage unexpectedly removed the protected state'
+grep -Fq $'action=CLOSE_FAILED\tagent=codex\tlane='"$SESSION_CLOSE_SABOTAGE_LANE"$'\tsession_id_sha256=' \
+  "$COORD_DIR/hook-session-lifecycle/events.tsv" ||
+  fail 'atomic-close sabotage omitted CLOSE_FAILED'
+SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" release --agent codex \
+  --lane "$SESSION_CLOSE_SABOTAGE_LANE" --reason 'atomic close sabotage fixture cleanup' >/dev/null
+
 cat >"$TMUX_HARNESS_SCRIPT" <<'HARNESS'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -598,4 +727,4 @@ done
   fail 'native process-exit supervisor left a watcher record behind'
 
 printf '%s\n' \
-  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio action=9045 session=roundtrip duplicate_session_end=idempotent late_stop=noop late_execution=refused tombstone_tamper=refused session_reopen=explicit process_exit=closed hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused cutover_policy_missing=refused cutover_policy_tamper=refused cutover_runtime_tamper=refused log_redirect=refused providers=codex,claude,cursor,grok dialect_mismatch=refused config_missing=refused config_non_native=refused decision_receipt=complete python=not-executed rust=not-executed'
+  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio action=9045 session=roundtrip duplicate_session_end=idempotent late_stop=noop late_execution=refused tombstone_tamper=refused session_reopen=explicit provider_exit_during_close=closed atomic_close_sabotage=causal generation_mismatch=refused presence_mismatch=refused process_exit=closed hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused direct_shell_close=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused cutover_policy_missing=refused cutover_policy_tamper=refused cutover_runtime_tamper=refused log_redirect=refused providers=codex,claude,cursor,grok dialect_mismatch=refused config_missing=refused config_non_native=refused decision_receipt=complete python=not-executed rust=not-executed'

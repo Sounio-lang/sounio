@@ -50,6 +50,8 @@ Commands:
                                  attest a native OCaml hook generation
   hook-capability-unregister --agent ID --lane ID
                                  retire a native hook attestation
+  hook-session-close --agent ID --lane ID --session-id ID --reason TEXT
+                                 atomically retire one attested native hook generation
   hook-capability-status --agent ID --lane ID
                                  inspect native hook eligibility
   hook-caller-attest --agent ID
@@ -1499,8 +1501,8 @@ active_coord_runtime_root() {
   printf '%s\n' "$runtime_root"
 }
 
-native_hook_parent_identity() {
-  local parent_pid="$PPID" runtime_self local_runtime local_loom parent_tail caller_tail
+native_hook_runtime_parent_identity() {
+  local parent_pid="$PPID" runtime_self local_runtime local_loom
   local runtime_root parent_bundle runtime_bundle current_bundle manifest runtime_version expected_parent_sha expected_coord_sha
   NATIVE_HOOK_PARENT_EXECUTABLE="$(readlink -f "/proc/$parent_pid/exe" 2>/dev/null || true)"
   [[ -n "$NATIVE_HOOK_PARENT_EXECUTABLE" ]] || return 1
@@ -1511,23 +1513,6 @@ native_hook_parent_identity() {
   NATIVE_HOOK_COORD_SHA256="$(sha256sum "$runtime_self" | awk '{print $1}')"
   [[ "$NATIVE_HOOK_PARENT_SHA256" =~ ^[0-9a-f]{64}$ && \
     "$NATIVE_HOOK_COORD_SHA256" =~ ^[0-9a-f]{64}$ ]] || return 1
-
-  parent_tail="$(sed 's/^[^)]*) //' "/proc/$parent_pid/stat" 2>/dev/null || true)"
-  NATIVE_HOOK_CALLER_PID="$(awk '{print $2}' <<< "$parent_tail")"
-  [[ "$NATIVE_HOOK_CALLER_PID" =~ ^[1-9][0-9]*$ ]] || return 1
-  caller_tail="$(sed 's/^[^)]*) //' "/proc/$NATIVE_HOOK_CALLER_PID/stat" 2>/dev/null || true)"
-  NATIVE_HOOK_CALLER_PID_START="$(awk '{print $20}' <<< "$caller_tail")"
-  NATIVE_HOOK_CALLER_EXECUTABLE="$(readlink -f "/proc/$NATIVE_HOOK_CALLER_PID/exe" 2>/dev/null || true)"
-  NATIVE_HOOK_CALLER_COMMAND="$(basename "$NATIVE_HOOK_CALLER_EXECUTABLE")"
-  NATIVE_HOOK_CALLER_SHA256="$(sha256sum "$NATIVE_HOOK_CALLER_EXECUTABLE" 2>/dev/null | awk '{print $1}')"
-  NATIVE_HOOK_CALLER_CMDLINE="$(tr '\0' ' ' < "/proc/$NATIVE_HOOK_CALLER_PID/cmdline" 2>/dev/null || true)"
-  NATIVE_HOOK_CALLER_BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
-  NATIVE_HOOK_CALLER_PID_NAMESPACE="$(readlink "/proc/$NATIVE_HOOK_CALLER_PID/ns/pid" 2>/dev/null || true)"
-  [[ "$NATIVE_HOOK_CALLER_PID_START" =~ ^[1-9][0-9]*$ && \
-    -n "$NATIVE_HOOK_CALLER_EXECUTABLE" && \
-    "$NATIVE_HOOK_CALLER_SHA256" =~ ^[0-9a-f]{64}$ && \
-    -n "$NATIVE_HOOK_CALLER_BOOT_ID" && \
-    -n "$NATIVE_HOOK_CALLER_PID_NAMESPACE" ]] || return 1
 
   local_runtime="$(readlink -f "$WORKTREE/scripts/dev/sounio_coord_runtime.sh" 2>/dev/null || true)"
   local_loom="$(readlink -f "$WORKTREE/tools/loom/_build/default/src/loom.exe" 2>/dev/null || true)"
@@ -1583,6 +1568,30 @@ native_hook_parent_identity() {
       esac
     fi
   fi
+}
+
+native_hook_provider_caller_identity() {
+  local parent_pid="$PPID" parent_tail caller_tail
+  parent_tail="$(sed 's/^[^)]*) //' "/proc/$parent_pid/stat" 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_PID="$(awk '{print $2}' <<< "$parent_tail")"
+  [[ "$NATIVE_HOOK_CALLER_PID" =~ ^[1-9][0-9]*$ ]] || return 1
+  caller_tail="$(sed 's/^[^)]*) //' "/proc/$NATIVE_HOOK_CALLER_PID/stat" 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_PID_START="$(awk '{print $20}' <<< "$caller_tail")"
+  NATIVE_HOOK_CALLER_EXECUTABLE="$(readlink -f "/proc/$NATIVE_HOOK_CALLER_PID/exe" 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_COMMAND="$(basename "$NATIVE_HOOK_CALLER_EXECUTABLE")"
+  NATIVE_HOOK_CALLER_SHA256="$(sha256sum "$NATIVE_HOOK_CALLER_EXECUTABLE" 2>/dev/null | awk '{print $1}')"
+  NATIVE_HOOK_CALLER_CMDLINE="$(tr '\0' ' ' < "/proc/$NATIVE_HOOK_CALLER_PID/cmdline" 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_PID_NAMESPACE="$(readlink "/proc/$NATIVE_HOOK_CALLER_PID/ns/pid" 2>/dev/null || true)"
+  [[ "$NATIVE_HOOK_CALLER_PID_START" =~ ^[1-9][0-9]*$ && \
+    -n "$NATIVE_HOOK_CALLER_EXECUTABLE" && \
+    "$NATIVE_HOOK_CALLER_SHA256" =~ ^[0-9a-f]{64}$ && \
+    -n "$NATIVE_HOOK_CALLER_BOOT_ID" && \
+    -n "$NATIVE_HOOK_CALLER_PID_NAMESPACE" ]] || return 1
+}
+
+native_hook_parent_identity() {
+  native_hook_runtime_parent_identity && native_hook_provider_caller_identity
 }
 
 native_hook_caller_is_exact_harness() {
@@ -1858,6 +1867,106 @@ hook_capability_unregister_command() {
   printf 'utc=%s event=HOOK_CAPABILITY_UNREGISTERED agent=%s lane=%s\n' \
     "$NOW_UTC" "$agent" "$lane" >> "$EVENT_LOG"
   printf 'HOOK_CAPABILITY_UNREGISTERED agent=%s lane=%s\n' "$agent" "$lane"
+}
+
+hook_session_close_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' session_id='' reason=''
+  local claim_file presence_file capability_file endpoint_file expected_generation
+  local revocation_mode='' presence_reason
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --session-id) require_arg "$1" "$2"; session_id="$2"; shift 2 ;;
+      --reason) require_arg "$1" "$2"; reason="$2"; shift 2 ;;
+      *) die "unknown hook-session-close option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" && -n "$lane" && -n "$session_id" && -n "$reason" ]] || \
+    die "hook-session-close requires --agent, --lane, --session-id, and --reason"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+  validate_value session-id "$session_id"
+  validate_value reason "$reason"
+  native_hook_runtime_parent_identity || \
+    die "native hook session close requires the matching OCaml runtime parent"
+
+  claim_file="$CLAIMS_DIR/$(claim_id_for "$agent" "$lane").claim"
+  presence_file="$(presence_path "$agent" "$lane")"
+  capability_file="$(hook_capability_path "$agent" "$lane")"
+  endpoint_file="$(endpoint_path "$agent" "$lane")"
+  acquire_state_lock "the native hook session close"
+
+  if [[ ! -f "$claim_file" && ! -f "$presence_file" && \
+    ! -f "$capability_file" && ! -f "$endpoint_file" ]]; then
+    printf 'HOOK_SESSION_ABSENT agent=%s lane=%s session_id=%s\n' \
+      "$agent" "$lane" "$session_id"
+    return 0
+  fi
+  [[ -f "$claim_file" && -f "$presence_file" && -f "$capability_file" ]] || \
+    die "native hook session close found incomplete coordination state"
+
+  load_claim "$claim_file"
+  [[ "$C_AGENT" == "$agent" && "$C_LANE" == "$lane" && \
+    "$C_WORKTREE" == "$WORKTREE" ]] || \
+    die "native hook session close claim mismatch"
+  load_presence "$presence_file"
+  [[ "$P_AGENT" == "$agent" && "$P_LANE" == "$lane" && \
+    "$P_SESSION_ID" == "$session_id" && "$P_WORKTREE" == "$WORKTREE" && \
+    "$P_GENERATION" =~ ^[1-9][0-9]*$ ]] || \
+    die "native hook session close presence mismatch"
+  load_hook_capability "$capability_file"
+  expected_generation="process-${P_SESSION_ID}-g${P_GENERATION}-${P_PID}-${P_PID_START}"
+  [[ "$HC_SCHEMA" == loom-native-hook-capability-v1 && \
+    "$HC_STATE" == NATIVE_HOOK_ATTESTED && "$HC_AGENT" == "$agent" && \
+    "$HC_LANE" == "$lane" && "$HC_SESSION_ID" == "$session_id" && \
+    "$HC_GENERATION" == "$expected_generation" && \
+    "$HC_WORKTREE" == "$P_WORKTREE" && "$HC_HARNESS" == "$P_HARNESS" && \
+    "$HC_PRESENCE_PID" == "$P_PID" && \
+    "$HC_PRESENCE_PID_START" == "$P_PID_START" && \
+    "$HC_PRESENCE_BOOT_ID" == "$P_BOOT_ID" && \
+    "$HC_PRESENCE_PID_NAMESPACE" == "$P_PID_NAMESPACE" && \
+    "$HC_CALLER_PID" == "$P_PID" && "$HC_CALLER_PID_START" == "$P_PID_START" && \
+    "$HC_CALLER_BOOT_ID" == "$P_BOOT_ID" && \
+    "$HC_CALLER_PID_NAMESPACE" == "$P_PID_NAMESPACE" ]] || \
+    die "native hook session close capability generation mismatch"
+  [[ "$HC_PRODUCER_EXECUTABLE" == "$NATIVE_HOOK_PARENT_EXECUTABLE" && \
+    "$HC_PRODUCER_SHA256" == "$NATIVE_HOOK_PARENT_SHA256" && \
+    "$HC_COORD_EXECUTABLE" == "$NATIVE_HOOK_COORD_EXECUTABLE" && \
+    "$HC_COORD_SHA256" == "$NATIVE_HOOK_COORD_SHA256" && \
+    "$HC_RUNTIME_ID" == "$NATIVE_HOOK_RUNTIME_ID" && \
+    "$HC_SOURCE_SHA" == "$NATIVE_HOOK_SOURCE_SHA" ]] || \
+    die "native hook session close runtime binding mismatch"
+  if [[ -f "$endpoint_file" ]]; then
+    load_endpoint "$endpoint_file"
+    [[ "$E_AGENT" == "$agent" && "$E_LANE" == "$lane" && \
+      "$E_WORKTREE" == "$WORKTREE" ]] || \
+      die "native hook session close endpoint mismatch"
+  fi
+
+  if native_hook_provider_caller_identity && native_hook_caller_matches_presence; then
+    revocation_mode='live-provider'
+  else
+    presence_state || true
+    presence_reason="$PRESENCE_REASON"
+    [[ "$PRESENCE_STATE" == orphaned && \
+      "$presence_reason" =~ ^(process-missing|pid-reused|boot-changed|pid-namespace-changed)$ ]] || \
+      die "native hook session close caller mismatch while provider generation is not dead"
+    revocation_mode="dead-provider-${presence_reason}"
+  fi
+
+  remove_presence_for_lane "$agent" "$lane" "$WORKTREE" hook-session-close
+  remove_endpoint_for_lane "$agent" "$lane" "$WORKTREE" hook-session-close
+  C_BRANCH="$(current_branch)"
+  C_SHA="$(current_sha)"
+  append_event RELEASE "$reason"
+  unlink "$claim_file"
+  printf 'utc=%s event=HOOK_SESSION_CLOSED agent=%s lane=%s session_id=%s generation=%s runtime_id=%s revocation_mode=%s\n' \
+    "$NOW_UTC" "$agent" "$lane" "$session_id" "$expected_generation" \
+    "$NATIVE_HOOK_RUNTIME_ID" "$revocation_mode" >> "$EVENT_LOG"
+  printf 'HOOK_SESSION_CLOSED agent=%s lane=%s session_id=%s generation=%s runtime_id=%s revocation_mode=%s\n' \
+    "$agent" "$lane" "$session_id" "$expected_generation" \
+    "$NATIVE_HOOK_RUNTIME_ID" "$revocation_mode"
 }
 
 hook_capability_status_command() {
@@ -4820,6 +4929,7 @@ case "$command" in
   presence-unregister) presence_unregister_command "$@" ;;
   hook-capability-register) hook_capability_register_command "$@" ;;
   hook-capability-unregister) hook_capability_unregister_command "$@" ;;
+  hook-session-close) hook_session_close_command "$@" ;;
   hook-capability-status) hook_capability_status_command "$@" ;;
   hook-caller-attest) hook_caller_attest_command "$@" ;;
   recover) recover_command "$@" ;;
@@ -4857,5 +4967,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, hook-capability-register, hook-capability-unregister, hook-capability-status, hook-caller-attest, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, wake-reconcile, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, hook-capability-register, hook-capability-unregister, hook-session-close, hook-capability-status, hook-caller-attest, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, wake-reconcile, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, injected, ack, message-status, wait, or prune)" ;;
 esac
