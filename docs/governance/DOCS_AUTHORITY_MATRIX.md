@@ -861,6 +861,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.llm-guide.explanations.e248 | repo_only | docs/llm-guide/explanations/E248.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.llm-guide.explanations.e249 | repo_only | docs/llm-guide/explanations/E249.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.llm-guide.explanations.e250 | repo_only | docs/llm-guide/explanations/E250.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.llm-guide.explanations.e251 | repo_only | docs/llm-guide/explanations/E251.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.llm-guide.explanations.e252 | repo_only | docs/llm-guide/explanations/E252.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.llm-guide.readme | repo_only | docs/llm-guide/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.llm-guide.stdlib-index | repo_only | docs/llm-guide/stdlib-index.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.madaros-status | repo_only | docs/MADAROS_STATUS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -963,6 +965,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.align-curve-and-target | historical | docs/research/align-curve-and-target.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.antigarbling-completeness-2026-08-23 | historical | docs/research/ANTIGARBLING_COMPLETENESS_2026-08-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.antigarbling-completeness-proof-2026-08-23 | historical | docs/research/ANTIGARBLING_COMPLETENESS_PROOF_2026-08-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.antigarbling-fusion-theorem-2026-09-01 | historical | docs/research/ANTIGARBLING_FUSION_THEOREM_2026-09-01.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.associator-spectral-bound-status | historical | docs/research/associator_spectral_bound_status.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ast-native-claims-falsifiers-2026-07-25 | historical | docs/research/ast_native_claims_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ast-native-claims-spec-2026-07-25 | historical | docs/research/ast_native_claims_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
