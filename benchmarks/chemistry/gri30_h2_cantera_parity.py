@@ -141,7 +141,15 @@ def main():
     worst, p_init = initial_state_deviation(gas, T_CHECK)
     print(f"INIT worst relative deviation from intended concentrations = {worst:.6e}")
     print(f"INIT pressure = {p_init:.6f} Pa (renormalising TPX would pin {P0:.0f})")
-    assert worst == 0.0, "initial state was renormalised"
+    # A few ULP, not exact zero.  With the unaligned 1/(82.057*T) constant the
+    # TDY round trip happens to land exactly on the intended concentrations;
+    # with the aligned P0/(R_SI*T)*1e-6 it lands within one ULP (1.629030e-16),
+    # because the intended total then *is* the ideal-gas concentration at P0 and
+    # the trip through molar masses re-rounds.  `== 0.0` therefore crashes the
+    # moment claude/align-molar-volume-constant lands.  The bound below still
+    # catches the defect this guard exists for by ten orders of magnitude: TPX
+    # renormalisation gives 5.692129e-06.
+    assert worst < 1e-14, f"initial state was renormalised (worst={worst:.6e})"
 
     t0 = time.perf_counter()
     conc = integrate(gas, T_CHECK, T_END)
