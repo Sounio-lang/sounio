@@ -266,3 +266,71 @@ This closes material parity only for current read-only observation. It does not
 open offline replay, supply protected content, create historical pre-install
 provenance, promote a fact into frame `9026`, dispatch decommission, or make
 the concept `CLAIM_READY`.
+
+## Historical Provenance Authority
+
+Frame `9028` closes the authority gap behind the single
+`preinstall_provenance_exact` bit in frame `9027`. It does not modify frame
+`9027`. Instead, it defines a separate effect-free Sounio decision whose only
+admitted terminal state is `HISTORICAL_PROVENANCE_ADMITTED`.
+
+The frame binds seven distinct content identities: source bundle, two ordered
+node sources, pair manifest, first-install anchor, parent frame `9027` freeze
+and predecessor receipt. Admission also requires complete facts for
+cryptographic ordering, evidence custody and restore coverage. Custody here is
+the custody chain of the historical evidence, not ownership of live GPU
+compute; compute exclusivity remains under frames `9025` and `9026`.
+
+Source classes `1..4` may be admitted: a frozen Sounio pre-install receipt, an
+immutable two-node machine snapshot, a canonical pre-install export bundle or
+a conflict-free composite closure. Class `5`, partial pre-install backup, may
+be bound as a fragment but cannot be admitted alone. Current/post-install,
+mutable or clock-only, and review-only sources are refused as classes `6..8`.
+An external LLM can review a receipt but cannot produce its authority facts.
+
+The exact frozen surface is:
+
+- authority: `stdlib/coordination/spark_pair_historical_provenance.sio`;
+- frame: `9028`, actions `54..56`, states `30..32`;
+- executable vectors: 95, including every ordering, custody and completeness
+  bit, predecessor-transcript substitution, digest aliasing and schema crossing;
+- first executable receipt:
+  `tools/cluster/spark_pair_historical_provenance.first.v1`;
+- semantic freeze:
+  `tools/cluster/spark_pair_historical_provenance.freeze.v1`, SHA-256
+  `79b4ea331f78ac3abc8bee9e295b0411d1dad1ab18d9264ddebe4a8f3c7d43ea`;
+- source assessment:
+  `tools/cluster/spark_pair_historical_provenance.source-assessment.v1`,
+  SHA-256
+  `a84e418c33784d47393e72ed32228fb066216cda9d8440c81927e4713a0b66a7`;
+- gate: `scripts/ci/spark_pair_historical_provenance_selftest.sh`.
+
+The read-only assessment found no admissible class `1..4` source. The retained
+etcd and Slurm database backups are class `5` component evidence without the
+two node leaves, host services, protected payloads or ordered pair closure.
+The existing pair capture is class `6` and is refused with
+`POSTINSTALL_SOURCE/354`. Slurm live accounting, ext4 timestamps and live
+Kubernetes objects are class `7` clock or mutable evidence.
+
+There is also a concrete temporal falsifier for reconstructing the complete
+current surface as if it were pre-mutation history. The first observed Slurm
+DRAIN is `2026-08-30T17:58:11Z`; the current content identity of the required
+`vxlan-cluster.service` on `spark-3c59` reflects a Claude recovery edit at
+`2026-08-31T08:38:44Z`, and protected paths on `spark-8e54` were created after
+that first DRAIN. The edit timestamp is not an original installation time.
+This evidence does not identify the exact first Pireus install or action; it
+proves only that the observed fragments cannot form a complete pre-mutation
+image of the current required surfaces.
+
+The persistent Pireus fence has not been installed. If that narrower event is
+chosen as the boundary, the current capture may be proposed as pre-fence, but
+frame `9028` still refuses it with `FIRST_INSTALL_ANCHOR/349`; it also lacks
+protected payloads and coverage closure. Against the earlier cluster boundary,
+the producer's `CURRENT_POSTINSTALL_OBSERVATION` classification remains exact.
+Boundary ambiguity cannot be resolved by choosing whichever label admits the
+same incomplete bytes.
+
+Therefore frame `9028` remains in `HISTORICAL_SOURCE_EMPTY`, no strict
+projector into frame `9027` exists, `preinstall_provenance_exact` remains false,
+and frame `9027` continues to return `PREINSTALL_PROVENANCE/315`.
+`OFFLINE_REPLAY` is closed by construction.

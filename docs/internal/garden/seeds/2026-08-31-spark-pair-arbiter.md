@@ -406,3 +406,61 @@ GARDEN(completed)
 -> OFFLINE_REPLAY(not_open)
 -> CLAIM_READY(blocked)
 ```
+
+## Pireus Historical Provenance Source v1
+
+The phrase to preserve is: **a post-install machine cannot testify itself back
+into a pre-install source**.
+
+Frame `9028` is now the effect-free Sounio authority for that boundary. It
+binds the source bundle, two ordered node leaves, pair identity, exact
+first-install anchor, parent `9027` freeze and predecessor receipt. Ordering,
+evidence custody and completeness are explicit masks; no timestamp, current
+capture, backup fragment or LLM review can set the frame `9027` provenance bit
+by itself.
+
+The state machine is:
+
+```text
+HISTORICAL_SOURCE_EMPTY
+-> HISTORICAL_CANDIDATE_BOUND
+-> HISTORICAL_PROVENANCE_ADMITTED
+```
+
+The admission search remains at the first state. No class `1..4` source was
+found. The content-addressed Slurm MariaDB backup is class `5` and lacks both
+node leaves and pair closure (`DENY346`; terminal admission would be
+`DENY357`). The current pair receipt is class `6` (`DENY354`). Live Slurm,
+Kubernetes state and ext4 timestamps are class `7` (`DENY344`). No immutable
+two-node root snapshot exists (`DENY343`).
+
+The retained temporal observations also prevent a retrospective composite:
+the first observed Slurm DRAIN occurred on `2026-08-30T17:58:11Z`, before the
+current recovered `vxlan-cluster.service` content and protected `/opt` surfaces
+existed. The service timestamp includes a Claude recovery edit and is not
+treated as original installation history. The exact first-install anchor
+remains unknown, so ordering is not promoted from those clocks.
+
+The persistent Pireus fence itself has never been installed. Under that narrow
+boundary, the current pair can be proposed as pre-fence; it is still refused
+with `FIRST_INSTALL_ANCHOR/349` and lacks protected payload closure. Under the
+cluster boundary it remains post-install. Neither reading produces an admitted
+receipt.
+
+The frozen order is now:
+
+```text
+GARDEN(completed)
+-> SOUNIO_EXECUTABLE(completed)
+-> SEMANTICS_FROZEN(completed)
+-> PARITY_OPEN(completed)
+-> SOURCE_ASSESSMENT_NO_ADMISSIBLE_SOURCE(completed)
+-> HISTORICAL_PROVENANCE_ADMITTED(not_open)
+-> OFFLINE_REPLAY(not_open)
+-> CLAIM_READY(blocked)
+```
+
+The assessment receipt is
+`tools/cluster/spark_pair_historical_provenance.source-assessment.v1`, SHA-256
+`a84e418c33784d47393e72ed32228fb066216cda9d8440c81927e4713a0b66a7`.
+It records read-only observation, not a waiver and not a semantic promotion.
