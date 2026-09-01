@@ -2,10 +2,16 @@
 """Instrument-resolution probe: how much of a replica-vs-Cantera deviation is
 the ORACLE's own tolerance error, and how much is the replica's truncation?
 
-Written because RESULTS.md section 6.3 instance (4) reported three numbers with
-no committed producer, and on re-measurement the headline figure did not
-reproduce (published 2.515e-08; measured 3.251e-09).  A claim about instrument
-resolution that cannot itself be re-measured is the very failure it describes.
+Written because RESULTS.md section 6.3 instance (4) reported three numbers
+with no committed producer and no regime label.  The first re-measurement, in
+the published regime, gave 3.251e-09 for the oracle's own spread and the
+published 2.515e-08 was wrongly withdrawn; run from the frozen snapshot, whose
+oracle is aligned, this file gives 2.515e-08 to four figures.  The number was
+right and its provenance was not, and the corrector added a regime error of
+his own.  A claim about instrument resolution that cannot itself be
+re-measured -- or that is re-measured under a different protocol and called
+wrong -- is the very failure it describes.  The oracle's spread is NOT a
+constant of the instrument: it is 7.7x larger in one regime than the other.
 
 Reports, at the isothermal pre-front checkpoint:
   * Cantera against itself at default vs pinned tolerances -- the oracle's own

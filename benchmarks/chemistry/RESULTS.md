@@ -363,11 +363,14 @@ Under the bug (T = 1500 K, t = 1e-4 s, dt = 1e-8):
 > measured in the *aligned* regime from a working copy that was never
 > committed — the same defect as §6.2b, in the section that closes the
 > provenance of claim (A). `rep_traj_bug.py` is that harness, committed. It
-> runs in whatever regime the committed oracle is in, so its absolute columns
-> sit in the sixth digit from those below. **The deltas — which are the
-> claim — reproduce to four significant figures**: 2.105e-03, 1.756e-02,
-> 1.490e-02, 1.774e-03, 3.441e-02, 1.687e-02, 1.394e-03, 1.617e-01, and
-> `fix − shipped` is 0.000e+00 bit-for-bit on all eight.
+> runs in whatever regime the oracle it loads is in. **From the frozen snapshot,
+> whose oracle is aligned, every absolute column below reproduces to every
+> printed digit** — H2 1.45202409180648259e-07, R16 forward
+> 5.22176484288829602e-06, d[HO2]/dt −8.13560209958764591e-08. From this
+> branch, whose oracle is in the published regime, the absolutes sit in the
+> sixth digit and **the deltas — which are the claim — reproduce to four
+> figures**: 2.105e-03, 1.756e-02, 1.490e-02, 1.774e-03, 3.441e-02, 1.687e-02,
+> 1.394e-03, 1.617e-01; `fix − shipped` is 0.000e+00 bit-for-bit in both.
 
 | sp | shipped | under `reac - nu` | delta | band |
 |---|---|---|---|---|
@@ -1160,33 +1163,51 @@ test could see.
 
 ### (4) A loose reference tolerance hides the integrator's own error
 
-> **Corrected 2026-09-01, and the correction is the instance repeating itself.**
-> This table previously reported 2.517e-08 and 2.515e-08 with no committed
-> producer. Re-measured across all ten species with fresh `gas` objects, the
-> oracle's own tolerance spread is **3.251e-09**, not 2.515e-08 — the published
-> figure does not reproduce and is withdrawn. The section arguing that an
-> unproducible number gets attributed to the wrong object was itself carrying
-> one.
+> **Corrected twice on 2026-09-01, and the second correction is instance (7)
+> catching the author of this section.** The table was first published with no
+> committed producer. A re-measurement then gave 3.251e-09 for the oracle's own
+> spread, and this section *withdrew* the published 2.515e-08 as unreproducible.
+> That withdrawal was wrong. The re-measurement ran in the **published**
+> regime; the published table had been measured in the **aligned** one, and
+> had not said so. Re-run in the aligned regime — `rep_tolerance.py` from the
+> frozen snapshot, fresh `gas` per run, ten species — the oracle's spread is
+> **2.515e-08, to four figures the number that was withdrawn.** The number was
+> right; it lacked a producer and a regime label, and the corrector supplied a
+> third regime error on top of the two missing labels. Both regimes are now
+> given, from committed runs.
 
 ```sh
-python3 benchmarks/chemistry/rep_tolerance.py
+python3 benchmarks/chemistry/rep_tolerance.py            # published regime, this tree
+python3 probes/rep_tolerance.py                          # aligned regime, frozen snapshot
 ```
 
-| comparison | worst rel | what it measures |
-|---|---|---|
-| CVODE default (`rtol=1e-9`) vs CVODE `rtol=1e-12` | **3.251e-09** (HO2) | the *oracle's* own resolution |
-| RK4 dt=1e-8 vs CVODE default | 2.662e-06 (O) | replica vs a loosely-set oracle |
-| RK4 dt=1e-8 vs CVODE `rtol=1e-12` | 2.660e-06 (O) | replica vs a tightly-set oracle |
-| RK4 dt=1e-8 vs RK4 dt=5e-9 | **2.222e-14** (H2O2) | RK4 truncation — the only row that is |
+| comparison | published regime | aligned regime | what it measures |
+|---|---|---|---|
+| CVODE default (`rtol=1e-9`) vs CVODE `rtol=1e-12` | 3.251e-09 (HO2) | **2.515e-08** (H2O) | the *oracle's* own tolerance spread |
+| RK4 dt=1e-8 vs CVODE default | 2.662e-06 (O) | 2.517e-08 (H2O) | replica vs a loosely-set oracle |
+| RK4 dt=1e-8 vs CVODE `rtol=1e-12` | 2.660e-06 (O) | 2.074e-11 (H2O) | replica vs a tightly-set oracle |
+| RK4 dt=1e-8 vs RK4 dt=5e-9 | 2.222e-14 (H2O2) | 3.465e-14 (H2O2) | RK4 truncation + roundoff — the only row that is the replica's |
 
-The argument survives the correction and is sharper for it. RK4's truncation at
-the operating step is **2.222e-14**; the oracle's own resolution is
-**3.251e-09** — five orders larger. **Any replica-vs-Cantera agreement claimed
-tighter than 3.3e-09 is below the oracle's resolution and cannot be attributed
-to the replica at all.** That bound applies to this document's own aligned-regime
-figures (8.9e-13 … 1.2e-11): they are meaningful *only* because the committed
-oracle pins `rtol=1e-12`, and would be uninterpretable against a default-tolerance
-Cantera. §7.3.
+Two things the two-column form shows that neither column alone did.
+
+**The oracle's tolerance spread is not a constant of the instrument.** It is
+2.515e-08 in one regime and 3.251e-09 in the other — a factor of 7.7 from a
+change in the initial density of 5.7e-06. CVODE's adaptive path depends on the
+state, so "the oracle's resolution" has no value independent of the protocol
+it is run under, and quoting one number for it without the regime is exactly
+the defect this instance describes.
+
+**In the aligned regime the middle two rows are the same number** — 2.517e-08
+against a default-tolerance oracle, 2.074e-11 against a pinned one, and
+2.515e-08 between the two oracle settings. A harness trusting the default
+would report the replica as 2.5e-08 off; all of that is the reference's error,
+and the replica's own contribution is bounded at 3.5e-14. That was the point
+the original table made, and it stands. What did not stand was the label.
+
+The bound for citing agreement follows from §7.5, which measures the floor
+*at the pinned setting* rather than the spread between settings: 1.416e-11 in
+the aligned regime. The aligned residual of 2.074e-11 sits at that floor, and
+is stated accordingly there. §7.3.
 
 ### (5) Integrated observables hide what per-reaction comparison exposes
 
@@ -1730,7 +1751,7 @@ contract is checkable rather than asserted.
 | §2.6 adiabatic anchors | 8 | cites `gri30_h2_adiabatic_replica.py`, **absent from the released tree** |
 | §3.1 Kc, 29 reactions | 6 | command was ```python3 - < the harness in section 7.2``` — the same placeholder |
 | §6.2b STEP 6 aligned | 40 | uncommitted working copy (found first; fixed in `cad8a9c0`) |
-| §6.3 instance (4) | 3 | no producer, **and the headline figure did not reproduce** (2.515e-08 published, 3.251e-09 measured) |
+| §6.3 instance (4) | 3 | no producer and no regime label. First re-measured in the wrong regime (3.251e-09) and wrongly withdrawn; reproduced at 2.515e-08 in the regime it was measured in |
 | §6.4 divergent constant | 2 | cites `flame1d_replica.py` and `stdlib/constants/physical.sio`, absent from the released tree |
 
 Everything else — 8 sections running from a named committed file, 19 inheriting
@@ -1745,11 +1766,15 @@ softening the claim:
 | §3.1 | `benchmarks/chemistry/rep_1atm.py`, which already produced these numbers and merely was not named |
 | §6.3 (4), §7.3 | `benchmarks/chemistry/rep_tolerance.py` — oracle resolution, replica-vs-oracle at both settings, and RK4 self-convergence |
 
-**What the audit cost, stated plainly.** One published number was withdrawn as
-unreproducible (§6.3's 2.515e-08). One table's absolute columns shifted in the
-sixth digit because the committed producer runs in the regime the committed
-oracle is in, while the original ran aligned — the deltas, which carry the
-claim, reproduce to four figures. No claim was weakened to fit a measurement.
+**What the audit cost, stated plainly.** No published number was ultimately
+withdrawn — but one was withdrawn *for four hours* by this audit itself, on a
+re-measurement made in the wrong regime, before the committed producer run in
+the right regime reproduced it to four figures (§6.3 (4)). The audit's own
+error is recorded there as an instance of what it audits. Every absolute
+column in §2.3–2.5 reproduces **to every printed digit** from the frozen
+snapshot, whose oracle is aligned; from this branch, whose oracle is in the
+published regime, the deltas reproduce to four figures and the absolutes sit
+in the sixth digit. No claim was weakened to fit a measurement.
 
 **Two probes now fail closed on provenance.** `rep_traj_bug.py` and
 `rep_tolerance.py` both draw the initial state from the oracle's
