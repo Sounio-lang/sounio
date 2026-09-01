@@ -165,3 +165,35 @@ specialization — not by any single characteristic number.
 **Remaining to prove:** (1) the generic cubic exists (deg D = dim Im A = 7 for
 dim A = 8), from the CD multiplication — the clean algebraic core; (2) the mod-2
 preservation of an odd component under specialization to every d ≥ 3 pair.
+
+## 8. The octonion witness equations (deep-research Step 1, verified)
+
+Writing u=(u₁,u₂), w=(w₁,w₂) (doubly pure), the Cayley–Dickson product gives the
+commutator explicitly:
+
+  [u,w] = ( [u₁,w₁] + 2·Im(ū₂ w₂),  2·(w₂u₁ − u₂w₁) ).   [verified numerically = 0
+  at a real witness: ‖·‖ = 0 for both components]
+
+So a witness ⟺ the two **octonion** equations
+  (A)  [u₁, w₁] = −2·Im(ū₂ w₂),
+  (B)  w₂ u₁ = u₂ w₁.
+
+**The Φ_u reduction (toward deg D = 7).** For n(u₁) ≠ 0, right multiplication
+R_{u₁} is invertible on 𝕆, so (B) solves w₂ uniquely from w₁:
+  w₂ = Φ_u(w₁),  Φ_u = R_{u₁}⁻¹ ∘ L_{u₂},
+where L_{u₂}(w₁)=u₂w₁, R_{u₁}(w₂)=w₂u₁, and R_{u₁}⁻¹ = R_{ū₁}/n(u₁) (octonion
+inverse). Φ_u is rational (polynomial after clearing n(u₁)) in u. A witness then
+exists iff there is a nonzero w₁ with:
+  (i) (w₁, Φ_u(w₁)) ∈ Im C(x′)  (the frame constraint — a linear condition), and
+  (ii) equation (A) holds with w₂ = Φ_u(w₁).
+D is the u-locus where this linear-algebra system in w₁ degenerates. Because Φ_u
+carries one factor of 1/n(u₁) and the frame/(A) constraints are linear, the
+degeneracy determinant is a form in u whose degree (after clearing n(u₁)²) is the
+source of deg D = 7. **This is the concrete analytic core to finish: compute the
+degree of that degeneracy form and show it equals dim Im 𝕆 = 7 when x,x′ generate
+𝕆.** The Φ_u operator makes it a question about left/right octonion
+multiplication operators (Zorn-vector / Moufang identities), i.e. pure 𝕆 algebra
+— no sedenion determinantal computation.
+
+Status: equations (A),(B) and the Φ_u reduction are exact and verified; the degree
+computation from Φ_u is the remaining analytic step (Step 1 of §7).
