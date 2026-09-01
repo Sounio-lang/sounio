@@ -7,11 +7,15 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
+#include <sys/file.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
+#include <caml/alloc.h>
 #include <caml/fail.h>
 #include <caml/memory.h>
+#include <caml/threads.h>
 #include <caml/mlvalues.h>
 
 static void fail_errno(const char *operation, const char *path) {
@@ -82,5 +86,50 @@ CAMLprim value sounio_loom_enter_readonly_namespace(value roots_value) {
   CAMLreturn(Val_unit);
 #else
   caml_failwith("sovereign change namespaces require Linux");
+#endif
+}
+
+CAMLprim value sounio_loom_flock_try_exclusive(value descriptor_value) {
+  CAMLparam1(descriptor_value);
+#ifdef __linux__
+  int result;
+  int saved;
+  caml_enter_blocking_section();
+  result = flock(Int_val(descriptor_value), LOCK_EX | LOCK_NB);
+  saved = errno;
+  caml_leave_blocking_section();
+  if (result == 0) CAMLreturn(Val_true);
+  if (saved == EWOULDBLOCK || saved == EAGAIN) CAMLreturn(Val_false);
+  errno = saved;
+  fail_errno("flock-exclusive", NULL);
+#else
+  caml_failwith("coordination flock requires Linux");
+#endif
+}
+
+CAMLprim value sounio_loom_flock_unlock(value descriptor_value) {
+  CAMLparam1(descriptor_value);
+#ifdef __linux__
+  if (flock(Int_val(descriptor_value), LOCK_UN) != 0)
+    fail_errno("flock-unlock", NULL);
+  CAMLreturn(Val_unit);
+#else
+  caml_failwith("coordination flock requires Linux");
+#endif
+}
+
+CAMLprim value sounio_loom_host_identity(value unit_value) {
+  CAMLparam1(unit_value);
+  CAMLlocal1(result_value);
+#ifdef __linux__
+  struct utsname identity;
+  char result[1024];
+  if (uname(&identity) != 0) fail_errno("uname", NULL);
+  snprintf(result, sizeof(result), "%s|%s|%s|%s", identity.sysname,
+           identity.release, identity.machine, identity.nodename);
+  result_value = caml_copy_string(result);
+  CAMLreturn(result_value);
+#else
+  caml_failwith("host identity requires Linux");
 #endif
 }

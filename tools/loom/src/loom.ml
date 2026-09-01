@@ -13501,6 +13501,8 @@ let usage () =
   Printf.eprintf
     "  provider-start accepts --wait to observe the turn until terminal state\n";
   Printf.eprintf
+    "  hook-generation-reconcile --cwd DIR --agent A --lane L [--apply]\n";
+  Printf.eprintf
     "  exec-ingress-probe --root DIR --mode inherited|forged|missing|fixture-escape|result|result-binding|result-receipt|result-manifest --event FILE [--receipt FILE] (test mode only)\n";
   Printf.eprintf
     "  exec-result-probe --root DIR --store DIR --mode publish|resolve|command-mismatch|promote-authority [--receipt FILE] [--handle HANDLE] (test mode only)\n";
@@ -13585,6 +13587,8 @@ let main () =
       Loom_hook_generation_drain.run (arguments_after_command ())
     else if command = "hook-generation-guardian" then
       Loom_hook_generation_guardian.run (arguments_after_command ())
+    else if command = "hook-generation-reconcile" then
+      Loom_hook_generation_reconcile.run (arguments_after_command ())
     else if command = "exec-capability" then
       Loom_exec.run (arguments_after_command ())
     else
