@@ -573,6 +573,14 @@ g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
 ./band_crosscheck ../gri30_h2_mechanism.json
 ```
 
+> **Cross-branch reference.** `cpp/gri30_h2_band_crosscheck.cpp` is in
+> [#2383](https://github.com/Sounio-lang/sounio/pull/2383), not on this branch,
+> so `audit_provenance.py` reports this section as failing when run here and
+> passing when run against the frozen release, where the file ships. That
+> difference is the audit working, not a defect: it is the only section whose
+> producer lives in a sibling pull request. `-std=c++20` will not build it —
+> `std::expected` and the multidimensional `operator[]` are both C++23.
+
 This is an **independent third implementation** (C++23, no dependencies),
 written from the published protocol rather than translated from either the
 Sounio module or the Python replica. Its deterministic checkpoint reproduces
@@ -1204,9 +1212,27 @@ as a finding, because reporting it as observed would be inventing it.
 
 ## 6.4 One constant deliberately left divergent
 
-`benchmarks/chemistry/flame1d_replica.py:81` keeps `R = 8.314462618`, the
-truncated value, while every other constant in the GRI-Mech path is now
-`8.31446261815324`. **This is deliberate.**
+```sh
+grep -n '8\.314462618\b' benchmarks/chemistry/flame1d_replica.py \
+                           stdlib/constants/physical.sio
+```
+
+```
+benchmarks/chemistry/flame1d_replica.py:81:R = 8.314462618        # J/mol/K
+stdlib/constants/physical.sio:228:// Value: 8.314462618 J/(mol·K) (exact)
+stdlib/constants/physical.sio:233:    8.314462618
+```
+
+Verified 2026-09-01. **Neither file is in the frozen release**: both live in
+the upstream repository only, so this section is a claim about the upstream
+tree and the command above must be run there, not against an unpacked
+snapshot. Recording that explicitly because a section citing files a reader
+does not have is precisely the defect §7.4 audits for — here it is intentional
+and scoped, not an oversight.
+
+`flame1d_replica.py:81` keeps `R = 8.314462618`, the truncated value, while
+every other constant in the GRI-Mech path is now `8.31446261815324`. **This is
+deliberate.**
 
 `flame1d_replica.py` is a different benchmark — a 1-D flame, not the GRI-Mech
 cross-validation — with its own published reference values and its own gates
