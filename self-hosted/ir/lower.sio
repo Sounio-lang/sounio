@@ -13764,6 +13764,117 @@ impl Lowerer {
         }
         lowerer_lookup_fn_id_by_name_ref(&self, call_name)
     }
+    // The named struct a plain expression evaluates to, for the ONE use below:
+    // naming the struct that sits in slot 0 of a tuple literal.
+    fn expr_direct_struct_name(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_struct_type((*e).name)
+        }
+        let fid = self.expr_method_fn_id(e)
+        if fid >= 0 {
+            return self.return_struct_name_for_fn_id(fid)
+        }
+        ir_empty_name()
+    }
+
+    // The named struct held by SLOT 0 of whatever this expression evaluates to,
+    // or empty when that cannot be answered.
+    //
+    // A local is typed from a hand-written enum of initializer shapes, and the
+    // shapes that PRODUCE a tuple are themselves a small grammar: a method call,
+    // a tuple literal, a block, an if, a match. Answering only the first two
+    // left `var lo = pair.0` untyped whenever `pair` came from a branch, and an
+    // untyped receiver lowers its calls against the bare method name.
+    fn expr_tuple0_struct_name(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_tuple0_struct_name(&(*e).block)
+        }
+        if (*e).kind == ExprKind::ExprTupleLit {
+            match (*e).args {
+                Some(lst) => return self.expr_direct_struct_name(&(*lst).head),
+                _ => return ir_empty_name(),
+            }
+        }
+        if (*e).kind == ExprKind::ExprIf {
+            let t = self.opt_block_tail_tuple0_struct_name(&(*e).block)
+            let f = self.opt_expr_tuple0_struct_name(&(*e).else_expr)
+            if t.len > 0 && ir_name_eq(t, f) {
+                return t
+            }
+            return ir_empty_name()
+        }
+        if (*e).kind == ExprKind::ExprMatch {
+            // Every arm must answer the same, and a single silent arm sinks it:
+            // binding from the arms that agree would type the local by which
+            // branch happened to be written, and a wrong type is a wrong call
+            // target where an absent one is only a refusal.
+            var cur = &(*e).arms
+            var acc = ir_empty_name()
+            var first = true
+            var ok = true
+            while true {
+                match *cur {
+                    Some(al) => {
+                        let got = self.expr_tuple0_struct_name(&(*al).head.body)
+                        if first {
+                            acc = got
+                            first = false
+                        } else {
+                            if !ir_name_eq(got, acc) { ok = false }
+                        }
+                        cur = &(*al).tail
+                    }
+                    _ => break
+                }
+            }
+            if ok && acc.len > 0 {
+                return acc
+            }
+            return ir_empty_name()
+        }
+        let fid = self.expr_method_fn_id(e)
+        if fid >= 0 {
+            if self.return_tuple_struct_slot_for_fn_id(fid) == 0 {
+                return self.return_tuple_struct_name_for_fn_id(fid)
+            }
+        }
+        ir_empty_name()
+    }
+
+    fn opt_expr_tuple0_struct_name(self, e_opt: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+        match *e_opt {
+            Some(e) => self.expr_tuple0_struct_name(&(*e)),
+            _ => ir_empty_name(),
+        }
+    }
+
+    fn opt_block_tail_tuple0_struct_name(self, blk_opt: &Option<Box<Block>>) -> Name with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_tuple0_struct_name(&(*blk)),
+            _ => ir_empty_name(),
+        }
+    }
+
+    fn block_tail_tuple0_struct_name(self, blk: &Block) -> Name with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result = ir_empty_name()
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_tuple0_struct_name(&stmt_ref.expr)
+                    } else {
+                        result = ir_empty_name()
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
 
 
     fn expr_result_scalar_kind_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
@@ -16404,6 +16515,27 @@ impl Lowerer {
                     let src_elem_layout = lo.lookup_local_tuple0_array_elem_layout((*expr_box).name)
                     if src_elem_layout >= 0 {
                         lo = lo.bind_local_tuple0_array_elem_layout(s.name, src_elem_layout)
+                    }
+                }
+            }
+            _ => {}
+        }
+        // A tuple-producing initializer the shape enum above could not name.
+        // The enum answers a method call and a tuple literal directly; a branch
+        // -- `let pair = match x { ... }` or an if -- it could not answer at all,
+        // and `var lo = pair.0` was then untyped, which sends every call on `lo`
+        // to the bare method name and invents a body-less function.
+        //
+        // Additive on purpose: it only ever binds a slot-0 struct that the arms
+        // above left unset, and expr_tuple0_struct_name returns empty unless
+        // EVERY branch agrees, so a disagreement still binds nothing.
+        match s.expr {
+            Some(t0_expr) => {
+                let t0_name = lo.expr_tuple0_struct_name(&(*t0_expr))
+                if t0_name.len > 0 {
+                    let t0_layout = lower_struct_layout_index_of(&(*lo.struct_layouts), t0_name)
+                    if t0_layout >= 0 {
+                        lo = lo.bind_local_tuple_struct(s.name, t0_layout, 0)
                     }
                 }
             }
