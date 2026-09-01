@@ -6,7 +6,7 @@
 # Available providers:
 #   deepseek     — DeepSeek V4 Pro (reasoning; 'deepseek-coder' silently
 #                  resolved to the weaker v4-flash and is no longer a listed model)
-#   xai|grok     — Grok 4.3 (primary adversarial math/review lane)
+#   xai|grok     — Grok 4.6 (primary adversarial math/review lane)
 #   xai-fast     — Grok 4.1 Fast Reasoning (lower-latency fallback)
 #   kimi|k3      — Kimi K3 (Moonshot, api.moonshot.ai, 1M ctx, thinking always on): the
 #                  independent second math/review vendor since 2026-08-31 (replaced zai)
@@ -54,6 +54,7 @@ PROMPT="$(cat "$PROMPT_FILE")"
 call_openai_compat() {
     local name="$1" url="$2" key="$3" model="$4" outfile="$5"
     local max_tok="${OFFLOAD_MAX_TOKENS:-8192}"
+    local request_file
     # Expensive models get fewer tokens to stay within credits (unless overridden).
     if [[ -z "${OFFLOAD_MAX_TOKENS:-}" ]]; then
         case "$model" in
@@ -68,15 +69,18 @@ call_openai_compat() {
     # Local reasoning models are slow; give them room rather than losing the leg.
     local _tmo="${OFFLOAD_TIMEOUT:-180}"
     case "$name" in Local*) _tmo="${OFFLOAD_TIMEOUT:-600}" ;; esac
+    request_file="$(mktemp "$OUTDIR/request-XXXXXX.json")"
+    jq -Rs --arg model "$model" --argjson maxtok "$max_tok" '{
+        model: $model,
+        messages: [{role: "user", content: .}],
+        max_tokens: $maxtok,
+        temperature: (if ($model | startswith("kimi-k")) then 1.0 else 0.7 end)
+    }' <<< "$PROMPT" > "$request_file"
     curl -s -m "$_tmo" "$url/chat/completions" \
         -H "Authorization: Bearer $key" \
         -H "Content-Type: application/json" \
-        -d "$(jq -n --arg model "$model" --arg prompt "$PROMPT" --argjson maxtok "$max_tok" '{
-            model: $model,
-            messages: [{role: "user", content: $prompt}],
-            max_tokens: $maxtok,
-            temperature: (if ($model | startswith("kimi-k")) then 1.0 else 0.7 end)
-        }')" > "$outfile" 2>&1 || true
+        --data-binary "@$request_file" > "$outfile" 2>&1 || true
+    rm -f "$request_file"
     # `|| true` is load-bearing under `set -e`: curl exits non-zero on a TIMEOUT or a
     # connection failure (unlike an HTTP error, where it exits 0 with a JSON body), and
     # without it the whole background subshell dies right here — no "<- name: ERROR" line,
@@ -107,7 +111,7 @@ run_provider() {
             ;;
         xai|grok)
             [[ -n "${XAI_API_KEY:-}" ]] && \
-            call_openai_compat "Grok 4.3" "https://api.x.ai/v1" "$XAI_API_KEY" "grok-4.3" "$OUTDIR/grok.json"
+            call_openai_compat "Grok 4.6" "https://api.x.ai/v1" "$XAI_API_KEY" "grok-4.6" "$OUTDIR/grok.json"
             ;;
         xai-fast)
             [[ -n "${XAI_API_KEY:-}" ]] && \

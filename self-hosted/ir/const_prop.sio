@@ -84,6 +84,15 @@ let CP_BINOP_LE: i64 = 15
 let CP_BINOP_GE: i64 = 16
 let CP_BINOP_BIT_AND: i64 = 17
 let CP_BINOP_BIT_OR: i64 = 18
+// Unsigned counterparts for /, %, >> — Findings 11 (#2084). Distinct tags so
+// cp_fold_binop_int can use unsigned arithmetic semantics instead of i64
+// signed truncating semantics. Folding an unsigned op with the signed tag
+// would re-introduce the same bug at compile time and the witness would not
+// fire because the runner does not see the unsigned instruction it should
+// have been.
+let CP_BINOP_UDIV: i64 = 19
+let CP_BINOP_UMOD: i64 = 20
+let CP_BINOP_USHR: i64 = 21
 
 // ============================================================================
 // Section 2: Data Structures
@@ -230,6 +239,76 @@ fn cp_lattice_bool(val: bool) -> CpLattice {
         is_float: false,
         is_bool: true,
     }
+}
+
+// ============================================================================
+// Unsigned 64-bit arithmetic (used by cp_fold_binop_int for CP_BINOP_UDIV /
+// CP_BINOP_UMOD / CP_BINOP_USHR — Finding 11, #2084).
+//
+// The CP lattice stores integer values in an i64 `int_val`. For unsigned
+// operations we must treat that bit pattern as a u64 magnitude: signed /
+// truncates toward zero, signed % follows the dividend's sign, and signed >>
+// is arithmetic (sign-fill). All three give the wrong answer on operands whose
+// bit 63 is set, which is precisely the regime the unsigned witness exercises.
+//
+// We implement u64 division and modulo via 64-step binary long division (no
+// 128-bit primitive). Each helper accepts two i64 operands whose bit patterns
+// are interpreted as u64 and returns an i64 whose bit pattern is the u64
+// result.
+// ============================================================================
+
+// Unsigned 64-bit division. Inputs interpreted as u64; result bit pattern is
+// `a_u64 / b_u64`. Caller must ensure b != 0.
+fn cp_u64_div(a: i64, b: i64) -> i64 with Div, Panic {
+    var q: i64 = 0
+    var r: i64 = 0
+    var i: i64 = 0
+    while i < 64 {
+        let bit_pos: i64 = 63 - i
+        let bit: i64 = (a >> bit_pos) & 1
+        r = (r << 1) | bit
+        if r >= b {
+            r = r - b
+            q = q | (1 << bit_pos)
+        }
+        i = i + 1
+    }
+    q
+}
+
+// Unsigned 64-bit modulo. Caller must ensure b != 0.
+fn cp_u64_mod(a: i64, b: i64) -> i64 with Div, Panic {
+    var r: i64 = 0
+    var i: i64 = 0
+    while i < 64 {
+        let bit_pos: i64 = 63 - i
+        let bit: i64 = (a >> bit_pos) & 1
+        r = (r << 1) | bit
+        if r >= b {
+            r = r - b
+        }
+        i = i + 1
+    }
+    r
+}
+
+// Unsigned (logical) shift-right of an i64 bit pattern treated as u64 by `n`.
+// Caller must ensure 0 <= n <= 63 (other ranges are guarded in
+// cp_fold_binop_int and return BOTTOM).
+fn cp_u64_shr(a: i64, n: i64) -> i64 with Div, Panic {
+    if n >= 64 {
+        return 0
+    }
+    if n <= 0 {
+        return a
+    }
+    // Sounio's >> is arithmetic (sar on x86): it sign-fills the high bits.
+    // To recover the logical shift, perform the arithmetic shift and then
+    // mask off the top n bits, which arithmetic shift may have copied from
+    // bit 63. The mask (1 << (64 - n)) - 1 is positive for n in 1..63.
+    let shifted: i64 = a >> n
+    let mask: i64 = (1 << (64 - n)) - 1
+    shifted & mask
 }
 
 fn cp_state_new() -> CpState {
@@ -437,7 +516,9 @@ fn cp_classify_binop(op: BinaryOp) -> i64 {
     if op == BinaryOp::OpSub { return CP_BINOP_SUB }
     if op == BinaryOp::OpMul { return CP_BINOP_MUL }
     if op == BinaryOp::OpDiv { return CP_BINOP_DIV }
+    if op == BinaryOp::OpUDiv { return CP_BINOP_UDIV }
     if op == BinaryOp::OpRem { return CP_BINOP_MOD }
+    if op == BinaryOp::OpURem { return CP_BINOP_UMOD }
     if op == BinaryOp::OpEq { return CP_BINOP_EQ }
     if op == BinaryOp::OpNe { return CP_BINOP_NE }
     if op == BinaryOp::OpLt { return CP_BINOP_LT }
@@ -451,6 +532,7 @@ fn cp_classify_binop(op: BinaryOp) -> i64 {
     if op == BinaryOp::OpBitXor { return CP_BINOP_XOR }
     if op == BinaryOp::OpShl { return CP_BINOP_SHL }
     if op == BinaryOp::OpShr { return CP_BINOP_SHR }
+    if op == BinaryOp::OpUShr { return CP_BINOP_USHR }
     0
 }
 
@@ -635,6 +717,39 @@ fn cp_fold_binop_int(op: i64, a: i64, b: i64) -> CpLattice with Div, Panic {
             return cp_lattice_int(a >> b)
         }
         return cp_lattice_bottom()
+    }
+    // Findings 11 (#2084): unsigned variants must fold with UNSIGNED semantics.
+    // The lattice int_val is still i64-bit-pattern, but the arithmetic is the
+    // unsigned magnitude. The witnesses u64_unsigned_shr_divmod_witness.sio
+    // (run-pass) and the Finding 11 unit test in test_const_prop.sio both
+    // rely on these three arms being correct: folding with the signed tag
+    // would move the bug from runtime to compile time.
+    if op == CP_BINOP_UDIV {
+        if b == 0 {
+            return cp_lattice_bottom()
+        }
+        return cp_lattice_int(cp_u64_div(a, b))
+    }
+    if op == CP_BINOP_UMOD {
+        if b == 0 {
+            return cp_lattice_bottom()
+        }
+        return cp_lattice_int(cp_u64_mod(a, b))
+    }
+    if op == CP_BINOP_USHR {
+        // Unsigned shift semantics: 0 <= b < 64 takes the cp_u64_shr branch;
+        // b >= 64 is the well-defined ZERO result (logical shift past the
+        // width loses all bits). b < 0 stays BOTTOM (negative shift count
+        // is meaningless). Folding b >= 64 to 0 here matters for testing
+        // AND for downstream consumers that rely on the const to know the
+        // result: the runtime `shr rax,cl` instruction masks cl by 64 (cl
+        // is only 6 bits wide), so count=64 would silently be count=0
+        // and yield the unchanged original bit pattern at run time -- a
+        // wrong answer that the fold step has to pre-empt.
+        if b < 0 {
+            return cp_lattice_bottom()
+        }
+        return cp_lattice_int(cp_u64_shr(a, b))
     }
     if op == CP_BINOP_EQ {
         if a == b { return cp_lattice_int(1) } else { return cp_lattice_int(0) }

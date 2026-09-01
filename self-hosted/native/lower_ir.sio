@@ -825,12 +825,31 @@ pub fn emit_binop_code(nc: &! NativeCompiler, op: BinaryOp) with Mut, Panic, Div
         c.code = emit_mov_rax_rbx(c.code)           // dividend in rax
         c.code = emit_cqo(c.code)                   // sign-extend to rdx:rax
         c.code = emit_idiv_rcx(c.code)              // rax = quotient
+    } else if op == BinaryOp::OpUDiv {
+        // rax = rbx / rax (UNSIGNED). Distinct from idiv: operand widths are
+        // still i64, but rax/rbx are treated as unsigned magnitude — quotient
+        // in rax, remainder in rdx. The Result must zero rdx first; on x86 the
+        // quotient of `div r/m64` is rdx:rax / src, so a non-zero rdx would
+        // fault (#DE). Findings 11 (#2084): u64 >>,/, % above bit 63 were
+        // silently routed through idiv, returning the wrong magnitude.
+        c.code = emit_mov_rcx_rax(c.code)           // rcx = divisor
+        c.code = emit_mov_rax_rbx(c.code)           // rax = dividend
+        c.code = emit_xor_rdx_rdx(c.code)            // rdx = 0 (required for div)
+        c.code = emit_div_reg(c.code, 1)            // rcx=1 -> div rcx (48 F7 F1)
     } else if op == BinaryOp::OpRem {
         // rax = rbx % rax (signed remainder)
         c.code = emit_mov_rcx_rax(c.code)
         c.code = emit_mov_rax_rbx(c.code)
         c.code = emit_cqo(c.code)
         c.code = emit_idiv_rcx(c.code)
+        c.code = emit_mov_rax_rdx(c.code)           // remainder is in rdx
+    } else if op == BinaryOp::OpURem {
+        // rax = rbx % rax (UNSIGNED remainder). Counterpart to OpUDiv above;
+        // div r/m64 leaves the remainder in rdx.
+        c.code = emit_mov_rcx_rax(c.code)
+        c.code = emit_mov_rax_rbx(c.code)
+        c.code = emit_xor_rdx_rdx(c.code)
+        c.code = emit_div_reg(c.code, 1)            // rcx=1 -> div rcx
         c.code = emit_mov_rax_rdx(c.code)           // remainder is in rdx
     } else if op == BinaryOp::OpEq {
         c.code = emit_cmp_rbx_rax(c.code)
@@ -874,6 +893,13 @@ pub fn emit_binop_code(nc: &! NativeCompiler, op: BinaryOp) with Mut, Panic, Div
         c.code = emit_mov_rcx_rax(c.code)
         c.code = emit_mov_rax_rbx(c.code)
         c.code = emit_sar_rax_cl(c.code)
+    } else if op == BinaryOp::OpUShr {
+        // rax = rbx >> rax (UNSIGNED / logical right shift). Distinct from
+        // emit_sar_rax_cl only when rbx has the sign bit set: 0xFFFF... shr 1
+        // = 0x7FFF..., but 0xFFFF... sar 1 = 0xFFFF.... Findings 11 (#2084).
+        c.code = emit_mov_rcx_rax(c.code)
+        c.code = emit_mov_rax_rbx(c.code)
+        c.code = emit_shr_rax_cl(c.code)
     }
 
     (*nc) = c

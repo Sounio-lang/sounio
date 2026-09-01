@@ -962,6 +962,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.align-curve-and-target | historical | docs/research/align-curve-and-target.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.antigarbling-completeness-2026-08-23 | historical | docs/research/ANTIGARBLING_COMPLETENESS_2026-08-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.antigarbling-completeness-proof-2026-08-23 | historical | docs/research/ANTIGARBLING_COMPLETENESS_PROOF_2026-08-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.antigarbling-fusion-theorem-2026-09-01 | historical | docs/research/ANTIGARBLING_FUSION_THEOREM_2026-09-01.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.associator-spectral-bound-status | historical | docs/research/associator_spectral_bound_status.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ast-native-claims-falsifiers-2026-07-25 | historical | docs/research/ast_native_claims_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ast-native-claims-spec-2026-07-25 | historical | docs/research/ast_native_claims_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -1000,6 +1001,10 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.commutator-associator-identity | historical | docs/research/commutator_associator_identity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.compiler-issue-triage-2026-08-10 | historical | docs/research/compiler_issue_triage_2026-08-10.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.composition-failure-field | historical | docs/research/composition-failure-field.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.conj68-attack-log-2026-08-31 | historical | docs/research/conj68_attack_log_2026-08-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.conj68-commutator-kernel-machinery | historical | docs/research/conj68_commutator_kernel_machinery.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.conj68-manuscript-draft | historical | docs/research/conj68_manuscript_draft.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.conj68-proof-strategy | historical | docs/research/conj68_proof_strategy.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cpc2026-orc-group-preregistration-2026-07-11 | historical | docs/research/cpc2026_orc_group_preregistration_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cpc2026-yale-evidence-dossier-2026-07-11 | historical | docs/research/cpc2026_yale_evidence_dossier_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.delta-epistemic-gradual-compilation-paper | historical | docs/research/delta_epistemic_gradual_compilation_paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -1184,6 +1189,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.octonion-validation-report | historical | docs/research/OCTONION_VALIDATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.onn-benchmark-analysis | historical | docs/research/ONN_BENCHMARK_ANALYSIS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ontology-elplus-complete-universe-open-question-2026-08-03 | historical | docs/research/ontology_elplus_complete_universe_open_question_2026-08-03.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.open-problems-scan-2026-08-31 | historical | docs/research/open_problems_scan_2026-08-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.paper-a-antigarbling-skeleton-2026-08-25 | historical | docs/research/paper_A_antigarbling_skeleton_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.paper-a-artifact.readme | historical | docs/research/paper_A_artifact/README.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.paper-a-merged-2026-08-25 | historical | docs/research/paper_A_MERGED_2026-08-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -1255,6 +1261,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.r2-continuous-law-theorem-falsifiers-2026-07-25 | historical | docs/research/r2_continuous_law_theorem_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.r2-continuous-law-theorem-spec-2026-07-25 | historical | docs/research/r2_continuous_law_theorem_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipt-broken-structure.v1 | historical | docs/research/receipt_broken_structure.v1.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.refs.zhilina-diameter-commutativity-2608.26890-theorem | historical | docs/research/refs/zhilina_diameter_commutativity_2608.26890_THEOREM.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.relational-annihilation-geometry | historical | docs/research/relational-annihilation-geometry.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.research-validation-summary | repo_only | docs/research/RESEARCH_VALIDATION_SUMMARY.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.river-variational-and-the-ordering-null | historical | docs/research/river-variational-and-the-ordering-null.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

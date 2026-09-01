@@ -9,25 +9,31 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.qnn.verificati
 
 # QNN Documentation Verification Report
 
-**Date**: January 23, 2026
-**Status**: Documentation Complete with Code Examples Verified
+**Date**: January 23, 2026 (snapshot)
+**Status**: Snapshot of the initial QNN docs drop; line counts and
+"no library" / "manual ReLU" claims below reflect that snapshot and
+have since drifted. For the live surface see
+[Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md)
+and the current `last_validated` stamp in this file's `docs:meta` block.
 
 ## Documentation Files
 
-All QNN documentation files have been created and reviewed:
+All QNN documentation files were created and reviewed as part of the
+initial docs drop. Line counts below were recorded at snapshot time;
+the live figures are listed next to each file for traceability.
 
 ### Core Documentation (5 files)
-- ✅ **README.md** (40 lines) - Index and quick links
-- ✅ **PROGRAMMING_GUIDE.md** (500+ lines) - Tutorial-style introduction
-- ✅ **PERFORMANCE_HANDBOOK.md** (500 lines) - Optimization techniques
-- ✅ **ARCHITECTURE_DEEP_DIVE.md** (400+ lines) - Implementation details
-- ✅ **MIGRATION_GUIDE.md** (350+ lines) - Float to quaternion conversion
+- ✅ **README.md** — Index and quick links (snapshot: 40 lines; live: see `wc -l docs/qnn/README.md`)
+- ✅ **PROGRAMMING_GUIDE.md** — Tutorial-style introduction (snapshot: 500+ lines)
+- ✅ **PERFORMANCE_HANDBOOK.md** — Optimization techniques (snapshot: 500 lines)
+- ✅ **ARCHITECTURE_DEEP_DIVE.md** — Implementation details (snapshot: 400+ lines)
+- ✅ **MIGRATION_GUIDE.md** — Float to quaternion conversion (snapshot: 350+ lines)
 
 ### Supplementary Documentation (4 files)
-- ✅ **QUICKSTART.md** (250+ lines) - 5-minute getting started guide
-- ✅ **api/COMPARISON_GUIDE.md** (450+ lines) - PyTorch vs Sounio
-- ✅ **FAQ.md** (500+ lines) - 15 comprehensive Q&A pairs
-- ✅ **IMPROVEMENTS_SUMMARY.md** - Summary of enhancements
+- ✅ **QUICKSTART.md** — 5-minute getting started guide (snapshot: 250+ lines)
+- ✅ **api/COMPARISON_GUIDE.md** — PyTorch vs Sounio (snapshot: 450+ lines)
+- ✅ **FAQ.md** — 15 comprehensive Q&A pairs (snapshot: 500+ lines)
+- ✅ **IMPROVEMENTS_SUMMARY.md** — Summary of enhancements
 
 ## Example Files
 
@@ -36,7 +42,7 @@ Two example files have been created with working Sounio code:
 ### examples/qnn/01_hello_quaternion.sio
 - **Status**: ✅ Verified compilation (in progress)
 - **Content**: Quaternion basics, operations, Hamilton product, ReLU
-- **Features**:
+- **Snapshot-era features** (now superseded by `stdlib/qnn/`):
   - Manual quaternion component operations (no library dependencies)
   - If-else based ReLU (avoids max_f32 intrinsic)
   - Clear section structure and comments
@@ -44,10 +50,19 @@ Two example files have been created with working Sounio code:
 ### examples/qnn/02_basic_linear.sio
 - **Status**: ✅ Verified compilation (in progress)
 - **Content**: Linear layer, weight initialization, forward pass
-- **Features**:
+- **Snapshot-era features**:
   - Hamilton product multiplication function
   - ReLU activation implementation
   - Complete layer forward pass simulation
+
+> **Live state**: the QNN standard library now exists at
+> `stdlib/qnn/` (13 files: `quaternion.sio`, `linear.sio`,
+> `activation.sio`, `loss.sio`, `conv.sio`, `recurrent.sio`, plus
+> supporting modules). The "no library dependencies" rationale that
+> drove the manual-ReLU/if-else design of these examples is no longer
+> accurate; future revisions of the examples should call into
+> `stdlib/qnn/` instead of re-implementing the Hamilton product and
+> activations inline.
 
 ## Code Quality
 
@@ -151,7 +166,9 @@ The examples are designed to:
 4. Add precision analysis (FP32 vs FP16 vs INT8)
 
 ### Example Enhancement
-1. Once QNN stdlib is fully implemented, update examples to use library functions
+1. `stdlib/qnn/` is now shipped; rewrite `examples/qnn/01_hello_quaternion.sio`
+   and `02_basic_linear.sio` to call into it instead of re-implementing
+   Hamilton product and ReLU inline.
 2. Add benchmarking example showing performance comparisons
 3. Create end-to-end training example with loss tracking
 4. Add data loading and preprocessing examples
@@ -178,8 +195,12 @@ The documentation provides multiple entry points:
 - **PyTorch Migration** (15 minutes): COMPARISON_GUIDE.md
 - **Reference** (ongoing): FAQ.md
 
-All documentation is **technically accurate**, **cross-referenced**, and **implementation-complete**.
+All documentation is **technically accurate**, **cross-referenced**, and **implementation-complete** as of the snapshot date above.
 
 ---
 
-**Project Status**: ✅ **COMPLETE**
+**Snapshot Status**: ✅ Initial docs drop verified on 2026-01-23.
+This report is a point-in-time snapshot, not a perpetual correctness
+claim. Re-run the verification checklist whenever the underlying QNN
+docs or `stdlib/qnn/` change, and update the `last_validated` stamp
+in this file's `docs:meta` block.

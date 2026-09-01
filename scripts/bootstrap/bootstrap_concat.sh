@@ -84,6 +84,7 @@ FILES=(
   self-hosted/check/refinement.sio
   self-hosted/check/compat.sio
   self-hosted/check/ontology_side_table_cache.sio
+  self-hosted/check/noise_sets.sio
   self-hosted/check/check.sio
   self-hosted/check/mod.sio
   self-hosted/check/patterns.sio
@@ -419,6 +420,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/check/refinement.sio
     self-hosted/check/compat.sio
     self-hosted/check/ontology_side_table_cache.sio
+    self-hosted/check/noise_sets.sio
     self-hosted/check/check.sio
     self-hosted/check/mod.sio
     self-hosted/check/patterns.sio

@@ -33,7 +33,7 @@ use check::types::{TypeEntry, empty_type_entry}
 // reachable, and self-compilation needs the reachable set to fit. BSS is
 // byte-identical at 2048/4096/8192 because the IrModule is allocated at runtime.
 pub let IR_MAX_FUNCS: i64 = 16384
-pub let IR_MAX_STRINGS: i64 = 4096
+pub let IR_MAX_STRINGS: i64 = 16384
 pub let IR_MAX_INSTRS: i64 = 16384
 pub let IR_MAX_PARAMS: i64 = 64
 pub let IR_INVALID_REG: i64 = -1
@@ -810,28 +810,28 @@ pub fn ir_strategy_name(s: i64) -> string {
 //
 // It is also much cheaper than the array it replaces: ~112 MB of scalars for a
 // million instructions, against 2 GB of reserved [IrInstr; 4096] per module.
-pub var IR_A_OP: [i64; 1048576] = [0; 1048576]
-pub var IR_A_DST: [i64; 1048576] = [0; 1048576]
-pub var IR_A_SRC1: [i64; 1048576] = [0; 1048576]
-pub var IR_A_SRC2: [i64; 1048576] = [0; 1048576]
-pub var IR_A_IMM_I64: [i64; 1048576] = [0; 1048576]
-pub var IR_A_IMM_F64: [f64; 1048576] = [0.0; 1048576]
-pub var IR_A_LABEL_ID: [i64; 1048576] = [0; 1048576]
-pub var IR_A_FN_ID: [i64; 1048576] = [0; 1048576]
-pub var IR_A_FIELD_IDX: [i64; 1048576] = [0; 1048576]
-pub var IR_A_IMM_FLAGS: [i64; 1048576] = [0; 1048576]
-pub var IR_A_BIN_OP: [i64; 1048576] = [0; 1048576]
-pub var IR_A_UN_OP: [i64; 1048576] = [0; 1048576]
+pub var IR_A_OP: [i64; 4194304] = [0; 4194304]
+pub var IR_A_DST: [i64; 4194304] = [0; 4194304]
+pub var IR_A_SRC1: [i64; 4194304] = [0; 4194304]
+pub var IR_A_SRC2: [i64; 4194304] = [0; 4194304]
+pub var IR_A_IMM_I64: [i64; 4194304] = [0; 4194304]
+pub var IR_A_IMM_F64: [f64; 4194304] = [0.0; 4194304]
+pub var IR_A_LABEL_ID: [i64; 4194304] = [0; 4194304]
+pub var IR_A_FN_ID: [i64; 4194304] = [0; 4194304]
+pub var IR_A_FIELD_IDX: [i64; 4194304] = [0; 4194304]
+pub var IR_A_IMM_FLAGS: [i64; 4194304] = [0; 4194304]
+pub var IR_A_BIN_OP: [i64; 4194304] = [0; 4194304]
+pub var IR_A_UN_OP: [i64; 4194304] = [0; 4194304]
 // #1695: the INTERNED id, carried rather than recomputed. ir_arena_load did
 // `out.name_id = ir_intern_name(ir_arena_name(at))` -- interning on a READ path
 // reached at ~431 sites. ir_intern_name caps at IR_NAME_POOL_MAX and RETURNS 0 on
 // overflow, and 0 means "unnamed", so once the pool filled every load produced a
 // nameless instruction.
-pub var IR_A_NAME_ID: [i64; 1048576] = [0; 1048576]
-pub var IR_A_ARG_COUNT: [i64; 1048576] = [0; 1048576]
-pub var IR_A_NAME_OFF: [i64; 1048576] = [0; 1048576]
-pub var IR_A_NAME_LEN: [i64; 1048576] = [0; 1048576]
-pub var IR_A_ARG_BASE: [i64; 1048576] = [0; 1048576]
+pub var IR_A_NAME_ID: [i64; 4194304] = [0; 4194304]
+pub var IR_A_ARG_COUNT: [i64; 4194304] = [0; 4194304]
+pub var IR_A_NAME_OFF: [i64; 4194304] = [0; 4194304]
+pub var IR_A_NAME_LEN: [i64; 4194304] = [0; 4194304]
+pub var IR_A_ARG_BASE: [i64; 4194304] = [0; 4194304]
 
 // Byte pool for instruction names, and a flat pool for call-argument registers.
 pub var IR_NAME_POOL: [i8; 4194304] = [0; 4194304]
@@ -1126,7 +1126,7 @@ pub fn ir_arena_load(at: i64) -> IrInstr with Mut, Panic, Div {
     out.name_id = IR_A_NAME_ID[at as usize]
     out
 }
-pub fn ir_instr_arena_capacity() -> i64 { 1048576 }
+pub fn ir_instr_arena_capacity() -> i64 { 4194304 }
 
 pub var IR_REGION_BASE: [i64; 16640] = [0; 16640]
 pub var IR_REGION_CAP: [i64; 16640] = [0; 16640]
@@ -1418,6 +1418,17 @@ pub let IR_ARENA_VIOLATION_ARG_POOL: i64 = 5
 pub let IR_ARENA_VIOLATION_FLOAT_SET: i64 = 6
 pub let IR_ARENA_VIOLATION_FN_TABLE_INDEX: i64 = 7
 pub let IR_ARENA_VIOLATION_FN_TABLE_ALLOC: i64 = 8
+// Exhaustion of the INSTRUCTION arena itself. It had no kind of its own, so
+// ir_region_grow_slot returning IR_ARENA_ERR_CAPACITY was latched as
+// IR_ARENA_VIOLATION_INVALID and printed as "invalid handle" -- a message that
+// sends the reader after an aliasing bug that is not there. The remedy differs
+// too: "raise the arena or stop growing", never "you published a stale handle".
+// Same reasoning the NAME_POOL and ARG_POOL kinds were split out for.
+pub let IR_ARENA_VIOLATION_INSTR_POOL: i64 = 9
+// Set alongside the latch so the report can name the SHORTFALL, not just the
+// fill: at the moment of refusal the arena is by definition ~full, and the
+// number a reader needs is how much more was being asked for.
+pub var IR_ARENA_VIOLATION_WANT: i64 = -1
 
 fn ir_arena_latch(kind: i64, r: IrInstrRegion) with Mut, Panic, Div {
     if IR_ARENA_VIOLATION == 0 {
@@ -1431,6 +1442,41 @@ fn ir_arena_latch(kind: i64, r: IrInstrRegion) with Mut, Panic, Div {
 // Prints the FIRST violation. Returns true when there was one, so the driver can
 // refuse to emit -- an arena contract breach means some function's instructions
 // were written through a stale or published handle, which is a miscompile.
+// Live capacity: what the regions actually hold. IR_ARENA_TOP minus this is the
+// space stranded by growth -- ir_region_grow_slot copies a region to a fresh base
+// and never reclaims the old range.
+pub fn ir_arena_live_capacity() -> i64 with Mut, Panic, Div {
+    var live: i64 = 0
+    var ri: i64 = 0
+    while ri < IR_REGION_COUNT {
+        if IR_REGION_STATE[ri as usize] != IR_REGION_FREE {
+            live = live + IR_REGION_CAP[ri as usize]
+        }
+        ri = ri + 1
+    }
+    live
+}
+
+// Arena usage WITHOUT a violation. The exhaustion report only fires when the
+// arena runs out, so an arena large enough to finish the compile answers nothing
+// about how much it actually needed -- which is the one number required to size
+// it. Measured 2026-08-30: at 1048576 and at 2097152 the compile exhausts; the
+// demand is above both and this is how to read it.
+pub fn ir_arena_report_usage() with IO, Mut, Panic, Div {
+    let live = ir_arena_live_capacity()
+    print("arena_usage: fill ")
+    print_int(IR_ARENA_TOP)
+    print(" of ")
+    print_int(ir_instr_arena_capacity())
+    print(", regions ")
+    print_int(IR_REGION_COUNT)
+    print(", live ")
+    print_int(live)
+    print(", abandoned ")
+    print_int(IR_ARENA_TOP - live)
+    print("\n")
+}
+
 pub fn ir_arena_report_violation() -> bool with IO, Mut, Panic, Div {
     if IR_ARENA_VIOLATION == 0 { return false }
     print("error: IR instruction arena contract violated (")
@@ -1450,6 +1496,80 @@ pub fn ir_arena_report_violation() -> bool with IO, Mut, Panic, Div {
         print("a vreg above the float-typing capacity was marked as f64 -- the backend cannot represent it")
         print(") capacity ")
         print_int(ir_float_bits_capacity())
+        print("\n")
+        return true
+    } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_INSTR_POOL {
+        print("instruction arena exhausted -- a function could not be given room for its body")
+        print(") fill ")
+        print_int(IR_ARENA_TOP)
+        print(" of ")
+        print_int(ir_instr_arena_capacity())
+        print(", wanted ")
+        print_int(IR_ARENA_VIOLATION_WANT)
+        print(" more\n")
+        // LIVE vs ABANDONED, because "full" does not say which fix is the right
+        // one. ir_region_grow_slot copies a region to a fresh base at the top and
+        // never reclaims the old range, so a region that walked 16->32->64 leaves
+        // every earlier copy stranded in the middle of the bump arena. If most of
+        // the fill is abandoned, raising the capacity buys one more compile and
+        // the ceiling comes back; if most of it is live, the arena is simply too
+        // small. Printed rather than inferred.
+        let live = ir_arena_live_capacity()
+        print("       regions ")
+        print_int(IR_REGION_COUNT)
+        print(", live capacity ")
+        print_int(live)
+        print(", abandoned by growth ")
+        print_int(IR_ARENA_TOP - live)
+        print("\n")
+        // WHICH region ran away. Doubling the arena from 1048576 to 2097152 moved
+        // the fill to 2097142 and the shortfall stayed at 4: consumption tracked
+        // capacity exactly, which is the signature of something growing until the
+        // space is gone rather than of a table that is merely too small. A single
+        // region doubling without bound would do that, and the top offenders name
+        // it -- the slot is the function's region slot, allocated in function
+        // order.
+        var top1: i64 = -1
+        var top2: i64 = -1
+        var top3: i64 = -1
+        var c1: i64 = 0
+        var c2: i64 = 0
+        var c3: i64 = 0
+        var rj: i64 = 0
+        while rj < IR_REGION_COUNT {
+            if IR_REGION_STATE[rj as usize] != IR_REGION_FREE {
+                let cj = IR_REGION_CAP[rj as usize]
+                if cj > c1 {
+                    c3 = c2
+                    top3 = top2
+                    c2 = c1
+                    top2 = top1
+                    c1 = cj
+                    top1 = rj
+                } else if cj > c2 {
+                    c3 = c2
+                    top3 = top2
+                    c2 = cj
+                    top2 = rj
+                } else if cj > c3 {
+                    c3 = cj
+                    top3 = rj
+                }
+            }
+            rj = rj + 1
+        }
+        print("       largest regions: slot ")
+        print_int(top1)
+        print(" cap ")
+        print_int(c1)
+        print(", slot ")
+        print_int(top2)
+        print(" cap ")
+        print_int(c2)
+        print(", slot ")
+        print_int(top3)
+        print(" cap ")
+        print_int(c3)
         print("\n")
         return true
     } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_ARG_POOL {
@@ -1545,8 +1665,17 @@ pub fn ir_region_slot_w(r: IrInstrRegion, idx: i64) -> i64 with Mut, Panic, Div 
         return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
     }
     if idx >= IR_REGION_CAP[slot as usize] {
-        if ir_region_grow_slot(slot, idx + 1) != IR_ARENA_OK {
-            ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+        let grc = ir_region_grow_slot(slot, idx + 1)
+        if grc != IR_ARENA_OK {
+            // Exhaustion is not a handle-contract breach. Naming it as one cost
+            // the reader a hunt through the aliasing rules for a bug that is not
+            // there; the arena is simply full.
+            if grc == IR_ARENA_ERR_CAPACITY {
+                IR_ARENA_VIOLATION_WANT = (idx + 1) - IR_REGION_CAP[slot as usize]
+                ir_arena_latch(IR_ARENA_VIOLATION_INSTR_POOL, r)
+            } else {
+                ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+            }
             return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
         }
     }
@@ -3300,7 +3429,7 @@ pub struct IrFunctionTable {
 pub struct IrModule {
     pub functions: *mut IrFunctionTable,
     pub fn_count: i64,
-    pub string_table: [Name; 4096],
+    pub string_table: [Name; 16384],
     pub string_count: i64,
     pub epistemic: IrEpistemicSection,
     pub algebras: IrAlgebraTable,
@@ -5620,7 +5749,7 @@ pub fn ir_empty_module() -> IrModule with Mut, Panic, Div, Alloc {
     IrModule {
         functions: table,
         fn_count: 0,
-        string_table: [ir_empty_name(); 4096],
+        string_table: [ir_empty_name(); 16384],
         string_count: 0,
         epistemic: ir_empty_epistemic_section(),
         algebras: ir_empty_algebra_table(),

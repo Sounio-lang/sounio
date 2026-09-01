@@ -39,6 +39,12 @@ struct LowerLocalStack {
     array_copy_word_scalar: Box<LowerLocalI64Slots>,
     wide_bits: Box<LowerLocalI64Slots>,
     wide_signed: Box<LowerLocalI64Slots>,
+    // Findings 11 (#2084): 1 when a local/param is a non-wide unsigned integer
+    // (u8/u16/u32/u64/usize). Used by lower_binary_expr_ref to flip the IR
+    // bin_op to OpUDiv/OpURem/OpUShr before emitting the Sar/Idiv path.
+    // wide_signed only fires for bits>64, so this field is the separate
+    // per-slot tracker for the standard 8/16/32/64-bit unsigned widths.
+    is_unsigned_int: Box<LowerLocalI64Slots>,
     global_bss_offsets: Box<LowerLocalI64Slots>,
     global_bss_sizes: Box<LowerLocalI64Slots>,
     is_global: Box<LowerLocalI64Slots>,
@@ -73,6 +79,33 @@ struct LowerLocalStack {
     count: i64,
 }
 
+// FO bind table, moved OFF the Lowerer and behind a Box.
+//
+// WHY. These two arrays are 49 KB of the Lowerer's 75.5 KB of inline storage, and
+// the Lowerer is passed BY VALUE into every classifier and lowering method here.
+// lower_expr_non_binary_ref alone makes 71 by-value calls whose methods also
+// RETURN a Lowerer, so one frame of it holds ~150 copies: 11,941,664 bytes,
+// measured from its own prologue. At 103 nested if-expressions that is 1173 MB of
+// a 1536 MB stack -- 76.6% of it, and the reason a gen2 self-compile SIGSEGVs in
+// the stack probe at `dep_begin 80`.
+//
+// Boxing them cuts the inline Lowerer from 75.5 KB to 26.5 KB, which divides EVERY
+// frame in every recursion, not just this one. That is why the table moves rather
+// than the recursion being flattened: the depth (103) is legitimate source
+// nesting, and the classifier trio that looked like the culprit is 4.7% of the
+// budget. Measured before choosing, because the obvious target was the wrong one.
+struct LowerFoBindTable {
+    names: [Name; 128],
+    sens: [i64; 4096],
+}
+
+fn empty_lower_fo_bind_table() -> LowerFoBindTable {
+    LowerFoBindTable {
+        names: [ir_empty_name(); 128],
+        sens: [-1; 4096],
+    }
+}
+
 fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
     let names = lowerer_box_empty_local_name_slots()
     let struct_types = lowerer_box_empty_local_name_slots()
@@ -86,6 +119,8 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         array_copy_word_scalar: lowerer_box_local_i64_slots(0),
         wide_bits: lowerer_box_local_i64_slots(0),
         wide_signed: lowerer_box_local_i64_slots(0),
+        // Findings 11 (#2084): see the is_unsigned_int field comment above.
+        is_unsigned_int: lowerer_box_local_i64_slots(0),
         global_bss_offsets: lowerer_box_local_i64_slots(0),
         global_bss_sizes: lowerer_box_local_i64_slots(0),
         is_global: lowerer_box_local_i64_slots(0),
@@ -945,8 +980,7 @@ struct Lowerer {
     fo_expr_sens: [i64; 32],
     fo_pending_sens: [i64; 32],
     fo_bind_count: i64,
-    fo_bind_names: [Name; 128],
-    fo_bind_sens: [i64; 4096],
+    fo_bind: Box<LowerFoBindTable>,
     // Second order. H_jk = d2y/dx_j dx_k over the same 8 seed channels, stored
     // as the upper triangle (36 slots, so_hess_idx below). A slot of -1 means
     // STRUCTURALLY zero, not "unknown" -- measure() and every projection have
@@ -1245,8 +1279,7 @@ fn lowerer_new() -> Lowerer with Alloc, Mut, Panic, Div {
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
         fo_bind_count: 0,
-        fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 4096],
+        fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
@@ -1352,6 +1385,39 @@ fn lower_live_diag_enabled() -> bool with IO, Mut, Panic, Div {
 
 var LOWER_DIAG_BODY_ON: i64 = 0
 var LOWER_DIAG_BODY_CHECKED: i64 = 0
+
+var LOWER_RECV_TRACE_ON: i64 = 0
+var LOWER_RECV_TRACE_CHECKED: i64 = 0
+
+fn lower_recv_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if LOWER_RECV_TRACE_CHECKED == 0 {
+        LOWER_RECV_TRACE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_RECV_TRACE"), "1") {
+            LOWER_RECV_TRACE_ON = 1
+        }
+    }
+    LOWER_RECV_TRACE_ON == 1
+}
+
+// Receiver SHAPE, for the one decision that turns a method call into a body-less
+// function: `if recv_type.len > 0 { mangle(t, m) } else { m }`. An unresolved
+// receiver emits the call against the BARE method name and invents a slot that
+// nothing ever fills -- lower_method_recv_type says exactly this a few hundred
+// lines below ("lowering invents a body-less `er_add` function"). Knowing WHICH
+// shapes still fail is the difference between closing them and guessing.
+fn lower_print_expr_kind(k: ExprKind) with IO, Mut, Panic, Div {
+    if k == ExprKind::ExprIdent { print("ident") }
+    else if k == ExprKind::ExprFieldAccess { print("field") }
+    else if k == ExprKind::ExprCall { print("call") }
+    else if k == ExprKind::ExprMethodCall { print("method_call") }
+    else if k == ExprKind::ExprIndex { print("index") }
+    else if k == ExprKind::ExprUnary { print("unary") }
+    else if k == ExprKind::ExprPath { print("path") }
+    else if k == ExprKind::ExprStructLit { print("struct_lit") }
+    else if k == ExprKind::ExprBlock { print("block") }
+    else if k == ExprKind::ExprIf { print("if") }
+    else { print("other") }
+}
 
 fn lower_body_diag_enabled() -> bool with IO, Mut, Panic, Div {
     if LOWER_DIAG_BODY_CHECKED == 0 {
@@ -1783,8 +1849,7 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
         fo_bind_count: 0,
-        fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 4096],
+        fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
@@ -1847,8 +1912,7 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
         fo_bind_count: 0,
-        fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 4096],
+        fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
@@ -1915,8 +1979,7 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
         fo_bind_count: 0,
-        fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 4096],
+        fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
@@ -2727,7 +2790,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                                 // the real class from the field type, matching
                                                 // ir_fast_summary_register_struct_fields_owned.
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_bool(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
-                                                elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*flist).head.ty)),
+                                                elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty)),
                                                 word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
                                                 named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                                             }
@@ -2913,7 +2976,7 @@ fn lowerer_preseed_external_items_into_acc_mut(
                                                 name_id: ir_intern_name((*flist).head.name),
                                                 index: fc,
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_bool(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
-                                                elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*flist).head.ty)),
+                                                elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty)),
                                                 word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
                                                 named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                                             }
@@ -3005,7 +3068,7 @@ fn lowerer_register_struct_fields_direct_mut(
                     // FIRST-registered field entry — the one actually found by name lookup —
                     // without the i64 marker).
                     is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_bool(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
-                    elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*flist).head.ty)),
+                    elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*flist).head.ty)),
                     word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
                     named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                 }
@@ -3062,7 +3125,7 @@ fn lowerer_register_struct_fields_mut(
                         index: field_idx,
                         // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
                         is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
-                        elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*list).head.ty)),
+                        elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*list).head.ty)),
                         word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
                         named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
                     }
@@ -3257,6 +3320,24 @@ fn lower_type_expr_word_scalar_array_len(te: &TypeExpr) -> i64 with Mut, Panic, 
 fn lower_type_expr_named_type_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeNamed { return ir_empty_name() }
     ir_path_first_name((*te).path)
+}
+
+// A field's ELEMENT type: the array element for `[T; N]`, and the INNER T for
+// `Box<T>`. The two shapes are disjoint -- a field is one or the other, never
+// both -- so they share `elem_type_name_id`, the way tuple0_array_elem_layout
+// already shares a local slot between disjoint shapes.
+//
+// WHY NOT named_type_name_id: it holds the literal "Box" for `f: Box<T>`, and
+// field_is_box_for_struct TESTS for exactly that (is_float == 4 &&
+// ir_name_is_box(named_type_name_id)). Writing T there would resolve the type
+// and silently disable every Box deref -- the auto-deref class that has already
+// been reverted four times. The name stays "Box"; the inner type rides in the
+// slot that is empty for a Box field anyway.
+fn lower_type_expr_elem_or_box_inner_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
+    if lower_type_expr_is_box(te) {
+        return lower_box_inner_type_name(te)
+    }
+    lower_type_expr_array_elem_name(te)
 }
 
 fn lower_array_literal_fixed_len_ref(e: &Expr) -> i64 with Alloc, Mut, Div {
@@ -3930,7 +4011,7 @@ fn ir_fast_summary_register_struct_fields_owned(
                     index: idx,
                     // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
                     is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
-                    elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*list).head.ty)),
+                    elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*list).head.ty)),
                     word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
                     named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
                 }
@@ -4252,11 +4333,15 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).array_copy_word_scalar).values[idx as usize] = 0
         (*(*locals_box).wide_bits).values[idx as usize] = 0
         (*(*locals_box).wide_signed).values[idx as usize] = 0
+        // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
+        (*(*locals_box).is_unsigned_int).values[idx as usize] = 0
         (*(*locals_box).global_bss_offsets).values[idx as usize] = 0
         (*(*locals_box).global_bss_sizes).values[idx as usize] = 0
         (*(*locals_box).is_global).values[idx as usize] = 0
         (*(*locals_box).is_ref).values[idx as usize] = 0
         (*(*locals_box).scalar_kind).values[idx as usize] = 0
+        // Post-#2084: tuple0_array_elem_layout was added on main to track when a
+        // tuple slot-0 is a fixed array, which gates the aggregate-shallow-copy path.
         (*(*locals_box).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
         (*(*locals_box).variance_regs).values[idx as usize] = -1
         // Explicit -1: the locals stack is REUSED across functions (count is
@@ -4465,6 +4550,84 @@ fn lowerer_fresh_reg_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
     (*current_func_box).reg_count = reg + 1
     (*lo).current_func = current_func_box
     reg
+}
+
+// `self` reaches lowering UNTYPED. parser/items.sio:1741 gives the receiver a
+// dummy_type_expr() unless the source wrote `self: T`, so lower_param_struct_type_name
+// answers empty, struct_types[self] stays empty, and every `self.a.b` loses its base
+// type -- the chained field index then falls to the cross-struct first-match scan.
+// Measured: `self.n` came out right (7) while `self.boxed.a/.b/.c` came out 1/0/0
+// against 10/20/30. Not a crash; a wrong number.
+//
+// The owner type is recoverable WITHOUT string surgery. A method's own name is
+// ir_mangle_method_name(T, M) = T + "_" + M, so a registered layout T matches when
+// its bytes prefix the name and the next byte is '_'. LONGEST match wins and an
+// ambiguous tie binds NOTHING: `Foo` and `Foo_bar` can both prefix `Foo_bar_baz`,
+// and choosing between them is exactly how a wrong layout gets picked silently.
+// Refusing leaves today's behaviour in place -- the discipline the 8-byte
+// struct-name collision fix settled on.
+//
+// A FREE function over the table, not a `self` method: every earlier attempt to
+// read a side table through a by-value `self` on a param/field path copied the
+// whole Lowerer and broke the build (see lower_lookup_box_inner_layout, which
+// exists for exactly this reason).
+fn lower_self_owner_type_from_mangled(table: &StructLayoutTable, fn_name: Name) -> Name with Mut, Panic, Div {
+    var best = ir_empty_name()
+    var best_len: i64 = 0
+    var ties: i64 = 0
+    var si: i64 = 0
+    while si < (*table).count {
+        let t = (*table).entries[si as usize].type_name
+        if t.len > 0 && (t.len + 1) < fn_name.len {
+            var k: i64 = 0
+            var same = true
+            while k < t.len {
+                if fn_name.buf[k as usize] != t.buf[k as usize] {
+                    same = false
+                }
+                k = k + 1
+            }
+            if same && (fn_name.buf[t.len as usize] as i64) == 95 {
+                if t.len > best_len {
+                    best = t
+                    best_len = t.len
+                    ties = 0
+                } else if t.len == best_len && !ir_name_eq(t, best) {
+                    ties = ties + 1
+                }
+            }
+        }
+        si = si + 1
+    }
+    if ties > 0 {
+        return ir_empty_name()
+    }
+    best
+}
+
+// Rebind the receiver's struct type once the params are in place. Only the
+// param flagged is_self, and only when it declared no type of its own, so an
+// explicit `self: T` still wins and every non-receiver param is untouched.
+fn lowerer_bind_self_owner_type_mut(
+    lo: &! Lowerer,
+    params: &Option<Box<ParamList>>,
+    fn_name: Name
+) with IO, Mut, Panic, Div, Alloc {
+    var current = params
+    while true {
+        match *current {
+            Some(list) => {
+                if (*list).head.is_self && lower_param_struct_type_name(&(*list).head.ty).len == 0 {
+                    let owner = lower_self_owner_type_from_mangled(&(*(*lo).struct_layouts), fn_name)
+                    if owner.len > 0 {
+                        lowerer_bind_local_struct_type_mut(lo, (*list).head.name, owner)
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
 }
 
 fn lowerer_lower_fn_params_mut(
@@ -4867,6 +5030,16 @@ fn lowerer_lower_fn_item_mut(
     let kernel_param_reg_base = (*(*lo).current_func).reg_count
     if ir_param_list_count_ref(&fd.params) > 0 {
         lowerer_lower_fn_params_mut(lo, &fd.params)
+        // The receiver's type, which the parser did not supply. Bound HERE and
+        // not inside lowerer_lower_fn_params_mut because the mangled name lives
+        // in this frame; the params walker never sees it.
+        //
+        // The first attempt patched lower_fn_params_ref, the by-value twin, and
+        // measured no change at all -- that function is reached only from
+        // lower_fn_item_owned / lower_fn_item_ref, and NEITHER has a caller
+        // anywhere in self-hosted/. Dead twins of a live path is a known shape
+        // here (codegen carries seven compile_ir_function variants, one live).
+        lowerer_bind_self_owner_type_mut(lo, &fd.params, name)
     }
     lower_rss_mark("after_params")
     if lower_live_diag_enabled() {
@@ -5430,6 +5603,54 @@ fn lower_name_is_integer_type(n: Name) -> bool with Div {
     false
 }
 
+// Findings 11 (#2084): the unsigned-restricted variant of
+// lower_name_is_integer_type. Selects u8/u16/u32/u64/usize; rejects every
+// signed integer, float, string, bool, char, named struct. Used by
+// lower_binary_expr_ref to detect u8/u16/u32/u64 operands so the IR bin_op
+// can be flipped to OpUDiv/OpURem/OpUShr before emitting the signed
+// Sar/Idiv path. Without this, u64 `>>`/`/`/`%` above bit 63 silently use
+// signed semantics.
+fn lower_name_is_unsigned_int_type(n: Name) -> bool with Div {
+    if n.len == 2 {
+        // u8 only (i8 is excluded).
+        return n.buf[0] == 117 as i8 && n.buf[1] == 56 as i8
+    }
+    if n.len == 3 {
+        // u16 / u32 / u64 (i-prefixed names are excluded).
+        if n.buf[0] != 117 as i8 { return false }
+        let is_16 = n.buf[1] == 49 as i8 && n.buf[2] == 54 as i8
+        let is_32 = n.buf[1] == 51 as i8 && n.buf[2] == 50 as i8
+        let is_64 = n.buf[1] == 54 as i8 && n.buf[2] == 52 as i8
+        return is_16 || is_32 || is_64
+    }
+    if n.len == 5 {
+        // usize only (isize is excluded).
+        let suffix = n.buf[1] == 115 as i8 && n.buf[2] == 105 as i8
+            && n.buf[3] == 122 as i8 && n.buf[4] == 101 as i8
+        return suffix && n.buf[0] == 117 as i8
+    }
+    false
+}
+
+fn lower_type_expr_is_unsigned_int(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeNamed { return false }
+    lower_name_is_unsigned_int_type(ir_path_first_name((*te).path))
+}
+
+fn lower_opt_type_is_unsigned_int(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_is_unsigned_int(&(*te)),
+        None => false,
+    }
+}
+
+fn lower_cast_type_is_unsigned_int(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ct {
+        Some(te) => lower_type_expr_is_unsigned_int(&(*te)),
+        None => false,
+    }
+}
+
 fn lower_type_expr_is_string(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeNamed { return false }
     let seg = (*te).path.segments
@@ -5940,6 +6161,19 @@ fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
         return ir_path_first_name((*ty).path)
     }
     if (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut {
+        return lower_opt_type_named_name(&(*ty).inner)
+    }
+    // `*mut T` stores its pointee in `inner` exactly as `&T` and `&!T` do
+    // (parser/types.sio:87), and lower_type_expr_is_ref_like already counts it as
+    // ref-like -- it was simply missing from this unwrap. check.sio declares 249
+    // parameters this way, and a `c: *mut Checker` with no struct type is why
+    // `(*c).env.lookup(...)` could not resolve its owner: 140 of the 142
+    // unresolved field receivers in a gen2 self-compile sit in those functions.
+    //
+    // Found by looking at the failing function instead of modelling it. Two
+    // witnesses written against `&! T` -- one single-module, one cross-module --
+    // both PASSED, because `&!` was never the shape that breaks.
+    if (*ty).kind == TypeExprKind::TypeRawPtr {
         return lower_opt_type_named_name(&(*ty).inner)
     }
     ir_empty_name()
@@ -8182,6 +8416,8 @@ impl Lowerer {
                 (*(*stk).array_copy_word_scalar).values[idx as usize] = 0
                 (*(*stk).wide_bits).values[idx as usize] = 0
                 (*(*stk).wide_signed).values[idx as usize] = 0
+                // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
+                (*(*stk).is_unsigned_int).values[idx as usize] = 0
                 (*(*stk).is_ref).values[idx as usize] = 0
                 // Explicit 0: slot may be reused after scope-pop restores count.
                 // Callers that know a positive kind (for-IV int, float local) re-bind.
@@ -8540,6 +8776,22 @@ impl Lowerer {
         false
     }
 
+    // Findings 11 (#2084): look up the per-slot unsigned-int bit set when the
+    // local/param was bound with a u8/u16/u32/u64/usize type annotation.
+    // Default 0 (signed-or-unknown), so i64-style locals stay in the signed
+    // path. Drives the OpDiv→OpUDiv / OpRem→OpURem / OpShr→OpUShr rewrite in
+    // lower_binary_expr_ref.
+    fn lookup_local_is_unsigned_int(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).is_unsigned_int).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
     fn bind_local_scalar_kind(self, name: Name, kind: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         var stk = lo.locals
@@ -8547,6 +8799,27 @@ impl Lowerer {
         while i >= 0 {
             if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
                 (*(*stk).scalar_kind).values[i as usize] = kind
+                lo.locals = stk
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    // Findings 11 (#2084): stamp is_unsigned_int=1 on the local whose
+    // type annotation is u8/u16/u32/u64/usize. Drives the per-binary rewrite
+    // in lower_binary_expr_ref. Walks the local stack from the top so an
+    // inner-shadowing binding (let n: u64 = ... ; { let n = ... ; ... })
+    // is correctly marked or unmarked. No-op for names not yet bound
+    // (forward reference cases).
+    fn bind_local_is_unsigned_int(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                (*(*stk).is_unsigned_int).values[i as usize] = 1
                 lo.locals = stk
                 return lo
             }
@@ -8668,7 +8941,7 @@ impl Lowerer {
         var lo = self
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.fo_bind).names[i as usize], name) {
                 return (lo, i)
             }
             i = i + 1
@@ -8677,12 +8950,14 @@ impl Lowerer {
             return (lo, 0 - 1)
         }
         let idx = lo.fo_bind_count
-        lo.fo_bind_names[idx as usize] = name
+        var fb0 = lo.fo_bind
+        (*fb0).names[idx as usize] = name
         var c: i64 = 0
         while c < 32 {
-            lo.fo_bind_sens[(idx * 32 + c) as usize] = 0 - 1
+            (*fb0).sens[(idx * 32 + c) as usize] = 0 - 1
             c = c + 1
         }
+        lo.fo_bind = fb0
         lo.fo_bind_count = idx + 1
         (lo, idx)
     }
@@ -8707,13 +8982,15 @@ impl Lowerer {
             // Same aliasing rule as alloc_variance_slot_for_local: a channel already
             // bound points at the RHS's vreg, so copy its value into a private reg
             // rather than reusing it as this local's slot.
-            let existing = lo.fo_bind_sens[(row * 32 + k) as usize]
+            let existing = (*lo.fo_bind).sens[(row * 32 + k) as usize]
             let z = lo.emit_f64_const(0.0)
             lo = z.0
             if existing >= 0 {
                 lo = lo.emit(ir_copy(z.1, existing))
             }
-            lo.fo_bind_sens[(row * 32 + k) as usize] = z.1
+            var fb1 = lo.fo_bind
+            (*fb1).sens[(row * 32 + k) as usize] = z.1
+            lo.fo_bind = fb1
             k = k + 1
         }
         lo
@@ -8729,7 +9006,7 @@ impl Lowerer {
         var row: i64 = 0 - 1
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.fo_bind).names[i as usize], name) {
                 row = i
                 i = lo.fo_bind_count
             } else {
@@ -8742,7 +9019,7 @@ impl Lowerer {
         var any: bool = false
         var k: i64 = 0
         while k < 32 {
-            let slot = lo.fo_bind_sens[(row * 32 + k) as usize]
+            let slot = (*lo.fo_bind).sens[(row * 32 + k) as usize]
             if slot >= 0 {
                 any = true
                 let src = lo.fo_expr_sens[k as usize]
@@ -9383,7 +9660,7 @@ impl Lowerer {
         var row: i64 = 0 - 1
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.fo_bind).names[i as usize], name) {
                 row = i
                 i = lo.fo_bind_count
             } else {
@@ -9406,10 +9683,12 @@ impl Lowerer {
         // Update existing bind if present.
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.fo_bind).names[i as usize], name) {
                 var k: i64 = 0
                 while k < 32 {
-                    lo.fo_bind_sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+                    var fb2 = lo.fo_bind
+                    (*fb2).sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+                    lo.fo_bind = fb2
                     k = k + 1
                 }
                 return lo
@@ -9420,10 +9699,14 @@ impl Lowerer {
             return lo
         }
         let idx = lo.fo_bind_count
-        lo.fo_bind_names[idx as usize] = name
+        var fb3 = lo.fo_bind
+        (*fb3).names[idx as usize] = name
+        lo.fo_bind = fb3
         var k2: i64 = 0
         while k2 < 32 {
-            lo.fo_bind_sens[(idx * 32 + k2) as usize] = lo.fo_expr_sens[k2 as usize]
+            var fb4 = lo.fo_bind
+            (*fb4).sens[(idx * 32 + k2) as usize] = lo.fo_expr_sens[k2 as usize]
+            lo.fo_bind = fb4
             k2 = k2 + 1
         }
         lo.fo_bind_count = idx + 1
@@ -9453,10 +9736,10 @@ impl Lowerer {
         var lo = self
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.fo_bind).names[i as usize], name) {
                 var k: i64 = 0
                 while k < 32 {
-                    lo.fo_expr_sens[k as usize] = lo.fo_bind_sens[(i * 32 + k) as usize]
+                    lo.fo_expr_sens[k as usize] = (*lo.fo_bind).sens[(i * 32 + k) as usize]
                     k = k + 1
                 }
                 return lo
@@ -12535,6 +12818,30 @@ impl Lowerer {
         false
     }
 
+    // Inner T of a `Box<T>` FIELD, or empty. Reads the slot the array-element
+    // type would occupy; the Box test is on named_type_name_id, which still says
+    // "Box", so this cannot answer for a plain array field.
+    fn field_box_inner_type_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
+        if type_name.len <= 0 { return ir_empty_name() }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        if ir_name_is_box(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id)) {
+                            return ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].elem_type_name_id)
+                        }
+                        return ir_empty_name()
+                    }
+                    fi = fi + 1
+                }
+            }
+            si = si + 1
+        }
+        ir_empty_name()
+    }
+
     fn field_named_type_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
         if type_name.len <= 0 { return ir_empty_name() }
         var si: i64 = 0
@@ -12856,6 +13163,14 @@ impl Lowerer {
                 var fi: i64 = 0
                 while fi < (*self.struct_layouts).entries[si as usize].field_count {
                     if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        // elem_type_name_id now also carries the inner T of a
+                        // `Box<T>` field. This asks for an ARRAY element type, so
+                        // a Box answer would be a new claim where the answer used
+                        // to be empty. Keep it empty: this reader's behaviour is
+                        // unchanged by the widening, deliberately.
+                        if ir_name_is_box(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id)) {
+                            return ir_empty_name()
+                        }
                         return ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].elem_type_name_id)
                     }
                     fi = fi + 1
@@ -12903,11 +13218,83 @@ impl Lowerer {
                 _ => {}
             }
         }
+        // `(*p).field` -- the field's owner is a DEREF, and this resolver had no
+        // ExprUnary arm (its sibling lower_method_recv_type got one in #2313).
+        // Measured: 140 of 142 unresolved field receivers report owner=<none>,
+        // and fldty=<none> follows from it -- field_named_type_for_struct returns
+        // empty on an empty type name, so the two were never independent.
+        if (*expr).kind == ExprKind::ExprUnary && (*expr).un_op == UnaryOp::OpDeref {
+            match (*expr).left {
+                Some(operand) => {
+                    if (*operand).kind == ExprKind::ExprIdent {
+                        let ost = self.lookup_local_struct_type((*operand).name)
+                        if ir_name_is_box(ost) {
+                            let bl = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*operand).name)
+                            if bl >= 0 && bl < (*self.struct_layouts).count {
+                                return (*self.struct_layouts).entries[bl as usize].type_name
+                            }
+                            return ir_empty_name()
+                        }
+                        return ost
+                    }
+                    return self.expr_receiver_struct_type_ref(&(*operand))
+                }
+                _ => {}
+            }
+            return ir_empty_name()
+        }
+        // `pair.0.method()` -- the receiver is a TUPLE SLOT, not a named field.
+        // The field-access arm below asks field_named_type_for_struct for a field
+        // literally called "0", which no struct has, so it answered empty and the
+        // method call fell to the BARE name. #2291 already records the slot's
+        // struct on the tuple local; that record was read at the let binding and
+        // nowhere else. This is the same lookup, one consumer over -- the third
+        // time in this stack that machinery existed and simply was not asked.
+        if (*expr).kind == ExprKind::ExprFieldAccess {
+            let tix = lower_name_tuple_index((*expr).name)
+            if tix >= 0 {
+                match (*expr).left {
+                    Some(tb) => {
+                        if (*tb).kind == ExprKind::ExprIdent {
+                            let tl = self.lookup_local_tuple_struct_layout((*tb).name, tix)
+                            if tl >= 0 && tl < (*self.struct_layouts).count {
+                                return (*self.struct_layouts).entries[tl as usize].type_name
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         if (*expr).kind == ExprKind::ExprFieldAccess {
             match (*expr).left {
                 Some(owner) => {
                     let owner_type = self.expr_receiver_struct_type_ref(&(*owner))
-                    return self.field_named_type_for_struct(owner_type, (*expr).name)
+                    let named = self.field_named_type_for_struct(owner_type, (*expr).name)
+                    // `self.module.fn_count` is where this mattered. The recursion
+                    // above already resolved the owner to Lowerer correctly; it
+                    // then stopped at the literal "Box", the declared type of
+                    // `module: Box<IrModule>`, which names no layout. The caller
+                    // reads a non-empty name as TYPED, so field_idx_for_base_ref
+                    // called field_idx_from_name("Box", "fn_count"), found no such
+                    // layout, and fell through to the cross-struct first-match
+                    // scan. `fn_count` is index 1 in IrModule and index 2 in four
+                    // other structs (HlirModule, CompilerIrRoundtripResult,
+                    // A64PreviewCompiler x2), so the loop bound in
+                    // find_or_add_fn_id was read from `string_table` -- a value
+                    // large enough that the scan could never end. It walked the
+                    // 16384-entry function array and dereferenced the first word
+                    // past it. That is the gen2 SIGSEGV at module 7.
+                    //
+                    // Unwrapping the Box here is the whole repair. Falling back to
+                    // `named` keeps every other chain exactly as it was.
+                    if ir_name_is_box(named) {
+                        let inner = self.field_box_inner_type_for_struct(owner_type, (*expr).name)
+                        if inner.len > 0 {
+                            return inner
+                        }
+                    }
+                    return named
                 }
                 None => {}
             }
@@ -13071,6 +13458,55 @@ impl Lowerer {
             }
             _ => 0,
         }
+    }
+
+    // Findings 11 (#2084): `opt_expr_is_unsigned_int_ref` walks an expression to
+    // determine whether it is a u8/u16/u32/u64/usize-typed result. Used as one
+    // half of the "both operands unsigned?" gate in lower_binary_expr_ref that
+    // decides whether to emit OpUDiv/OpURem/OpUShr instead of OpDiv/OpRem/OpShr.
+    //
+    // Coverage matrix mirrors the cases of expr_result_is_float_ref:
+    //   - ExprCast with cast_type = u8/u16/u32/u64/usize → true
+    //   - ExprIdent whose local was bound with such a type        → true
+    //   - ExprBinary                                            → propagate from left
+    //   - everything else (IntLit, FloatLit, BoolLit, StringLit) → false
+    //
+    // A boolean-literal, integer-literal, or float-literal CANNOT carry
+    // width+sign info at this lowering level — the only way a literal
+    // becomes unsigned is via an enclosing `as u64` cast, which lowers to
+    // the ExprCast case above.
+    fn opt_expr_is_unsigned_int_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(expr) => self.expr_is_unsigned_int_ref(&(*expr)),
+            None => false,
+        }
+    }
+
+    fn expr_is_unsigned_int_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprCast {
+            return lower_cast_type_is_unsigned_int(&(*e).cast_type)
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_is_unsigned_int((*e).name) == 1
+        }
+        // An integer literal standing alone has no width/sign of its own; the
+        // textual parser writes ExprIntLit with no typed annotation. We leave
+        // this case as `false` here and let the binary-op call site ASK the
+        // contextual question ("is the OTHER operand unsigned, and this is a
+        // bare integer literal?") -- that is handled in
+        // lower_binary_expr_ref via expr_is_int_literal_ref and the
+        // `is_unsigned_or_intlit_paired_with_unsigned` semantics applied
+        // there. Returning false here keeps the helper from overclaiming on
+        // expressions that have no operand context at all.
+        if (*e).kind == ExprKind::ExprBinary {
+            // The result of an integer binary expression on unsigned operands is
+            // unsigned (modulo a signed widening cast on a sibling — out of
+            // scope for now since the unsigned flag we track propagates from
+            // the literal binding via let-typed locals; a nested let n: u64 =
+            // foo() + bar() will be re-tagged when the inner if-let lands).
+            return self.opt_expr_is_unsigned_int_ref(&(*e).left)
+        }
+        false
     }
 
     fn expr_result_is_float_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
@@ -13569,7 +14005,7 @@ impl Lowerer {
                             // Marker 3 is consumed only by field_is_int_* (println
                             // dispatch), so this is inert for float/array/store paths.
                             is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
-                            elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*list).head.ty)),
+                            elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*list).head.ty)),
                             word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
                             named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
                         }
@@ -14312,6 +14748,8 @@ impl Lowerer {
                         (*(*locals).array_copy_word_scalar).values[idx as usize] = if param_word_scalar { 1 } else { 0 }
                         (*(*locals).wide_bits).values[idx as usize] = 0
                         (*(*locals).wide_signed).values[idx as usize] = 0
+                        // Findings 11 (#2084): stamp is_unsigned_int=1 when the param is u8/u16/u32/u64/usize.
+                        (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).is_ref).values[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).box_inner_layout).values[idx as usize] = if lower_type_expr_is_box(&(*list).head.ty) { lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_inner_type_name(&(*list).head.ty)) } else { 0 - 1 }
                         if lower_type_expr_is_box(&(*list).head.ty) && str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
@@ -15579,6 +16017,18 @@ impl Lowerer {
                 _ => {}
             }
         }
+        // Findings 11 (#2084): if the let type annotation is u8/u16/u32/u64/usize,
+        // stamp the local so lower_binary_expr_ref can flip the IR bin_op to
+        // OpUDiv/OpURem/OpUShr before signed Sar/Idiv emission. Re-uses the
+        // LowerLocalStack.is_unsigned_int slot reserved near wide_signed.
+        match s.ty {
+            Some(ann_ty_unsigned) => {
+                if lower_type_expr_is_unsigned_int(&(*ann_ty_unsigned)) {
+                    lo = lo.bind_local_is_unsigned_int(s.name)
+                }
+            }
+            _ => {}
+        }
         // Annotation TypeKnowledge[T] → bind local as Knowledge for FO GUM field/variance paths
         match s.ty {
             Some(ann_ty) => {
@@ -15704,6 +16154,31 @@ impl Lowerer {
                     // Tuple-let desugaring emits `let arr = __tup.0`. The call
                     // binding above recorded the named element layout for slot
                     // 0; project it onto `arr` so `arr[i].field` stays typed.
+                    // `let c = pair.0` where the tuple slot holds a named struct.
+                    // Measured on a gen2 self-compile: 1562 of 1856 unresolved
+                    // method receivers are idents, and the top ones are `lo`, `c`,
+                    // `lo1..lo4` -- locals rebound from exactly this shape, 824
+                    // times across check.sio and lower.sio. An unresolved receiver
+                    // sends the call to the BARE method name, which invents a
+                    // body-less function the backend then refuses (empty_stub_ud2).
+                    // The slot's struct is already recorded on the tuple local; it
+                    // simply was not read here.
+                    let tsi = lower_name_tuple_index((*expr_box).name)
+                    if tsi >= 0 {
+                        match (*expr_box).left {
+                            Some(tb) => {
+                                if (*tb).kind == ExprKind::ExprIdent {
+                                    let tsl = lo.lookup_local_tuple_struct_layout((*tb).name, tsi)
+                                    if tsl >= 0 && tsl < (*lo.struct_layouts).count {
+                                        lo = lo.bind_local_struct_type(
+                                            s.name,
+                                            (*lo.struct_layouts).entries[tsl as usize].type_name)
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     if lower_name_tuple_index((*expr_box).name) == 0 {
                         match (*expr_box).left {
                             Some(tuple_base) => {
@@ -15763,6 +16238,17 @@ impl Lowerer {
                     let ret_name = lo.return_struct_name_for_fn_id(fn_id)
                     if ret_name.len > 0 {
                         lo = lo.bind_local_struct_type(s.name, ret_name)
+                    }
+                    // `let pair = c.method(...)` where the method returns
+                    // `(Self, T)`. The plain-call branch above records the tuple
+                    // slot's struct; method syntax did not, and method syntax is
+                    // how this compiler reaches almost all of them.
+                    let m_slot = lo.return_tuple_struct_slot_for_fn_id(fn_id)
+                    if m_slot >= 0 {
+                        let m_layout = lower_struct_layout_index_of(
+                            &(*lo.struct_layouts),
+                            lo.return_tuple_struct_name_for_fn_id(fn_id))
+                        lo = lo.bind_local_tuple_struct(s.name, m_layout, m_slot)
                     }
                 } else if (*expr_box).kind == ExprKind::ExprIdent {
                     // `let b = nx`: propagate the source variable's struct type (e.g. a Box
@@ -18549,7 +19035,60 @@ impl Lowerer {
                 return (lo3.emit(ir_wide_cmp(dst, lhs, rhs, limbs, cmp_op)), dst)
             }
         }
-        let lo4 = lo3.emit(ir_binop_typed(dst, lhs, e.bin_op, rhs, lhs_expr_is_float, rhs_expr_is_float))
+        // Findings 11 (#2084): if BOTH operands of a /, %, or >> binary op
+        // resolve to a u8/u16/u32/u64/usize-typed expression, flip the IR
+        // bin_op to the unsigned counterpart BEFORE emitting
+        // ir_binop_typed. The signed Sar/Idiv path would otherwise give
+        // silently wrong magnitudes on operands with bit 63 set
+        // (0xFFFF...FFFF >> 1 = 0xFFFF...FFFF under sar; / 2 = 0 under
+        // idiv). Wide ops (bits>64) are handled separately by the
+        // ir_wide_* path above.
+        //
+        // Extension (covers `let n: u64 = 0x8000...; n / 2`): an integer
+        // literal on the RHS (or LHS) that fits in 64 bits adopts the
+        // unsigned interpretation of its sibling -- the textual parser
+        // cannot tag a bare `2` as u64, so without this promotion the most
+        // common u64 shift/divmod patterns would silently stay signed.
+        //
+        // Guard is `(both-typed-unsigned) || (literal paired with typed
+        // unsigned)`. Two literals with neither typed stay signed (no
+        // disjunct fires). One typed unsigned + one signed-expression
+        // (e.g. `let sh: u8 = 1; (0-8) >> sh`) also stays signed -- the
+        // typed operand alone does NOT flip the op; the contextual
+        // promotion only applies to bare literals. Mixing two typed
+        // operands of disagreeing signedness is left to the const-prop /
+        // checker layer, not silently coerced here. (Review by
+        // agourakis82 on PR #2286: the prior form
+        // `either_unsigned_p && (rhs_unsigned_p || lhs_unsigned_p || ...)`
+        // collapsed to `either_unsigned_p` and broke signed shifts whose
+        // shift-amount was a u8/usize local.)
+        var final_op = e.bin_op
+        let lhs_unsigned_p = lo3.opt_expr_is_unsigned_int_ref(&e.left)
+        let rhs_unsigned_p = match e.right {
+            Some(rbox) => lo3.expr_is_unsigned_int_ref(&(*rbox)),
+            None => false,
+        }
+        let lhs_is_intlit_p = match e.left {
+            Some(lbox) => (*lbox).kind == ExprKind::ExprIntLit,
+            None => false,
+        }
+        let rhs_is_intlit_p = match e.right {
+            Some(rbox) => (*rbox).kind == ExprKind::ExprIntLit,
+            None => false,
+        }
+        let both_typed_unsigned_p = lhs_unsigned_p && rhs_unsigned_p
+        let literal_pair_with_unsigned_p =
+            (lhs_is_intlit_p && rhs_unsigned_p) || (rhs_is_intlit_p && lhs_unsigned_p)
+        if both_typed_unsigned_p || literal_pair_with_unsigned_p {
+            if e.bin_op == BinaryOp::OpDiv {
+                final_op = BinaryOp::OpUDiv
+            } else if e.bin_op == BinaryOp::OpRem {
+                final_op = BinaryOp::OpURem
+            } else if e.bin_op == BinaryOp::OpShr {
+                final_op = BinaryOp::OpUShr
+            }
+        }
+        let lo4 = lo3.emit(ir_binop_typed(dst, lhs, final_op, rhs, lhs_expr_is_float, rhs_expr_is_float))
         (lo4, dst)
     }
 
@@ -19132,6 +19671,46 @@ impl Lowerer {
                 if (*recv).kind == ExprKind::ExprFieldAccess {
                     return self.expr_receiver_struct_type_ref(&(*recv))
                 }
+                // `(*p).method()`. There was no ExprUnary case at all, so a deref
+                // receiver came back empty and the call went to the BARE method
+                // name -- which invents a body-less function, exactly as the
+                // comment above this one warns. Measured on a gen2 self-compile:
+                // 40 such sites, and the bucket did not move at all when the
+                // ident and field shapes were fixed, so it is a cause of its own.
+                //
+                // 47 occurrences in check.sio and lower.sio, all `(*lo).emit(...)`
+                // / `(*c).check_items(...)`: a `&! T` parameter dereferenced to
+                // call a method. lower_param_struct_type_name already unwraps
+                // TypeReference/TypeRefMut, so the operand's own struct type IS
+                // the answer -- except for a Box, where the literal "Box" names no
+                // layout and the inner T has to come from box_inner_layout.
+                //
+                // Read through the locals Box, not a by-value `self` lookup: the
+                // same discipline lower_lookup_box_inner_layout exists for.
+                if (*recv).kind == ExprKind::ExprUnary && (*recv).un_op == UnaryOp::OpDeref {
+                    match (*recv).left {
+                        Some(operand) => {
+                            if (*operand).kind == ExprKind::ExprIdent {
+                                let ost = self.lookup_local_struct_type((*operand).name)
+                                if ir_name_is_box(ost) {
+                                    let bl = lower_lookup_box_inner_layout(self.locals, self.scope_depth, (*operand).name)
+                                    if bl >= 0 && bl < (*self.struct_layouts).count {
+                                        return (*self.struct_layouts).entries[bl as usize].type_name
+                                    }
+                                    return ir_empty_name()
+                                }
+                                if ost.len > 0 {
+                                    return ost
+                                }
+                            }
+                            if (*operand).kind == ExprKind::ExprFieldAccess {
+                                return self.expr_receiver_struct_type_ref(&(*operand))
+                            }
+                        }
+                        _ => {}
+                    }
+                    return ir_empty_name()
+                }
                 // Root 2 chain residual: method call on a method result.
                 // `a.add(&b).get()` — outer mangling needs the inner method's
                 // return_struct_name (E), not an empty name that invents bare "get".
@@ -19444,6 +20023,79 @@ impl Lowerer {
             }
         }
         let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, e.name) } else { e.name }
+        if recv_type.len == 0 && lower_recv_trace_enabled() {
+            print("recv_unresolved kind=")
+            match e.left {
+                Some(rv) => {
+                    lower_print_expr_kind((*rv).kind)
+                    // The receiver's NAME when it is an ident, and the enclosing
+                    // function's name, because the two together say whether the
+                    // gap is the local or the frame it sits in: a body lowered
+                    // under a BARE name never gets its `self` typed (the owner is
+                    // recovered from `T_method`), so every local copied from self
+                    // inside it is untyped too, and every method call on one of
+                    // them lands on the bare name in turn.
+                    if (*rv).kind == ExprKind::ExprIdent {
+                        print(" recv=")
+                        print(str_from_bytes((*rv).name.buf, (*rv).name.len))
+                    }
+                    // For a FIELD receiver the field's own name and the base's
+                    // shape are what say where the chain broke: an empty owner
+                    // type, or an owner that resolved but whose field carries no
+                    // declared named type.
+                    if (*rv).kind == ExprKind::ExprFieldAccess {
+                        print(" fld=")
+                        print(str_from_bytes((*rv).name.buf, (*rv).name.len))
+                        print(" base=")
+                        match (*rv).left {
+                            Some(bb) => {
+                                lower_print_expr_kind((*bb).kind)
+                                if (*bb).kind == ExprKind::ExprUnary {
+                                    if (*bb).un_op == UnaryOp::OpDeref { print(":deref") }
+                                    else if (*bb).un_op == UnaryOp::OpRef { print(":ref") }
+                                    else if (*bb).un_op == UnaryOp::OpRefMut { print(":refmut") }
+                                    else { print(":otherop") }
+                                }
+                                if (*bb).kind == ExprKind::ExprIdent {
+                                    print(":")
+                                    print(str_from_bytes((*bb).name.buf, (*bb).name.len))
+                                }
+                                // What the resolver ACTUALLY returns for this base,
+                                // and then what the field's declared type comes back
+                                // as. Three fixes were tried by reasoning about which
+                                // of these two steps fails and all three measured
+                                // zero; this asks the code instead.
+                                let owner_ty = self.expr_receiver_struct_type_ref(&(*bb))
+                                print(" owner=")
+                                if owner_ty.len > 0 {
+                                    print(str_from_bytes(owner_ty.buf, owner_ty.len))
+                                } else {
+                                    print("<none>")
+                                }
+                                let fld_ty = self.field_named_type_for_struct(owner_ty, (*rv).name)
+                                print(" fldty=")
+                                if fld_ty.len > 0 {
+                                    print(str_from_bytes(fld_ty.buf, fld_ty.len))
+                                } else {
+                                    print("<none>")
+                                }
+                            }
+                            _ => {
+                                print("none")
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    print("none")
+                }
+            }
+            print(" method=")
+            print(str_from_bytes(e.name.buf, e.name.len))
+            print(" in=")
+            print(str_from_bytes((*self.current_func).name.buf, (*self.current_func).name.len))
+            print("\n")
+        }
         let pair_b = self.lower_opt_expr_ref(&e.left)
         var lo1 = pair_b.0
         var base_reg = pair_b.1
