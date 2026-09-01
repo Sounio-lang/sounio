@@ -416,3 +416,80 @@ measures blast radius, not defect count.
 **That the unoptimised path is correct.** These comparisons are `-O` against no
 `-O` on the same engine. Where the two disagree, the flag changed something; that
 the default build is right is assumed here, not shown.
+
+## Fourth defect: copy_prop kept a record past a write to its SOURCE
+
+`ocp_mfi_copy_prop` records "read `src` instead of `dst`" for an `IrCopy` and
+invalidates that record when `dst` is written. It never invalidated it when
+`src` was written. A swap through a temporary writes exactly that register
+between the copy and its use:
+
+    tv = v0     recorded: read v0 instead of tv
+    v0 = v1     v0 changes; the record above is now false
+    v1 = tv     rewritten to `v1 = v0`, so both hold the new value
+
+Four peels in this file have now been found keeping state across an event that
+invalidates it, and each one's neighbour already handled that same event:
+
+    ocp_mfi_dse        last write per register     missed: calls
+    ocp_mfi_cse        computed expressions        missed: block boundaries
+    ocp_mfi_dedup_imm  immediates per register     missed: writes (the key)
+    ocp_mfi_copy_prop  copies per register         missed: writes (the VALUE)
+
+### How it was found, and what nearly stopped it
+
+Two source-level reproducers were written and both were wrong, because the
+instrument used to attribute the divergence to a peel was itself lying. The
+`SOUNIO_OCP_SKIP_*` switches were served by TWO definitions of
+`module_frontend_load_ocp_skip_mask` in one file, with different bit numbering;
+the first wins, and it was the one that disagreed with `ocp_skip()`. Ten of the
+twelve names disabled a different peel than they name. Fixed separately, and
+measured rather than read: `SOUNIO_OCP_SKIP_DCE_LOOP=1` (present only in the
+dead table) left the binary byte-identical while `SOUNIO_OCP_SKIP_DCE=1`
+changed it, and afterwards the exact inverse.
+
+A scalar swap of literals does NOT reproduce this. `dedup_imm` and `const_fold`
+run first and fold it away; the values have to be opaque. Reduction from
+`gum_reporting.sio` -- whose selection sort ranked its second contributor wrong
+with the top two entries holding the same value -- gave the shape directly.
+
+The first version of the fix indexed its guard array without a bounds check and
+SIGSEGV'd the compiler on `gum_reporting`, AFTER building itself cleanly. A
+green self-build only exercises the paths the compiler itself takes.
+
+### Measured after the fix
+
+Full sweep over `tests/run-pass`, same compiler built twice, differing only in
+`-O`, with `SOUNIO_STDLIB_PATH` pinned to the worktree:
+
+    compared                  1725
+    divergent                   26   (29 before this fix)
+    of which output-changing     0   (1 before this fix)
+    new divergences              0
+
+The silent class is now empty. The three that closed are `gum_reporting.sio`,
+`test_ot_hand_problems.sio` and `test_rational_exact.sio`.
+
+**A first pass at this said 29 -> 18 and it was wrong.** Eight of the eleven
+files that vanished from the divergence list had not been fixed; their base
+build failed, so the sweep skipped them silently. The cause was environmental --
+module resolution reaching `/workspace/sounio/stdlib`, a shared checkout that
+was broken at the time -- and with the path pinned they still diverge. A file
+that leaves a divergence list has either been fixed or stopped being measured,
+and only checking it one by one distinguishes those.
+
+### The 26 that remain are one family
+
+All 26 are wide-integer arithmetic: 25 `lorenz_i256_*` plus
+`wide_i128_fn_abi_known_failure`. None changes output; all change exit status.
+
+They are NOT `opt_cleanup` peels. On a clean case
+(`lorenz_i256_step1_taylor2_radius_artifact_tiny`, which passes without `-O` and
+fails with it) disabling each of the thirteen peels one at a time fixes none of
+them, so the cause is a different `-O` stage and outside what this mask can
+reach.
+
+`lorenz_i256_fixed_step` is a trap for anyone continuing here: it is annotated
+`known-failure`, returns 4 without `-O` and 0 with it. The optimiser is right
+there and the default path is wrong, which inverts this document's standing
+assumption that the unoptimised build is the reference.
