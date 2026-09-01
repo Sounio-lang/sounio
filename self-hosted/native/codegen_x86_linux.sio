@@ -1304,6 +1304,7 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_is_heap_free(*name) { return 24 }
     if name_is_malloc(*name) { return 23 }
     if name_is_free(*name) { return 24 }
+    if name_is_read_byte(*name) { return 39 }
     if name_is_getpid(*name) { return 28 }
     if name_is_getppid(*name) { return 29 }
     if name_is_exit(*name) { return 30 }
@@ -1382,6 +1383,9 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_str_slice3((*func).name) { return 54 }
     if name_is_starts_with((*func).name) { return 9 }
     if name_is_str_concat((*func).name) { return 10 }
+    // The refusal path asks THIS function, not the by-name one: an empty stub
+    // is what reaches the backend, so a builtin only exists if it is named here.
+    if name_is_read_byte((*func).name) { return 39 }
     if name_is_read_file((*func).name) { return 11 }
     if name_is_write_file((*func).name) { return 12 }
     if name_is_file_size((*func).name) { return 13 }
@@ -4148,6 +4152,20 @@ fn emit_builtin_syscall6_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // EXECUTION witnesses (not just "no longer E250") gate this in CI.
 // ============================================================================
 
+fn name_is_read_byte(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 9 { return false }
+    if n.buf[0] != 114 as i8 { return false }  // 'r'
+    if n.buf[1] != 101 as i8 { return false }  // 'e'
+    if n.buf[2] != 97 as i8 { return false }   // 'a'
+    if n.buf[3] != 100 as i8 { return false }  // 'd'
+    if n.buf[4] != 95 as i8 { return false }   // '_'
+    if n.buf[5] != 98 as i8 { return false }   // 'b'
+    if n.buf[6] != 121 as i8 { return false }  // 'y'
+    if n.buf[7] != 116 as i8 { return false }  // 't'
+    if n.buf[8] != 101 as i8 { return false }  // 'e'
+    true
+}
+
 fn name_is_getpid(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 6 { return false }
     if n.buf[0] != 103 as i8 { return false }  // 'g'
@@ -4340,6 +4358,57 @@ fn emit_builtin_write_offset64_into(nc: &! NativeCompiler) with Mut, Panic, Div 
 
 // getpid()/getppid(): raw syscalls 39/110; result in rax per the Sounio
 // integer-return convention.
+// read_byte() -> i64: one byte from stdin, -1 at EOF. The checker binds the
+// name as an import-unknown and lean_single emits it inline, so a call reached
+// a body-less function here and the backend refused it with ud2. Mirrors
+// lean_single's emit_read_byte_x86 byte for byte.
+fn emit_builtin_read_byte_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xec)
+    nc_emit_byte(nc, 0x08)  // sub rsp, 8
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xff)  // xor rdi, rdi  (fd = 0)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8d)
+    nc_emit_byte(nc, 0x34)
+    nc_emit_byte(nc, 0x24)  // lea rsi, [rsp]
+    nc_emit_byte(nc, 0xba)
+    nc_emit_byte(nc, 0x01)
+    nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x00)
+    nc_emit_byte(nc, 0x00)  // mov edx, 1
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xc0)  // xor rax, rax  (SYS_read)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x05)  // syscall
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_byte(nc, 0xc0)  // test rax, rax
+    nc_emit_byte(nc, 0x7e)
+    nc_emit_byte(nc, 0x06)  // jle +6 -> the -1 store below
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0xb6)
+    nc_emit_byte(nc, 0x04)
+    nc_emit_byte(nc, 0x24)  // movzx eax, byte [rsp]
+    nc_emit_byte(nc, 0xeb)
+    nc_emit_byte(nc, 0x07)  // jmp +7 -> past the -1 store
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xc7)
+    nc_emit_byte(nc, 0xc0)
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0xff)  // mov rax, -1  (EOF)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_byte(nc, 0xc4)
+    nc_emit_byte(nc, 0x08)  // add rsp, 8
+    nc_emit_ret(nc)
+}
+
 fn emit_builtin_getpid_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_mov_rax_imm(nc, 39)
     nc_emit_syscall(nc)
@@ -7580,6 +7649,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 25 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 26 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 27 { emit_builtin_syscall6_into(nc); return }
+    if builtin_id == 39 { emit_builtin_read_byte_into(nc); return }
     if builtin_id == 28 { emit_builtin_getpid_into(nc); return }
     if builtin_id == 29 { emit_builtin_getppid_into(nc); return }
     if builtin_id == 30 { emit_builtin_exit_into(nc); return }
