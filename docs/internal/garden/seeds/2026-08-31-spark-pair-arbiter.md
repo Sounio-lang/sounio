@@ -231,19 +231,20 @@ The Sounio policy must refuse at least:
   the boundary. Undeclared root GPU processes are inside it and must be denied.
 - Enabling MIG or device-plugin time sharing invalidates the one-GPU-one-owner
   proof and must fail the preflight gate.
-- Phase 1 has no Sounio-authorized decommission action yet. Deleting the
-  DaemonSet must not silently re-enable legacy GPU services.
+- Phase 1 still has no material decommission dispatcher. The separate Sounio
+  frame `9026` now defines an effect-free plan; deleting the DaemonSet must not
+  silently re-enable legacy GPU services.
 
 ## Reversible decommission seed
 
 The phrase to preserve is: **removing the DaemonSet is not decommission**.
 Decommission is a custody transfer from the active scheduler arbiter to one
-explicit terminal owner. The proposed concept
+explicit terminal owner. The executable concept
 `SOUNIO-REVERSIBLE-COMPUTE-CUSTODY` defines that owner as
 `LEGACY_HOST_OWNED`, with Slurm drained and its GPU workers absent, Kubernetes
 GPU capacity withdrawn, and only the exact snapshotted legacy services restored.
 
-The proposed path is:
+The frozen plan path is:
 
 ```text
 SLURM_OWNED
@@ -259,12 +260,14 @@ pair. It cannot restore either scheduler or a legacy service from absence,
 timeout, Lease expiry, or a one-node observation. Recommission is the reverse
 Sounio-authorized transfer, not manual reconstruction after deletion.
 
-This remains `Garden` until the Mac-side inventory supplies the exact two-node
-pre-install service and restart-policy snapshot. The first executable bridge is
-not an uninstall script: it is a Sounio decision surface and negative vector set
-for the proposed states, owner modes, snapshot binding, pair-wide prepare/commit,
-and recovery refusals. Material restore code may exist only after that Sounio
-artifact is frozen by hash.
+The Garden phase is complete. Frame `9026` now has 69 executable Sounio vectors,
+a first-executable receipt, a semantic freeze, and a parity-open receipt. It is
+not an uninstall script: every result says `effect=NONE`, and the unchanged
+frame `9025` controller rejects its schema, action namespace, and output prefix.
+
+`CLAIM_READY` remains blocked until the Mac-side inventory supplies the exact
+two-node pre-install service and restart-policy snapshot, replay evidence exists,
+and a post-freeze material parity implementation passes its negative gates.
 
 The full draft semantic contract is
 [`spark-pair-reversible-decommission.md`](../../concepts/spark-pair-reversible-decommission.md).
