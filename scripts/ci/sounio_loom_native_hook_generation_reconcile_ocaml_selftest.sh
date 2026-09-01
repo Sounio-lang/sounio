@@ -82,6 +82,7 @@ write_related() {
     >"$state/delivery-endpoints/$key.endpoint"
   printf '%s\n' "claim_id=$key" "agent=$agent" "lane=$lane" \
     "worktree=$worktree" 'branch=test' 'sha=0123456789ab' \
+    'file=tools/loom/src/loom.ml' 'file=tools/loom/src/loom_ui.ml' \
     >"$state/claims/$key.claim"
   printf '%s\n' 'schema=loom-native-hook-capability-v1' \
     'state=NATIVE_HOOK_ATTESTED' "agent=$agent" "lane=$lane" \
@@ -129,6 +130,20 @@ write_related "$HEARTBEAT_STATE" test heartbeat "$WORK"
 HEARTBEAT_OUTPUT="$(run_reconcile "$HEARTBEAT_STATE" --agent test --lane heartbeat)"
 expect_text "$HEARTBEAT_OUTPUT" '"decision":"KEEP"' heartbeat-control
 expect_text "$HEARTBEAT_OUTPUT" '"absence_reason":"none"' heartbeat-not-absence
+
+LEGACY_STATE="$(new_state legacy-endpoint)"
+write_presence "$LEGACY_STATE" test legacy "$LIVE_PID" "$LIVE_START" "$NOW" 300 "$WORK"
+RELATED_PID="$LIVE_PID"
+RELATED_PID_START="$LIVE_START"
+write_related "$LEGACY_STATE" test legacy "$WORK"
+printf '%s\n' 'endpoint_id=test--legacy' 'agent=test' 'lane=legacy' \
+  "worktree=$WORK" 'harness=codex' 'transport=tmux' 'address=%5' \
+  'token_file=' 'instance_id=' 'session_id=' 'harness_pid=' \
+  'harness_pid_start=' >"$LEGACY_STATE/delivery-endpoints/test--legacy.endpoint"
+LEGACY_OUTPUT="$(run_reconcile "$LEGACY_STATE" --agent test --lane legacy)"
+expect_text "$LEGACY_OUTPUT" '"decision":"KEEP"' legacy-endpoint-control
+expect_text "$LEGACY_OUTPUT" '"legacy_endpoint_key_bound":true' legacy-endpoint-disclosure
+expect_text "$LIVE_OUTPUT" '"legacy_endpoint_key_bound":false' native-endpoint-disclosure
 
 CAUSAL_STATE="$(new_state causal)"
 write_presence "$CAUSAL_STATE" test causal "$LIVE_PID" "$LIVE_START" "$NOW" 300 "$WORK"
@@ -246,4 +261,4 @@ wait "$UI_PID" || true
 CHILDREN=()
 
 printf '%s\n' \
-  'sounio-loom-native-hook-generation-reconcile-ocaml-selftest: PASS semantic_authority=Sounio action=9047 stage=PARITY_OPEN operational_realization=OCaml live=KEEP heartbeat_only=KEEP pid_absent_plan=QUARANTINE_ELIGIBLE pid_absent_apply=QUARANTINE_READY related_artifacts=4 wal=COMMITTED audit=ALLOW+DENY identity_drift=FAIL_CLOSED shared_lock=flock2 timeout=FAIL_CLOSED python_oracle_attempt=PRE_EXEC_REFUSED causal_control=LIVE_THEN_PID_ABSENT ui_route=READ_ONLY_AUTHORITY python_executed=false rust_executed=false disposable_oracle_executed=false same_uid_peer_isolation=false quarantine_committed=true native_entry_open=false cutover_ready=false bridge_free_current=false'
+  'sounio-loom-native-hook-generation-reconcile-ocaml-selftest: PASS semantic_authority=Sounio action=9047 stage=PARITY_OPEN operational_realization=OCaml live=KEEP heartbeat_only=KEEP legacy_endpoint=KEY_BOUND_KEEP pid_absent_plan=QUARANTINE_ELIGIBLE pid_absent_apply=QUARANTINE_READY related_artifacts=4 wal=COMMITTED audit=ALLOW+DENY identity_drift=FAIL_CLOSED shared_lock=flock2 timeout=FAIL_CLOSED python_oracle_attempt=PRE_EXEC_REFUSED causal_control=LIVE_THEN_PID_ABSENT ui_route=READ_ONLY_AUTHORITY python_executed=false rust_executed=false disposable_oracle_executed=false same_uid_peer_isolation=false quarantine_committed=true native_entry_open=false cutover_ready=false bridge_free_current=false'

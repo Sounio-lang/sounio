@@ -187,6 +187,31 @@ type artifact = { relative : string; source : string; digest : string; text : st
 let same_field label values key expected =
   if required label values key <> expected then failf "%s-generation-drift:%s" label key
 
+let same_field_when_present label values key expected =
+  match Hashtbl.find_opt values key with
+  | None | Some "" -> ()
+  | Some value when value = expected -> ()
+  | Some _ -> failf "%s-generation-drift:%s" label key
+
+let parse_related_fields ~allow_duplicate ~allow_empty label text =
+  let table = Hashtbl.create 32 in
+  String.split_on_char '\n' text
+  |> List.iter (fun line ->
+         if line <> "" then
+           match String.index_opt line '=' with
+           | None -> failf "%s-malformed-field" label
+           | Some split ->
+               let key = String.sub line 0 split in
+               let value =
+                 String.sub line (split + 1) (String.length line - split - 1)
+               in
+               if key = "" || (value = "" && not allow_empty) then
+                 failf "%s-empty-field" label;
+               if Hashtbl.mem table key && not allow_duplicate then
+                 failf "%s-duplicate-field:%s" label key;
+               if not (Hashtbl.mem table key) then Hashtbl.add table key value);
+  table
+
 let related_artifacts state key agent lane worktree presence_values =
   let candidates =
     [ ("claims", ".claim", "claim_id");
@@ -202,17 +227,21 @@ let related_artifacts state key agent lane worktree presence_values =
         if not (Sys.file_exists source) then None
         else
           let text = read_file ("related-" ^ directory) source in
-          let values = parse_fields ("related-" ^ directory) text in
+          let values =
+            parse_related_fields ~allow_duplicate:(directory = "claims")
+              ~allow_empty:(directory = "delivery-endpoints")
+              ("related-" ^ directory) text
+          in
           ensure_identity ("related-" ^ directory) values ~key:identity_key ~agent
             ~lane ~worktree;
           if directory = "delivery-endpoints" then (
-            same_field "related-delivery-endpoints" values "session_id"
+            same_field_when_present "related-delivery-endpoints" values "session_id"
               (required "presence-record" presence_values "session_id");
             same_field "related-delivery-endpoints" values "harness"
               (required "presence-record" presence_values "harness");
-            same_field "related-delivery-endpoints" values "harness_pid"
+            same_field_when_present "related-delivery-endpoints" values "harness_pid"
               (required "presence-record" presence_values "pid");
-            same_field "related-delivery-endpoints" values "harness_pid_start"
+            same_field_when_present "related-delivery-endpoints" values "harness_pid_start"
               (required "presence-record" presence_values "pid_start"));
           if directory = "hook-capabilities" then (
             same_field "related-hook-capabilities" values "session_id"
@@ -267,6 +296,7 @@ type observation = {
   transaction_digest : string;
   cause : cause;
   heartbeat_expired : bool;
+  legacy_endpoint_key_bound : bool;
   related : artifact list;
   destination : string;
 }
@@ -310,6 +340,22 @@ let observe_locked state agent lane =
   in
   let first_inventory, inventory_digest = presence_inventory state in
   let related = related_artifacts state key agent lane worktree values in
+  let legacy_endpoint_key_bound =
+    related
+    |> List.exists (fun artifact ->
+           Filename.check_suffix artifact.relative ".endpoint"
+           &&
+           let fields =
+             parse_related_fields ~allow_duplicate:false ~allow_empty:true
+               "related-delivery-endpoints" artifact.text
+           in
+           List.exists
+             (fun field ->
+               match Hashtbl.find_opt fields field with
+               | None | Some "" -> true
+               | Some _ -> false)
+             [ "session_id"; "harness_pid"; "harness_pid_start" ])
+  in
   let related_digest = artifact_signature related in
   let second_inventory, second_digest = presence_inventory state in
   if inventory_digest <> second_digest
@@ -339,7 +385,8 @@ let observe_locked state agent lane =
     session_id = required "presence-record" values "session_id";
     generation = required "presence-record" values "generation";
     record_digest; inventory_digest; related_digest; kernel_digest;
-    transaction_digest; cause; heartbeat_expired; related; destination }
+    transaction_digest; cause; heartbeat_expired; legacy_endpoint_key_bound;
+    related; destination }
 
 let authority_word observation ~transaction_ready =
   0 |> fun word -> bit word 0 true
@@ -426,7 +473,7 @@ let receipt_text policy observation decision output frame state =
       observation.agent observation.lane
   in
   Printf.sprintf
-    "schema=loom-native-hook-generation-reconcile-receipt-v1\nstage=PARITY_OPEN\nsemantic_authority=Sounio\nproducing_language=Sounio\noperational_realization=OCaml\nlanguage_role=OPERATIONAL_REALIZATION\naction=9047\ndecision=%s\nabsence_reason=%s\nagent=%s\nlane=%s\nworktree=%s\nsession_id=%s\ngeneration=%s\nrecord_sha256=%s\ninventory_sha256=%s\nrelated_artifacts_sha256=%s\nkernel_observation_sha256=%s\ntransaction_sha256=%s\nmanifest_sha256=%s\nsemantics_sha256=%s\nexecutable_sha256=%s\nocaml_runtime_sha256=%s\nauthority_frame_sha256=%s\nauthority_output_sha256=%s\ntoolchain=OCaml-dune-plus-Sounio-lean_single\nhardware=%s\ncommand=%s\nresult=%s\nstate_directory=%s\nrelated_total=%d\npython_executed=false\nrust_executed=false\ndisposable_oracle_executed=false\nsame_uid_peer_isolation=false\ncreated_utc=%s\n"
+    "schema=loom-native-hook-generation-reconcile-receipt-v1\nstage=PARITY_OPEN\nsemantic_authority=Sounio\nproducing_language=Sounio\noperational_realization=OCaml\nlanguage_role=OPERATIONAL_REALIZATION\naction=9047\ndecision=%s\nabsence_reason=%s\nagent=%s\nlane=%s\nworktree=%s\nsession_id=%s\ngeneration=%s\nrecord_sha256=%s\ninventory_sha256=%s\nrelated_artifacts_sha256=%s\nkernel_observation_sha256=%s\ntransaction_sha256=%s\nmanifest_sha256=%s\nsemantics_sha256=%s\nexecutable_sha256=%s\nocaml_runtime_sha256=%s\nauthority_frame_sha256=%s\nauthority_output_sha256=%s\ntoolchain=OCaml-dune-plus-Sounio-lean_single\nhardware=%s\ncommand=%s\nresult=%s\nstate_directory=%s\nrelated_total=%d\nlegacy_endpoint_key_bound=%b\npython_executed=false\nrust_executed=false\ndisposable_oracle_executed=false\nsame_uid_peer_isolation=false\ncreated_utc=%s\n"
     decision (cause_name observation.cause) observation.agent observation.lane
     observation.worktree observation.session_id observation.generation
     observation.record_digest observation.inventory_digest observation.related_digest
@@ -434,7 +481,8 @@ let receipt_text policy observation decision output frame state =
     semantics_sha256 policy.executable_sha256
     (sha256_file "ocaml-runtime" Sys.executable_name) (sha256 frame) (sha256 output)
     (host_identity ()) command decision state
-    (List.length observation.related) (utc_now (Unix.time ()))
+    (List.length observation.related) observation.legacy_endpoint_key_bound
+    (utc_now (Unix.time ()))
 
 let wal_text observation state_value =
   let artifacts =
@@ -515,12 +563,13 @@ let commit_quarantine policy state observation output frame receipt_directory wa
 
 let result_json policy observation decision output frame ~applied ~moved ~receipt =
   Printf.sprintf
-    "{\"schema\":\"loom-native-hook-generation-reconcile-v1\",\"action\":9047,\"stage\":\"PARITY_OPEN\",\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"decision\":\"%s\",\"absence_reason\":\"%s\",\"agent\":\"%s\",\"lane\":\"%s\",\"record_sha256\":\"%s\",\"inventory_sha256\":\"%s\",\"related_artifacts_sha256\":\"%s\",\"kernel_observation_sha256\":\"%s\",\"transaction_sha256\":\"%s\",\"related_total\":%d,\"mutation_applied\":%s,\"moved_artifacts\":%d,\"receipt\":\"%s\",\"python_executed\":false,\"rust_executed\":false,\"disposable_oracle_executed\":false,\"same_uid_peer_isolation\":false,\"authority\":{\"manifest_sha256\":\"%s\",\"semantics_sha256\":\"%s\",\"executable_sha256\":\"%s\",\"frame_sha256\":\"%s\",\"output_sha256\":\"%s\",\"output\":\"%s\"}}"
+    "{\"schema\":\"loom-native-hook-generation-reconcile-v1\",\"action\":9047,\"stage\":\"PARITY_OPEN\",\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"decision\":\"%s\",\"absence_reason\":\"%s\",\"agent\":\"%s\",\"lane\":\"%s\",\"record_sha256\":\"%s\",\"inventory_sha256\":\"%s\",\"related_artifacts_sha256\":\"%s\",\"kernel_observation_sha256\":\"%s\",\"transaction_sha256\":\"%s\",\"related_total\":%d,\"legacy_endpoint_key_bound\":%b,\"mutation_applied\":%s,\"moved_artifacts\":%d,\"receipt\":\"%s\",\"python_executed\":false,\"rust_executed\":false,\"disposable_oracle_executed\":false,\"same_uid_peer_isolation\":false,\"authority\":{\"manifest_sha256\":\"%s\",\"semantics_sha256\":\"%s\",\"executable_sha256\":\"%s\",\"frame_sha256\":\"%s\",\"output_sha256\":\"%s\",\"output\":\"%s\"}}"
     decision (cause_name observation.cause) (json_escape observation.agent)
     (json_escape observation.lane) observation.record_digest
     observation.inventory_digest observation.related_digest observation.kernel_digest
     observation.transaction_digest (List.length observation.related)
-    (string_of_bool applied) moved (json_escape receipt) policy.manifest_sha256
+    observation.legacy_endpoint_key_bound (string_of_bool applied) moved
+    (json_escape receipt) policy.manifest_sha256
     semantics_sha256 policy.executable_sha256 (sha256 frame) (sha256 output)
     (json_escape output)
 
