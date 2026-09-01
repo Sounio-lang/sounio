@@ -2,15 +2,16 @@
 topic_id: repo.docs.ops.spark-pair-arbiter
 authority: repo_only
 audience: users
-last_validated: 2026-08-31
+last_validated: 2026-09-01
 validated_by: Codex
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ops.spark-pair-arbiter
 -->
 
 # Spark Pair Arbiter
 
-Status: Sounio frame 9025 executable; semantics frozen; offline gates green;
-installation and live exclusion are not yet claimed.
+Status: Sounio frame 9025 executable; semantics frozen; offline gates and the
+ARM64 child-cgroup device-barrier canary are green; root installation and live
+mutual exclusion are not yet claimed.
 
 The arbiter gives the two DGX Spark nodes to exactly one scheduler at a time.
 Sounio is the executable transition authority. Bash transports observations and
@@ -50,12 +51,29 @@ Run the non-mutating checks first:
 
 ```bash
 bash scripts/ci/spark_pair_arbiter_selftest.sh
+bash scripts/dev/spark_pair_device_barrier_arm64_gate.sh --check
 bash scripts/dev/install_spark_pair_arbiter.sh --check
 bash scripts/ci/spark_pair_arbiter_live_gate.sh --check
 ```
 
-Installation and the live gate are separate operator decisions. The live gate
-will not install an absent arbiter:
+The ARM64 gate is a separate, transient material-parity probe. Its `--apply`
+mode compiles the frozen C++20 helper natively on both Sparks, resolves and
+canonically proves a target strictly below `/sys/fs/cgroup`, and attaches an
+FD-scoped BPF link only there. It proves `mknod` denial for the frozen NVIDIA/DRM
+majors, injects a post-deny failure and proves link-close restoration, repeats
+the successful path, and deletes its content-addressed ConfigMap and Pods. The
+orchestration image is pinned by digest; the compiler and resulting helper
+execute from the host root:
+
+```bash
+bash scripts/dev/spark_pair_device_barrier_arm64_gate.sh --apply
+```
+
+This evidence does not authorize installation on `/sys/fs/cgroup` and does not
+replace the live pair-wide exclusion gate.
+
+Root installation and the live gate are separate operator decisions. The live
+gate will not install an absent arbiter:
 
 ```bash
 bash scripts/dev/install_spark_pair_arbiter.sh --apply

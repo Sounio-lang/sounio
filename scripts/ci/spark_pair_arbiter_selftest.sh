@@ -17,6 +17,7 @@ POLICY="$ROOT_DIR/tools/cluster/spark_pair_arbiter.policy.v1"
 FREEZE="$ROOT_DIR/tools/cluster/spark_pair_arbiter.freeze.v1"
 HOST_FENCE="$ROOT_DIR/tools/cluster/spark_pair_host_fence.yaml"
 DEVICE_BARRIER="$ROOT_DIR/tools/cluster/pireus_spark_device_barrier.cpp"
+DEVICE_BARRIER_ARM64_GATE="$ROOT_DIR/scripts/dev/spark_pair_device_barrier_arm64_gate.sh"
 ADMISSION="$ROOT_DIR/tools/cluster/spark_pair_arbiter_admission.yaml"
 HOST_FENCE_UNIT="$ROOT_DIR/tests/fixtures/spark_pair_arbiter/host_fence_unit.sh"
 K8S_BACKEND_TRANSACTION_UNIT="$ROOT_DIR/tests/fixtures/spark_pair_arbiter/k8s_backend_transaction_unit.sh"
@@ -53,10 +54,18 @@ awk '
 [[ "$(sed -n '1p' "$HOST_FENCE_SCRIPT")" == '#!/usr/bin/env bash' ]] || \
   fail 'host fence ConfigMap script key or extraction boundary drifted'
 bash -n "$HOST_FENCE_SCRIPT" || fail 'host fence ConfigMap script is not valid Bash'
+bash -n "$DEVICE_BARRIER_ARM64_GATE" || fail 'ARM64 device-barrier gate is not valid Bash'
+grep -Fq 'canary-self /sys/fs/cgroup' "$DEVICE_BARRIER_ARM64_GATE" || \
+  fail 'ARM64 gate does not exercise a live child cgroup'
+grep -Fq 'access=MKNOD_DENIED detach=BASELINE_RESTORED' "$DEVICE_BARRIER_ARM64_GATE" || \
+  fail 'ARM64 gate does not require deny and exact-detach evidence'
+if grep -Eiq '\<(python[0-9.]*|rustc|cargo)\>' "$DEVICE_BARRIER_ARM64_GATE"; then
+  fail 'ARM64 device-barrier gate invokes a prohibited oracle'
+fi
 c++ -std=c++20 -O2 -Wall -Wextra -Werror "$DEVICE_BARRIER" \
   -o "$DEVICE_BARRIER_EXECUTABLE"
 [[ "$($DEVICE_BARRIER_EXECUTABLE selftest)" == \
-    'PIREUS_DEVICE_BARRIER_SELFTEST_PASS majors=195,226,247,498,501 default=ALLOW matched=DENY duplicates=REFUSE' ]] || \
+    'PIREUS_DEVICE_BARRIER_SELFTEST_PASS majors=195,226,247,498,501 default=ALLOW matched=DENY duplicates=REFUSE root_target=REFUSE' ]] || \
   fail 'device barrier executable selftest failed'
 [[ "$(sed -n '1p' "$RESERVATION_PROBE_SCRIPT")" == '#!/usr/bin/env bash' ]] || \
   fail 'reservation probe ConfigMap script key or extraction boundary drifted'
@@ -411,4 +420,4 @@ awk -F= '$1 == "decision_receipt_sha256" && $2 ~ /^[0-9a-f]+$/ && length($2) == 
 
 printf '%s\n' "$result"
 printf 'SPARK_PAIR_ADAPTER_NEGATIVE_PASS reason=MALFORMED_FRAME status=64\n'
-printf 'SPARK_PAIR_MATERIAL_SELFTEST_PASS positive=12 negative=30 freeze_drift=DENY persisted_freeze=DENY journal_freeze=DENY root_override=DENY timeout_override=DENY canonical_fixture=DENY python_oracle=DENY direct_backend=DENY concurrency=DENY bootstrap_recovery=PASS action28_crash_recovery=PASS bootstrap_fence_first=PASS host_actions=PASS host_dirty=DENY recovery_drain_before_fence=PASS material_keepalive_expiry=DENY material_receipts=PASS nvml_formats=PASS host_fence_unit=PASS transaction_kill=REFENCED transaction_cas=REFENCED device_barrier=PASS\n'
+printf 'SPARK_PAIR_MATERIAL_SELFTEST_PASS positive=12 negative=30 freeze_drift=DENY persisted_freeze=DENY journal_freeze=DENY root_override=DENY timeout_override=DENY canonical_fixture=DENY python_oracle=DENY direct_backend=DENY concurrency=DENY bootstrap_recovery=PASS action28_crash_recovery=PASS bootstrap_fence_first=PASS host_actions=PASS host_dirty=DENY recovery_drain_before_fence=PASS material_keepalive_expiry=DENY material_receipts=PASS nvml_formats=PASS host_fence_unit=PASS transaction_kill=REFENCED transaction_cas=REFENCED device_barrier=PASS arm64_child_gate=FROZEN\n'

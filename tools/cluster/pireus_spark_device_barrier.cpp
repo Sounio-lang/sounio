@@ -16,12 +16,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -152,7 +155,10 @@ ProgramIdentity program_identity(int descriptor) {
          std::string(std::strerror(errno)));
   }
 
-  std::vector<std::uint8_t> translated(info.xlated_prog_len);
+  const __u32 translated_size = info.xlated_prog_len;
+  std::vector<std::uint8_t> translated(translated_size);
+  info = {};
+  info.xlated_prog_len = translated_size;
   info.xlated_prog_insns = reinterpret_cast<__u64>(translated.data());
   attributes = {};
   attributes.info.bpf_fd = static_cast<__u32>(descriptor);
@@ -206,6 +212,8 @@ struct QueryResult {
   std::vector<__u32> attach_flags;
   __u64 revision;
 };
+
+void verify_single_attached(const QueryResult& query);
 
 QueryResult query_programs(int cgroup, __u32 query_flags = 0) {
   std::size_t capacity = kInitialQueryCapacity;
@@ -266,6 +274,19 @@ void attach_program(int cgroup, int program, __u64 expected_revision) {
     fail("BPF_PROG_ATTACH with expected revision failed: " +
          std::string(std::strerror(errno)));
   }
+}
+
+int create_program_link(int cgroup, int program) {
+  union bpf_attr attributes{};
+  attributes.link_create.target_fd = static_cast<__u32>(cgroup);
+  attributes.link_create.prog_fd = static_cast<__u32>(program);
+  attributes.link_create.attach_type = BPF_CGROUP_DEVICE;
+  attributes.link_create.flags = 0;
+  const int descriptor = bpf_call(BPF_LINK_CREATE, &attributes);
+  if (descriptor < 0) {
+    fail("BPF_LINK_CREATE failed: " + std::string(std::strerror(errno)));
+  }
+  return descriptor;
 }
 
 void detach_program(int cgroup, int program, __u64 expected_revision) {
@@ -431,6 +452,210 @@ void verify_devices(const std::string& root,
   }
 }
 
+void validate_self_cgroup_relative(const std::string& relative) {
+  if (relative.empty() || relative.front() != '/' || relative == "/" ||
+      relative.find("..") != std::string::npos ||
+      relative.find("//") != std::string::npos) {
+    fail("current cgroup v2 identity is not a strict child");
+  }
+}
+
+std::string canonical_path(const std::string& path) {
+  char* resolved = realpath(path.c_str(), nullptr);
+  if (resolved == nullptr) {
+    fail("cannot resolve canonical cgroup path: " +
+         std::string(std::strerror(errno)));
+  }
+  std::string canonical(resolved);
+  std::free(resolved);
+  return canonical;
+}
+
+std::string strict_child_cgroup_path(const std::string& root,
+                                     const std::string& relative) {
+  if (root.empty() || root.front() != '/' || root.back() == '/') {
+    fail("cgroup root must be an absolute path without a trailing slash");
+  }
+  validate_self_cgroup_relative(relative);
+  const std::string canonical_root = canonical_path(root);
+  const std::string canonical_target = canonical_path(root + relative);
+  if (canonical_root == "/" ||
+      canonical_target.rfind(canonical_root + "/", 0) != 0) {
+    fail("current cgroup is not canonically below the supplied root");
+  }
+  return canonical_target;
+}
+
+std::string self_cgroup_path(const std::string& root) {
+  std::ifstream input("/proc/self/cgroup");
+  std::string line;
+  std::string relative;
+  while (std::getline(input, line)) {
+    if (line.rfind("0::/", 0) != 0 || !relative.empty()) {
+      fail("current process does not have one exact cgroup v2 identity");
+    }
+    relative = line.substr(3);
+  }
+  if (!input.eof()) fail("current cgroup v2 identity is unreadable");
+  return strict_child_cgroup_path(root, relative);
+}
+
+void verify_self_membership(const std::string& cgroup_path) {
+  std::ifstream input(cgroup_path + "/cgroup.procs");
+  std::string line;
+  const std::string self = std::to_string(static_cast<long long>(getpid()));
+  while (std::getline(input, line)) {
+    if (line == self) return;
+  }
+  fail("current process is not a member of its resolved cgroup");
+}
+
+void canary_mknod(int directory, unsigned device_major, bool denied) {
+  const std::string name =
+      "pireus-device-canary-" +
+      std::to_string(static_cast<long long>(getpid())) + "-" +
+      std::to_string(device_major);
+  errno = 0;
+  const int status = mknodat(directory, name.c_str(), S_IFCHR | 0600,
+                             makedev(device_major, 0));
+  const int saved_errno = errno;
+  if (status == 0) {
+    if (unlinkat(directory, name.c_str(), 0) < 0) {
+      fail("canary device cleanup failed");
+    }
+    if (denied) fail("device barrier allowed a denied canary mknod");
+    return;
+  }
+  if (!denied || saved_errno != EPERM) {
+    fail("canary mknod returned unexpected result: " +
+         std::string(std::strerror(saved_errno)));
+  }
+}
+
+void canary_mknods(int directory, const std::set<unsigned>& majors,
+                   bool denied) {
+  for (const unsigned value : majors) {
+    canary_mknod(directory, value, denied);
+  }
+}
+
+std::vector<std::pair<__u32, __u32>> query_members(
+    const QueryResult& query) {
+  if (query.ids.size() != query.attach_flags.size()) {
+    fail("device program query omitted per-program attach flags");
+  }
+  std::vector<std::pair<__u32, __u32>> members;
+  members.reserve(query.ids.size());
+  for (std::size_t index = 0; index < query.ids.size(); ++index) {
+    members.emplace_back(query.ids[index], query.attach_flags[index]);
+  }
+  std::sort(members.begin(), members.end());
+  return members;
+}
+
+bool query_contains_id(const QueryResult& query, __u32 identifier) {
+  return std::find(query.ids.begin(), query.ids.end(), identifier) !=
+         query.ids.end();
+}
+
+void run_self_cgroup_canary(const std::string& cgroup_root,
+                            const std::string& scratch_path,
+                            const std::set<unsigned>& majors,
+                            bool inject_failure) {
+  const std::string cgroup_path = self_cgroup_path(cgroup_root);
+  struct stat cgroup_metadata{};
+  const int cgroup = open_cgroup(cgroup_path, &cgroup_metadata);
+  const int scratch =
+      open(scratch_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                     O_NOFOLLOW);
+  if (scratch < 0) {
+    close_checked(cgroup);
+    fail("cannot open canary scratch directory: " +
+         std::string(std::strerror(errno)));
+  }
+
+  int expected_fd = -1;
+  int link_fd = -1;
+  QueryResult baseline{};
+  std::vector<std::pair<__u32, __u32>> baseline_members;
+  ProgramIdentity expected{};
+  try {
+    verify_self_membership(cgroup_path);
+    baseline = query_programs(cgroup);
+    baseline_members = query_members(baseline);
+    canary_mknods(scratch, majors, false);
+
+    expected_fd = load_program(deny_major_program(majors));
+    expected = program_identity(expected_fd);
+    link_fd = create_program_link(cgroup, expected_fd);
+
+    QueryResult query = query_programs(cgroup);
+    if (query.ids.size() != baseline.ids.size() + 1) {
+      fail("canary attach did not add exactly one direct device program");
+    }
+    const auto current_members = query_members(query);
+    for (const auto& member : baseline_members) {
+      if (!std::binary_search(current_members.begin(), current_members.end(),
+                              member)) {
+        fail("canary attach changed a pre-existing device program");
+      }
+    }
+    std::size_t expected_count = 0;
+    for (std::size_t index = 0; index < query.ids.size(); ++index) {
+      if (query_contains_id(baseline, query.ids[index])) continue;
+      if (query.ids[index] != expected.id ||
+          query.attach_flags[index] != BPF_F_ALLOW_MULTI) {
+        fail("canary post-attach device barrier identity mismatch");
+      }
+      ++expected_count;
+    }
+    if (expected_count != 1) fail("canary device barrier was not queryable");
+    canary_mknods(scratch, majors, true);
+    if (inject_failure) fail("injected canary failure after deny proof");
+
+    close_checked(link_fd);
+    link_fd = -1;
+    if (query_members(query_programs(cgroup)) != baseline_members) {
+      fail("canary detach did not restore the exact device-program baseline");
+    }
+    canary_mknods(scratch, majors, false);
+    std::cout << "PIREUS_DEVICE_BARRIER_CANARY_PASS cgroup=" << cgroup_path
+              << " tag=" << tag_hex(expected)
+              << " majors=" << join_majors(majors)
+              << " baseline_programs=" << baseline.ids.size()
+              << " access=MKNOD_DENIED detach=BASELINE_RESTORED\n";
+  } catch (...) {
+    const std::exception_ptr failure = std::current_exception();
+    const bool link_was_open = link_fd >= 0;
+    close_checked(link_fd);
+    link_fd = -1;
+    if (link_was_open) {
+      try {
+        if (query_members(query_programs(cgroup)) != baseline_members) {
+          fail("canary link close did not restore the exact baseline");
+        }
+        std::cerr << "PIREUS_DEVICE_BARRIER_CANARY_FAILURE_CLEANUP_PASS"
+                  << " cgroup=" << cgroup_path
+                  << " lifetime=FD_SCOPED baseline=RESTORED\n";
+      } catch (...) {
+        close_checked(expected_fd);
+        close_checked(scratch);
+        close_checked(cgroup);
+        fail("canary cleanup could not prove exact baseline restoration");
+      }
+    }
+    close_checked(expected_fd);
+    close_checked(scratch);
+    close_checked(cgroup);
+    std::rethrow_exception(failure);
+  }
+
+  close_checked(link_fd);
+  close_checked(expected_fd);
+  close_checked(scratch);
+  close_checked(cgroup);
+}
+
 bool simulated_allow(const std::set<unsigned>& denied, unsigned value) {
   return denied.find(value) == denied.end();
 }
@@ -439,24 +664,33 @@ void selftest() {
   const std::set<unsigned> denied = parse_majors("195,226,247,498,501");
   const auto program = deny_major_program(denied);
   bool duplicate_refused = false;
+  bool root_target_refused = false;
   try {
     static_cast<void>(parse_majors("195,195"));
   } catch (const std::exception&) {
     duplicate_refused = true;
   }
+  try {
+    validate_self_cgroup_relative("/");
+  } catch (const std::exception&) {
+    root_target_refused = true;
+  }
   if (program.size() != denied.size() + 5 || simulated_allow(denied, 195) ||
       simulated_allow(denied, 498) || !simulated_allow(denied, 1) ||
-      !duplicate_refused) {
+      !duplicate_refused || !root_target_refused) {
     fail("instruction generator selftest failed");
   }
   std::cout << "PIREUS_DEVICE_BARRIER_SELFTEST_PASS majors="
             << join_majors(denied)
-            << " default=ALLOW matched=DENY duplicates=REFUSE\n";
+            << " default=ALLOW matched=DENY duplicates=REFUSE"
+               " root_target=REFUSE\n";
 }
 
 void usage(const char* executable) {
   std::cerr << "usage: " << executable
             << " selftest | verify-devices DEVICE_ROOT MAJORS | "
+               "canary-self|canary-self-fail "
+               "CGROUP_ROOT SCRATCH_DIR MAJORS | "
                "attach|detach|status-attached|status-detached "
                "CGROUP MAJORS STATE\n";
 }
@@ -481,6 +715,14 @@ int main(int argc, char** argv) {
       verify_devices(argv[2], majors);
       std::cout << "PIREUS_DEVICE_BARRIER_INVENTORY_PASS root=" << argv[2]
                 << " majors=" << join_majors(majors) << '\n';
+      return 0;
+    }
+    if (argc == 5 &&
+        (std::string(argv[1]) == "canary-self" ||
+         std::string(argv[1]) == "canary-self-fail")) {
+      const std::set<unsigned> majors = parse_majors(argv[4]);
+      run_self_cgroup_canary(argv[2], argv[3], majors,
+                             std::string(argv[1]) == "canary-self-fail");
       return 0;
     }
     if (argc != 5) {

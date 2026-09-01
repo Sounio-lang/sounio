@@ -94,6 +94,7 @@ verify_frozen_authority() {
   verify_frozen_file admission_manifest_source admission_manifest_sha256
   verify_frozen_file host_fence_manifest_source host_fence_manifest_sha256
   verify_frozen_file device_barrier_source device_barrier_source_sha256
+  verify_frozen_file device_barrier_arm64_gate_source device_barrier_arm64_gate_sha256
   verify_frozen_file installer_source installer_sha256
   verify_frozen_file selftest_source selftest_sha256
   verify_frozen_file mock_backend_source mock_backend_sha256

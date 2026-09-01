@@ -2,14 +2,15 @@
 topic_id: repo.docs.internal.garden.seeds.2026-08-31-spark-pair-arbiter
 authority: repo_only
 audience: users
-last_validated: 2026-08-31
+last_validated: 2026-09-01
 validated_by: Codex
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.garden.seeds.2026-08-31-spark-pair-arbiter
 -->
 
 # Garden Seed: Spark Pair Arbiter
 
-Status: SEMANTICS_FROZEN; PARITY_OPEN offline gates green; live gate pending
+Status: SEMANTICS_FROZEN; PARITY_OPEN offline gates and ARM64 child-cgroup
+device-barrier canary green; root install and live mutual-exclusion gate pending
 Date: 2026-08-31
 Owner: Sounio founder direction
 Concept-ID: SOUNIO-SPARK-PAIR-ARBITER
@@ -58,6 +59,16 @@ It does not:
 - exercise the Multus fabric or NCCL;
 - change Pireus operator semantics;
 - claim that the current cluster has already passed the mutual-exclusion gate.
+
+On 2026-09-01 the frozen C++ helper was compiled natively with GCC 13.3.0 on
+both canonical ARM64 Sparks running Linux 6.17.0-1021-nvidia. A transient canary
+rejected the cgroup root as a target, canonically resolved each Pod's strict
+child cgroup, and attached the helper through an FD-scoped BPF link. It denied
+`mknod` for majors 195, 226, 247, 498, and 501, proved exact baseline restoration
+after an injected post-deny failure, then repeated the successful path. Both
+nodes produced binary SHA-256
+`427ae944d4bb2922930ffb23baf65aa65a128df355050b6079da0945c725acf3` and BPF
+tag `539451426e7078af`. No root-cgroup attachment was attempted.
 
 ## Authority
 
