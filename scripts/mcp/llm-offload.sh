@@ -6,14 +6,14 @@
 # Available providers:
 #   deepseek     — DeepSeek V4 Pro (reasoning; 'deepseek-coder' silently
 #                  resolved to the weaker v4-flash and is no longer a listed model)
-#   xai|grok     — Grok 4.3 (primary adversarial math/review lane)
-#   xai-fast     — Grok 4.1 Fast Reasoning (lower-latency fallback)
+#   xai|grok     — Grok 4.6 (fixed primary adversarial math/review lane)
+#   xai-fast     — compatibility alias; resolves to the same fixed Grok 4.6
 #   zai|glm      — Z.AI GLM-5.2 direct (independent math/review provider)
 #   local        — a LOCAL OpenAI-compatible endpoint (Ollama/vLLM/llama.cpp/LM Studio):
 #                  set LOCAL_LLM_URL (with the /v1 prefix) and LOCAL_LLM_MODEL
 #   local2       — a second local endpoint (LOCAL2_LLM_URL / LOCAL2_LLM_MODEL), so a
 #                  two-local fan-out can satisfy the two-provider review policy
-#   grok-code    — Grok Code Fast 1 (fast code tasks)
+#   grok-code    — compatibility alias; resolves to the same fixed Grok 4.6
 #   groq         — Llama 3.3 70B on Groq (fast inference)
 #   gemini       — Gemini 2.5 Pro via OpenRouter (1M ctx, best long-context)
 #   qwen         — Qwen 3 235B via OpenRouter (strong math/code, Chinese perspective)
@@ -22,13 +22,101 @@
 #   cohere       — Command R+ via OpenRouter (structured analysis, lit review)
 #   openrouter   — OpenRouter Auto (auto-routes to best model)
 #   minimax      — MiniMax M2.7 (Anthropic-compat, long context)
-#   all          — ALL providers (13 models)
+#   all          — all distinct configured providers
 #
 # Keys read from env vars (set in ~/.sounio-keys.env):
 #   DEEPSEEK_API_KEY, XAI_API_KEY, ZAI_API_KEY or ZHIPU_API_KEY,
 #   GROQ_API_KEY, OPENROUTER_API_KEY, MINIMAX_API_KEY
 
 set -euo pipefail
+
+readonly XAI_GROK_BASE_URL="https://api.x.ai/v1"
+readonly XAI_GROK_MODEL="grok-4.6"
+readonly XAI_GROK_NAME="Grok 4.6"
+readonly -a XAI_GROK_ALIASES=(xai grok xai-fast grok-code)
+
+canonical_provider() {
+    local alias
+    for alias in "${XAI_GROK_ALIASES[@]}"; do
+        if [[ "$1" == "$alias" ]]; then
+            echo "xai"
+            return
+        fi
+    done
+    case "$1" in
+        zai|glm|zhipu) echo "zai" ;;
+        *)             echo "$1" ;;
+    esac
+}
+
+provider_is_known() {
+    case "$1" in
+        deepseek|xai|zai|local|local1|local2|groq|gemini|qwen|mistral|llama|cohere|openrouter|minimax)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+normalize_providers() {
+    local provider canonical existing duplicate
+    local -a expanded=() normalized=()
+
+    for provider in "$@"; do
+        if [[ "$provider" == "all" ]]; then
+            expanded+=(deepseek xai zai groq gemini qwen mistral llama cohere openrouter minimax)
+        else
+            expanded+=("$provider")
+        fi
+    done
+
+    for provider in "${expanded[@]}"; do
+        canonical="$(canonical_provider "$provider")"
+        if ! provider_is_known "$canonical"; then
+            echo "ERROR: unknown provider '$provider'" >&2
+            return 2
+        fi
+        duplicate=false
+        for existing in "${normalized[@]}"; do
+            if [[ "$existing" == "$canonical" ]]; then
+                duplicate=true
+                break
+            fi
+        done
+        if [[ "$duplicate" == true ]]; then
+            echo "ERROR: provider '$provider' duplicates canonical review leg '$canonical'" >&2
+            return 2
+        fi
+        normalized+=("$canonical")
+    done
+
+    echo "${normalized[*]}"
+}
+
+if [[ "${1:-}" == "--resolve-provider" ]]; then
+    provider="${2:-}"
+    canonical="$(canonical_provider "$provider")"
+    if [[ "$canonical" != "xai" ]]; then
+        echo "ERROR: no fixed resolution is exposed for provider '$provider'" >&2
+        exit 2
+    fi
+    printf 'provider=%s canonical=%s model=%s endpoint=%s\n' \
+        "$provider" "$canonical" "$XAI_GROK_MODEL" "$XAI_GROK_BASE_URL"
+    exit 0
+fi
+
+if [[ "${1:-}" == "--resolve-provider-set" ]]; then
+    shift
+    [[ $# -gt 0 ]] || {
+        echo "ERROR: --resolve-provider-set requires at least one provider" >&2
+        exit 2
+    }
+    normalized_providers="$(normalize_providers "$@")" || exit $?
+    printf 'providers=%s\n' "$normalized_providers"
+    exit 0
+fi
 
 PROMPT_FILE="${1:?Usage: llm-offload.sh <prompt-file> [provider1 provider2 ...]}"
 shift
@@ -97,7 +185,8 @@ call_openai_compat() {
 }
 
 run_provider() {
-    local p="$1"
+    local p
+    p="$(canonical_provider "$1")"
     case "$p" in
         deepseek)
             [[ -n "${DEEPSEEK_API_KEY:-}" ]] && \
@@ -105,11 +194,7 @@ run_provider() {
             ;;
         xai|grok)
             [[ -n "${XAI_API_KEY:-}" ]] && \
-            call_openai_compat "Grok 4.3" "https://api.x.ai/v1" "$XAI_API_KEY" "grok-4.3" "$OUTDIR/grok.json"
-            ;;
-        xai-fast)
-            [[ -n "${XAI_API_KEY:-}" ]] && \
-            call_openai_compat "Grok 4.1 fast" "https://api.x.ai/v1" "$XAI_API_KEY" "grok-4-1-fast-reasoning" "$OUTDIR/grok-fast.json"
+            call_openai_compat "$XAI_GROK_NAME" "$XAI_GROK_BASE_URL" "$XAI_API_KEY" "$XAI_GROK_MODEL" "$OUTDIR/grok.json"
             ;;
         zai|glm|zhipu)
             # Z.AI (Zhipu) direct, OpenAI-compatible. Accepts ZAI_API_KEY or ZHIPU_API_KEY.
@@ -124,10 +209,6 @@ run_provider() {
             else
                 echo "  <- Z.AI: SKIPPED (set ZAI_API_KEY or ZHIPU_API_KEY, or fund OPENROUTER_API_KEY)"
             fi
-            ;;
-        grok-code)
-            [[ -n "${XAI_API_KEY:-}" ]] && \
-            call_openai_compat "Grok Code" "https://api.x.ai/v1" "$XAI_API_KEY" "grok-code-fast-1" "$OUTDIR/grok-code.json"
             ;;
         groq)
             [[ -n "${GROQ_API_KEY:-}" ]] && \
@@ -181,22 +262,10 @@ run_provider() {
             fi
             ;;
         *)
-            echo "  ?? Unknown provider: $p"
+            echo "  ?? Unknown provider: $p" >&2
+            return 2
             ;;
     esac
-}
-
-# Expand "all" keyword
-expand_providers() {
-    local result=()
-    for p in "$@"; do
-        if [[ "$p" == "all" ]]; then
-            result+=(deepseek xai zai grok-code groq gemini qwen mistral llama cohere openrouter minimax)
-        else
-            result+=("$p")
-        fi
-    done
-    echo "${result[@]}"
 }
 
 # Default: diverse consensus set (5 models, geographic diversity)
@@ -204,8 +273,10 @@ if [[ ${#PROVIDERS[@]} -eq 0 ]]; then
     PROVIDERS=(deepseek xai gemini qwen mistral)
 fi
 
-# Expand "all"
-PROVIDERS=($(expand_providers "${PROVIDERS[@]}"))
+# Canonicalize compatibility aliases before fan-out. Multiple names for Grok 4.6
+# are one review leg, so a request that repeats that leg fails closed.
+normalized_providers="$(normalize_providers "${PROVIDERS[@]}")" || exit $?
+read -ra PROVIDERS <<< "$normalized_providers"
 
 echo "Providers: ${PROVIDERS[*]}"
 echo ""

@@ -31,7 +31,7 @@ The following checkpoints are **MANDATORY** for any agent before commit / PR ope
 bin/llm-offload -t math-review -i <file_or_diff>
 ```
 
-before commit. **As of 2026-07-07 this fans out by default to two independent providers — xai (grok-4.3) and zai (Z.AI GLM) — for every agent.** A single-vendor pass is no longer the standard for math claims; the independent second opinion is mandatory. (Z.AI requires `ZAI_API_KEY`/`ZHIPU_API_KEY`; if absent, the run degrades to xai-only and logs a SKIPPED notice — treat a Z.AI skip as an incomplete review, not a pass.) If any provider rejects a claim, EITHER fix it OR document the disagreement in `.claude/llm_offload_log.md` with explicit reasoning. Precedent for this rule: on 2026-07-07 grok-4.3 + grok-4.20-reasoning caught a sign error making the NeuroDyn "octonion" product non-normed/non-alternative that had passed all prior review.
+before commit. For `math-review`, the default fans out to xai (**the fixed `grok-4.6` model**), zai (Z.AI GLM), and the configured local provider. `xai`, `grok`, `xai-fast`, and `grok-code` are command aliases for the same immutable Grok 4.6 identity; they must never select an earlier or alternate Grok model. Duplicate aliases fail closed and never count as independent review legs. A complete review requires a successful Grok 4.6 leg plus a substantive verdict from at least one distinct provider/model family. Provider skips and errors remain incomplete evidence even when the raw driver exits zero after reporting them. If any provider rejects a claim, EITHER fix it OR document the disagreement in `.claude/llm_offload_log.md` with explicit reasoning. Historical log entries retain the model identities actually used at the time and do not define current routing.
 
 For high-stakes math (theorem published / referee-bound), fan out:
 
@@ -79,7 +79,7 @@ Format:
 …
 
 LLM-offload-review:
-  provider: xai (Grok 4.1 fast reasoning)
+  provider: xai (Grok 4.6)
   task: math-review
   issue: <one line>
 ```

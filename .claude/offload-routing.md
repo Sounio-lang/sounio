@@ -19,9 +19,11 @@ The wrapper prepends a task-specific system prompt from `.claude/offload-tasks/<
 | `scaffold` | `deepseek` | `qwen`, `grok-code` | Spec → boilerplate (.sio, SQL, ETL, LaTeX) |
 | `review` | `deepseek` | `xai`, `qwen` | Devil's-advocate code/paper review |
 | `paraphrase` | `minimax` (needs key) | `qwen`, `deepseek` | Cover letters, abstract polishing |
-| `math-review` | `xai zai local` fan-out | `xai-fast`, `qwen`, `mistral` | Math / algebra / stats audit — **three-way, so one outage still leaves two independent opinions** |
+| `math-review` | `xai zai local` fan-out | `qwen`, `mistral` | Math / algebra / stats audit — **three-way, so one outage still leaves two independent opinions** |
 
-> **Default math review (2026-07-07):** `bin/llm-offload -t math-review` fans out to **xai (grok-4.3)** and **zai (Z.AI GLM-5.2)** automatically — an independent second opinion is the standard, not opt-in. Z.AI needs `ZAI_API_KEY` (or `ZHIPU_API_KEY`); without it the tool runs xai alone and prints a SKIPPED notice for Z.AI. The default response cap is 8,192 tokens; deep audits must opt in with `OFFLOAD_MAX_TOKENS`. Run `bin/llm-offload --status` to see loaded keys.
+> **Default math review:** `bin/llm-offload -t math-review` fans out to **xai (grok-4.6, fixed)**, **zai (Z.AI GLM-5.2)**, and the configured local model. A complete review requires a successful Grok 4.6 leg plus a substantive verdict from at least one distinct provider/model family. Provider skips and errors must be recorded as incomplete evidence even though the raw fan-out driver reports them in output rather than enforcing quorum through its exit status. The default response cap is 8,192 tokens; deep audits must opt in with `OFFLOAD_MAX_TOKENS`. Run `bin/llm-offload --status` to see loaded keys.
+>
+> **Fixed xAI identity (2026-09-01):** `xai`, `grok`, `xai-fast`, and `grok-code` all resolve to the literal model `grok-4.6`. The latter two names are compatibility aliases, not lower-version or code-model fallbacks. Aliases are canonicalized before fan-out and a request containing duplicate aliases fails closed, so they can never count as independent review legs. The public CLI accepts no environment override for this identity; `scripts/ci/llm_offload_grok_identity_selftest.sh` enforces it offline, and its explicit `--live` mode verifies the configured xAI endpoint when credentials are available.
 
 > **Third leg added 2026-08-24.** The two-provider default degrades to ONE whenever either
 > vendor is down, silently — the run still exits 0 and prints a review. On 2026-08-24 zai
@@ -82,8 +84,8 @@ Run `bin/llm-offload --list-providers` for the canonical list.
 | Slug | Model | Key required | Strength |
 |------|-------|--------------|---------|
 | `deepseek` | DeepSeek Coder | `DEEPSEEK_API_KEY` | Code review, second opinion |
-| `xai` / `grok` | Grok 4.1 Fast Reasoning | `XAI_API_KEY` | Math, blunt realist, no flattery |
-| `grok-code` | Grok Code Fast 1 | `XAI_API_KEY` | Fast code tasks |
+| `xai` / `grok` | Grok 4.6 (fixed) | `XAI_API_KEY` | Math, blunt realist, no flattery |
+| `xai-fast` / `grok-code` | Grok 4.6 (compatibility aliases) | `XAI_API_KEY` | Existing command compatibility; no model fallback |
 | `groq` | Llama 3.3 70B (Groq) | `GROQ_API_KEY` | Fast inference |
 | `gemini` | Gemini 2.5 Pro (OpenRouter) | `OPENROUTER_API_KEY` | 1M ctx, long-context expansion |
 | `qwen` | Qwen 3 235B (OpenRouter) | `OPENROUTER_API_KEY` | Math/code, Chinese perspective |
