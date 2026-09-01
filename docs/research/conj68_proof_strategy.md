@@ -222,3 +222,33 @@ avenues to *prove* it are (1) dead (reintroduces E₇) and (2) live but a real
 research computation in octonion operator algebra. The problem is reduced to its
 sharpest form — the parity/degree lives in the operators R_{u₁}, L_{u₂} on 𝕆 —
 but is not closed here. No proof is fabricated.
+
+## 10. ℚ(t) computation FALSIFIES "deg D = dim Im A" (2026-09-01, exact)
+
+Using exact arithmetic over the function field ℚ(t) for a generic 1-parameter
+family x=(e₁,e₂), x′(t)=((1+t²)e₄, (1−t²)e₅+2t e₆) (dim A = 8, generates 𝕆):
+
+**deg D = 9** over ℚ(t) (scheme mult), with reduced curve components (Singular,
+t=2 and t=3 rational members) (dim2,deg): (2,1),(2,2),(2,2),(2,1) — reduced total
+degree **6 (EVEN)**. Compare 13370001 (also dim A = 8): reduced 2+2+3 = **7 (ODD)**.
+
+**Consequences (correcting §7–§9):**
+- **"deg D = dim Im A = 7" is FALSE.** Among configs that generate 𝕆 (dim A = 8),
+  the reduced degree varies (6, 7) and even its parity varies. The subalgebra
+  reframe gave the right *intuition* (odd components appear) but the wrong
+  value-identity. The degree is not the subalgebra dimension.
+- Neither the reduced top-dimensional degree nor the scheme multiplicity is
+  uniformly odd (measured: reduced 6 and 7; scheme mult 1, 2, 7, 9).
+- **The only robust fact across all configs:** D contains an **odd-degree,
+  ℝ-rational component** — a cubic (deg 3), a pair of lines (deg 1), or a
+  hyperplane (deg 1). In the deg-9 family the generic cubic has split into
+  line + conic, leaving two degree-1 lines. That odd component gives the real
+  point (§3).
+
+**Status.** The exact ℚ(t) machinery (the native operators) did its job: it
+disproved a clean but false statement before it hardened into the manuscript. The
+open core is now precisely: **prove D always contains an odd-degree ℝ-rational
+component** — a statement about the *component structure* of the determinantal
+locus, not about its total degree (which is genuinely config-dependent). The Φ_u
+operator reduction (§8) remains the tool; the question is why an odd-degree piece
+is always present in the degeneracy locus of (Ψ − R_{u₁}⁻¹L_{u₂}).
