@@ -9119,6 +9119,10 @@ fn ocp_mfi_dedup_imm(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 // Copy-prop: rewrite src1/src2 through IrCopy chains; scalar field stores only.
 fn ocp_mfi_copy_prop(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var copy_target: [i64; 256] = [-1; 256]
+    // Guard for the invalidation below: true when some entry's VALUE is this
+    // register. Without it the scan runs on every instruction with a dst, the
+    // common case; with it, only where a mapping could actually be stale.
+    var copy_is_source: [bool; 256] = [false; 256]
     var i: i64 = 0
     while i < ir_fn_get(&(*module), fi as usize).instr_count {
         let s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
@@ -9142,12 +9146,45 @@ fn ocp_mfi_copy_prop(module: &! IrModule, fi: i64) with Mut, Div, Panic {
         }
         let dst = IR_A_DST[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         let cur_s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        // A write to `dst` invalidates the entry whose KEY is `dst` (below) and
+        // also every entry whose VALUE is `dst` -- those record "read this
+        // register instead", which stops being true the moment it is written.
+        // Only the key was cleared, so a swap through a temporary miscompiled:
+        //     tv = v0        copy_target[tv] = v0
+        //     v0 = v1        clears copy_target[v0] -- not the entry tv -> v0
+        //     v1 = tv        the read of tv is rewritten to v0, already changed
+        // leaving v0 and v1 both holding the new value. This runs BEFORE the
+        // record below, because that record's own dst is a write as well.
+        // `dst >= 256` also scans: the else branch below stores an unchecked
+        // cur_s1, so an entry's VALUE can name a register outside the tracked
+        // window, and a write to that register must still invalidate it. The
+        // guard array cannot be indexed there, so those writes always scan --
+        // rare, and over-invalidating is sound where under-invalidating is not.
+        if ocp_has_dst(op) && dst >= 0 && (dst >= 256 || copy_is_source[dst as usize]) {
+            var q: i64 = 0
+            while q < 256 {
+                if copy_target[q as usize] == dst { copy_target[q as usize] = 0 - 1 }
+                q = q + 1
+            }
+            if dst < 256 { copy_is_source[dst as usize] = false }
+        }
         if op == IrOpcode::IrCopy && dst >= 0 && dst < 256 {
             if cur_s1 >= 0 && cur_s1 < 256 && copy_target[cur_s1 as usize] >= 0 {
                 copy_target[dst as usize] = copy_target[cur_s1 as usize]
+                // Both guard writes are range-checked: copy_target holds a
+                // register number that was never bounded above (the else branch
+                // stores an unchecked cur_s1), so indexing the guard with it
+                // unchecked walks off the array -- it segfaulted the compiler
+                // on the first build. A register outside the tracked window is
+                // simply not guarded; the invalidation scan below is likewise
+                // limited to dst < 256, so nothing new is missed.
+                if copy_target[cur_s1 as usize] < 256 {
+                    copy_is_source[copy_target[cur_s1 as usize] as usize] = true
+                }
                 IR_A_SRC1[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] = copy_target[cur_s1 as usize]
             } else {
                 copy_target[dst as usize] = cur_s1
+                if cur_s1 >= 0 && cur_s1 < 256 { copy_is_source[cur_s1 as usize] = true }
             }
         } else if dst >= 0 && dst < 256 {
             copy_target[dst as usize] = 0 - 1
