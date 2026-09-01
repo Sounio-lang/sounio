@@ -206,6 +206,7 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_exec_ingress.ml" \
   "$ROOT_DIR/tools/loom/src/loom_exec_grant_cell.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_canary.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook_generation_drain.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook_generation_guardian.ml" \
   "$ROOT_DIR/tools/loom/src/loom_invocation_cell.ml" \
@@ -348,6 +349,15 @@ output="$(cd "$REPO" && bin/sounio-coord install-runtime)"
 first_id="$(sed -n 's/^INSTALLED runtime_id=\([^ ]*\).*/\1/p' <<< "$output")"
 [[ -n "$first_id" ]] || fail 'installer did not return the first runtime id'
 grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime was not activated'
+current_before_stage="$(readlink -f "$RUNTIME_ROOT/current")"
+stage_output="$(cd "$REPO" && bin/sounio-coord install-runtime --stage)"
+grep -q "^STAGED runtime_id=$first_id .*current_unchanged=true candidate_selected=true$" \
+  <<< "$stage_output" || fail 'staged runtime did not publish the candidate selector'
+[[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$current_before_stage" ]] ||
+  fail 'staging changed the active runtime'
+[[ "$(readlink -f "$RUNTIME_ROOT/native-next")" == \
+  "$RUNTIME_ROOT/versions/$first_id" ]] ||
+  fail 'staging did not atomically select native-next'
 first_manifest="$RUNTIME_ROOT/versions/$first_id/manifest"
 first_source_sha="$(git -C "$REPO" rev-parse --short=12 HEAD)"
 grep -q "^source_sha=$first_source_sha$" "$first_manifest" || \
@@ -1586,6 +1596,8 @@ grep -q "^runtime_id=$first_id$" <<< "$output" || \
 output="$(cd "$REPO" && bin/sounio-coord install-runtime --list)"
 grep -q "runtime_id=$first_id current=yes" <<< "$output" || fail 'runtime list lost the current marker'
 grep -q "runtime_id=$second_id current=no" <<< "$output" || fail 'runtime list lost installed upgrade'
+grep -q "runtime_id=$first_id current=yes candidate=yes" <<< "$output" ||
+  fail 'runtime list lost the staged candidate marker'
 
 unlink "$RUNTIME_ROOT/current"
 ln -s versions/missing "$RUNTIME_ROOT/current"

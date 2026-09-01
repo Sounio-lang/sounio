@@ -743,15 +743,23 @@ let live_observation root =
         || member.classification = Unresponsive)
       members
   in
-  let provider_bit = function "codex" -> 1 | "claude" -> 2 | "cursor" -> 4 | "grok" -> 8 | _ -> 0 in
-  let canary_mask =
-    List.fold_left
-      (fun mask member ->
-        if member.classification = Native then mask lor provider_bit member.harness else mask)
-      0 members
-  in
   let candidate_config_bound, repository_config_sha256 =
     candidate_config_binding root candidate
+  in
+  let candidate_loom_runtime_sha256 =
+    try
+      let manifest =
+        parse_fields ~allow_duplicate:true "candidate-runtime-manifest"
+          (read_file "candidate-runtime-manifest" (Filename.concat candidate "manifest"))
+      in
+      required "candidate-runtime-manifest" manifest "loom_runtime_sha256"
+    with _ -> String.make 64 '0'
+  in
+  let canary_mask =
+    Loom_hook_generation_canary.verified_mask
+      ~state_directory:(marker_directory common) ~candidate_id
+      ~candidate_manifest_sha256:candidate_runtime_sha256
+      ~candidate_loom_runtime_sha256 ~config_bundle_sha256:repository_config_sha256
   in
   let final_config = read_marker common "final-config.v1" in
   let rollback_marker = read_marker common "rollback-pair-tested.v1" in

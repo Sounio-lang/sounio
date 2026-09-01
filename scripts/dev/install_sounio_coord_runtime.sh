@@ -699,6 +699,36 @@ activate_runtime() {
     "$runtime_id" "$protocol" "$version_dir"
 }
 
+stage_runtime() {
+  local runtime_id="$1" version_dir manifest protocol expected actual link_tmp
+  version_dir="$RUNTIME_ROOT/versions/$runtime_id"
+  manifest="$version_dir/manifest"
+  [[ -f "$manifest" && -x "$version_dir/bin/sounio-coord-runtime" && \
+    -x "$version_dir/bin/sounio-loom-runtime" ]] ||
+    die "cannot select incomplete staged runtime: $runtime_id"
+  protocol="$(manifest_value "$manifest" protocol_version)"
+  [[ "$protocol" == "$CLIENT_PROTOCOL" ]] ||
+    die "cannot stage protocol $protocol with installer protocol $CLIENT_PROTOCOL"
+  grep -q '^loom_native_hook_cutover_python_bridge_absent=true$' "$manifest" ||
+    die "cannot select staged runtime without native hook cutover: $runtime_id"
+  [[ ! -e "$version_dir/hooks/sounio_coord_agent_hook_runtime.py" && \
+    ! -e "$version_dir/hooks/sounio_coord_agent_hook.py" ]] ||
+    die "cannot select staged runtime containing a Python hook bridge: $runtime_id"
+  expected="$(manifest_value "$manifest" loom_runtime_sha256)"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] ||
+    die "staged runtime has invalid Loom hash: $runtime_id"
+  actual="$(sha256sum "$version_dir/bin/sounio-loom-runtime" | awk '{print $1}')"
+  [[ "$actual" == "$expected" ]] ||
+    die "staged runtime Loom hash mismatch: expected=$expected actual=$actual"
+  [[ ! -e "$RUNTIME_ROOT/native-next" || -L "$RUNTIME_ROOT/native-next" ]] ||
+    die "refusing to replace non-symlink candidate path: $RUNTIME_ROOT/native-next"
+  link_tmp="$RUNTIME_ROOT/.native-next.$$.$RANDOM"
+  ln -s "versions/$runtime_id" "$link_tmp"
+  mv -Tf "$link_tmp" "$RUNTIME_ROOT/native-next"
+  [[ "$(readlink -f "$RUNTIME_ROOT/native-next")" == "$version_dir" ]] ||
+    die "staged runtime selector verification failed: $runtime_id"
+}
+
 WORKTREE="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 [[ -n "$WORKTREE" ]] || die "run this installer from a Git worktree"
 WORKTREE="$(cd "$WORKTREE" && pwd -P)"
@@ -734,15 +764,20 @@ flock 9
 
 if [[ "$action" == list ]]; then
   current=''
+  candidate=''
   [[ ! -e "$RUNTIME_ROOT/current" ]] || current="$(basename "$(readlink -f "$RUNTIME_ROOT/current")")"
+  [[ ! -e "$RUNTIME_ROOT/native-next" ]] ||
+    candidate="$(basename "$(readlink -f "$RUNTIME_ROOT/native-next")")"
   version_paths=("$RUNTIME_ROOT"/versions/*)
   for version_dir in "${version_paths[@]}"; do
     [[ -d "$version_dir" && -f "$version_dir/manifest" ]] || continue
     runtime_id="$(basename "$version_dir")"
     marker=no
+    candidate_marker=no
     [[ "$runtime_id" != "$current" ]] || marker=yes
-    printf 'RUNTIME runtime_id=%s current=%s protocol=%s runtime_version=%s source_sha=%s\n' \
-      "$runtime_id" "$marker" \
+    [[ "$runtime_id" != "$candidate" ]] || candidate_marker=yes
+    printf 'RUNTIME runtime_id=%s current=%s candidate=%s protocol=%s runtime_version=%s source_sha=%s\n' \
+      "$runtime_id" "$marker" "$candidate_marker" \
       "$(manifest_value "$version_dir/manifest" protocol_version)" \
       "$(manifest_value "$version_dir/manifest" runtime_version)" \
       "$(manifest_value "$version_dir/manifest" source_sha)"
@@ -2067,6 +2102,7 @@ fi
 if ((activate_after_install)); then
   activate_runtime "$runtime_id"
 else
-  printf 'STAGED runtime_id=%s protocol=%s path=%s current_unchanged=true\n' \
+  stage_runtime "$runtime_id"
+  printf 'STAGED runtime_id=%s protocol=%s path=%s current_unchanged=true candidate_selected=true\n' \
     "$runtime_id" "$protocol" "$version_dir"
 fi

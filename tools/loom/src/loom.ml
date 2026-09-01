@@ -13579,6 +13579,8 @@ let main () =
       durable_lane_canary_child ()
     else if command = "agent-hook" then
       Loom_hook.run (arguments_after_command ())
+    else if command = "hook-generation-canary" then
+      Loom_hook_generation_canary.run (arguments_after_command ())
     else if command = "hook-generation-drain-snapshot" then
       Loom_hook_generation_drain.run (arguments_after_command ())
     else if command = "hook-generation-guardian" then
