@@ -317,3 +317,43 @@ effort:
 
 This closes the external-consult avenue: the strongest models available (incl.
 GPT-5.4, DeepSeek V4 Pro) do not solve it. The problem is genuinely open.
+
+## 13. Comprehensive repo sweep (2026-09-01) — the exact ZD machinery, and the honest verdict
+
+A full repo + primary-source sweep (prompted by the founder: "you didn't look at
+everything") found a large body of EXACT Cayley–Dickson zero-divisor machinery I
+had not connected, and three primary Zhilina papers cached from a prior session
+(now preserved in `docs/research/refs/`):
+- `zhilina_doubly_alternative_zd_2608.26893.txt` — centralizer structure.
+- `zhilina_orthogonality_graphs_part1_2608.28176.txt`.
+- `zhilina_orthogonality_graphs_part2_2608.28163.txt` — the diameter-3 technique.
+
+**Genuinely useful assets found (repo, exact/Lean-proven):**
+- **2-cycle criterion + nullity-histogram law** (routon_zd_spec, nullity_histogram_law_spec,
+  cd_tower_zd_graph_invariants_spec): closed forms for `dim ker(L_a)` of canonical
+  ZDs; `det(L_a)=det(A)∏_cycles(1−p(k))`, p(k)∈{±1} from CD signs; L2:
+  `nullity(L_a)=nullity(R_a)` pointwise.
+- **`SounioZDChi.lean` (Lean, no sorry): χ(x,y)=σ(x,y)σ(y,x) = +1 iff x=0∨y=0∨x=y,
+  else −1.** ⟹ distinct nonzero basis units ALWAYS anticommute ⟹ the commutativity
+  graph has **no monomial edges** ⟹ the finite-basis reduction that works on the
+  orthogonality side (84 vertices, PSL(2,7)) **cannot** be used for commutativity.
+- **Centralizer bridge (2608.26893 Lemma 2.19/2.20):** C(x)=F⊕Fx⊕O(x) for n(x)≠0
+  (sedenion ZDs, Euclidean norm ⟹ n(x)≠0, so dim Im C(x)=5, confirming our setup).
+- **Diameter-3 technique (2608.28163 Cor 4.8):** "special elements" (a component
+  = e₀) act as hubs; every nonspecial element is distance-1 from a special one,
+  giving diameter 3 — but this is the ORTHOGONALITY graph. GZ could NOT transpose
+  it to commutativity (they get only 3≤diam≤4); that gap is exactly Conjecture 6.8.
+
+**The honest verdict.** Conjecture 6.8 (commutativity diameter) is an **open
+target** in this repo, not a solved result — the founder's own
+`open_problems_scan_2026-08-31.md` lists it as open problem #1, and its proposed
+reduction ("Aut(𝕆)/Khalil–Yiu transitive on ZD pairs") is an **unverified
+parenthetical that the sweep shows is false**: the symmetry (G₂×S₃, PSL(2,7)=168)
+is transitive on the 84 single ZD vertices, NOT on pairs, so there is **no finite
+reduction**. All the exact machinery is orthogonality-side; the commutativity
+witness reduces to a rank/degeneracy problem on Im C(x)×Im C(x') (≤5×5) — exactly
+the determinantal locus D of §§2–12, whose degree we computed (6,7,9) and whose
+odd-component existence remains the open core. The comprehensive sweep corrected a
+real oversight (the exact ZD corpus) but confirmed: the solution is not sitting
+pre-assembled in the repo; 6.8 is genuinely open, and the repo's own proposed
+shortcut is falsified here.
