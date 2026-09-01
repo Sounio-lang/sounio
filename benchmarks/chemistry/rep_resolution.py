@@ -160,6 +160,30 @@ def main():
     print("   If truncation is orders larger inside the front than at the")
     print("   checkpoint, the checkpoint is where the integrator is NOT tested.")
 
+    # ---- 4. separating truncation from roundoff ---------------------------
+    print()
+    print("=" * 78)
+    print("4. TRUNCATION vs ROUNDOFF in the replica's own self-differences")
+    print("=" * 78)
+    print("   RK4 truncation falls 16x per halving.  Roundoff accumulated over N")
+    print("   steps GROWS as sqrt(N), i.e. by ~1.41x per halving.  The observed")
+    print("   ratio says which dominates at this step.")
+    a, b, c = (traj[1e-8], traj[5e-9], traj[2.5e-9])
+    print(f"{'sp':6s} {'|c(1e-8)-c(5e-9)|':>18s} {'|c(5e-9)-c(2.5e-9)|':>20s} {'ratio':>8s}")
+    for s_ in REPORT:
+        d1 = abs(a[s_] - b[s_]) / abs(b[s_])
+        d2 = abs(b[s_] - c[s_]) / abs(c[s_])
+        print(f"{s_:6s} {d1:18.3e} {d2:20.3e} "
+              f"{(d1 / d2 if d2 else float('nan')):8.3f}")
+    print()
+    print("   ratio ~16      : truncation dominates, the step is the limit")
+    print("   ratio << 1 and : roundoff dominates -- halving the step ADDS")
+    print("     erratic          error, and differences of a few ULP have no")
+    print("                      stable ratio.  Truncation is then unmeasurable")
+    print("                      at this step, only bounded above by the")
+    print("                      self-difference itself.")
+    print("   ratio ~1       : neither -- the difference is a fixed offset")
+
 
 if __name__ == "__main__":
     main()

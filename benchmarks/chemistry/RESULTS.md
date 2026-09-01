@@ -1558,6 +1558,75 @@ can be measured and states plainly what cannot.
 
 ---
 
+## 7.7 The aligned residual, decomposed into what was measured
+
+Every entry below is a measurement from `rep_resolution.py --dir <aligned>`;
+nothing is inferred by subtraction, because the parts are not orthogonal and a
+subtraction would manufacture a number.
+
+```sh
+python3 benchmarks/chemistry/rep_resolution.py --dir <aligned tree>
+```
+
+| part | how measured | value | share of residual |
+|---|---|---|---|
+| **total residual**, replica vs Cantera `rtol=1e-12` | §7.5b, worst species (H2O) | **2.074e-11** | 100% |
+| **oracle's own resolution** at `rtol=1e-12` | Cantera `1e-12` vs `1e-13`, fresh `gas` | **1.416e-11** | 68% |
+| **replica truncation + roundoff**, upper bound | `\|c(1e-8) − c(5e-9)\|/\|c\|`, worst (H2O2) | **≤ 3.465e-14** | 0.17% |
+| — of which truncation alone | see below | **not separable at this step** | — |
+| **unaccounted** | 2.074e-11 − 1.416e-11, *not* a measurement | ~6.6e-12 | 32% |
+
+### Why truncation and roundoff cannot be separated here — and why that is itself the finding
+
+RK4 truncation falls 16× per halving of dt. Roundoff accumulated over N steps
+grows with N. Measuring the replica's self-difference at three step sizes:
+
+| sp | \|c(1e-8)−c(5e-9)\| | \|c(5e-9)−c(2.5e-9)\| | ratio |
+|---|---|---|---|
+| H2 | 1.823e-16 | 2.188e-15 | 0.083 |
+| H | 2.537e-15 | 3.247e-14 | 0.078 |
+| O | 2.705e-15 | 3.218e-14 | 0.084 |
+| O2 | 2.683e-15 | 8.943e-16 | 3.000 |
+| OH | 1.283e-14 | 3.293e-14 | 0.390 |
+| H2O | 2.809e-16 | 3.905e-14 | 0.007 |
+| HO2 | 3.411e-15 | 7.580e-16 | 4.500 |
+| H2O2 | 3.465e-14 | 2.626e-14 | 1.320 |
+
+Not one ratio is near 16. **Halving the step makes the self-difference worse,
+not better, for five of eight species** — by 12× for H, O and H2, by 140× for
+H2O — and the ratios are erratic across two orders of magnitude. That is the
+signature of **roundoff dominance**: at 10,000 to 40,000 steps the accumulated
+double-precision error is of order √N·ε ≈ 2e-14 … 4e-14, which is exactly the
+band these differences sit in. A difference of a few ULP has no stable ratio.
+
+So at dt = 1e-8 the replica is **already at the double-precision floor**:
+truncation is below roundoff, and reducing the step would add error rather
+than remove it. The upper bound of 3.465e-14 on truncation-plus-roundoff is the
+best this instrument gives, and it is three orders below the residual, so
+**the replica contributes nothing measurable to the 2.074e-11.**
+
+### The honest statement of the central result
+
+- **The published gap of 2.660e-06 is real, is one rounded constant, and is
+  180,000× the oracle's resolution.** Its existence, magnitude and attribution
+  are far above every noise source in this table. That result stands
+  unqualified.
+- **After alignment, the residual is 2.074e-11, of which the oracle's own
+  uncertainty accounts for 1.416e-11 and the replica for at most 3.5e-14.** The
+  remaining ~6.6e-12 is within a factor 1.5 of the instrument floor and is
+  **unresolved** — it may be a real difference between the two implementations
+  or may be oracle noise, and this configuration cannot say which.
+- **Therefore: with the constants aligned, replica and Cantera agree to within
+  the oracle's resolution.** Not "to 2e-11". Not "at the floor of rtol". *To
+  within the resolution of the instrument used to compare them.*
+
+To resolve the last 6.6e-12 would need a reference at least an order tighter
+— Cantera at `rtol=1e-14`, whose own floor is 6.068e-12 and so would not
+suffice either — or an arbitrary-precision integration of the same mechanism.
+Not done here; bounded rather than claimed.
+
+---
+
 ## 7.6 The truncation curve in time — the checkpoint sits at its minimum
 
 Truncation measured at one instant says nothing about the integrator elsewhere
