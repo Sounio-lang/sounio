@@ -1,0 +1,135 @@
+// examples/chemistry/band_sweep.sio
+//
+// RECONSTRUCTION (2026-09-01) -- this is NOT the original artefact.
+// The preprint cites examples/chemistry/band_sweep.sio. No blob under that
+// name exists in any tree reachable from any ref of this repository (see
+// benchmarks/chemistry/RESULTS.md section 4). Written from the described
+// protocol, not recovered.
+//
+// PURPOSE: settle the band-scaling law on the NATIVE Sounio surface.
+//
+// The per-step parameter term (nu_ir * net_r * dt * u_r)^2, accumulated in
+// quadrature over N = T/dt steps, gives a variance ~ N*dt^2 = T*dt, hence a
+// standard uncertainty ~ sqrt(T*dt). A factor f in dt must therefore move the
+// band by sqrt(f): a factor 4 must give 2.0, NOT sqrt(2).
+//
+// Measured independently at this commit by two other implementations (the
+// Python replica and a dependency-free C++20 cross-check, which agree with
+// each other to six digits -- RESULTS.md section 5):
+//
+//   factor 2 in dt -> ratio 1.41418 .. 1.41817   (sqrt(2) = 1.414214)
+//   factor 4 in dt -> ratio 1.99994 .. 2.00841   (sqrt(4) = 2.000000)
+//
+// A log entry recording "factor 4 in dt, ratio sqrt(2)" conflates the two
+// sweeps: sqrt(2) is the factor-2 ratio.
+//
+// IMPORTANT -- what this measures. The sqrt(dt) dependence is not a property
+// of the chemistry. It is the signature of adding an INDEPENDENT quadrature
+// source at every time step, when successive steps in fact share the same
+// rate parameters and are not independent. A band that changes when you change
+// the step size is reporting the integrator, not the chemistry. The Sounio
+// native module propagates persistent rate-parameter sensitivities coherently
+// and should therefore NOT show this scaling; that contrast is the point of
+// running the sweep here rather than only in the replica.
+//
+// Expect the ratio to be 1.0 for H2 and O2 under every dt: their variance is
+// dominated by the 1% initial-condition uncertainty seeded at t = 0, which
+// does not accumulate.
+//
+// Protocol: T = 1500 K, fixed end time t = 1e-6 s (pre-front), dt swept over
+// 4e-9 (250 steps), 2e-9 (500 steps) and 1e-9 (1000 steps). 1% standard
+// uncertainty on initial H2 and O2.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/chemistry/band_sweep.sio
+use chemistry::gri30_h2::*
+
+fn pi64(x: i64) with IO, Mut, Div, Panic {
+    if x < 0 { print("-"); pi64a(0 - x) } else { pi64a(x) }
+}
+fn pi64a(x: i64) with IO, Mut, Div, Panic {
+    if x >= 10 { pi64a(x / 10); digit(x % 10) } else { digit(x) }
+}
+fn digit(d: i64) with IO, Mut, Div, Panic {
+    if d == 0 { print("0") } else if d == 1 { print("1") } else if d == 2 { print("2") } else if d == 3 { print("3") } else if d == 4 { print("4") } else if d == 5 { print("5") } else if d == 6 { print("6") } else if d == 7 { print("7") } else if d == 8 { print("8") } else { print("9") }
+}
+fn pv(label: string, v: f64, scale: f64, exponent: i64) with IO, Mut, Div, Panic {
+    print(label); pi64((v * scale) as i64); print("e"); pi64(exponent); println("")
+}
+
+fn band(dt: f64, steps: i64) -> [f64; 10] with Mut, Div, Panic {
+    let t_k: f64 = 1500.0
+    let mtot: f64 = 1.0 / (82.057 * t_k)
+    var c0: [f64; 10] = [0.0; 10]
+    c0[0] = mtot * 0.02
+    c0[3] = mtot * 0.01
+    c0[8] = mtot * 0.97
+    c0[1] = 1.0e-11
+    var s0: [f64; 10] = [0.0; 10]
+    s0[0] = 0.01 * c0[0]
+    s0[3] = 0.01 * c0[3]
+    let r = simulate_gri30_h2_epistemic(&c0, &s0, t_k, dt, steps)
+    r.1
+}
+
+fn report(label: string, u: &[f64; 10]) with IO, Mut, Div, Panic {
+    println(label)
+    pv("  H2   u=", u[0], 1.0e24, -24 as i64)
+    pv("  H    u=", u[1], 1.0e30, -30 as i64)
+    pv("  O    u=", u[2], 1.0e30, -30 as i64)
+    pv("  O2   u=", u[3], 1.0e25, -25 as i64)
+    pv("  OH   u=", u[4], 1.0e30, -30 as i64)
+    pv("  H2O  u=", u[5], 1.0e30, -30 as i64)
+    pv("  HO2  u=", u[6], 1.0e31, -31 as i64)
+    pv("  H2O2 u=", u[7], 1.0e34, -34 as i64)
+}
+
+fn ratio(label: string, a: f64, b: f64) with IO, Mut, Div, Panic {
+    // ratio printed as an integer scaled by 1e6, i.e. 1414214e-6 is 1.414214
+    print(label)
+    if b > 0.0 { pi64(((a / b) * 1.0e6) as i64); println("e-6") }
+    else { println("undefined (zero band)") }
+}
+
+fn ratios(label: string, a: &[f64; 10], b: &[f64; 10]) with IO, Mut, Div, Panic {
+    println(label)
+    ratio("  H2   ", a[0], b[0])
+    ratio("  H    ", a[1], b[1])
+    ratio("  O    ", a[2], b[2])
+    ratio("  O2   ", a[3], b[3])
+    ratio("  OH   ", a[4], b[4])
+    ratio("  H2O  ", a[5], b[5])
+    ratio("  HO2  ", a[6], b[6])
+    ratio("  H2O2 ", a[7], b[7])
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("BAND SWEEP (RECONSTRUCTION 2026-09-01)")
+    println("GRI-Mech 3.0 H/O, T=1500K, t=1e-6 s fixed, dt swept")
+    println("1-sigma bands, mol/cm3, mantissa e exponent")
+    println("")
+
+    let u4 = band(4.0e-9, 250 as i64)
+    report("dt = 4e-9 (250 steps):", &u4)
+    println("")
+    let u2 = band(2.0e-9, 500 as i64)
+    report("dt = 2e-9 (500 steps):", &u2)
+    println("")
+    let u1 = band(1.0e-9, 1000 as i64)
+    report("dt = 1e-9 (1000 steps):", &u1)
+    println("")
+
+    println("RATIOS (printed as integer x 1e-6; 1414214e-6 is 1.414214)")
+    println("")
+    ratios("dt 4e-9 / 2e-9  -- factor 2, sqrt(2) = 1414214e-6:", &u4, &u2)
+    println("")
+    ratios("dt 2e-9 / 1e-9  -- factor 2, sqrt(2) = 1414214e-6:", &u2, &u1)
+    println("")
+    ratios("dt 4e-9 / 1e-9  -- factor 4, sqrt(4) = 2000000e-6:", &u4, &u1)
+    println("")
+    println("VERDICT: a factor 4 in dt must give 2.000000, not 1.414214.")
+    println("sqrt(2) is the factor-2 ratio. See RESULTS.md section 5.")
+    println("SWEEP DONE")
+    0
+}
