@@ -1,3 +1,5 @@
+>>> RESOLVED 2026-09-01: Conjecture 6.8 is a THEOREM — Zhilina, arXiv 2608.26890, Theorem 4.13 (diam Γ_C^Z(𝕊)=3), a companion paper to 2608.26903 that we had cited but never fetched. Proof = dimension count: find (a',b')∈Im C(x')∩span{(a,-b),(b,a),(ab,0),(0,ab)}^⊥ (5∩codim4≥1), then Lemma 4.12 gives d(x,(a',b'))≤2; length-3 path. VERIFIED computationally 8/8. See refs/zhilina_diameter_commutativity_2608.26890_THEOREM.md. Our §§2-5 rank laws stand independently.
+
 # The commutator map on sedenion zero-divisor commutants: rank laws and a characteristic-class approach to the commutativity-diameter conjecture
 
 **Draft v0.1 — 2026-08-31.** Working manuscript; verification artifacts in this
