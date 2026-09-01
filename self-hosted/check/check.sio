@@ -6291,7 +6291,56 @@ fn checker_finish_binary_units_inplace(c: *mut Checker, span: Span, op: BinaryOp
     pair.1
 }
 
+// R6 Correlated (id 29): Knowledge binary arith reusing the same ExprIdent
+// requires `with Correlated`. Distinct from E230 anti-garbling (noise symbols).
+// SOUNIO_FORCE_CORRELATED=1 forces every Knowledge arith op (reachability).
+fn checker_check_correlated_on_binary_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+        || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
+    if !is_arith {
+        return
+    }
+    let know = is_knowledge_type(left_ty) || is_knowledge_type(right_ty)
+    if !know {
+        return
+    }
+    let force = str_eq(read_env("SOUNIO_FORCE_CORRELATED"), "1")
+    var need = false
+    var shared_name = make_name("_")
+    if force {
+        need = true
+        shared_name = make_name("force")
+    } else {
+        match e.left {
+            Some(lbox) => {
+                match e.right {
+                    Some(rbox) => {
+                        if (*lbox).kind == ExprKind::ExprIdent && (*rbox).kind == ExprKind::ExprIdent {
+                            if name_eq((*lbox).name, (*rbox).name) {
+                                need = true
+                                shared_name = (*lbox).name
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            None => {}
+        }
+    }
+    if need {
+        let corr_id: i64 = 29
+        if !has_effect_id((*c).current_effects, (*c).current_effect_count, corr_id) {
+            checker_report_error_at_inplace(c, e.span, 236, 0, 0, 0)
+            print("   = shared binding ")
+            e035_print_ident(shared_name)
+            print("\n   = help: add `with Correlated` — operands share a slot; GUM independence does not hold\n")
+        }
+    }
+}
+
 fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    checker_check_correlated_on_binary_inplace(c, e, left_ty, right_ty)
     if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
             || e.bin_op == BinaryOp::OpLt || e.bin_op == BinaryOp::OpLe
@@ -15115,6 +15164,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 205 { print("Audited<T> requires ZD and Witness effects: witness-bearing surgery (G9) must emit a machine-checkable Lean derivation of the ZD-kernel action. `with ZD` alone produces the erasure without evidence; Witness is what makes it checkable. Add `with ZD, Witness` to your function signature.") }
     else if code == 206 { print("Revivable<T> requires ZD and Temporal effects: time-bounded reversible surgery (G10) needs both the ZD annihilator algebra and an explicit Temporal window in which the op can be inverted. After the window, the surgery is irrevocable. Add `with ZD, Temporal` to your function signature.") }
     else if code == 207 { print("Interpretable<T> requires ZD effect: the 168-class canonical basis is the projective ZD-graph of sedenions. Without the ZD effect the compiler cannot guarantee that decomposition/reconstruction is fp-exact. Add `with ZD` to your function signature.") }
+    else if code == 236 { print("binary operation on Knowledge values reuses a correlated binding; independence is not assumed. Add `with Correlated` to the function signature.") }
     else if code == 247 { print("ZD locus is not a well-formed sedenion pair eIeJ with 1 <= I < J <= 15") }
     else if code == 213 { print("tuple destructure arity mismatch") }
     else if code == 215 { print("EpistemicComplete violation") }
@@ -22498,8 +22548,63 @@ impl Checker {
     // (checker_check_binary_expr_inplace) can check the OPERANDS in place and bridge here
     // for the operand-type-driven validation. This body never re-checks operands, so it
     // never recurses into check_path_expr — faithful by construction (verbatim move).
+    fn report_correlated_required(self, span: Span, shared: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self.report_error_at(span, 236, 0, 0, 0)
+        print("   = shared binding ")
+        e035_print_ident(shared)
+        print("\n   = help: add `with Correlated` — operands share a slot; GUM independence does not hold\n")
+        c
+    }
+
+    fn check_correlated_on_binary(self, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
+        if !is_arith {
+            return c
+        }
+        let know = is_knowledge_type(left_ty) || is_knowledge_type(right_ty)
+        if !know {
+            return c
+        }
+        let force = str_eq(read_env("SOUNIO_FORCE_CORRELATED"), "1")
+        var need = false
+        var shared_name = make_name("_")
+        if force {
+            need = true
+            shared_name = make_name("force")
+        } else {
+            match e.left {
+                Some(lbox) => {
+                    match e.right {
+                        Some(rbox) => {
+                            if (*lbox).kind == ExprKind::ExprIdent && (*rbox).kind == ExprKind::ExprIdent {
+                                if name_eq((*lbox).name, (*rbox).name) {
+                                    need = true
+                                    shared_name = (*lbox).name
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                None => {}
+            }
+        }
+        if need {
+            let corr_id: i64 = 29
+            if !has_effect_id(c.current_effects, c.current_effect_count, corr_id) {
+                c = c.report_correlated_required(e.span, shared_name)
+            }
+        }
+        c
+    }
+
     fn check_binary_with_operand_types(self, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
+
+        // R6: Correlated effect on Knowledge slot-identity arithmetic
+        c = c.check_correlated_on_binary(e, left_ty, right_ty)
 
         // Observer semantics: comparing Unobserved<T> requires with Observe
         if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
