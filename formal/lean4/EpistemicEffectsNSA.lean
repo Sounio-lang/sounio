@@ -33,6 +33,16 @@ Theorems (all sorry-free, Mathlib-free, `decide` only — no `native_decide`):
     sensitivity propagator reports 8. So "(C) exactly two" is a theorem for propagators
     that carry sensitivities, and FALSE for variance-only propagators over non-composition
     algebras.
+  * The third axis RELATIVE TO `Q` (§L): the composition identity quantified over the
+    certified supports `LA × LB` instead of the whole basis (`polarOn`, decidable) gives
+    norm multiplicativity and shortcut exactness at EVERY level (`norm_mult_of_polarOn`,
+    `shortcut_eq_sensitivity_of_polarOn`) — in the sedenions on `{1,10}×{2,5}`
+    (`sedenion_shortcut_exact_on_1_10_x_2_5`), refused on the witness `{1,10}×{4,15}`.
+    And the SYNTACTIC criterion: on basis quadruples the polarized form is a sum of
+    coincidences `l⊕l' = i⊕i'` (`polar_e_e`, via `cdMul_e_e`), so xor-freeness of the two
+    supports certifies the identity with no sign table (`polarOn_of_xorFree`); a monomial
+    operand certifies against any partner (`norm_mult_of_monomial`). The third axis is the
+    first axis seen through the norm; one certificate decides both.
 
 Companion: docs/research/ANTIGARBLING_FUSION_THEOREM_2026-09-01.md
 -/
@@ -1616,6 +1626,321 @@ theorem octonion_shortcut_exact (x : Vec) (a : Aff) (y : Vec) (b : Aff) (ma mb :
     (gMulShortcut 3 x y ma mb).gumVar = (gMulMeta 3 x a y b ma mb).gumVar :=
   shortcut_eq_sensitivity_of_polarBasis polarBasis3 x a y b ma mb hx hy
 
+-- ================================================================
+-- §L. The third axis RELATIVE TO THE Q CERTIFICATE. Hurwitz (§K) quantified the
+--     composition identity over the WHOLE basis, so it lives or dies with the level.
+--     Quantified over the certified supports `LA × LB` instead, it is decidable per
+--     operand pair and holds on many pairs at EVERY level — the sedenions included.
+--     So the variance shortcut is exact beyond Hurwitz whenever Q certifies it: the
+--     third axis is the first axis (order) seen through the norm, and the same
+--     certificate decides both.
+-- ================================================================
+
+/-- Support-restricted composition identity: the basis quadruple identity over left
+    supports `LA` and right supports `LB` only. `polarBasis n` is `LA = LB = range (2^n)`. -/
+def polarOn (n : Nat) (LA LB : List Nat) : Prop :=
+  ∀ i ∈ LA, ∀ i' ∈ LA, ∀ l ∈ LB, ∀ l' ∈ LB, polar n i i' (e l) (e l') = 0
+instance (n : Nat) (LA LB : List Nat) : Decidable (polarOn n LA LB) := by
+  unfold polarOn; infer_instance
+
+/-- Every index of a support list is live at level `n`. -/
+def boundedL (n : Nat) (L : List Nat) : Prop := ∀ i ∈ L, i < 2^n
+instance (n : Nat) (L : List Nat) : Decidable (boundedL n L) := by unfold boundedL; infer_instance
+
+/-- Support induction, relative form (the `key` of `lin_zero_of_basis`, exposed): a
+    functional additive, homogeneous and live-only that kills `e_i` for `i ∈ L` kills
+    every vector covered by `L`. -/
+theorem lin_zero_of_qCoversL (n : Nat) (F : Vec → Int)
+    (hadd : ∀ u v, F (vadd u v) = F u + F v)
+    (hsmul : ∀ c u, F (smul c u) = c * F u)
+    (hlive : ∀ u, eqOn (2^n) u vzero → F u = 0)
+    (L : List Nat) (hb : ∀ i ∈ L, F (e i) = 0) : ∀ v, qCoversL n L v → F v = 0 := by
+  induction L with
+  | nil => intro v hv; exact hlive v (eqOn_zero_of_qCoversL_nil hv)
+  | cons i L ih =>
+    intro v hv
+    rw [peel_decomp i v, hadd, hsmul, hb i (List.mem_cons_self),
+        ih (fun j hj => hb j (List.mem_cons_of_mem i hj)) _ (qCoversL_peel hv)]
+    simp
+
+theorem polar_zero_of_polarOn {n : Nat} {LA LB : List Nat} (hp : polarOn n LA LB) {i i' : Nat}
+    (hi : i ∈ LA) (hi' : i' ∈ LA) :
+    ∀ b b', qCoversL n LB b → qCoversL n LB b' → polar n i i' b b' = 0 := by
+  have step1 : ∀ l ∈ LB, ∀ b', qCoversL n LB b' → polar n i i' (e l) b' = 0 := by
+    intro l hl
+    refine lin_zero_of_qCoversL n (fun b' => polar n i i' (e l) b') ?_ ?_ ?_ LB ?_
+    · intro u v; rw [polar_comm, polar_add_right, polar_comm n i i' u, polar_comm n i i' v]
+    · intro c u; rw [polar_comm, polar_smul_right, polar_comm]
+    · intro u hu; rw [polar_comm]; exact polar_live_right n i i' (e l) hu
+    · intro l' hl'; exact hp i hi i' hi' l hl l' hl'
+  intro b b' hb hb'
+  refine lin_zero_of_qCoversL n (fun b => polar n i i' b b') ?_ ?_ ?_ LB ?_ b hb
+  · intro u v; exact polar_add_right n i i' u v b'
+  · intro c u; exact polar_smul_right n i i' c u b'
+  · intro u hu; exact polar_live_right n i i' b' hu
+  · intro l hl; exact step1 l hl b' hb'
+
+theorem basis_bil_zero_on {n : Nat} {LA LB : List Nat} (hp : polarOn n LA LB) {i i' : Nat}
+    (hi : i ∈ LA) (hi' : i' ∈ LA) {b : Vec} (hb : qCoversL n LB b) :
+    inner (2^n) (cdMul n (e i) b) (cdMul n (e i') b) - (if i = i' then normSq (2^n) b else 0) = 0 := by
+  have h := polar_zero_of_polarOn hp hi hi' b b hb hb
+  unfold polar at h; unfold normSq
+  by_cases hii : i = i' <;> simp only [hii, if_true, if_false] at h ⊢ <;> omega
+
+theorem bil_zero_of_polarOn {n : Nat} {LA LB : List Nat} (hLA : boundedL n LA)
+    (hp : polarOn n LA LB) {b : Vec} (hb : qCoversL n LB b) :
+    ∀ a a', qCoversL n LA a → qCoversL n LA a' → bil n b a a' = 0 := by
+  have step1 : ∀ i ∈ LA, ∀ a', qCoversL n LA a' → bil n b (e i) a' = 0 := by
+    intro i hi
+    refine lin_zero_of_qCoversL n (fun a' => bil n b (e i) a') ?_ ?_ ?_ LA ?_
+    · intro u v; rw [bil_comm, bil_add_left, bil_comm n b u, bil_comm n b v]
+    · intro c u; rw [bil_comm, bil_smul_left, bil_comm]
+    · intro u hu; rw [bil_comm]; exact bil_live_left n b (e i) hu
+    · intro i' hi'
+      have h := basis_bil_zero_on hp hi hi' hb
+      unfold bil; rw [inner_e_e (2^n) i i' (hLA i hi)]
+      by_cases hii : i = i' <;> simp only [hii, if_true, if_false] at h ⊢ <;> omega
+  intro a a' ha ha'
+  refine lin_zero_of_qCoversL n (fun a => bil n b a a') ?_ ?_ ?_ LA ?_ a ha
+  · intro u v; exact bil_add_left n b u v a'
+  · intro c u; exact bil_smul_left n b c u a'
+  · intro u hu; exact bil_live_left n b a' hu
+  · intro i hi; exact step1 i hi a' ha'
+
+/-- HURWITZ RELATIVE TO Q: on certified supports satisfying the composition identity the
+    norm is multiplicative — at every level, the sedenions included. -/
+theorem norm_mult_of_polarOn {n : Nat} {LA LB : List Nat} (hLA : boundedL n LA)
+    (hp : polarOn n LA LB) {a b : Vec} (ha : qCoversL n LA a) (hb : qCoversL n LB b) :
+    normSq (2^n) (cdMul n a b) = normSq (2^n) a * normSq (2^n) b := by
+  have h := bil_zero_of_polarOn hLA hp hb a a ha ha
+  unfold bil at h; unfold normSq at h ⊢; omega
+
+theorem inner_mulR_eq_on {n : Nat} {LA LB : List Nat} (hLA : boundedL n LA) (hp : polarOn n LA LB)
+    {d d' y : Vec} (hd : qCoversL n LA d) (hd' : qCoversL n LA d') (hy : qCoversL n LB y) :
+    inner (2^n) (cdMul n d y) (cdMul n d' y) = inner (2^n) d d' * normSq (2^n) y := by
+  have h := bil_zero_of_polarOn hLA hp hy d d' hd hd'; unfold bil at h; omega
+
+theorem inner_mulL_eq_on {n : Nat} {LA LB : List Nat} (hLA : boundedL n LA) (hp : polarOn n LA LB)
+    {x d d' : Vec} (hx : qCoversL n LA x) (hd : qCoversL n LB d) (hd' : qCoversL n LB d') :
+    inner (2^n) (cdMul n x d) (cdMul n x d') = normSq (2^n) x * inner (2^n) d d' := by
+  have hdd' : qCoversL n LB (vadd d d') := qCovers_vadd_same (Q := some LB) hd hd'
+  have h1 := norm_mult_of_polarOn hLA hp hx hdd'
+  have h2 := norm_mult_of_polarOn hLA hp hx hd
+  have h3 := norm_mult_of_polarOn hLA hp hx hd'
+  rw [cdMul_add_right, normSq_add, normSq_add, h2, h3, Int.mul_add, Int.mul_add] at h1
+  have := Int.mul_left_comm (normSq (2^n) x) 2 (inner (2^n) d d')
+  omega
+
+theorem trueVar_scaleR_eq_on {n : Nat} {LA LB : List Nat} (hLA : boundedL n LA) (hp : polarOn n LA LB)
+    {a : Aff} (ha : qCoversAff n (some LA) a) {y : Vec} (hy : qCoversL n LB y) :
+    trueVar (2^n) (scaleR n a y) = normSq (2^n) y * trueVar (2^n) a := by
+  unfold trueVar
+  suffices h : ∀ b : Aff, qCoversAff n (some LA) b →
+      innerA (2^n) (scaleR n a y) (scaleR n b y) = normSq (2^n) y * innerA (2^n) a b from h a ha
+  intro b hb
+  induction a with
+  | nil => simp [scaleR, innerA]
+  | cons p r ih =>
+    rcases p with ⟨s, c⟩
+    have hcons : scaleR n ((s, c) :: r) y = (s, cdMul n c y) :: scaleR n r y := rfl
+    have hc : qCoversL n LA c := ha (s, c) List.mem_cons_self
+    have hr : qCoversAff n (some LA) r := fun q hq => ha q (List.mem_cons_of_mem _ hq)
+    have hcb : qCoversL n LA (coeff b s) := qCovers_coeff hb s
+    rw [hcons]; simp only [innerA]
+    rw [ih hr, coeff_scaleR, inner_mulR_eq_on hLA hp hc hcb hy, Int.mul_add,
+        Int.mul_comm (inner (2^n) c (coeff b s))]
+
+theorem trueVar_scaleL_eq_on {n : Nat} {LA LB : List Nat} (hLA : boundedL n LA) (hp : polarOn n LA LB)
+    {x : Vec} (hx : qCoversL n LA x) {a : Aff} (ha : qCoversAff n (some LB) a) :
+    trueVar (2^n) (scaleL n x a) = normSq (2^n) x * trueVar (2^n) a := by
+  unfold trueVar
+  suffices h : ∀ b : Aff, qCoversAff n (some LB) b →
+      innerA (2^n) (scaleL n x a) (scaleL n x b) = normSq (2^n) x * innerA (2^n) a b from h a ha
+  intro b hb
+  induction a with
+  | nil => simp [scaleL, innerA]
+  | cons p r ih =>
+    rcases p with ⟨s, c⟩
+    have hcons : scaleL n x ((s, c) :: r) = (s, cdMul n x c) :: scaleL n x r := rfl
+    have hc : qCoversL n LB c := ha (s, c) List.mem_cons_self
+    have hr : qCoversAff n (some LB) r := fun q hq => ha q (List.mem_cons_of_mem _ hq)
+    have hcb : qCoversL n LB (coeff b s) := qCovers_coeff hb s
+    rw [hcons]; simp only [innerA]
+    rw [ih hr, coeff_scaleL, inner_mulL_eq_on hLA hp hx hc hcb, Int.mul_add]
+
+/-- THE THIRD AXIS, RELATIVE TO Q. If the value AND every perturbation direction of `x`
+    are certified inside `LA`, those of `y` inside `LB`, and the composition identity holds
+    on `LA × LB`, the shortcut equals the sensitivity propagator — at EVERY level `n`. No
+    Hurwitz hypothesis: the level may be 4 or beyond. -/
+theorem shortcut_eq_sensitivity_of_polarOn {n : Nat} {LA LB : List Nat}
+    (hLA : boundedL n LA) (hp : polarOn n LA LB)
+    {x : Vec} {a : Aff} {y : Vec} {b : Aff} (ma mb : KMeta)
+    (hx : qCoversL n LA x) (ha : qCoversAff n (some LA) a)
+    (hy : qCoversL n LB y) (hb : qCoversAff n (some LB) b)
+    (hma : ma.gumVar = trueVar (2^n) a) (hmb : mb.gumVar = trueVar (2^n) b) :
+    (gMulShortcut n x y ma mb).gumVar = (gMulMeta n x a y b ma mb).gumVar := by
+  simp only [gMulShortcut, gMulMeta]
+  rw [hma, hmb, trueVar_scaleR_eq_on hLA hp ha hy, trueVar_scaleL_eq_on hLA hp hx hb]
+
+/-- `polarBasis n` is the full-support instance, so §K is the special case `LA = LB = range`. -/
+theorem polarOn_range_of_polarBasis {n : Nat} (hp : polarBasis n) :
+    polarOn n (List.range (2^n)) (List.range (2^n)) := by
+  intro i hi i' hi' l hl l' hl'
+  exact hp i (List.mem_range.mp hi) i' (List.mem_range.mp hi') l (List.mem_range.mp hl) l' (List.mem_range.mp hl')
+
+-- ---- Sedenions (n = 4): the identity fails on the whole basis (`not_polarBasis4`) but
+-- ---- holds on certified pairs — decided in the kernel.
+
+/-- The pair behind `sed_shortcut_understates`: supports `{1,10}` × `{4,15}`. Refused. -/
+theorem not_polarOn4_witness : ¬ polarOn 4 [1, 10] [4, 15] := by decide
+/-- Same left support, a right support that certifies: `{1,10}` × `{2,5}`. -/
+theorem polarOn4_1_10_x_2_5 : polarOn 4 [1, 10] [2, 5] := by decide
+/-- A monomial left operand certifies against a right operand straddling the octonion
+    boundary: `{9}` × `{3, 12}`. -/
+theorem polarOn4_9_x_3_12 : polarOn 4 [9] [3, 12] := by decide
+/-- Mixed supports on both sides, still certified: `{2, 13}` × `{1, 4, 8}`. -/
+theorem polarOn4_2_13_x_1_4_8 : polarOn 4 [2, 13] [1, 4, 8] := by decide
+
+/-- SEDENION SHORTCUT, EXACT: on the certified pair `{1,10}` × `{2,5}` the shortcut is the
+    sensitivity propagator, at level 4 — where Hurwitz fails and `sedenion_norm_not_multiplicative`
+    holds. Same theorem as `octonion_shortcut_exact`, one level up, certificate instead of level. -/
+theorem sedenion_shortcut_exact_on_1_10_x_2_5
+    {x : Vec} {a : Aff} {y : Vec} {b : Aff} (ma mb : KMeta)
+    (hx : qCoversL 4 [1, 10] x) (ha : qCoversAff 4 (some [1, 10]) a)
+    (hy : qCoversL 4 [2, 5] y) (hb : qCoversAff 4 (some [2, 5]) b)
+    (hma : ma.gumVar = trueVar 16 a) (hmb : mb.gumVar = trueVar 16 b) :
+    (gMulShortcut 4 x y ma mb).gumVar = (gMulMeta 4 x a y b ma mb).gumVar :=
+  shortcut_eq_sensitivity_of_polarOn (by decide) polarOn4_1_10_x_2_5 ma mb hx ha hy hb hma hmb
+
+/-- And the norm itself, multiplicative on that pair in the sedenions. -/
+theorem sedenion_norm_mult_on_1_10_x_2_5 {a b : Vec} (ha : qCoversL 4 [1, 10] a) (hb : qCoversL 4 [2, 5] b) :
+    normSq 16 (cdMul 4 a b) = normSq 16 a * normSq 16 b :=
+  norm_mult_of_polarOn (by decide) polarOn4_1_10_x_2_5 ha hb
+
+-- ---- §L.2  The syntactic criterion. On basis quadruples the polarized form is a sum of
+-- ---- Kronecker coincidences `i ⊕ l = i' ⊕ l'`, i.e. `l ⊕ l' = i ⊕ i'`. So if no xor of two
+-- ---- right indices equals a xor of two DISTINCT left indices, the identity holds — at any
+-- ---- level, with no sign table consulted. (The sedenion witness has 1⊕10 = 4⊕15 = 11.)
+-- ---- This is what a checker can test in O(|LA|²+|LB|²) from the Q masks alone.
+
+theorem neg_pm {c : Int} (h : c = 1 ∨ c = -1) : -c = 1 ∨ -c = -1 := by omega
+
+/-- The Cayley–Dickson sign is a sign. -/
+theorem cdSigma_pm : ∀ (n a b : Nat), cdSigma a b n = 1 ∨ cdSigma a b n = -1
+  | 0, a, b => by
+      simp only [cdSigma]; split <;> first | exact Or.inl rfl | exact Or.inr rfl
+  | 1, a, b => by
+      simp only [cdSigma]; split <;> first | exact Or.inl rfl | exact Or.inr rfl
+  | bits+2, a, b => by
+      simp only [cdSigma]
+      repeat' split
+      all_goals first
+        | exact Or.inl rfl
+        | exact Or.inr rfl
+        | exact cdSigma_pm (bits+1) _ _
+        | exact neg_pm (cdSigma_pm (bits+1) _ _)
+
+theorem cdSigma_sq (a b n : Nat) : cdSigma a b n * cdSigma a b n = 1 := by
+  rcases cdSigma_pm n a b with h | h <;> rw [h] <;> decide
+
+theorem xor_swap {a b c d : Nat} (h : a ^^^ b = c ^^^ d) : b ^^^ d = a ^^^ c := by
+  calc b ^^^ d = (a ^^^ a) ^^^ (b ^^^ d) := by rw [Nat.xor_self, Nat.zero_xor]
+    _ = a ^^^ ((a ^^^ b) ^^^ d) := by rw [Nat.xor_assoc, Nat.xor_assoc]
+    _ = a ^^^ ((c ^^^ d) ^^^ d) := by rw [h]
+    _ = a ^^^ c := by rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+
+theorem xor_cancel_left {a b c : Nat} (h : a ^^^ b = a ^^^ c) : b = c := by
+  calc b = a ^^^ (a ^^^ b) := by rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+    _ = a ^^^ (a ^^^ c) := by rw [h]
+    _ = c := by rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+
+/-- Basis product: `e_i · e_l = σ(i,l) · e_{i ⊕ l}` (the docstring of `cdSigma`, as a theorem). -/
+theorem cdMul_e_e (n i l : Nat) (hi : i < 2^n) :
+    cdMul n (e i) (e l) = smul (cdSigma i l n) (e (i ^^^ l)) := by
+  funext k
+  simp only [cdMul, smul, e]
+  have hf : (fun j => cdSigma j (j ^^^ k) n * (if j = i then (1:Int) else 0) * (if j ^^^ k = l then (1:Int) else 0))
+          = (fun j => if j = i then cdSigma j (j ^^^ k) n * (if j ^^^ k = l then (1:Int) else 0) else 0) := by
+    funext j; by_cases h : j = i <;> simp [h]
+  rw [hf, sumR_ite_eq (2^n) i hi]
+  by_cases hk : k = i ^^^ l
+  · subst hk
+    have h1 : i ^^^ (i ^^^ l) = l := by rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+    simp [h1]
+  · have h2 : i ^^^ k ≠ l := by
+      intro h; apply hk; rw [← h, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+    simp [h2, hk]
+
+/-- The polarized form on a basis quadruple: two Kronecker coincidences and the diagonal. -/
+theorem polar_e_e (n : Nat) {i i' l l' : Nat} (hi : i < 2^n) (hi' : i' < 2^n) (hl : l < 2^n) (hl' : l' < 2^n) :
+    polar n i i' (e l) (e l')
+      = cdSigma i l n * (cdSigma i' l' n * (if i ^^^ l = i' ^^^ l' then 1 else 0))
+      + cdSigma i l' n * (cdSigma i' l n * (if i ^^^ l' = i' ^^^ l then 1 else 0))
+      - (if i = i' then 2 * (if l = l' then 1 else 0) else 0) := by
+  unfold polar
+  rw [cdMul_e_e n i l hi, cdMul_e_e n i' l' hi', cdMul_e_e n i l' hi, cdMul_e_e n i' l hi',
+      inner_smul_left, inner_smul_right, inner_smul_left, inner_smul_right,
+      inner_e_e _ _ _ (Nat.xor_lt_two_pow hi hl), inner_e_e _ _ _ (Nat.xor_lt_two_pow hi hl'),
+      inner_e_e _ _ _ hl]
+
+/-- No xor of two right indices equals a xor of two DISTINCT left indices. -/
+def xorFree (LA LB : List Nat) : Prop :=
+  ∀ i ∈ LA, ∀ i' ∈ LA, ∀ l ∈ LB, ∀ l' ∈ LB, i ≠ i' → l ^^^ l' ≠ i ^^^ i'
+instance (LA LB : List Nat) : Decidable (xorFree LA LB) := by unfold xorFree; infer_instance
+
+/-- THE SYNTACTIC CERTIFICATE: xor-freeness implies the composition identity on the
+    supports — at every level, no sign table. Hence (§L.1) norm multiplicativity and
+    shortcut exactness on those supports. -/
+theorem polarOn_of_xorFree {n : Nat} {LA LB : List Nat} (hLA : boundedL n LA) (hLB : boundedL n LB)
+    (hx : xorFree LA LB) : polarOn n LA LB := by
+  intro i hi i' hi' l hl l' hl'
+  rw [polar_e_e n (hLA i hi) (hLA i' hi') (hLB l hl) (hLB l' hl')]
+  by_cases hii : i = i'
+  · subst hii
+    by_cases hll : l = l'
+    · subst hll
+      have h := cdSigma_sq i l n
+      simp only [if_true, Int.mul_one]
+      omega
+    · have h1 : i ^^^ l ≠ i ^^^ l' := fun h => hll (xor_cancel_left h)
+      have h2 : i ^^^ l' ≠ i ^^^ l := fun h => hll (xor_cancel_left h).symm
+      simp [h1, h2, hll]
+  · have hne := hx i hi i' hi' l hl l' hl' hii
+    have h1 : i ^^^ l ≠ i' ^^^ l' := fun h => hne (xor_swap h)
+    have h2 : i ^^^ l' ≠ i' ^^^ l := fun h => hne (by rw [Nat.xor_comm l l']; exact xor_swap h)
+    simp [h1, h2, hii]
+
+/-- Norm multiplicativity from xor-freeness alone. -/
+theorem norm_mult_of_xorFree {n : Nat} {LA LB : List Nat} (hLA : boundedL n LA) (hLB : boundedL n LB)
+    (hx : xorFree LA LB) {a b : Vec} (ha : qCoversL n LA a) (hb : qCoversL n LB b) :
+    normSq (2^n) (cdMul n a b) = normSq (2^n) a * normSq (2^n) b :=
+  norm_mult_of_polarOn hLA (polarOn_of_xorFree hLA hLB hx) ha hb
+
+/-- Shortcut exactness from xor-freeness alone — the form a checker discharges from Q masks. -/
+theorem shortcut_eq_sensitivity_of_xorFree {n : Nat} {LA LB : List Nat}
+    (hLA : boundedL n LA) (hLB : boundedL n LB) (hx : xorFree LA LB)
+    {x : Vec} {a : Aff} {y : Vec} {b : Aff} (ma mb : KMeta)
+    (hxv : qCoversL n LA x) (ha : qCoversAff n (some LA) a)
+    (hy : qCoversL n LB y) (hb : qCoversAff n (some LB) b)
+    (hma : ma.gumVar = trueVar (2^n) a) (hmb : mb.gumVar = trueVar (2^n) b) :
+    (gMulShortcut n x y ma mb).gumVar = (gMulMeta n x a y b ma mb).gumVar :=
+  shortcut_eq_sensitivity_of_polarOn hLA (polarOn_of_xorFree hLA hLB hx) ma mb hxv ha hy hb hma hmb
+
+/-- The witness violates xor-freeness exactly at `1 ⊕ 10 = 4 ⊕ 15 = 11`; the certified pair
+    does not. -/
+theorem not_xorFree_witness : ¬ xorFree [1, 10] [4, 15] := by decide
+theorem xorFree_1_10_x_2_5 : xorFree [1, 10] [2, 5] := by decide
+/-- A monomial left operand is xor-free against EVERY right support (no distinct pair). -/
+theorem xorFree_singleton (i : Nat) (LB : List Nat) : xorFree [i] LB := by
+  intro a ha b hb _ _ _ _ hne
+  simp at ha hb; subst ha; subst hb; exact absurd rfl hne
+/-- Hence a monomial `Knowledge<CD(n)>` operand makes the shortcut exact against any
+    partner, at any level. -/
+theorem norm_mult_of_monomial {n : Nat} {i : Nat} (hi : i < 2^n) {LB : List Nat} (hLB : boundedL n LB)
+    {a b : Vec} (ha : qCoversL n [i] a) (hb : qCoversL n LB b) :
+    normSq (2^n) (cdMul n a b) = normSq (2^n) a * normSq (2^n) b :=
+  norm_mult_of_xorFree (fun j hj => by simp at hj; subst hj; exact hi) hLB (xorFree_singleton i LB) ha hb
+
 end Sounio.EpistemicEffectsNSA
 
 -- ================================================================
@@ -1645,3 +1970,15 @@ end Sounio.EpistemicEffectsNSA
 #print axioms Sounio.EpistemicEffectsNSA.sedenion_norm_not_multiplicative
 #print axioms Sounio.EpistemicEffectsNSA.shortcut_eq_sensitivity_of_polarBasis
 #print axioms Sounio.EpistemicEffectsNSA.not_polarBasis4
+#print axioms Sounio.EpistemicEffectsNSA.lin_zero_of_qCoversL
+#print axioms Sounio.EpistemicEffectsNSA.norm_mult_of_polarOn
+#print axioms Sounio.EpistemicEffectsNSA.shortcut_eq_sensitivity_of_polarOn
+#print axioms Sounio.EpistemicEffectsNSA.not_polarOn4_witness
+#print axioms Sounio.EpistemicEffectsNSA.sedenion_shortcut_exact_on_1_10_x_2_5
+#print axioms Sounio.EpistemicEffectsNSA.sedenion_norm_mult_on_1_10_x_2_5
+#print axioms Sounio.EpistemicEffectsNSA.cdSigma_pm
+#print axioms Sounio.EpistemicEffectsNSA.cdMul_e_e
+#print axioms Sounio.EpistemicEffectsNSA.polarOn_of_xorFree
+#print axioms Sounio.EpistemicEffectsNSA.shortcut_eq_sensitivity_of_xorFree
+#print axioms Sounio.EpistemicEffectsNSA.norm_mult_of_monomial
+#print axioms Sounio.EpistemicEffectsNSA.not_xorFree_witness

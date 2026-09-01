@@ -203,7 +203,9 @@ met this axis.
 The three axes are three identities: `⟨εᵢ,εⱼ⟩ = δᵢⱼ` (measure), `(xy)z = x(yz)`
 (multiplication), `‖xy‖ = ‖x‖‖y‖` (norm). Each is the kernel of a projection GUM performs
 silently. The first two are certified by `N` and `Q`; the third is certified by the
-**level** `n ≤ 3` — which is already a type in Sounio (`Sedenion` vs `Octonion`).
+**level** `n ≤ 3` — which is already a type in Sounio (`Sedenion` vs `Octonion`) — **or**,
+beyond that level, by `Q` itself (§11, same day): the norm identity is the order identity
+seen through the norm functional, and the same support certificate decides it.
 
 ---
 
@@ -344,6 +346,70 @@ and hands it to the gate through `MADAROS_RAW_BIN`, exactly as the axis-2 siblin
 does not build the checker measures the committed binary, not the PR** — same defect class as
 the #2318 false positive, from the other side.
 
+## 11. The third axis relative to `Q` (`§L`, same day) — beyond Hurwitz, on certified supports
+
+§K quantified the composition identity over the **whole basis** (`polarBasis n`), so it
+lives or dies with the level: true for `n ≤ 3`, false at `n = 4`. But the defect functional
+`bil n b a a' = ⟨ab, a'b⟩ − ⟨a,a'⟩‖b‖²` is additive and homogeneous in each argument and
+reads only live coordinates — exactly the shape the support induction (`lin_zero_of_basis`)
+eats. Run the same induction over the **certified supports** `LA × LB` instead of
+`range (2^n)`:
+
+- `polarOn n LA LB` — the basis quadruple identity only for `i,i' ∈ LA`, `l,l' ∈ LB`.
+  Decidable; `polarBasis n` is the instance `LA = LB = range (2^n)`
+  (`polarOn_range_of_polarBasis`).
+- `norm_mult_of_polarOn` — `‖ab‖² = ‖a‖²‖b‖²` whenever `Q(a) ⊆ LA`, `Q(b) ⊆ LB` and
+  `polarOn n LA LB`. **At every level.** No Hurwitz hypothesis.
+- `shortcut_eq_sensitivity_of_polarOn` — under the same certificate on the values *and* on
+  every perturbation direction (`qCoversAff`), the GUM variance shortcut **equals** the
+  sensitivity propagator. The third axis, discharged by `Q`.
+- In the sedenions, decided in the kernel: `¬ polarOn 4 [1,10] [4,15]` (the witness of §4),
+  `polarOn 4 [1,10] [2,5]`, `polarOn 4 [9] [3,12]`, `polarOn 4 [2,13] [1,4,8]`. Hence
+  `sedenion_shortcut_exact_on_1_10_x_2_5` and `sedenion_norm_mult_on_1_10_x_2_5` — the
+  same statement as `octonion_shortcut_exact`, one level up, certificate instead of level.
+
+**The syntactic criterion (`§L.2`).** With `e_i·e_l = σ(i,l)·e_{i⊕l}` as a theorem
+(`cdMul_e_e`, from the `sumR` definition) the polarized form on a basis quadruple is
+(`polar_e_e`)
+
+```
+σ(i,l)σ(i',l')·[i⊕l = i'⊕l'] + σ(i,l')σ(i',l)·[i⊕l' = i'⊕l] − 2·[i=i']·[l=l']
+```
+
+For `i = i'` both coincidences reduce to `[l = l']` and `σ² = 1` (`cdSigma_sq`, the sign is a
+sign at every level by structural induction — `cdSigma_pm`) kills the diagonal. For `i ≠ i'`
+both coincidences are the single condition `l ⊕ l' = i ⊕ i'`. So:
+
+> **`polarOn_of_xorFree`** — if no xor of two right indices equals a xor of two *distinct*
+> left indices (`xorFree LA LB`, decidable in `O(|LA|²·|LB|²)` and in practice a set
+> intersection `(LA⊕LA)∩(LB⊕LB) ⊆ {0}`), the identity holds — no sign table consulted.
+
+The sedenion witness is *exactly* a violation: `1 ⊕ 10 = 4 ⊕ 15 = 11`
+(`not_xorFree_witness`). And a **monomial** operand (`|LA| = 1`) is xor-free against every
+partner (`xorFree_singleton`), so `norm_mult_of_monomial`: a `Knowledge<CD(n)>` whose value
+and perturbations live on one basis line makes the shortcut exact against anything, at any
+level.
+
+**What this says about the axes.** The 2026-08-23 note claimed exactly two structural
+garblings; §4 found a third. §L says the third is not independent of the first: the norm
+defect on `CD(n+1)` is an associator-type expression on `CD(n)` (this is the classical
+Cayley–Dickson proof of Hurwitz, read as a *correction term*), and the *same* `Q`
+certificate that decides re-association decides it. Two certificates, three identities.
+Known mathematics (the doubling identity); what is new is its statement as a GUM
+obligation and its discharge by basis support in the type system — the pattern of the
+erasure ladder.
+
+**Compiler consequence (open, next).** E251 currently refuses every `Knowledge<Hyper kind≥4>`
+product. With `Q` masks on operands and on their affine directions, the refusal can be
+narrowed to *uncertified* pairs: admit iff `xorFree(Q(x), Q(y))` — the same 16-bit masks
+the e-graph now carries (`q_mask`), tested by xor-closure intersection. The relationship to
+the zero-divisor variety is direct: `Δ = −‖x‖²‖y‖²` exactly on annihilating pairs, and
+`ker L_z` (2026-08-23) is where the shortcut lies the most.
+
+Measured: `lean --threads=1`, 41 s, sorry-free, axioms ⊆ {propext, Quot.sound}; all six
+`decide` instances at `n = 4` kernel-checked; `antigarbling_fusion_lean_gate.sh` C1–C5 PASS
+with the §L names added to C4.
+
 ## 9. Theorem map
 
 | claim | Lean |
@@ -364,3 +430,6 @@ the #2318 false positive, from the other side.
 | **FUSION** | `reassoc_sound` |
 | orthogonality witnesses | `w1_typable`, `w1_cert_refused`, `w1_reassoc_changes_value`, `w1_sensitivity_changes`, `w1'_cert`, `w1'_reassoc_sound`, `assocCert_level0`, `w2_untypable`, `w2_understates` |
 | third axis | `sed_shortcut_understates`, `sed_x_typable`, `oct_shortcut_exact`, `sed_shortcut_overstates`, `shortcut_eq_sensitivity_level0` |
+| Hurwitz in the kernel (§K) | `polarBasis0..3`, `not_polarBasis4`, `lin_zero_of_basis`, `bil_zero_of_polarBasis`, `norm_mult_of_polarBasis`, `octonion_norm_multiplicative`, `sedenion_norm_not_multiplicative`, `shortcut_eq_sensitivity_of_polarBasis` |
+| third axis relative to `Q` (§L) | `polarOn`, `lin_zero_of_qCoversL`, `bil_zero_of_polarOn`, `norm_mult_of_polarOn`, `shortcut_eq_sensitivity_of_polarOn`, `not_polarOn4_witness`, `polarOn4_1_10_x_2_5`, `sedenion_shortcut_exact_on_1_10_x_2_5` |
+| syntactic criterion (§L.2) | `cdSigma_pm`, `cdSigma_sq`, `cdMul_e_e`, `polar_e_e`, `xorFree`, `polarOn_of_xorFree`, `norm_mult_of_xorFree`, `shortcut_eq_sensitivity_of_xorFree`, `not_xorFree_witness`, `xorFree_singleton`, `norm_mult_of_monomial` |

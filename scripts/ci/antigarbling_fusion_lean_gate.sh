@@ -98,7 +98,14 @@ for thm in cdMul_add_left cdMul_add_right cdMul_smul_left cdMul_smul_right normS
            lin_zero_of_basis polarBasis3 not_polarBasis4 polar_zero_of_polarBasis basis_bil_zero \
            bil_zero_of_polarBasis norm_mult_of_polarBasis octonion_norm_multiplicative \
            quaternion_norm_multiplicative sedenion_norm_not_multiplicative inner_mulR_eq inner_mulL_eq \
-           trueVar_scaleR_eq trueVar_scaleL_eq shortcut_eq_sensitivity_of_polarBasis octonion_shortcut_exact; do
+           trueVar_scaleR_eq trueVar_scaleL_eq shortcut_eq_sensitivity_of_polarBasis octonion_shortcut_exact \
+           lin_zero_of_qCoversL polar_zero_of_polarOn bil_zero_of_polarOn norm_mult_of_polarOn \
+           inner_mulR_eq_on inner_mulL_eq_on trueVar_scaleR_eq_on trueVar_scaleL_eq_on \
+           shortcut_eq_sensitivity_of_polarOn polarOn_range_of_polarBasis not_polarOn4_witness \
+           polarOn4_1_10_x_2_5 sedenion_shortcut_exact_on_1_10_x_2_5 sedenion_norm_mult_on_1_10_x_2_5 \
+           cdSigma_pm cdSigma_sq cdMul_e_e polar_e_e polarOn_of_xorFree norm_mult_of_xorFree \
+           shortcut_eq_sensitivity_of_xorFree not_xorFree_witness xorFree_1_10_x_2_5 \
+           xorFree_singleton norm_mult_of_monomial; do
     grep -qE "^theorem ${thm}( |$|\()" "${LEAN_FILE}" || fail "theorem ${thm} not found"
 done
 echo "C4 PASS: all load-bearing theorems present"
