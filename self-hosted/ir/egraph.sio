@@ -1312,6 +1312,13 @@ pub struct EgSmallContext {
     best:       [i64; 64],
     unc_lo:     [i64; 64],
     unc_hi:     [i64; 64],
+    // Q certificate — basis support per node index (the second certificate of the
+    // anti-garbling FUSION theorem, formal/lean4/EpistemicEffectsNSA.lean: qCovers,
+    // qCovers_vadd, qCovers_cdMul, assoc_zero_of_qCoversL). Bit k set ⇔ the coefficient
+    // of e_k may be nonzero. EG_Q_UNKNOWN (-1) = no certificate (⊤): the fano_selective
+    // gate then refuses. Scalar f64 leaves fed by opt_cleanup certify {e_0} (the real
+    // line); declared basis leaves certify {e_k}; sums unite; products map i xor j.
+    q_mask:     [i64; 64],
     // Algebra kind for the expression context.
     // 0=Real, 1=Complex, 2=Quaternion, 3=Octonion, 4=Sedenion, 5=Clifford
     algebra_kind: i64,
@@ -1363,6 +1370,7 @@ pub fn eg_small_init() -> EgSmallContext {
         best:       [EG_INVALID; 64],
         unc_lo:     [0; 64],
         unc_hi:     [0; 64],
+        q_mask:     [0 - 1; 64],
     }
 }
 
@@ -1391,6 +1399,7 @@ fn eg_small_init_algebra(strategy: i64, cd_bits_in: i64) -> EgSmallContext {
         best:       [EG_INVALID; 64],
         unc_lo:     [0; 64],
         unc_hi:     [0; 64],
+        q_mask:     [0 - 1; 64],
     }
 }
 
@@ -1586,6 +1595,23 @@ pub fn eg_small_add_var_with_unc(ctx: &! EgSmallContext, var_id: i64, unc: i64) 
     let node_idx = eg_small_add_var(ctx, var_id)
     if node_idx >= 0 && node_idx < 64 {
         ctx.unc_lo[node_idx as usize] = unc
+        // Q certificate: this feed carries scalar f64 registers (the epistemic pass works
+        // on Knowledge<f64> values), i.e. real numbers — basis support {e_0}. The real line
+        // associates inside every Cayley-Dickson algebra (real_assoc), which is exactly
+        // what the fano_selective gate needs to admit a scalar product chain. Before this
+        // certificate existed the gate read the REGISTER id as a basis index.
+        ctx.q_mask[node_idx as usize] = 1
+    }
+    node_idx
+}
+
+// Add a VAR node standing for the basis unit e_k of the context's Cayley-Dickson algebra:
+// Q = {k}. Used by the algebra self-tests and by any producer that knows a leaf's support.
+// (opt_cleanup's scalar feeds go through eg_small_add_var_with_unc and certify {e_0}.)
+pub fn eg_small_add_basis_var(ctx: &! EgSmallContext, var_id: i64, basis_k: i64) -> i64 with Mut, Div, Panic {
+    let node_idx = eg_small_add_var(ctx, var_id)
+    if node_idx >= 0 && node_idx < 64 && basis_k >= 0 && basis_k < 16 {
+        ctx.q_mask[node_idx as usize] = 1 << basis_k
     }
     node_idx
 }
@@ -1792,21 +1818,100 @@ fn ir_can_reassociate_triple(bits: i64, i: i64, j: i64, k: i64) -> bool with Mut
     alpha == beta
 }
 
-// Extract basis index from an e-class for Fano predicate.
-// Returns the VAR node's value field as basis index, or -1 if the e-class
-// doesn't contain a simple VAR node (complex expression → conservatively block).
-fn eg_small_basis_index(ctx: &! EgSmallContext, eclass: i64) -> i64 with Mut, Div, Panic {
+// ---------------------------------------------------------------------------
+// Q certificate (basis support) — the second anti-garbling certificate, as e-graph
+// engineering. Masks are over at most 16 lanes (sedenions); -1 means "no certificate".
+// Lean: EpistemicEffectsNSA.lean — qCovers_vadd (union), qCovers_cdMul (product),
+// assoc_zero_of_qCoversL (a triple of certified supports whose basis triples all
+// associate has a vanishing associator, so (xy)z = x(yz) exactly).
+// ---------------------------------------------------------------------------
+
+// Q(x + y) ⊆ Q(x) ∪ Q(y)   (qCovers_vadd). Unknown on either side ⇒ unknown.
+pub fn eg_q_union(a: i64, b: i64) -> i64 {
+    if a < 0 || b < 0 { return 0 - 1 }
+    a | b
+}
+
+// Q(x * y) ⊆ { i xor j : i ∈ Q(x), j ∈ Q(y) }   (qCovers_cdMul: e_i e_j = ±e_{i xor j}).
+pub fn eg_q_prod(a: i64, b: i64) -> i64 {
+    if a < 0 || b < 0 { return 0 - 1 }
+    var out: i64 = 0
+    var i: i64 = 0
+    while i < 16 {
+        if ((a >> i) & 1) == 1 {
+            var j: i64 = 0
+            while j < 16 {
+                if ((b >> j) & 1) == 1 {
+                    out = out | (1 << (i ^ j))
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
+// Q certificate of an e-class. Every node of a class denotes the same value, so any
+// node's certificate covers the class: take the first node that yields one, walking
+// FADD/FSUB by union and FMUL by product. `depth` bounds the walk (unions can make the
+// graph cyclic); past it, or with no certified node, the answer is unknown (⊤).
+pub fn eg_small_q_of_class(ctx: &! EgSmallContext, eclass: i64, depth: i64) -> i64 with Mut, Div, Panic {
+    if depth <= 0 { return 0 - 1 }
     let canonical = eg_small_find(ctx, eclass)
     var i: i64 = 0
     while i < ctx.node_count {
         let node = ctx.nodes[i as usize]
         let node_ec = eg_small_find(ctx, node.eclass_id)
-        if node_ec == canonical && node.op == EG_OP_VAR {
-            return node.value  // basis index encoded in VAR node value
+        if node_ec == canonical {
+            if node.op == EG_OP_VAR {
+                let q = ctx.q_mask[i as usize]
+                if q >= 0 { return q }
+            } else if node.op == EG_OP_CONST {
+                return 1  // a scalar constant is real: {e_0}
+            } else if (node.op == EG_OP_FADD || node.op == EG_OP_FSUB) && node.child_count >= 2 {
+                let ql = eg_small_q_of_class(ctx, node.children[0], depth - 1)
+                let qr = eg_small_q_of_class(ctx, node.children[1], depth - 1)
+                let q = eg_q_union(ql, qr)
+                if q >= 0 { return q }
+            } else if node.op == EG_OP_FMUL && node.child_count >= 2 {
+                let ql = eg_small_q_of_class(ctx, node.children[0], depth - 1)
+                let qr = eg_small_q_of_class(ctx, node.children[1], depth - 1)
+                let q = eg_q_prod(ql, qr)
+                if q >= 0 { return q }
+            }
         }
         i = i + 1
     }
-    0 - 1  // no VAR node found — unknown basis
+    0 - 1
+}
+
+// The certificate at a reassociation site: (x*y)*z ↔ x*(y*z) is exact iff the associator
+// vanishes on the supports, i.e. every basis triple in Q(x)×Q(y)×Q(z) associates
+// (assoc_zero_of_qCoversL, with ir_can_reassociate_triple as the per-triple predicate —
+// the 168 theorem). Any unknown support ⇒ no certificate ⇒ refuse.
+pub fn eg_q_triple_associative(bits: i64, qa: i64, qb: i64, qc: i64) -> bool with Mut, Panic, Div {
+    if qa < 0 || qb < 0 || qc < 0 { return false }
+    var i: i64 = 0
+    while i < 16 {
+        if ((qa >> i) & 1) == 1 {
+            var j: i64 = 0
+            while j < 16 {
+                if ((qb >> j) & 1) == 1 {
+                    var k: i64 = 0
+                    while k < 16 {
+                        if ((qc >> k) & 1) == 1 {
+                            if !ir_can_reassociate_triple(bits, i, j, k) { return false }
+                        }
+                        k = k + 1
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    true
 }
 
 // Float associativity saturation (imperative scan, mirrors eg_apply_distributivity)
@@ -1894,20 +1999,16 @@ pub fn eg_small_saturate_float(ctx: &! EgSmallContext) -> i64 with Mut, Div, Pan
                                 // For fano_selective: check the triple before merging
                                 var allow = true
                                 if ctx.reassoc_strategy == 2 {
-                                    // Extract basis indices from VAR nodes
-                                    // inner.a, inner.b, c are e-classes
-                                    // Use the value field as basis index for VAR nodes
-                                    let a_idx = eg_small_basis_index(ctx, inner.children[0])
-                                    let b_idx = eg_small_basis_index(ctx, inner.children[1])
-                                    let c_idx = eg_small_basis_index(ctx, mul_rhs)
-                                    // Only check if all three are concrete basis elements
-                                    if a_idx >= 0 && b_idx >= 0 && c_idx >= 0 {
-                                        allow = ir_can_reassociate_triple(ctx.cd_bits, a_idx, b_idx, c_idx)
-                                    }
-                                    // If any index is unknown (-1), conservatively block
-                                    if a_idx < 0 || b_idx < 0 || c_idx < 0 {
-                                        allow = false
-                                    }
+                                    // Q certificate of the three operands, propagated from
+                                    // the leaves (scalar f64 = {e_0}, declared basis = {e_k},
+                                    // sums unite, products map i xor j, else ⊤). Admit iff
+                                    // every basis triple in Q(a)×Q(b)×Q(c) associates — the
+                                    // 168-theorem predicate quantified over the certificate.
+                                    // (Formerly this read REGISTER ids as basis indices.)
+                                    let qa = eg_small_q_of_class(ctx, inner.children[0], 8)
+                                    let qb = eg_small_q_of_class(ctx, inner.children[1], 8)
+                                    let qc = eg_small_q_of_class(ctx, mul_rhs, 8)
+                                    allow = eg_q_triple_associative(ctx.cd_bits, qa, qb, qc)
                                 }
                                 if allow {
                                     let bc = eg_small_add_binop(ctx, EG_OP_FMUL, inner.children[1], mul_rhs)
@@ -3334,9 +3435,9 @@ fn test_eg_guided_e2e() -> bool with Mut, Div, Panic {
 // T81 — non-Fano triple (1,2,4): fano_selective must block reassociation
 // (1,2,4) is not on any Fano line, so (e1*e2)*e4 ≠ e1*(e2*e4) in octonions.
 fn test_eg_fano_blocks_non_fano_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
-    let e1    = eg_small_add_var(ctx, 1)
-    let e2    = eg_small_add_var(ctx, 2)
-    let e4    = eg_small_add_var(ctx, 4)
+    let e1    = eg_small_add_basis_var(ctx, 1, 1)
+    let e2    = eg_small_add_basis_var(ctx, 2, 2)
+    let e4    = eg_small_add_basis_var(ctx, 4, 4)
     let inner = eg_small_add_binop(ctx, EG_OP_FMUL, e1, e2)    // e1*e2
     let _out  = eg_small_add_binop(ctx, EG_OP_FMUL, inner, e4)  // (e1*e2)*e4
     let merges = eg_small_saturate_float(ctx)
@@ -3350,9 +3451,9 @@ fn test_eg_fano_blocks_non_fano() -> bool with Mut, Div, Panic {
 // T82 — Fano triple (1,2,3): fano_selective must allow reassociation
 // (1,2,3) lies on Fano line 0, so (e1*e2)*e3 = e1*(e2*e3) is safe to merge.
 fn test_eg_fano_allows_fano_triple_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
-    let e1    = eg_small_add_var(ctx, 1)
-    let e2    = eg_small_add_var(ctx, 2)
-    let e3    = eg_small_add_var(ctx, 3)
+    let e1    = eg_small_add_basis_var(ctx, 1, 1)
+    let e2    = eg_small_add_basis_var(ctx, 2, 2)
+    let e3    = eg_small_add_basis_var(ctx, 3, 3)
     let inner = eg_small_add_binop(ctx, EG_OP_FMUL, e1, e2)    // e1*e2
     let _out  = eg_small_add_binop(ctx, EG_OP_FMUL, inner, e3)  // (e1*e2)*e3
     let merges = eg_small_saturate_float(ctx)
@@ -3361,6 +3462,98 @@ fn test_eg_fano_allows_fano_triple_inner(ctx: &! EgSmallContext) -> bool with Mu
 fn test_eg_fano_allows_fano_triple() -> bool with Mut, Div, Panic {
     var ctx = eg_small_init_algebra(2, 3)  // fano_selective, octonion (cd_bits=3)
     return test_eg_fano_allows_fano_triple_inner(&! ctx)
+}
+
+// ----------------------------------------------------------------------------
+// T86-T90 — the Q certificate (basis support) behind fano_selective.
+// ----------------------------------------------------------------------------
+
+// T86 — scalar f64 leaves (the epistemic pass's feed) certify {e_0}: a product chain of
+// real scalars reassociates under fano_selective whatever the register ids are. The ids
+// 9, 18, 36 are chosen so the OLD gate (register id read as a basis index, masked by
+// cd_bits) would have decided arbitrarily; the certificate makes the decision the theorem's.
+fn test_eg_q_scalar_leaves_reassociate_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let a     = eg_small_add_var_with_unc(ctx, 9, 0)
+    let b     = eg_small_add_var_with_unc(ctx, 18, 0)
+    let c     = eg_small_add_var_with_unc(ctx, 36, 0)
+    let inner = eg_small_add_binop(ctx, EG_OP_FMUL, a, b)
+    let _out  = eg_small_add_binop(ctx, EG_OP_FMUL, inner, c)
+    let merges = eg_small_saturate_float(ctx)
+    merges > 0
+}
+fn test_eg_q_scalar_leaves_reassociate() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init_algebra(2, 3)
+    return test_eg_q_scalar_leaves_reassociate_inner(&! ctx)
+}
+
+// T87 — leaves with NO certificate (plain VAR, ids 1,2,3 — a Fano line if ids were basis
+// indices) are refused under fano_selective: an id is not a certificate. Fail-closed.
+fn test_eg_q_unknown_leaves_block_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let a     = eg_small_add_var(ctx, 1)
+    let b     = eg_small_add_var(ctx, 2)
+    let c     = eg_small_add_var(ctx, 3)
+    let inner = eg_small_add_binop(ctx, EG_OP_FMUL, a, b)
+    let _out  = eg_small_add_binop(ctx, EG_OP_FMUL, inner, c)
+    let merges = eg_small_saturate_float(ctx)
+    merges == 0
+}
+fn test_eg_q_unknown_leaves_block() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init_algebra(2, 3)
+    return test_eg_q_unknown_leaves_block_inner(&! ctx)
+}
+
+// T88 — a sum widens the support and the gate quantifies over ALL of it:
+// a = e1 + e2 (Q = {1,2}), b = e2, c = e4. (2,2,4) associates (alternativity) but
+// (1,2,4) does not, so (a*b)*c must NOT be reassociated.
+fn test_eg_q_union_support_blocks_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let e1    = eg_small_add_basis_var(ctx, 1, 1)
+    let e2    = eg_small_add_basis_var(ctx, 2, 2)
+    let e4    = eg_small_add_basis_var(ctx, 4, 4)
+    let a     = eg_small_add_binop(ctx, EG_OP_FADD, e1, e2)
+    let inner = eg_small_add_binop(ctx, EG_OP_FMUL, a, e2)
+    let _out  = eg_small_add_binop(ctx, EG_OP_FMUL, inner, e4)
+    let merges = eg_small_saturate_float(ctx)
+    merges == 0
+}
+fn test_eg_q_union_support_blocks() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init_algebra(2, 3)
+    return test_eg_q_union_support_blocks_inner(&! ctx)
+}
+
+// T89 — a sum inside the real line keeps the certificate: a = s + t with s, t scalar
+// ({e_0} ∪ {e_0} = {e_0}), so (a*u)*v still reassociates. Union does not lose {e_0}.
+fn test_eg_q_scalar_sum_keeps_certificate_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let s     = eg_small_add_var_with_unc(ctx, 11, 0)
+    let t     = eg_small_add_var_with_unc(ctx, 12, 0)
+    let u     = eg_small_add_var_with_unc(ctx, 13, 0)
+    let v     = eg_small_add_var_with_unc(ctx, 14, 0)
+    let a     = eg_small_add_binop(ctx, EG_OP_FADD, s, t)
+    let inner = eg_small_add_binop(ctx, EG_OP_FMUL, a, u)
+    let _out  = eg_small_add_binop(ctx, EG_OP_FMUL, inner, v)
+    let merges = eg_small_saturate_float(ctx)
+    merges > 0
+}
+fn test_eg_q_scalar_sum_keeps_certificate() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init_algebra(2, 3)
+    return test_eg_q_scalar_sum_keeps_certificate_inner(&! ctx)
+}
+
+// T90 — the mask algebra itself: union, product through i xor j, unknown absorbs.
+//   {1}·{2} = {3};  {1,2}·{4} = {5,6};  {0}·Q = Q;  ⊤ absorbs on both sides.
+fn test_eg_q_mask_algebra() -> bool with Mut, Div, Panic {
+    let p12   = eg_q_prod(1 << 1, 1 << 2) == (1 << 3)
+    let p124  = eg_q_prod((1 << 1) | (1 << 2), 1 << 4) == ((1 << 5) | (1 << 6))
+    let unit  = eg_q_prod(1, (1 << 3) | (1 << 7)) == ((1 << 3) | (1 << 7))
+    let uni   = eg_q_union(1 << 1, 1 << 6) == ((1 << 1) | (1 << 6))
+    let topl  = eg_q_prod(0 - 1, 1) < 0
+    let topr  = eg_q_union(1, 0 - 1) < 0
+    // The site predicate over certificates: the real line always passes; (1,2,4) fails;
+    // an unknown operand never passes, even next to two certified ones.
+    let real3 = eg_q_triple_associative(3, 1, 1, 1)
+    let fano  = eg_q_triple_associative(3, 1 << 1, 1 << 2, 1 << 3)
+    let nfano = !eg_q_triple_associative(3, 1 << 1, 1 << 2, 1 << 4)
+    let unk   = !eg_q_triple_associative(3, 1 << 1, 0 - 1, 1 << 3)
+    p12 && p124 && unit && uni && topl && topr && real3 && fano && nfano && unk
 }
 
 // ============================================================================
@@ -3424,7 +3617,7 @@ fn test_eg_small_satf_chaotic_blocks() -> bool with Mut, Div, Panic {
 
 fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 85
+    let total: i64 = 90
 
     print("=== E-Graph Equality Saturation Tests ===\n")
 
@@ -3513,6 +3706,11 @@ fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
     if test_eg_small_satf_blocks_inexact_default() { passed = passed + 1; print("  T83 OK satf_blocks_inexact_default\n") } else { print("  FAIL: T83 satf_blocks_inexact_default\n") }
     if test_eg_small_satf_allows_optin() { passed = passed + 1; print("  T84 OK satf_allows_optin\n") } else { print("  FAIL: T84 satf_allows_optin\n") }
     if test_eg_small_satf_chaotic_blocks() { passed = passed + 1; print("  T85 OK satf_chaotic_blocks\n") } else { print("  FAIL: T85 satf_chaotic_blocks\n") }
+    if test_eg_q_scalar_leaves_reassociate() { passed = passed + 1; print("  T86 OK q_scalar_leaves_reassociate\n") } else { print("  FAIL: T86 q_scalar_leaves_reassociate\n") }
+    if test_eg_q_unknown_leaves_block() { passed = passed + 1; print("  T87 OK q_unknown_leaves_block\n") } else { print("  FAIL: T87 q_unknown_leaves_block\n") }
+    if test_eg_q_union_support_blocks() { passed = passed + 1; print("  T88 OK q_union_support_blocks\n") } else { print("  FAIL: T88 q_union_support_blocks\n") }
+    if test_eg_q_scalar_sum_keeps_certificate() { passed = passed + 1; print("  T89 OK q_scalar_sum_keeps_certificate\n") } else { print("  FAIL: T89 q_scalar_sum_keeps_certificate\n") }
+    if test_eg_q_mask_algebra() { passed = passed + 1; print("  T90 OK q_mask_algebra\n") } else { print("  FAIL: T90 q_mask_algebra\n") }
 
     print("\nE-Graph: ")
     print_int(passed)
