@@ -13942,7 +13942,120 @@ impl Lowerer {
         }
     }
 
+    // The declaring block need not be the naming one. In
+    // check_audit_attach_expr_expected the pair is introduced by one block and
+    // named by a branch INSIDE it:
+    //
+    //     let seeded_pair = if ... { ... } else { ... }
+    //     if seeded_pair.1.kind == TyError { seeded_pair } else { ... }
+    //                                        ^ named here, declared above
+    //
+    // So the scan descends through blocks, ifs and matches while resolving
+    // every ident it meets against the block passed IN -- the enclosing scope
+    // that may declare it -- rather than against whichever block it lands in.
+    fn block_tail_via_block(self, blk: &Block, outer: &Block) -> Name with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result = ir_empty_name()
+        while true {
+            match *current {
+                Some(list) => {
+                    let st = &(*list).head
+                    if st.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_tuple0_struct_name_via_block(&st.expr, outer)
+                    } else {
+                        result = ir_empty_name()
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    fn opt_block_tail_via_block(self, blk_opt: &Option<Box<Block>>, outer: &Block) -> Name with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(b) => self.block_tail_via_block(&(*b), outer),
+            _ => ir_empty_name(),
+        }
+    }
+
+    // Receiver type with the BLOCK in scope.
+    //
+    // lower_method_recv_type answers from the local stack, and by the time the
+    // slot-0 resolver runs, lower_block_ref has already truncated away every
+    // local the initializer's own blocks declared. So `seeded_pair.0.method()`
+    // finds nothing and lowers against the bare name.
+    //
+    // A sibling rather than a change to lower_method_recv_type: that one is
+    // consulted everywhere, and this question only arises on the via-block path.
+    fn recv_type_via_block(self, left: &Option<Box<Expr>>, blk: &Block) -> Name with Mut, Panic, Div, Alloc {
+        match *left {
+            Some(r) => {
+                if (*r).kind == ExprKind::ExprIdent {
+                    let d = self.block_decl_direct_struct_name(blk, (*r).name)
+                    if d.len > 0 {
+                        return d
+                    }
+                }
+                if (*r).kind == ExprKind::ExprFieldAccess {
+                    if lower_name_tuple_index((*r).name) == 0 {
+                        match (*r).left {
+                            Some(b) => {
+                                if (*b).kind == ExprKind::ExprIdent {
+                                    let d2 = self.block_decl_tuple0_struct_name(blk, (*b).name)
+                                    if d2.len > 0 {
+                                        return d2
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                self.lower_method_recv_type(left)
+            }
+            _ => ir_empty_name(),
+        }
+    }
+
     fn expr_tuple0_struct_name_via_block(self, e: &Expr, blk: &Block) -> Name with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_via_block(&(*e).block, blk)
+        }
+        if (*e).kind == ExprKind::ExprIf {
+            let t = self.opt_block_tail_via_block(&(*e).block, blk)
+            let f = self.opt_expr_tuple0_struct_name_via_block(&(*e).else_expr, blk)
+            if t.len > 0 && ir_name_eq(t, f) {
+                return t
+            }
+            return ir_empty_name()
+        }
+        if (*e).kind == ExprKind::ExprMatch {
+            var cur = &(*e).arms
+            var acc = ir_empty_name()
+            var first = true
+            var ok = true
+            while true {
+                match *cur {
+                    Some(al) => {
+                        let got = self.expr_tuple0_struct_name_via_block(&(*al).head.body, blk)
+                        if first {
+                            acc = got
+                            first = false
+                        } else {
+                            if !ir_name_eq(got, acc) { ok = false }
+                        }
+                        cur = &(*al).tail
+                    }
+                    _ => break
+                }
+            }
+            if ok && acc.len > 0 {
+                return acc
+            }
+            return ir_empty_name()
+        }
         // `(c2, ty)`: slot 0 names a local this block declares.
         if (*e).kind == ExprKind::ExprTupleLit {
             match (*e).args {
@@ -13959,7 +14072,26 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprIdent {
             return self.block_decl_tuple0_struct_name(blk, (*e).name)
         }
-        ir_empty_name()
+        // A method call whose receiver the block declares. Without this the arm
+        // goes silent and cancels the one the block scan just rescued.
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let rt = self.recv_type_via_block(&(*e).left, blk)
+            if rt.len > 0 {
+                let fid = lowerer_lookup_fn_id_by_name_ref(&self, ir_mangle_method_name(rt, (*e).name))
+                if fid >= 0 {
+                    if self.return_tuple_struct_slot_for_fn_id(fid) == 0 {
+                        return self.return_tuple_struct_name_for_fn_id(fid)
+                    }
+                }
+            }
+            return self.expr_tuple0_struct_name(e)
+        }
+        // Everything else answers as it always did. This path ADDS a
+        // block-scoped lookup for names the local stack cannot supply; it must
+        // not REPLACE the ordinary answers. Returning empty here made a method
+        // call go silent -- and since every branch must agree, the arm the block
+        // lookup had just rescued was cancelled by the sibling it had broken.
+        self.expr_tuple0_struct_name(e)
     }
 
     fn opt_expr_tuple0_struct_name_via_block(self, e_opt: &Option<Box<Expr>>, blk: &Block) -> Name with Mut, Panic, Div, Alloc {
