@@ -2,7 +2,7 @@
 topic_id: repo.docs.audit.madaros-gen2-pr2307-isolation-2026-08-31
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-09-01
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-gen2-pr2307-isolation-2026-08-31
 -->
@@ -26,8 +26,14 @@ cause=cannot safely lower print/println argument with unresolved scalar kind
 
 Both rows typechecked `self-hosted/compiler/main.sio` with zero errors and
 compiled/ran `examples/hello.sio`. There is therefore no PR-local causal delta
-to bisect or repair from this comparison. The default floor of 40 remains red,
-but its current failure must not be attributed to PR #2307.
+to bisect or repair from this comparison.
+
+The actual current-source defect was a scalar-kind inference failure at direct
+`CompilerOptions.output_file` field uses in
+`compiler_try_default_native_v2_single`. Anchoring that field in an explicitly
+typed `string` local restored the fixed-seed floor from 0 to 40. The canonical
+fixed-point gate now passes its default progress floor; the remaining 40-to-122
+work is a separate failure in `module_frontend_compile_imported_to_file`.
 
 ## Fixed experiment contract
 
@@ -109,6 +115,44 @@ REMOTE: gen2_measure context=  raised at lower.sio lines: 9712
 REMOTE: gen2_measure context=  cause: cannot safely lower print/println argument with unresolved scalar kind in function `compiler_try_default_native_v2_single`
 ```
 
+## Source repair
+
+`compiler_try_default_native_v2_single` now copies `opts.output_file` into an
+explicitly typed `string` local before passing or printing it. Its success
+message also uses separate `print` calls instead of constructing a string with
+`+`. This is the smallest source change that supplies a concrete scalar kind at
+all three uses rejected by the fixed Madaros seed.
+
+The independent controls remained green:
+
+```text
+REMOTE: hello compile_rc=0 run_rc=0 output=Hello, Sounio
+REMOTE: fpcheck rc=0 errors=0
+REMOTE: run_check_mode: verdict=0
+REMOTE: check: OK
+```
+
+The direct default-floor measurement passed:
+
+```text
+REMOTE: gen2_measure rc=1 into_acc_done=40 minimum=40
+REMOTE: gen2_measure first_failure=IR lowering failed during merge: ir_into_acc_failed
+REMOTE: gen2_measure context=  lowering errors: 1, first while lowering function `module_frontend_compile_imported_to_file`
+REMOTE: gen2_measure context=  raised at lower.sio lines: 9712
+REMOTE: gen2_measure context=  cause: cannot safely lower print/println argument with unresolved scalar kind in function `module_frontend_compile_imported_to_file`
+```
+
+The canonical fixed-point wrapper independently reproduced the same boundary:
+
+```text
+[rung check] rc=0 errors=0
+[rung gen2] rc=1 merged_ir_functions=<none>
+            into_acc_done=40 minimum=40
+            first_failure=IR lowering failed during merge: ir_into_acc_failed
+MADAROS_FIXED_POINT_OK: reached rung 'check' as recorded; the next wall is 'gen2'
+REMOTE: gen2_progress rc=0 minimum=40
+```
+
 ## Invalidated controls
 
 The earlier matrix fixed the lean bootstrap seed but rebuilt Madaros from every
@@ -146,7 +190,7 @@ control for this lane.
 
 - reports `into_acc_done`, first failure, and lowering context;
 - supports `SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE` with default 40;
-- keeps the 40 floor red on current source.
+- rejects regressions below the restored 40 floor.
 
 `scripts/dev/souc-build-remote.sh`:
 
@@ -158,12 +202,20 @@ control for this lane.
 - adds `gen2-measure`, a direct single-process progress receipt;
 - reports the raw Madaros ELF SHA-256 and independent hello/self-check results.
 
-No compiler source change is retained in the product worktree.
+One compiler source change is retained in the product worktree: the explicitly
+typed output-path local and non-concatenating success output in
+`self-hosted/compiler/main.sio`. PR #2307 remains intact.
+
+## Closed blocker
+
+`BLK-20260901-gen2-current-zero` is closed. Its acceptance gate passed with
+`into_acc_done=40`, independent hello and self-check controls green, and the
+fixed Madaros SHA-256 recorded above.
 
 ## Remaining blocker
 
 ```text
-Blocker-ID: BLK-20260901-gen2-current-zero
+Blocker-ID: BLK-20260901-gen2-40-to-122
 Status: reproduced
 Severity: B1
 Class: gate-regression
@@ -171,25 +223,26 @@ Owner: codex-2
 Lane: gen2-pr2307-isolation-20260831
 Worktree: /tmp/sounio-gen2-pr2307-20260831
 Branch: codex/gen2-pr2307-isolation-20260831
-Files-Owned: scripts/ci/madaros_fixed_point_gate.sh, scripts/dev/souc-build-remote.sh, docs/audit/MADAROS_GEN2_PR2307_ISOLATION_2026-08-31.md
+Files-Owned: self-hosted/compiler/main.sio, scripts/ci/madaros_fixed_point_gate.sh, scripts/dev/souc-build-remote.sh, docs/audit/MADAROS_GEN2_PR2307_ISOLATION_2026-08-31.md
 Files-Read-Only: canonical Madaros ELF outputs, origin/main
 Do-Not-Touch: canonical Madaros ELF outputs
-Repro: run separate clean-environment hello, check, and gen2-measure jobs with fixed Madaros SHA-256 2080defa2f1042ef0b0c3d6796e77de0226e2b840856af5da7d2e36ee911e253
-Observed: hello passes; self-check exits 0 with zero errors; direct Gen2 reports into_acc_done=0 and the unresolved-scalar print refusal in compiler_try_default_native_v2_single at lower.sio site 9712
-Expected: direct Gen2 reports into_acc_done>=40 while hello and self-check remain green
-Acceptance-Gate: SOUNIO_REMOTE_GEN2_MIN_INTO_ACC_DONE=40 with --gate gen2-measure, plus independent --gate hello and --gate check jobs, all under the fixed clean environment
+Repro: run the clean-environment gen2-progress or gen2-measure job with fixed Madaros SHA-256 2080defa2f1042ef0b0c3d6796e77de0226e2b840856af5da7d2e36ee911e253
+Observed: hello passes; self-check exits 0 with zero errors; Gen2 reaches into_acc_done=40, then rejects an unresolved-scalar print argument in module_frontend_compile_imported_to_file at lower.sio site 9712
+Expected: Gen2 reaches the independently established next floor of into_acc_done>=122 while hello and self-check remain green
+Acceptance-Gate: SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE=122 with scripts/ci/madaros_fixed_point_gate.sh, plus independent --gate hello and --gate check jobs under the fixed clean environment
 Evidence-Level: E4
-Evidence: this audit and two consecutive fixed-seed inverse Foundry receipts from 2026-09-01
+Evidence: this audit, the fixed-seed direct receipt, and the canonical fixed-point Foundry receipt from 2026-09-01
 Fallback-Path: none
 Legacy-Kept: yes; PR #2307 remains intact because its causal attribution was falsified
 LLM-Offload: not-required
-Next-Action: isolate the unresolved scalar kind entering compiler_try_default_native_v2_single on current source without treating PR #2307 as the search boundary
+Next-Action: isolate the unresolved scalar kind in module_frontend_compile_imported_to_file without weakening the restored default floor of 40
 ```
 
 ## Review disposition
 
 The earlier Grok 4.6 review correctly warned that a crashing inverse was not an
 acceptance oracle. The fixed-seed rerun sharpened that warning: rebuilding the
-compiler for each row was the primary attribution confound. No math claim,
-clinical pathway, or external-facing artifact changed, so repository policy did
-not require an additional LLM offload.
+compiler for each row was the primary attribution confound. The repaired source
+then passed both the direct floor and canonical fixed-point wrapper. No math
+claim, clinical pathway, or external-facing artifact changed, so repository
+policy did not require an additional LLM offload.
