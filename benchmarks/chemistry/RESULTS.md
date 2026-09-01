@@ -1,5 +1,20 @@
 # GRI-Mech 3.0 cross-validation — measured results
 
+> **This PR is one of four.** The work was split so each carries its own
+> justification and can be reviewed on its own evidence:
+>
+> | PR | contents | why separate |
+> |---|---|---|
+> | this one | `benchmarks/chemistry/`, `examples/chemistry/` | the measurements and this document |
+> | gas-constant alignment | `stdlib/chemistry/`, replicas, tests | a semantic change to the constants, spanning stdlib |
+> | C++23 cross-check | `benchmarks/chemistry/cpp/` | an independent third implementation |
+> | Lean development | `formal/lean4/` | targets the d-separation PR, not `main` |
+>
+> **The numbers in this document are measured in the ALIGNED regime and
+> require the gas-constant PR.** Landing this alone would leave the probes
+> setting an initial state the modules do not share. The published-regime
+> numbers are kept alongside, dated, for the record.
+
 **Every number on this page was produced by the command printed above it, at
 commit `98aa8e4d5151bbc61815bf910b6c31c3d0789f5f` (branch `claude/gri-mech-cantera-preprint-776qb9`), on
 2026-09-01.** Nothing is carried forward from an earlier log, a prior session,
@@ -821,9 +836,10 @@ H/O checkpoint prose, not to this.
 
 ---
 
-## 6.2 The measured law is a theorem — `formal/lean4/SounioIndepComposition.lean`
+## 6.2 The measured law is a theorem — `SounioIndepComposition.lean` (sibling PR)
 
 ```sh
+# the Lean development ships in its own PR, targeting the d-separation PR
 cd formal/lean4 && lake build SounioIndepComposition
 ```
 

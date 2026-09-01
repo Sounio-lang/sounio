@@ -777,13 +777,3 @@ lean_lib «SounioFoMultimodFragment» where
 -- lane -- so it keeps its entry, or the file would sit in the tree unbuilt.
 @[default_target]
 lean_lib «SounioZDChi» where
-
--- Composition-independence obligation of PR #1758: quadrature is the ρ = 0 case
--- of the JCGM combination law, it understates under positive correlation, the
--- additive default is sound for every admissible ρ, N fully-correlated steps
--- combined in quadrature understate by exactly √N, and the collider row that
--- separates d-separation from a reachability check. Stated on VARIANCES so no
--- square root is constructed and core `omega` suffices -- Mathlib-free, same
--- discipline as SounioMeasConf. Cross-checks benchmarks/chemistry/RESULTS.md §5.
-@[default_target]
-lean_lib «SounioIndepComposition» where
