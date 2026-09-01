@@ -493,6 +493,7 @@ activate_runtime() {
       installer_path:installer_sha256 \
       coord_runtime_path:coord_runtime_sha256 \
       canary_gate_path:canary_gate_sha256 \
+      guardian_gate_path:guardian_gate_sha256 \
       reconcile_gate_path:reconcile_gate_sha256 \
       operational_gate_path:operational_gate_sha256 \
       ci_entrypoint_path:ci_entrypoint_sha256; do
@@ -1050,6 +1051,7 @@ loom_change_sources=(
   "$SOURCE_ROOT/tools/loom/src/loom_ui.ml"
   "$SOURCE_ROOT/tools/loom/src/dune"
   "$SOURCE_ROOT/scripts/ci/sounio_loom_native_hook_generation_canary_ocaml_selftest.sh"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_native_hook_generation_guardian_ocaml_selftest.sh"
   "$SOURCE_ROOT/scripts/ci/sounio_loom_native_hook_generation_reconcile_ocaml_selftest.sh"
 )
 [[ -x "$installer_source" ]] || die "runtime installer source missing or not executable: $installer_source"

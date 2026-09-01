@@ -441,23 +441,31 @@ let bridge_free_runtime path =
   with _ -> false
 
 let find_candidate runtime_root current =
-  let links = [ "native-next"; "next" ] in
-  let from_link =
-    List.find_map
-      (fun name ->
-        let path = Filename.concat runtime_root name in
-        try
-          let resolved = Unix.realpath path in
-          if resolved <> current && bridge_free_runtime resolved then Some resolved else None
-        with _ -> None)
-      links
-  in
-  match from_link with
-  | Some path -> path
-  | None ->
-      Filename.concat runtime_root "versions" |> sorted_directories
-      |> List.find_opt (fun path -> path <> current && bridge_free_runtime path)
-      |> Option.value ~default:""
+  match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_CANDIDATE" with
+  | Some value when value <> "" && Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" = Some "1" ->
+      let resolved = Unix.realpath value in
+      if resolved = current then failf "candidate-override-selects-current-runtime";
+      if not (bridge_free_runtime resolved) then failf "candidate-override-not-bridge-free";
+      resolved
+  | Some value when value <> "" -> failf "candidate-override-requires-test-mode"
+  | _ ->
+      let links = [ "native-next"; "next" ] in
+      let from_link =
+        List.find_map
+          (fun name ->
+            let path = Filename.concat runtime_root name in
+            try
+              let resolved = Unix.realpath path in
+              if resolved <> current && bridge_free_runtime resolved then Some resolved else None
+            with _ -> None)
+          links
+      in
+      (match from_link with
+      | Some path -> path
+      | None ->
+          Filename.concat runtime_root "versions" |> sorted_directories
+          |> List.find_opt (fun path -> path <> current && bridge_free_runtime path)
+          |> Option.value ~default:"")
 
 let capability_for common member current candidate =
   let path =
@@ -692,7 +700,7 @@ let member_from_record ~now ~boot_id ~pid_namespace record =
             classification = Unknown; capability_reason = "unmeasured" }, true)
        with Error _ -> invalid_member record "presence-record-invalid")
 
-let live_observation root =
+let live_observation ?(verify_canaries = true) root =
   let common = git_common_dir root in
   let runtime_root = Filename.concat common "sounio-coord-runtime" in
   let current =
@@ -770,10 +778,12 @@ let live_observation root =
     with _ -> String.make 64 '0'
   in
   let canary_mask =
-    Loom_hook_generation_canary.verified_mask
-      ~state_directory:(marker_directory common) ~candidate_id
-      ~candidate_manifest_sha256:candidate_runtime_sha256
-      ~candidate_loom_runtime_sha256 ~config_bundle_sha256:repository_config_sha256
+    if verify_canaries then
+      Loom_hook_generation_canary.verified_mask
+        ~state_directory:(marker_directory common) ~candidate_id
+        ~candidate_manifest_sha256:candidate_runtime_sha256
+        ~candidate_loom_runtime_sha256 ~config_bundle_sha256:repository_config_sha256
+    else 0
   in
   let final_config = read_marker common "final-config.v1" in
   let rollback_marker = read_marker common "rollback-pair-tested.v1" in

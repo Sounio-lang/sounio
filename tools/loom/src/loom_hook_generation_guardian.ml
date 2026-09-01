@@ -238,28 +238,324 @@ let rollback_marker observation config_sha256 probe_sha256 created_utc =
     observation.candidate_runtime_id observation.candidate_runtime_sha256 config_sha256
     probe_sha256 created_utc
 
+let provider_receipts state_directory =
+  [ ("codex", 1); ("claude", 2); ("cursor", 4); ("grok", 8) ]
+  |> List.filter_map (fun (provider, bit) ->
+         let relative = "canaries/" ^ provider ^ ".canary.v1" in
+         let path = Filename.concat state_directory relative in
+         if Sys.file_exists path then Some (provider, bit, relative, path) else None)
+
+let proof_residual state_directory =
+  Sys.file_exists (Filename.concat state_directory "rollback-pair-tested.v1")
+  || provider_receipts state_directory <> []
+
+let require_field label fields key expected =
+  let observed = Loom_hook_generation_drain.field fields key in
+  if observed <> expected then
+    failf "%s-field-invalid:%s:%s" label key observed
+
+let archive_relative archive relative = Filename.concat archive relative
+
+let remove_tree path =
+  let rec remove path =
+    if Sys.file_exists path then
+      match (Unix.lstat path).st_kind with
+      | S_DIR ->
+          Sys.readdir path
+          |> Array.iter (fun name -> remove (Filename.concat path name));
+          Unix.rmdir path
+      | _ -> Unix.unlink path
+  in
+  remove path
+
+let archive_proof_files state_directory receipts =
+  [ ("final_config_sha256", "final-config.v1",
+     Filename.concat state_directory "final-config.v1");
+    ("rollback_pair_sha256", "rollback-pair-tested.v1",
+     Filename.concat state_directory "rollback-pair-tested.v1") ]
+  @ List.map
+      (fun (provider, _bit, relative, path) ->
+        (provider ^ "_canary_sha256", relative, path))
+      receipts
+
+let verify_archive ~state_directory ~archive ~old_id ~old_manifest_sha256
+    ~successor_id ~current_id ~current_manifest_sha256 =
+  let receipt_path = Filename.concat archive "generation-archive.v1" in
+  let payload, signature =
+    Loom_hook_generation_canary.split_signed_receipt
+      (Loom_hook_generation_drain.read_file "guardian-generation-archive" receipt_path)
+  in
+  let fields =
+    Loom_hook_generation_drain.parse_fields "guardian-generation-archive" payload
+  in
+  let _, public_key, _ = signing_paths state_directory in
+  let public_text =
+    Loom_hook_generation_drain.read_file "guardian-public-key" public_key
+  in
+  let public_sha256 = Loom_hook_generation_drain.sha256 public_text in
+  let key_id = Loom_epistemic.outcome_public_key_id public_text in
+  List.iter
+    (fun (key, expected) ->
+      require_field "guardian-generation-archive" fields key expected)
+    [ ("schema", "loom-native-hook-generation-archive-v1");
+      ("state", "ARCHIVED");
+      ("prior_candidate_runtime_id", old_id);
+      ("prior_candidate_runtime_manifest_sha256", old_manifest_sha256);
+      ("successor_candidate_runtime_id", successor_id);
+      ("old_runtime_id", current_id);
+      ("old_runtime_manifest_sha256", current_manifest_sha256);
+      ("guardian_key_id", key_id);
+      ("guardian_public_key_sha256", public_sha256);
+      ("semantic_authority", "Sounio");
+      ("action", "9046");
+      ("operational_language", "OCaml");
+      ("operational_role", "GENERATION_EVIDENCE_ARCHIVE") ];
+  if not (Loom_epistemic.outcome_ed25519_verify public_text payload signature) then
+    failf "guardian-generation-archive-signature-invalid";
+  let mask =
+    Loom_hook_generation_canary.decimal "guardian-generation-archive-mask"
+      (Loom_hook_generation_drain.field fields "canary_mask")
+  in
+  let receipts =
+    [ ("codex", 1); ("claude", 2); ("cursor", 4); ("grok", 8) ]
+    |> List.filter_map (fun (provider, bit) ->
+           if mask land bit = 0 then None
+           else
+             let relative = "canaries/" ^ provider ^ ".canary.v1" in
+             Some (provider, bit, relative,
+               Filename.concat state_directory relative))
+  in
+  let proof_files = archive_proof_files state_directory receipts in
+  List.iter
+    (fun (key, relative, active) ->
+      let archived = archive_relative archive relative in
+      let archived_sha256 =
+        Loom_hook_generation_drain.sha256_file "guardian-archived-proof" archived
+      in
+      require_field "guardian-generation-archive" fields key archived_sha256;
+      if Sys.file_exists active
+         && Loom_hook_generation_drain.sha256_file "guardian-active-proof" active
+            <> archived_sha256
+      then failf "guardian-active-proof-drift:%s" relative)
+    proof_files;
+  let expected_mask =
+    provider_receipts state_directory
+    |> List.fold_left (fun total (_provider, bit, _relative, _path) -> total lor bit) 0
+  in
+  if expected_mask land lnot mask <> 0 then failf "guardian-active-canary-not-archived";
+  (mask, receipts)
+
+let create_archive ~state_directory ~archive ~old_id ~old_manifest_sha256
+    ~old_loom_sha256 ~old_config_sha256 ~successor_id ~current_id
+    ~current_manifest_sha256 ~mask ~receipts ~guardian_public_key_sha256
+    ~guardian_key_id =
+  let archive_root = Filename.dirname archive in
+  ensure_directory archive_root;
+  let temporary =
+    Filename.concat archive_root
+      (Printf.sprintf ".generation.%d.%Ld.tmp" (Unix.getpid ())
+         (Int64.of_float (Unix.gettimeofday () *. 1_000_000.0)))
+  in
+  Unix.mkdir temporary 0o700;
+  Fun.protect
+    ~finally:(fun () -> if Sys.file_exists temporary then (try remove_tree temporary with _ -> ()))
+    (fun () ->
+      let temporary_canaries = Filename.concat temporary "canaries" in
+      if receipts <> [] then Unix.mkdir temporary_canaries 0o700;
+      let proof_files = archive_proof_files state_directory receipts in
+      let hashes =
+        List.map
+          (fun (key, relative, source) ->
+            let text =
+              Loom_hook_generation_drain.read_file "guardian-active-proof" source
+            in
+            let target_directory =
+              if Filename.dirname relative = "." then temporary else temporary_canaries
+            in
+            ignore (atomic_write target_directory (Filename.basename relative) text);
+            (key, Loom_hook_generation_drain.sha256 text))
+          proof_files
+      in
+      let created_utc = Loom_hook_generation_drain.utc_now (Unix.time ()) in
+      let payload =
+        String.concat "\n"
+          ([ "schema=loom-native-hook-generation-archive-v1"; "state=ARCHIVED";
+             "prior_candidate_runtime_id=" ^ old_id;
+             "prior_candidate_runtime_manifest_sha256=" ^ old_manifest_sha256;
+             "prior_candidate_loom_runtime_sha256=" ^ old_loom_sha256;
+             "prior_config_bundle_sha256=" ^ old_config_sha256;
+             "successor_candidate_runtime_id=" ^ successor_id;
+             "old_runtime_id=" ^ current_id;
+             "old_runtime_manifest_sha256=" ^ current_manifest_sha256;
+             "canary_mask=" ^ string_of_int mask ]
+          @ List.map (fun (key, value) -> key ^ "=" ^ value) hashes
+          @ [ "guardian_key_id=" ^ guardian_key_id;
+              "guardian_public_key_sha256=" ^ guardian_public_key_sha256;
+              "semantic_authority=Sounio"; "action=9046";
+              "operational_language=OCaml";
+              "operational_role=GENERATION_EVIDENCE_ARCHIVE";
+              "created_utc=" ^ created_utc; "" ])
+      in
+      let private_key, public_key, _ = signing_paths state_directory in
+      let public_text =
+        Loom_hook_generation_drain.read_file "guardian-public-key" public_key
+      in
+      let signature = Loom_epistemic.outcome_ed25519_sign private_key payload in
+      if not (Loom_epistemic.outcome_ed25519_verify public_text payload signature) then
+        failf "guardian-generation-archive-signature-self-check-refused";
+      ignore
+        (atomic_write temporary "generation-archive.v1"
+           (payload ^ "signature_base64=" ^ signature ^ "\n"));
+      if receipts <> [] then fsync_directory temporary_canaries;
+      fsync_directory temporary;
+      Unix.rename temporary archive;
+      fsync_directory archive_root)
+
+let clear_archived_generation state_directory receipts =
+  List.iter
+    (fun (_provider, _bit, _relative, path) ->
+      if Sys.file_exists path then Unix.unlink path)
+    receipts;
+  let canaries = Filename.concat state_directory "canaries" in
+  if Sys.file_exists canaries then fsync_directory canaries;
+  let rollback = Filename.concat state_directory "rollback-pair-tested.v1" in
+  if Sys.file_exists rollback then Unix.unlink rollback;
+  fsync_directory state_directory;
+  let final = Filename.concat state_directory "final-config.v1" in
+  if Sys.file_exists final then Unix.unlink final;
+  fsync_directory state_directory
+
+let archive_prior_generation ~state_directory ~current_id ~current_manifest_sha256
+    ~successor_id ~guardian_public_key_sha256 ~guardian_key_id =
+  let final_path = Filename.concat state_directory "final-config.v1" in
+  if not (Sys.file_exists final_path) then (
+    if proof_residual state_directory then failf "guardian-prior-proof-set-incomplete";
+    None)
+  else
+    let final_text =
+      Loom_hook_generation_drain.read_file "guardian-prior-final-config" final_path
+    in
+    let final_fields =
+      Loom_hook_generation_drain.parse_fields "guardian-prior-final-config" final_text
+    in
+    let old_id = Loom_hook_generation_drain.field final_fields "runtime_id" in
+    if old_id = successor_id then None
+    else (
+      List.iter
+        (fun (key, expected) ->
+          require_field "guardian-prior-final-config" final_fields key expected)
+        [ ("schema", "loom-native-hook-final-config-v1");
+          ("state", "FINAL_CONFIG_BOUND");
+          ("guardian_public_key_sha256", guardian_public_key_sha256);
+          ("semantic_authority", "Sounio"); ("action", "9046") ];
+      let old_manifest_sha256 =
+        Loom_hook_generation_drain.field final_fields "runtime_manifest_sha256"
+      in
+      let old_config_sha256 =
+        Loom_hook_generation_drain.field final_fields "config_bundle_sha256"
+      in
+      let final_sha256 = Loom_hook_generation_drain.sha256 final_text in
+      let archive_root = Filename.concat state_directory "archives" in
+      let archive =
+        Filename.concat archive_root
+          (Loom_hook_generation_drain.slug old_id ^ "-"
+          ^ String.sub final_sha256 0 12)
+      in
+      let receipts =
+        if Sys.file_exists archive then
+          snd
+            (verify_archive ~state_directory ~archive ~old_id ~old_manifest_sha256
+               ~successor_id ~current_id ~current_manifest_sha256)
+        else (
+          let rollback_path =
+            Filename.concat state_directory "rollback-pair-tested.v1"
+          in
+          let rollback_text =
+            Loom_hook_generation_drain.read_file "guardian-prior-rollback" rollback_path
+          in
+          if not
+               (Loom_hook_generation_drain.valid_rollback_marker rollback_text current_id
+                  current_manifest_sha256 old_id old_manifest_sha256 old_config_sha256)
+          then failf "guardian-prior-rollback-invalid";
+          let active_receipts = provider_receipts state_directory in
+          let old_loom_sha256 =
+            match active_receipts with
+            | [] -> String.make 64 '0'
+            | (_provider, _bit, _relative, path) :: _ ->
+                let payload, _ =
+                  Loom_hook_generation_canary.split_signed_receipt
+                    (Loom_hook_generation_drain.read_file "guardian-prior-canary" path)
+                in
+                let fields =
+                  Loom_hook_generation_canary.parse_fields "guardian-prior-canary"
+                    payload
+                in
+                Loom_hook_generation_canary.required "guardian-prior-canary" fields
+                  "candidate_loom_runtime_sha256"
+          in
+          let mask =
+            Loom_hook_generation_canary.verified_mask ~state_directory
+              ~candidate_id:old_id ~candidate_manifest_sha256:old_manifest_sha256
+              ~candidate_loom_runtime_sha256:old_loom_sha256
+              ~config_bundle_sha256:old_config_sha256
+          in
+          create_archive ~state_directory ~archive ~old_id ~old_manifest_sha256
+            ~old_loom_sha256 ~old_config_sha256 ~successor_id ~current_id
+            ~current_manifest_sha256 ~mask ~receipts:active_receipts
+            ~guardian_public_key_sha256 ~guardian_key_id;
+          active_receipts)
+      in
+      clear_archived_generation state_directory receipts;
+      Some archive)
+
 let prepare ~cwd ~apply =
   let root =
     Loom_hook_generation_drain.find_source_root (Unix.realpath cwd)
   in
   let common = Loom_hook_generation_drain.git_common_dir root in
   let state = state_directory common in
-  let observation = Loom_hook_generation_drain.live_observation root in
-  require_prepare_boundary observation;
   let current, candidate = runtime_paths common in
-  let config_sha256 = Loom_hook_generation_drain.config_bundle_sha256 root in
-  if config_sha256 = String.make 64 '0' then failf "guardian-config-bundle-unbound";
+  let candidate_id, _ = Loom_hook_generation_drain.runtime_identity candidate in
+  let current_id, current_manifest_sha256 =
+    Loom_hook_generation_drain.runtime_identity current
+  in
   if not apply then
+    let observation =
+      Loom_hook_generation_drain.live_observation ~verify_canaries:false root
+    in
+    require_prepare_boundary observation;
+    let config_sha256 = Loom_hook_generation_drain.config_bundle_sha256 root in
+    if config_sha256 = String.make 64 '0' then failf "guardian-config-bundle-unbound";
+    let rotation_required =
+      let final = Filename.concat state "final-config.v1" in
+      Sys.file_exists final
+      && Loom_hook_generation_drain.field
+           (Loom_hook_generation_drain.parse_fields "guardian-prior-final-config"
+              (Loom_hook_generation_drain.read_file "guardian-prior-final-config" final))
+           "runtime_id"
+         <> candidate_id
+    in
     Printf.sprintf
-      "{\"schema\":\"loom-native-hook-generation-guardian-v1\",\"action\":9046,\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"state\":\"PLAN_READY\",\"applied\":false,\"current_runtime_id\":\"%s\",\"candidate_runtime_id\":\"%s\",\"config_bundle_sha256\":\"%s\"}"
+      "{\"schema\":\"loom-native-hook-generation-guardian-v1\",\"action\":9046,\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"state\":\"PLAN_READY\",\"applied\":false,\"rotation_required\":%s,\"current_runtime_id\":\"%s\",\"candidate_runtime_id\":\"%s\",\"config_bundle_sha256\":\"%s\"}"
+      (string_of_bool rotation_required)
       (Loom_hook_generation_drain.json_escape observation.current_runtime_id)
-      (Loom_hook_generation_drain.json_escape observation.candidate_runtime_id)
-      config_sha256
+      (Loom_hook_generation_drain.json_escape observation.candidate_runtime_id) config_sha256
   else
     with_lock state (fun () ->
         let guardian_public_key_sha256, guardian_key_id =
           ensure_signing_pair state
         in
+        let archive =
+          archive_prior_generation ~state_directory:state ~current_id
+            ~current_manifest_sha256 ~successor_id:candidate_id
+            ~guardian_public_key_sha256 ~guardian_key_id
+        in
+        let observation =
+          Loom_hook_generation_drain.live_observation ~verify_canaries:false root
+        in
+        require_prepare_boundary observation;
+        let config_sha256 = Loom_hook_generation_drain.config_bundle_sha256 root in
+        if config_sha256 = String.make 64 '0' then failf "guardian-config-bundle-unbound";
         let probe_sha256 = rollback_probe state current candidate in
         let created_utc =
           Loom_hook_generation_drain.utc_now (Unix.time ())
@@ -272,7 +568,9 @@ let prepare ~cwd ~apply =
         let rollback_path = atomic_write state "rollback-pair-tested.v1" rollback in
         let final_path = atomic_write state "final-config.v1" final in
         Printf.sprintf
-          "{\"schema\":\"loom-native-hook-generation-guardian-v1\",\"action\":9046,\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"state\":\"PREPARED\",\"applied\":true,\"live_runtime_unchanged\":true,\"current_runtime_id\":\"%s\",\"candidate_runtime_id\":\"%s\",\"config_bundle_sha256\":\"%s\",\"guardian_key_id\":\"%s\",\"guardian_public_key_sha256\":\"%s\",\"rollback_probe_sha256\":\"%s\",\"rollback_marker_sha256\":\"%s\",\"final_marker_sha256\":\"%s\",\"rollback_marker_path\":\"%s\",\"final_marker_path\":\"%s\"}"
+          "{\"schema\":\"loom-native-hook-generation-guardian-v1\",\"action\":9046,\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"state\":\"PREPARED\",\"applied\":true,\"live_runtime_unchanged\":true,\"prior_generation_archived\":%s,\"archive_path\":\"%s\",\"current_runtime_id\":\"%s\",\"candidate_runtime_id\":\"%s\",\"config_bundle_sha256\":\"%s\",\"guardian_key_id\":\"%s\",\"guardian_public_key_sha256\":\"%s\",\"rollback_probe_sha256\":\"%s\",\"rollback_marker_sha256\":\"%s\",\"final_marker_sha256\":\"%s\",\"rollback_marker_path\":\"%s\",\"final_marker_path\":\"%s\"}"
+          (string_of_bool (Option.is_some archive))
+          (Loom_hook_generation_drain.json_escape (Option.value ~default:"" archive))
           (Loom_hook_generation_drain.json_escape observation.current_runtime_id)
           (Loom_hook_generation_drain.json_escape observation.candidate_runtime_id)
           config_sha256 guardian_key_id guardian_public_key_sha256 probe_sha256

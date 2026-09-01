@@ -257,6 +257,18 @@ let ensure_directory path =
       failf "canary-state-not-directory:%s" path)
   else Unix.mkdir path 0o700
 
+let with_guardian_lock state_directory operation =
+  ensure_directory state_directory;
+  let path = Filename.concat state_directory "guardian.lock" in
+  let descriptor = Unix.openfile path [ O_RDWR; O_CREAT ] 0o600 in
+  Fun.protect
+    ~finally:(fun () ->
+      (try Unix.lockf descriptor F_ULOCK 0 with _ -> ());
+      Unix.close descriptor)
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      operation ())
+
 let atomic_write directory name text =
   ensure_directory directory;
   let target = Filename.concat directory name in
@@ -511,12 +523,16 @@ let run values =
       | Some value when value <> "" -> failf "canary-state-override-requires-test-mode"
       | _ -> Filename.concat common "sounio-coord-runtime/native-hook-drain"
     in
+    let operation () =
+      if verify then verify_current ~root ~state_directory
+      else
+        issue ~root ~state_directory ~provider:parsed.provider
+          ~canary_root:parsed.canary_root ~output_path:parsed.output_path
+          ~expected_output:parsed.expected_output ~apply:parsed.apply
+    in
     print_endline
-      (if verify then verify_current ~root ~state_directory
-       else
-         issue ~root ~state_directory ~provider:parsed.provider
-           ~canary_root:parsed.canary_root ~output_path:parsed.output_path
-           ~expected_output:parsed.expected_output ~apply:parsed.apply);
+      (if verify || parsed.apply then with_guardian_lock state_directory operation
+       else operation ());
     0
   with error ->
     Printf.printf

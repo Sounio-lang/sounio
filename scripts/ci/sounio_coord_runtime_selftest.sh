@@ -126,6 +126,7 @@ cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_receipt_admit.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_canary_ocaml_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_guardian_ocaml_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_drain_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_drain_freeze_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_reconcile_ocaml_selftest.sh" \
