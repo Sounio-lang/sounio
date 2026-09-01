@@ -133,10 +133,28 @@ major species and radicals; H2O2 agrees to 5.9e-3 relative.
 >    at the CHEMKIN-conventional value; whether GRI-Mech was itself regressed
 >    under that rounding is not established here -- see `RESULTS.md` 1.5.
 >
-> No claim of the form "majors 0.2-2%, radicals ~3%, H2O2 ~16%" has ever
-> appeared in this file or anywhere else in this repository, and no pairing
-> measured on 2026-09-01 produces percent-level deviations. If you have seen
-> that attribution (to "fixed-step RK4 vs CVODE"), it has no provenance here.
+> **SUPERSEDED 2026-09-01, later the same day.** The paragraph that stood here
+> said the claim "majors 0.2-2%, radicals ~3%, H2O2 ~16%" had "no provenance".
+> That was wrong, and the correction inverts it. **The provenance is closed:
+> those are the per-species errors of the historical `reac - nu` reverse-rate
+> defect** at the isothermal checkpoint, mislabelled as a Sounio-vs-Cantera
+> comparison. Measured by `rep_traj_bug.py`, which reintroduces the defect:
+>
+> | claim | measured under `reac - nu` |
+> |---|---|
+> | "majors within 0.2-2%" | H2 **0.21%**, O2 **0.18%**, HO2 0.14%, O 1.49%, H2O 1.69%, H 1.76% |
+> | "radicals ~3%" | OH **3.44%** |
+> | "H2O2 ~16%" | H2O2 **16.17%** |
+>
+> Three figures, three matches, the last to three significant figures. What was
+> wrong was the *label*, not the number: the attribution to "fixed-step RK4 vs
+> CVODE" has no basis -- halving dt leaves the residual at ratio 1.000, so it is
+> not truncation -- but the numbers themselves are a real measurement of a real
+> defect. The half of the original paragraph that stands is that no pairing of
+> Sounio, replica and Cantera produces percent-level deviations; that is a
+> different statement, and `RESULTS.md` 1.2 measures it.
+>
+> Run: `python3 rep_traj_bug.py`.  See `RESULTS.md` 1.1a and 2.3.
 
 For the full mechanism at t=4e-7 s, Sounio's coherent forward-sensitivity
 band agrees with the independent Cantera central-difference referee in all

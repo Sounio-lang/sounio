@@ -1036,15 +1036,16 @@ TDY form reports `0.000000e+00` (or one ULP once aligned), the TPX form
 
 ---
 
-## 6.3 The instrument hid the defect — seven instances
+## 6.3 The instrument hid the defect — eight instances
 
 > **A note on the count.** The brief that commissioned this section asked for
-> the two new findings to bring it to *six*. It brings it to **seven**: the
-> section already carried five instances, not four. The miscount is worth
-> recording rather than absorbing, because the instance most easily dropped
-> from a mental list — (4), where the *reference's* own error was the thing
-> being attributed to the method under test — is the one this document had to
-> correct twice, and the second correction is in this revision.
+> two new findings, bringing it to *six*. It brought it to **seven** — the
+> section already carried five instances, not four — and then to **eight**,
+> when the operator recorded his own falsified premise as instance (8). The
+> miscount is worth keeping rather than absorbing, because the instance most
+> easily dropped from a mental list is (4), where the *reference's* own error
+> was the thing being attributed to the method under test, and that is the one
+> this document had to correct twice.
 
 Every defect in this document was invisible to the instrument that was
 supposed to find it, and in each case the instrument had **less resolution
@@ -1052,14 +1053,43 @@ than the defect it was asked to measure**. The readings then came out
 attributed to the object rather than to the instrument. This is the pattern
 worth carrying out of this work; the individual numbers are secondary.
 
-The instances divide into two kinds, and the division is the point. Instances
-(1)–(4) are **instruments set too coarse**: the resolution is a number, the
-defect is a number, and the first is larger. Those are fixable by tightening a
-tolerance or choosing a finer probe. Instances (5)–(6) are not. In those, the
-defect **has no signature the instrument could have been set to detect** — no
-syntax to match, no type to check, no diff to read. Tightening nothing would
-have found them. That is a stronger claim than "the tolerance was loose", and
-it is the one that generalises beyond combustion kinetics.
+The instances divide into two kinds, and the division is the point.
+
+Instances **(1)–(4) are instruments set too coarse**: the resolution is a
+number, the defect is a number, and the first is larger. They are fixable by
+tightening a tolerance or choosing a finer probe.
+
+Instances **(5)–(8) have no *syntactic* signature**. They are invisible to
+every tool that reads the program as text or as types — no token to grep, no
+dimension to check, no diff to review, no unit test that could have been
+written against the source alone, because each branch, file and literal
+involved is individually well-formed and correct.
+
+**They are not, however, undetectable.** An earlier revision of this section
+said they were, and then this document built an instrument that catches one of
+them, which is a contradiction and is corrected here. The distinction that
+survives is:
+
+| | (1)–(4) | (5)–(8) |
+|---|---|---|
+| signature | a magnitude | none in the syntax |
+| detected by | a tighter setting | a **behavioural** invariant, printed |
+| the fix | calibrate | instrument deliberately, and **fail closed** |
+
+The constructive form, and the reason this section is worth more than its
+diagnosis: **a defect with no syntactic signature can still be given a
+behavioural one, by refusing to proceed when the provenance of the initial
+state cannot be established.** `benchmarks/chemistry/rep_tolerance.py`,
+`rep_traj_bug.py` and `rep_resolution.py` are the reference implementation —
+each draws its initial state from the oracle's `initial_concentrations()` and
+**raises rather than reports** when that helper is absent, because its absence
+*is* the signature of the TPX variant of instance (7). They do not compare two
+protocols that were never the same and then print a plausible number; they
+refuse. That is the whole recipe, and it costs four lines.
+
+The corresponding recipe for instance (6) is a gate that **recomputes** a
+convention constant rather than matching its text, since the text is what
+carries no signature.
 
 ### (1) A reduced mechanism hides a standard-state error
 
@@ -1192,6 +1222,53 @@ The general form: **a numerical result inherits its meaning from a merge
 history that no static analysis of the merged tree can recover.** The remedy
 is not a stronger type system; it is an invariant printed alongside the result,
 chosen so that different ancestries give different values.
+
+### (8) A documentation number, never measured, propagates into a reviewer's hypothesis
+
+The seven instances above are all failures of the *authors* of a measurement.
+This one is a failure of its **reviewer**, and it is the same defect, which is
+why it belongs in the list rather than in an acknowledgements note.
+
+The operator commissioning this work raised a specific, well-posed physical
+objection: that the two sides might be sharing an integrator, and that the
+replica-vs-Cantera residual might be RK4 truncation. The objection was correct
+to raise and forced the measurements of §7.3 — which is exactly what a reviewer
+is for. The **premise** of it, however, was a number:
+
+> "dt-convergence: dt = 1e-8 vs 5e-9 agree to 4 significant figures"
+> — `benchmarks/chemistry/README.md`
+
+Four significant figures reads as a truncation error near 1e-4. From that, an
+agreement at 2e-11 between two independent integrators looks impossible, and a
+shared-stepping hypothesis is the natural explanation. The reasoning is sound.
+
+The premise is not. Measured, that self-convergence is **2.7e-15 … 2.2e-14** —
+about **fifteen** significant figures, eleven orders from the documented four.
+The README's "4 significant figures" is about **ignition delays** (126.315 vs
+126.317 µs), a phase-sensitive quantity at the front, and was never a statement
+about the pre-front checkpoint at all. It was a documentation figure that had
+not been measured *for the quantity it was being read as*.
+
+The pattern is identical to instances (1)–(4), one level up: **an unmeasured
+number of low resolution was taken as the resolution of a different quantity,
+and the discrepancy was attributed to the object rather than to the reading.**
+Here the object was the harness's integrator, and it was innocent.
+
+Two things follow, and the second is why this instance is worth the space.
+
+First, the reviewer's correction was the right move regardless: the hypothesis
+was falsifiable, it was put in falsifiable form, and it was killed by
+measurement in one run. A wrong hypothesis that names its own test is worth
+more than a right one that does not.
+
+Second, **the defect reached the reviewer through the same channel it reached
+the authors** — the README. This document has now corrected four separate
+statements in that file, and each had been read, cited and reasoned from before
+being checked. A documentation number is an instrument reading like any other,
+and it carries no resolution label. That is the general form: **prose reports
+numbers without their resolution, and a reader supplies a plausible one.**
+
+---
 
 ### The hazard that is NOT an instance here
 
@@ -1382,6 +1459,104 @@ dt = 1e-8 and dt = 5e-9 agree to ~1e-14.
 law, reaching 0.2% would need dt ≈ 4.9e-6 s — 493× the step used, far outside
 RK4 stability for this mechanism. Claim (A) is not an integrator-comparison
 artefact; §1.1a gives what it actually is.
+
+## 7.5 The oracle's resolution at the setting actually used — and what it costs this document's headline
+
+§6.3 instance (4) measured CVODE at its *default* tolerance against CVODE at
+`rtol=1e-12`. That is the distance between two settings. It is not the
+resolution of the setting the harness pins, and only the latter can say whether
+a residual measured against that setting is agreement or noise.
+
+```sh
+python3 benchmarks/chemistry/rep_resolution.py
+```
+
+Ten species, a fresh `gas` object per run, t = 1e-4 s:
+
+| comparison | worst rel | on |
+|---|---|---|
+| `rtol=1e-12` vs `rtol=1e-13` | **1.473e-11** | H2O |
+| `rtol=1e-13` vs `rtol=1e-14` | 5.839e-12 | H2O |
+| `rtol=1e-12` vs `rtol=1e-14` | 2.057e-11 | H2O |
+
+**The oracle's own answer at `rtol=1e-12` is uncertain at the 1.473e-11
+level.**
+
+### The consequence, stated against this document's own headline
+
+The aligned-regime residual this document reports is **2.032e-11**. The oracle's
+resolution at the tolerance used to measure it is **1.473e-11**. The ratio is
+**1.38**.
+
+> **Therefore 2.032e-11 is not citable as agreement.** It is an *upper bound on
+> the disagreement*, bounded below by the instrument. Two integrators that
+> differed by anything under ~1.5e-11 would produce the same reading. The
+> correct statement is: **with the constants aligned, the replica and Cantera
+> agree to within the oracle's resolution, and the residual is at that
+> resolution, not below it.**
+
+This retires the framing used earlier in this file and in
+`benchmarks/chemistry/README.md`, where the aligned figures (8.9e-13 … 1.2e-11)
+were called agreement "at the floor of CVODE's own `rtol = 1e-12`". Two of
+those figures are **below** the measured floor of 1.473e-11 — which does not
+make the agreement better than the floor, it makes those particular numbers
+unresolvable. They are reported here as measured and must not be read as
+resolution.
+
+What survives, and it is the result that matters, is unaffected: the
+**published-regime** gap of 2.660e-06 is 180,000× the oracle's resolution, so
+its existence, its magnitude and its attribution to one rounded constant are
+all far above the noise. The alignment demonstrably removes something real; how
+much of what remains is real is a question this oracle configuration cannot
+answer.
+
+**To answer it would need a tighter reference** — CVODE at `rtol=1e-14`, whose
+own residual against `1e-13` is 5.839e-12, or an arbitrary-precision
+integration. Neither is done here, and the claim is bounded accordingly rather
+than asserted past the instrument.
+
+---
+
+## 7.6 The truncation curve in time — the checkpoint sits at its minimum
+
+Truncation measured at one instant says nothing about the integrator elsewhere
+on the trajectory. `|c(dt=1e-8) − c(dt=5e-9)| / |c|`, worst over the eight
+reported species:
+
+| t (s) | worst | on | regime |
+|---|---|---|---|
+| 1.00e-06 | **1.608e-11** | H2O | early induction |
+| 1.00e-05 | 7.330e-14 | O | induction |
+| **1.00e-04** | **2.222e-14** | H2O2 | **the pre-front checkpoint** |
+| 1.20e-04 | 8.508e-14 | HO2 | approaching the front |
+| 1.30e-04 | 2.088e-13 | HO2 | into the front |
+
+**The checkpoint is the minimum of the curve.** Truncation there is 724× lower
+than at t = 1e-6 and 9.4× lower than just past the front. The parity comparison
+is therefore made at the single sampled point where the integrator is under the
+least stress — which is the right choice for isolating a *constant* from an
+*integrator*, and the wrong one for claiming the integrator has been validated.
+
+Both readings are stated because both are true:
+
+- **For the question this document asks** — is the residual a constant or the
+  integrator? — the checkpoint is well chosen. Truncation there (2.2e-14) is
+  five orders below the published-regime gap (2.7e-06), so the gap cannot be
+  truncation, and §7.3's bisection confirms it directly at ratio 1.000.
+- **For a claim that the two integrators agree**, the checkpoint is the most
+  favourable point available and should not be presented as representative.
+  Into the front, truncation rises by an order; the rise is *not* the
+  explosion a stiff-solver failure would give, so the replica is not
+  misbehaving — but a parity table taken at t = 1.3e-4 would sit at 2e-13, an
+  order worse, and no such table is reported here.
+
+The rise at t = 1e-6 is the sharper caution: **truncation is three orders
+*higher* early than at the checkpoint**, because several species are still
+many orders below their eventual values and a relative measure is unforgiving
+there. Anyone re-using this protocol at a shorter horizon inherits a much
+weaker bound than the one this document reports.
+
+---
 
 ## 7.4 Provenance audit of this document
 
