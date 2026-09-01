@@ -29,6 +29,7 @@ import cantera as ct
 SUB_SPECIES = ["H2", "H", "O", "O2", "OH", "H2O", "HO2", "H2O2", "N2", "AR"]
 SUB_SET = set(SUB_SPECIES)
 P0 = 101325.0
+R_SI = 8.31446261815324  # J/(mol*K)
 DT = 1e-8
 T_END = 1e-4
 T_CHECK = 1500.0
@@ -56,7 +57,7 @@ def build_submechanism():
 
 
 def initial_state(gas, T):
-    mtot = 1.0 / (82.057 * T)  # mol/cm^3 at 1 atm
+    mtot = P0 / (R_SI * T) * 1e-6  # mol/cm^3 at 1 atm
     X = {s: 0.0 for s in SUB_SPECIES}
     X["H2"], X["O2"], X["N2"] = 0.02, 0.01, 0.97
     X["H"] = SEED_C / mtot  # absolute seed -> mole fraction

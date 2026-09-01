@@ -26,7 +26,7 @@ NSP = 10
 D = json.load(open(os.path.join(HERE, "gri30_h2_mechanism.json")))
 RX = D["reactions"]
 NR = len(RX)
-R_SI = 8.314462618
+R_SI = 8.31446261815324
 P0 = 101325.0  # CHEMKIN/GRI standard state: 1 atm
 
 nasa = {s: D["species"][s]["coeffs"] for s in SP}
@@ -165,7 +165,7 @@ def propagate_unc(t, c, kc, varc, dt):
 
 def main():
     t = 1200.0
-    mtot = 1.0 / (82.057 * t)
+    mtot = P0 / (R_SI * t) * 1e-6
     kc = [kc_cm(r, t) for r in range(NR)]
 
     print(f"NR = {NR}")
@@ -180,7 +180,7 @@ def main():
     # --- deterministic trajectory checkpoint, H-seeded (Sounio test protocol:
     # --- T=1500 K, seed H = 1e-11 mol/cm^3 absolute, pre-front t = 1e-4 s)
     ts = 1500.0
-    ms = 1.0 / (82.057 * ts)
+    ms = P0 / (R_SI * ts) * 1e-6
     kcs = [kc_cm(r, ts) for r in range(NR)]
     c = [0.0] * NSP
     c[0], c[3], c[8] = ms * 0.02, ms * 0.01, ms * 0.97
