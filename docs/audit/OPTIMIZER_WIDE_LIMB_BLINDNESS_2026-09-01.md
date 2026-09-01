@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.optimize
 
 # Every cleanup peel is blind to wide-integer limbs
 
-**Status:** root cause identified and reproduced; not fixed.
+**Status:** FIXED. Root cause below; the fix and its measurement are at the end.
 **Scope:** the 26 `-O` divergences left after the four peel fixes of 2026-08-31.
 
 ## The fact
@@ -100,3 +100,40 @@ unoptimised build is the reference.
 
 The 26 have not been shown to be ONE defect. They share a family and a width
 dependence; that is a common cause, not a proof of a single one.
+
+
+## Fixed
+
+Seven peels now read an operand as the range `r .. r+n-1`: `dce_once`,
+`copy_prop`, `dse`, `dedup_imm`, `const_fold`, `sccp` and `cse`. The other six
+keep no per-register state.
+
+Full sweep over `tests/run-pass`, one compiler built twice, differing only in
+`-O`, `SOUNIO_STDLIB_PATH` pinned -- the same denominator as the measurement
+above, so the two are comparable:
+
+    compared                  1725
+    divergent                    0   (26 before)
+    of which output-changing     0
+    new divergences              0
+
+`-O` no longer changes the behaviour of any program in `tests/run-pass`.
+
+Two asymmetries turned up while reading the opcode list, neither in the original
+hypothesis above:
+
+  `IrWideCmp` reads two wide values and writes ONE boolean, so its destination
+  span is computed separately from its operand span. Widening the destination
+  would clobber the register after it.
+
+  `src2` is not always a register: on `IrWideShr` and `IrWideShrLimb` it carries
+  the shift amount. `copy_prop` rewrote `src2` unconditionally, and a small
+  shift count collides with a low register number.
+
+`dse` is deliberately conservative: an elimination requires BOTH sides to be
+single-limb, because NOPing a wide instruction whose base was overwritten would
+delete the definitions of its other limbs with it.
+
+The claim above that the 26 were not shown to be ONE defect still stands as
+written -- they all cleared together under one change, which is consistent with
+a single cause but was not proved to be one before the fix.
