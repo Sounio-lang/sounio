@@ -175,6 +175,19 @@ activate_runtime() {
       fi
     done
   fi
+  if grep -q '^capability=loom-native-hook-generation-reconcile-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-native-hook-generation-reconcile" ]] || \
+      die "installed runtime declares generation reconciliation without Loom or frozen Sounio action 9047: $runtime_id"
+    [[ "$(manifest_value "$manifest" loom_native_hook_generation_reconcile_semantics_sha256)" == \
+      63733afa5f88bb5bc867ce59f5a7b481927b0126096d602c3bdf949b25935fff && \
+      "$(manifest_value "$manifest" loom_native_hook_generation_reconcile_manifest_sha256)" == \
+      a38fcb98dbaeb68b1913aec07b1646d8e965249a1bb05a01427327a78aea7cd7 ]] || \
+      die "installed generation reconciliation is not bound to frozen Sounio action 9047: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_native_hook_generation_reconcile_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-native-hook-generation-reconcile"
+  fi
   if grep -q '^capability=loom-runtime-authority-capsule-v1$' "$manifest"; then
     local authority_capsule="$version_dir/policy/language-authority"
     grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" || \
@@ -345,7 +358,12 @@ activate_runtime() {
   fi
   if grep -q '^capability=loom-sovereign-change-kernel-v2$' "$manifest"; then
     local change_capsule="$version_dir/policy/sovereign-change"
-    local change_product="$change_capsule/tools/loom/sovereign_material_change_product.runtime.v2"
+    local change_product_relative change_product
+    change_product_relative="$(manifest_value "$manifest" loom_material_change_product_path)"
+    [[ "$change_product_relative" == tools/loom/sovereign_material_change_product.runtime.v* &&
+      "$change_product_relative" != *'..'* ]] || \
+      die "installed sovereign change product path is unsafe: $runtime_id"
+    change_product="$change_capsule/$change_product_relative"
     [[ -x "$version_dir/bin/sounio-loom-runtime" &&
       -x "$version_dir/bin/sounio-loom-sovereign-change-kernel" &&
       -x "$version_dir/bin/sounio-loom-sovereign-material-change" &&
@@ -410,10 +428,12 @@ activate_runtime() {
       sounio_source_path:sounio_source_sha256 \
       loom_change_source_path:loom_change_source_sha256 \
       loom_source_path:loom_source_sha256 \
+      ui_source_path:ui_source_sha256 \
       hook_source_path:hook_source_sha256 \
       canary_source_path:canary_source_sha256 \
       drain_source_path:drain_source_sha256 \
       guardian_source_path:guardian_source_sha256 \
+      reconcile_source_path:reconcile_source_sha256 \
       c_stub_path:c_stub_sha256 \
       provider_fixture_path:provider_fixture_sha256 \
       dune_path:dune_sha256 \
@@ -421,6 +441,7 @@ activate_runtime() {
       installer_path:installer_sha256 \
       coord_runtime_path:coord_runtime_sha256 \
       canary_gate_path:canary_gate_sha256 \
+      reconcile_gate_path:reconcile_gate_sha256 \
       operational_gate_path:operational_gate_sha256 \
       ci_entrypoint_path:ci_entrypoint_sha256; do
       change_path_key="${change_pair%%:*}"
@@ -833,6 +854,10 @@ loom_native_hook_cutover_codex_config="$SOURCE_ROOT/.codex/hooks.json"
 loom_native_hook_cutover_claude_config="$SOURCE_ROOT/.claude/settings.json"
 loom_native_hook_cutover_cursor_config="$SOURCE_ROOT/.cursor/hooks.json"
 loom_native_hook_cutover_grok_config="$SOURCE_ROOT/.grok/hooks/loom-native.json"
+loom_native_hook_generation_reconcile_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_native_hook_generation_reconcile.sh"
+loom_native_hook_generation_reconcile_entrypoint="$SOURCE_ROOT/tools/loom/native_hook_generation_reconcile_authority_main.sio"
+loom_native_hook_generation_reconcile_module="$SOURCE_ROOT/stdlib/coordination/loom_native_hook_generation_reconcile_authority.sio"
+loom_native_hook_generation_reconcile_freeze="$SOURCE_ROOT/tools/loom/native_hook_generation_reconcile.freeze.v1"
 loom_custody_transfer_entrypoint="$SOURCE_ROOT/tools/loom/custody_transfer_main.sio"
 loom_custody_transfer_module="$SOURCE_ROOT/stdlib/coordination/loom_custody_transfer.sio"
 loom_custody_transfer_freeze="$SOURCE_ROOT/tools/loom/custody_transfer.freeze.v1"
@@ -927,8 +952,13 @@ loom_change_freeze="$SOURCE_ROOT/tools/loom/sovereign_change_kernel.freeze.v1"
 loom_material_change_source="$SOURCE_ROOT/stdlib/coordination/loom_sovereign_material_change_authority.sio"
 loom_material_change_entrypoint="$SOURCE_ROOT/tools/loom/sovereign_material_change_authority_main.sio"
 loom_material_change_freeze="$SOURCE_ROOT/tools/loom/sovereign_material_change.freeze.v2"
-loom_material_change_product="$SOURCE_ROOT/tools/loom/sovereign_material_change_product.runtime.v2"
-loom_material_change_evidence="$SOURCE_ROOT/tools/loom/evidence/loom-sovereign-material-change-product-v2-20260831.txt"
+loom_material_change_product="$(
+  find "$SOURCE_ROOT/tools/loom" -maxdepth 1 -type f \
+    -name 'sovereign_material_change_product.runtime.v*' -print | sort -V | tail -1
+)"
+loom_material_change_evidence="$SOURCE_ROOT/$(
+  manifest_value "$loom_material_change_product" evidence_path
+)"
 loom_change_operational_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh"
 loom_change_ci_admit="$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_change_receipt_admit.sh"
 loom_change_sources=(
@@ -940,8 +970,11 @@ loom_change_sources=(
   "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_canary.ml"
   "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_drain.ml"
   "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_guardian.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_reconcile.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_ui.ml"
   "$SOURCE_ROOT/tools/loom/src/dune"
   "$SOURCE_ROOT/scripts/ci/sounio_loom_native_hook_generation_canary_ocaml_selftest.sh"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_native_hook_generation_reconcile_ocaml_selftest.sh"
 )
 [[ -x "$installer_source" ]] || die "runtime installer source missing or not executable: $installer_source"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
@@ -960,6 +993,8 @@ loom_change_sources=(
   die "Loom language-authority build entrypoint missing or not executable: $loom_language_authority_build_source"
 [[ -x "$loom_native_hook_cutover_build_source" ]] || \
   die "Loom native-hook cutover build entrypoint missing or not executable: $loom_native_hook_cutover_build_source"
+[[ -x "$loom_native_hook_generation_reconcile_build_source" ]] || \
+  die "Loom native-hook generation-reconcile build entrypoint missing or not executable: $loom_native_hook_generation_reconcile_build_source"
 [[ -x "$loom_custody_transfer_build_source" ]] || \
   die "Loom custody-transfer build entrypoint missing or not executable: $loom_custody_transfer_build_source"
 [[ -x "$loom_execution_outcome_build_source" ]] || \
@@ -1009,6 +1044,10 @@ loom_change_sources=(
   -f "$loom_native_hook_cutover_cursor_config" && \
   -f "$loom_native_hook_cutover_grok_config" ]] || \
   die "Loom frozen Sounio native-hook cutover bundle is incomplete"
+[[ -f "$loom_native_hook_generation_reconcile_entrypoint" && \
+  -f "$loom_native_hook_generation_reconcile_module" && \
+  -f "$loom_native_hook_generation_reconcile_freeze" ]] || \
+  die "Loom frozen Sounio native-hook generation-reconcile bundle is incomplete"
 [[ -f "$loom_custody_transfer_entrypoint" && \
   -f "$loom_custody_transfer_module" && \
   -f "$loom_custody_transfer_freeze" ]] || \
@@ -1098,6 +1137,7 @@ done
   -f "$loom_project/src/loom_exec.ml" && \
   -f "$loom_project/src/loom_exec_ingress.ml" && \
   -f "$loom_project/src/loom_hook.ml" && \
+  -f "$loom_project/src/loom_hook_generation_reconcile.ml" && \
   -f "$loom_project/src/loom_change.ml" && \
   -f "$loom_project/src/loom_change_stubs.c" && \
   -f "$loom_project/src/loom_sovereign_exec.ml" && \
@@ -1134,6 +1174,7 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 loom_binary="$loom_project/_build/default/src/loom.exe"
 loom_language_authority_binary="$loom_project/.runtime/sounio-loom-language-authority-runtime"
 loom_native_hook_cutover_binary="$loom_project/.runtime/sounio-loom-native-hook-cutover"
+loom_native_hook_generation_reconcile_binary="$loom_project/.runtime/sounio-loom-native-hook-generation-reconcile"
 loom_custody_transfer_binary="$loom_project/_build/default/src/sounio-loom-custody-transfer-runtime"
 loom_execution_outcome_binary="$loom_project/.runtime/sounio-loom-execution-outcome-runtime"
 loom_lane_health_binary="$loom_project/.runtime/sounio-loom-lane-health-runtime"
@@ -1154,6 +1195,17 @@ loom_sovereign_binary="$loom_project/_build/default/src/sounio-loom-sovereign-ex
 loom_change_binary="$loom_project/_build/default/src/sounio-loom-sovereign-change-kernel"
 loom_material_change_binary="$loom_project/_build/default/src/sounio-loom-sovereign-material-change"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
+[[ -x "$loom_native_hook_generation_reconcile_binary" ]] || \
+  die "Loom build omitted frozen Sounio action 9047"
+loom_native_hook_generation_reconcile_expected_sha="$(
+  manifest_value "$loom_native_hook_generation_reconcile_freeze" executable_sha256
+)"
+[[ "$(sha256sum "$loom_native_hook_generation_reconcile_binary" | awk '{print $1}')" == \
+  "$loom_native_hook_generation_reconcile_expected_sha" ]] || \
+  die "Loom Sounio action 9047 runtime failed frozen hash verification"
+[[ "$(printf '0\n' | "$loom_native_hook_generation_reconcile_binary")" == \
+  'SOUNIO_NATIVE_HOOK_GENERATION_RECONCILE_SELFTEST PASS cases=13' ]] || \
+  die "Loom Sounio action 9047 failed its install probe"
 [[ -x "$loom_sovereign_binary" ]] || \
   die "Loom build omitted frozen Sounio action 9042"
 [[ -x "$loom_change_binary" && -x "$loom_material_change_binary" ]] ||
@@ -1421,6 +1473,10 @@ bundle_sources=(
   "$loom_native_hook_cutover_freeze" "$loom_native_hook_cutover_codex_config"
   "$loom_native_hook_cutover_claude_config" "$loom_native_hook_cutover_cursor_config"
   "$loom_native_hook_cutover_grok_config"
+  "$loom_native_hook_generation_reconcile_build_source"
+  "$loom_native_hook_generation_reconcile_entrypoint"
+  "$loom_native_hook_generation_reconcile_module"
+  "$loom_native_hook_generation_reconcile_freeze"
   "$loom_custody_transfer_build_source" "$loom_custody_transfer_entrypoint"
   "$loom_custody_transfer_module" "$loom_custody_transfer_freeze"
   "$loom_execution_outcome_build_source" "$loom_execution_outcome_entrypoint"
@@ -1568,6 +1624,8 @@ else
     "$stage/policy/language-authority/stdlib/coordination/loom_language_authority.sio"
   install -m 0555 "$loom_native_hook_cutover_binary" \
     "$stage/bin/sounio-loom-native-hook-cutover"
+  install -m 0555 "$loom_native_hook_generation_reconcile_binary" \
+    "$stage/bin/sounio-loom-native-hook-generation-reconcile"
   install -m 0444 "$loom_native_hook_cutover_freeze" \
     "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover.freeze.v1"
   install -m 0444 "$loom_native_hook_cutover_entrypoint" \
@@ -1795,7 +1853,7 @@ else
     sha256sum "$stage/policy/sovereign-change/tools/loom/sovereign_material_change.freeze.v2" | awk '{print $1}'
   )"
   loom_material_change_product_sha256="$(
-    sha256sum "$stage/policy/sovereign-change/tools/loom/sovereign_material_change_product.runtime.v2" | awk '{print $1}'
+    sha256sum "$stage/policy/sovereign-change/${loom_material_change_product#"$SOURCE_ROOT/"}" | awk '{print $1}'
   )"
   loom_sovereign_product_manifest_sha256="$(
     sha256sum "$stage/policy/sovereign-execution/tools/loom/sovereign_execution_kernel_product.runtime.v1" | awk '{print $1}'
@@ -1831,6 +1889,9 @@ else
   loom_native_hook_cutover_claude_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/claude.json" | awk '{print $1}')"
   loom_native_hook_cutover_cursor_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/cursor.json" | awk '{print $1}')"
   loom_native_hook_cutover_grok_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/grok.json" | awk '{print $1}')"
+  loom_native_hook_generation_reconcile_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-native-hook-generation-reconcile" | awk '{print $1}'
+  )"
   loom_custody_transfer_runtime_sha256="$(
     sha256sum "$stage/bin/sounio-loom-custody-transfer-runtime" | awk '{print $1}'
   )"
@@ -1899,6 +1960,11 @@ else
     printf 'loom_native_hook_cutover_grok_config_sha256=%s\n' \
       "$loom_native_hook_cutover_grok_config_sha256"
     printf 'loom_native_hook_cutover_python_bridge_absent=true\n'
+    printf 'loom_native_hook_generation_reconcile_action=9047\n'
+    printf 'loom_native_hook_generation_reconcile_semantics_sha256=63733afa5f88bb5bc867ce59f5a7b481927b0126096d602c3bdf949b25935fff\n'
+    printf 'loom_native_hook_generation_reconcile_manifest_sha256=a38fcb98dbaeb68b1913aec07b1646d8e965249a1bb05a01427327a78aea7cd7\n'
+    printf 'loom_native_hook_generation_reconcile_runtime_sha256=%s\n' \
+      "$loom_native_hook_generation_reconcile_runtime_sha256"
     printf 'loom_custody_transfer_language=Sounio\n'
     printf 'loom_custody_transfer_role=SEMANTIC_AUTHORITY\n'
     printf 'loom_custody_transfer_stage=SEMANTICS_FROZEN\n'
@@ -1970,6 +2036,8 @@ else
       "$loom_material_change_runtime_sha256"
     printf 'loom_material_change_product_sha256=%s\n' \
       "$loom_material_change_product_sha256"
+    printf 'loom_material_change_product_path=%s\n' \
+      "${loom_material_change_product#"$SOURCE_ROOT/"}"
     printf 'loom_change_ci_policy=consume-not-reinterpret\n'
     printf 'loom_change_claim_ready=true\n'
     printf 'loom_continuity_language=Sounio\n'
@@ -2016,6 +2084,7 @@ else
     printf 'capability=loom-durable-execution-outcome-v1\n'
     printf 'capability=loom-native-agent-hook-v1\n'
     printf 'capability=loom-native-hook-cutover-v1\n'
+    printf 'capability=loom-native-hook-generation-reconcile-v1\n'
     printf 'capability=loom-runtime-authority-capsule-v1\n'
     printf 'capability=loom-product-launch-dark-attachment-v1\n'
     printf 'capability=loom-sovereign-execution-kernel-product-v1\n'

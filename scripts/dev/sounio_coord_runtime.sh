@@ -3569,8 +3569,13 @@ coord_wake_reconcile_command() {
 
 coord_obligation_supervisor_stop_children() {
   local child
-  for child in $(jobs -pr); do
+  local -a children=()
+  mapfile -t children < <(jobs -pr)
+  for child in "${children[@]}"; do
     kill "$child" 2>/dev/null || true
+  done
+  for child in "${children[@]}"; do
+    wait "$child" 2>/dev/null || true
   done
 }
 
@@ -3840,9 +3845,9 @@ coord_obligation_supervisor_command() {
         exit 1
       fi
     done
-  ) &
+  ) 7>&- &
   bridge_pid=$!
-  coord_obligation_exec "${args[@]}" &
+  coord_obligation_exec "${args[@]}" 7>&- &
   loom_pid=$!
   if wait "$loom_pid"; then
     supervisor_status=0

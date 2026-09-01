@@ -75,6 +75,10 @@ let verify_manifest_file root manifest path_key hash_key reason =
 let choose_runtime root manifest =
   let repository_runtime =
     Filename.concat root
+      "tools/loom/.runtime/sounio-loom-native-hook-generation-reconcile"
+  in
+  let legacy_build_runtime =
+    Filename.concat root
       "tools/loom/_build/default/src/sounio-loom-native-hook-generation-reconcile"
   in
   let installed_runtime =
@@ -88,8 +92,9 @@ let choose_runtime root manifest =
           failf "authority-runtime-override-requires-test-mode";
         value
     | _ ->
-        if Sys.file_exists repository_runtime then repository_runtime
-        else installed_runtime
+        if Sys.file_exists installed_runtime then installed_runtime
+        else if Sys.file_exists repository_runtime then repository_runtime
+        else legacy_build_runtime
   in
   let stat = Loom_hook_generation_drain.require_regular_file "authority-runtime" selected in
   if stat.st_perm land 0o111 = 0 then failf "authority-runtime-not-executable";

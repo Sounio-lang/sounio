@@ -92,6 +92,7 @@ cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_cutover.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_generation_reconcile.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_custody_transfer.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_execution_outcome.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
@@ -124,6 +125,7 @@ cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_receipt_admit.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_canary_ocaml_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_reconcile_ocaml_selftest.sh" \
   "$REPO/scripts/ci/"
 mkdir -p "$REPO/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
@@ -131,6 +133,8 @@ cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v1" \
   "$ROOT_DIR/tools/loom/native_hook_cutover_authority_main.sio" \
   "$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_reconcile_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_reconcile.freeze.v1" \
   "$ROOT_DIR/tools/loom/execution_authority.freeze.v2" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
   "$ROOT_DIR/tools/loom/custody_transfer.freeze.v1" "$REPO/tools/loom/"
@@ -188,11 +192,13 @@ cp "$ROOT_DIR/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_authority_main.sio" \
   "$ROOT_DIR/tools/loom/sovereign_material_change.freeze.v2" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v2" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v3" \
   "$REPO/tools/loom/"
 mkdir -p "$REPO/tools/loom/evidence"
 cp "$ROOT_DIR/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v2-20260831.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v3-20260901.txt" \
   "$REPO/tools/loom/evidence/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
@@ -210,6 +216,7 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook_generation_canary.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook_generation_drain.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook_generation_guardian.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_reconcile.ml" \
   "$ROOT_DIR/tools/loom/src/loom_invocation_cell.ml" \
   "$ROOT_DIR/tools/loom/src/loom_lane_health.ml" \
   "$ROOT_DIR/tools/loom/src/loom_membrane.ml" \
@@ -241,6 +248,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
 cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_native_hook_cutover_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_native_hook_generation_reconcile_authority.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_custody_transfer.sio" \
   "$REPO/stdlib/coordination/"
@@ -369,6 +378,7 @@ coord_runtime_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coor
 loom_runtime_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-runtime" | awk '{print $1}')"
 loom_custody_transfer_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-custody-transfer-runtime" | awk '{print $1}')"
 loom_execution_outcome_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-execution-outcome-runtime" | awk '{print $1}')"
+loom_generation_reconcile_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-native-hook-generation-reconcile" | awk '{print $1}')"
 grep -qx "coord_runtime_sha256=$coord_runtime_sha" "$first_manifest" || \
   fail 'runtime manifest did not pin the coordination runtime executable'
 grep -qx "loom_runtime_sha256=$loom_runtime_sha" "$first_manifest" || \
@@ -379,6 +389,11 @@ grep -qx "loom_custody_transfer_runtime_sha256=$loom_custody_transfer_sha" \
 grep -qx "loom_execution_outcome_runtime_sha256=$loom_execution_outcome_sha" \
   "$first_manifest" || \
   fail 'runtime manifest did not pin the frozen Sounio execution-outcome executable'
+grep -qx "loom_native_hook_generation_reconcile_runtime_sha256=$loom_generation_reconcile_sha" \
+  "$first_manifest" || \
+  fail 'runtime manifest did not pin frozen Sounio action 9047'
+grep -q '^capability=loom-native-hook-generation-reconcile-v1$' "$first_manifest" || \
+  fail 'runtime manifest omitted native hook generation reconciliation'
 grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$first_manifest" || \
   fail 'runtime manifest omitted native hook binary attestation'
 if grep -q '^capability=loom-product-exec-ingress-dark-attachment-v1$' \
@@ -471,10 +486,12 @@ set -e
 [[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$active_before_tamper" ]] ||
   fail 'failed sovereign source activation changed the current runtime link'
 for tamper_binary in sounio-coord-runtime sounio-loom-runtime \
-  sounio-loom-custody-transfer-runtime sounio-loom-execution-outcome-runtime; do
+  sounio-loom-custody-transfer-runtime sounio-loom-execution-outcome-runtime \
+  sounio-loom-native-hook-generation-reconcile; do
   binary="$RUNTIME_ROOT/versions/$first_id/bin/$tamper_binary"
   saved_binary="$TEST_ROOT/$tamper_binary.saved"
   cp -p "$binary" "$saved_binary"
+  chmod u+w "$binary"
   printf x >> "$binary"
   set +e
   tamper_output="$(cd "$REPO" && scripts/dev/install_sounio_coord_runtime.sh \
@@ -567,6 +584,8 @@ git -C "$REPO" show HEAD:stdlib/coordination/loom_witness_epoch_handoff.sio > \
   fail 'installed runtime omitted the OCaml Loom kernel'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-language-authority-runtime" ]] || \
   fail 'installed runtime omitted the frozen Sounio language authority'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-native-hook-generation-reconcile" ]] || \
+  fail 'installed runtime omitted frozen Sounio action 9047'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-custody-transfer-runtime" ]] || \
   fail 'installed runtime omitted the frozen Sounio custody-transfer authority'
 grep -q '^loom_custody_transfer_semantics_sha256=5f53d3edcb6731c5b0f4e58ff7b27d251e6c0b40eda8c68366e48b17e596f55c$' \
@@ -904,6 +923,15 @@ for service_pid in "$supervisor_wrapper_pid" "$supervisor_pid"; do
       fail 'detached control service inherited the bootstrap-lock descriptor'
   done
 done
+leader_lock="$STATE/.obligation-supervisor-leader.lock"
+mapfile -t supervisor_child_pids < <(
+  tr ' ' '\n' < "/proc/$supervisor_wrapper_pid/task/$supervisor_wrapper_pid/children" |
+    sed '/^$/d'
+)
+((${#supervisor_child_pids[@]} >= 2)) ||
+  fail 'detached obligation supervisor child set was incomplete'
+assert_processes_do_not_hold "$leader_lock" 'detached obligation supervisor child' \
+  "${supervisor_child_pids[@]}"
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
 grep -q "state=already-running pid=$supervisor_pid " <<< "$output" || \
@@ -1201,18 +1229,22 @@ printf '\n# runtime upgrade selftest marker\n' >> \
   "$ALT/scripts/dev/sounio_coord_runtime.sh"
 chmod +x "$ALT/scripts/dev/"*
 upgrade_coord_sha="$(sha256sum "$ALT/scripts/dev/sounio_coord_runtime.sh" | awk '{print $1}')"
+alt_change_product="$(
+  find "$ALT/tools/loom" -maxdepth 1 -type f \
+    -name 'sovereign_material_change_product.runtime.v*' -print | sort -V | tail -1
+)"
+alt_change_evidence="$ALT/$(sed -n 's/^evidence_path=//p' "$alt_change_product")"
 sed -i "s/^coord_runtime_sha256=.*/coord_runtime_sha256=$upgrade_coord_sha/" \
-  "$ALT/tools/loom/sovereign_material_change_product.runtime.v2"
+  "$alt_change_product"
 upgrade_change_product_sha="$(
-  sha256sum "$ALT/tools/loom/sovereign_material_change_product.runtime.v2" | awk '{print $1}'
+  sha256sum "$alt_change_product" | awk '{print $1}'
 )"
 sed -i "s/^product_manifest_sha256=.*/product_manifest_sha256=$upgrade_change_product_sha/" \
-  "$ALT/tools/loom/evidence/loom-sovereign-material-change-product-v2-20260831.txt"
+  "$alt_change_evidence"
 git -C "$ALT" config user.name 'Sounio Runtime Upgrade Selftest'
 git -C "$ALT" config user.email 'coord-runtime-upgrade@sounio.local'
 git -C "$ALT" add scripts/dev/sounio_coord_runtime.sh \
-  tools/loom/sovereign_material_change_product.runtime.v2 \
-  tools/loom/evidence/loom-sovereign-material-change-product-v2-20260831.txt
+  "${alt_change_product#"$ALT/"}" "${alt_change_evidence#"$ALT/"}"
 git -C "$ALT" commit -qm 'test runtime upgrade source'
 output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord install-runtime --source-root "$ALT")"

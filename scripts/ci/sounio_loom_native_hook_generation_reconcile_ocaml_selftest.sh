@@ -94,9 +94,11 @@ write_related() {
 }
 
 run_reconcile() {
-  local state="$1"
+  local state="$1" authority
   shift
+  authority="${SOUNIO_LOOM_NATIVE_HOOK_GENERATION_RECONCILE_RUNTIME:-$AUTHORITY}"
   SOUNIO_LOOM_NATIVE_HOOK_RECONCILE_STATE_DIR="$state" \
+    SOUNIO_LOOM_NATIVE_HOOK_GENERATION_RECONCILE_RUNTIME="$authority" \
     "$LOOM" hook-generation-reconcile --cwd "$ROOT_DIR" "$@"
 }
 
