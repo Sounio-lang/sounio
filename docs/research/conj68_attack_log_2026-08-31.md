@@ -869,3 +869,34 @@ tudo, e os estratos grandes (d≤2) são triviais. FALTA: caracterizar d por dim
 (b) correlação d≥3 ⟺ dim D=1 (para localizar o argumento no escopo). Não provado.
 (c) redução top-dim (para a seção-hiperplana). Medido, não geral.
 Progresso real; núcleo ainda aberto. Ferramenta exata (Singular) foi decisiva.
+
+## Rodada 22: GZ verificado — a formulação do witness está CORRETA (restrição ZD é vácua)
+
+Li as definições exatas de GZ (arXiv 2608.26903, via alphaXiv). Pontos:
+- Vértices de Γ_C^Z(S) = P(R+Z(S)) = linhas de elementos cuja PARTE IMAGINÁRIA é ZD
+  (parte real livre). Adjacência: [a]~[b] ⟺ ab=ba. Conjectura 6.8: diam Γ_C^Z(S)=3.
+- C_S(x) = R ⊕ Rx ⊕ O_S(x) (Lemma 6.2(2)), dim 6; Im C_S(x)=Rx⊕O_S(x), dim 5. ✓
+- Prop 4.1: 1,a,b,c,d,ab,ac,ad ortonormais.
+
+**CHECAGEM QUE PODIA MATAR (resolvida a favor):** o path x~u~w~x' exige u,w VÉRTICES
+(Im ZD). Como u∈Im C(x) é puro, u é vértice ⟺ u∈Z(S). PROVEI que é AUTOMÁTICO: para
+u=k₀x+k₁(c,d)+k₂(d,-c)+k₃(ac,-ad)+k₄(ad,ac), usando ortonormalidade (Prop 4.1):
+n(u₁)=n(u₂)=Σkᵢ² (idênticos), Re(u₁)=0, ⟨u₁,u₂⟩=−k₁k₂+k₂k₁+k₃k₄−k₄k₃=0. Por Lemma 4.12
+(GZ), (u₁,u₂)∈Z(S). **Todo u∈Im C(x) é zero divisor** ⟹ restrição de vértice é VÁCUA ⟹
+D={rank M(u)≤4} É exatamente o locus de witness, SEM constraint extra. Formulação do §1
+CONFIRMADA correta.
+
+**Distância:** vizinho comum y de x,x' ∈ C_S(x)∩C_S(x') = R⊕(Im C(x)∩Im C(x')) = R
+(interseção medida =0). R é central (não-vértice). ⟹ SEM vizinho comum ⟹ todos os pares
+testados (incl. par duro) são d≥3. Logo o locus ruim (dim D≥2, ex. par duro dim3) contém
+pares d≥3 GENUÍNOS ⟹ gap (b) "d≥3⟺dimD=1" FALSO. O argumento deve cobrir todos estratos.
+
+**Nota:** o mult mod-p=9 em algumas alinhadas era multiplicidade/embebido; grau REDUZIDO
+da curva via primdec ℚ é 7 (não achei curva reduzida grau 9). O grau reduzido top-dim
+ímpar (7 curvas; 1/3 estratos maiores) continua sendo a afirmação uniforme medida.
+
+**Estado honesto:** formulação verificada correta contra a fonte; mecanismo de grau-ímpar
+sólido no estrato-curva (d≥3 genérico, deg 7); estratos degenerados (par duro) têm
+componente linear real (existência ok ali também). NÚCLEO ABERTO: provar grau reduzido
+top-dim ímpar UNIFORME (paridade via conjugação, NÃO número característico único — o grau
+varia). Problema genuinamente aberto; progresso real, sem prova fabricada.
