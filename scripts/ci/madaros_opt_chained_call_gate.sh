@@ -39,7 +39,8 @@ CASES="$ROOT_DIR/tests/multimodule"
 FIXTURES="opt_chained_call_accumulator_main.sio|OPT_CHAINED_CALL_ACCUMULATOR_OK
 opt_cse_branch_dominance_main.sio|OPT_CSE_BRANCH_DOMINANCE_OK
 opt_dedup_imm_stale_reg_main.sio|OPT_DEDUP_IMM_STALE_REG_OK
-opt_copy_prop_swap_temp_main.sio|OPT_COPY_PROP_SWAP_TEMP_OK"
+opt_copy_prop_swap_temp_main.sio|OPT_COPY_PROP_SWAP_TEMP_OK
+opt_wide_limb_span_main.sio|OPT_WIDE_LIMB_SPAN_OK"
 
 fail() { echo "MADAROS_OPT_CHAINED_CALL_FAIL: $*" >&2; exit 1; }
 
