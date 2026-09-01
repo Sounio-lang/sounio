@@ -6750,7 +6750,85 @@ fn const_find_val(ns: i64, ne: i64) -> i64 with Panic, Mut {
     return 0
 }
 
-fn scan_all_consts() with Panic, Mut {
+// ---- Compile-time folding of integer constant initializers (top-level let/const) ----
+// Precedence (low -> high): `|`  <  `&`  <  `<<` `>>`  <  `+` `-`  <  `*` `/` `%`  <  unary `-`.
+// Primaries: integer literal, parenthesised expression, a previously scanned integer constant.
+// Outputs through globals in this file's style: CF_P = position after the expression,
+// CF_OK = 0 if any token could not be folded (callers then keep the legacy behaviour).
+var CF_P: i64 = 0
+var CF_OK: i64 = 0
+fn cfold_peek() -> i64 with Panic, Mut {
+    if CF_P < TC { return TK[CF_P as usize] }
+    return 0
+}
+fn cfold_primary() -> i64 with Panic, Mut, Div {
+    let k = cfold_peek()
+    if k == 4 { let v = TV[CF_P as usize]; CF_P = CF_P + 1; return v }
+    if k == 18 { CF_P = CF_P + 1; let u = cfold_primary(); return 0 - u }
+    if k == 6 {
+        CF_P = CF_P + 1
+        let v = cfold_bor()
+        if cfold_peek() == 7 { CF_P = CF_P + 1 } else { CF_OK = 0 }
+        return v
+    }
+    if k == 3 {
+        if const_find_val(TS[CF_P as usize], TE[CF_P as usize]) != 0 && CONST_TYPE[CONST_FOUND_IDX as usize] == 1 {
+            CF_P = CF_P + 1
+            return CONST_FOUND_VAL
+        }
+    }
+    CF_OK = 0
+    return 0
+}
+fn cfold_mul() -> i64 with Panic, Mut, Div {
+    var v = cfold_primary()
+    while CF_OK != 0 {
+        let k = cfold_peek()
+        if k == 19 { CF_P = CF_P + 1; let r = cfold_primary(); v = v * r }
+        else if k == 20 { CF_P = CF_P + 1; let r = cfold_primary(); if r == 0 { CF_OK = 0 } else { v = v / r } }
+        else if k == 29 { CF_P = CF_P + 1; let r = cfold_primary(); if r == 0 { CF_OK = 0 } else { v = v % r } }
+        else { break }
+    }
+    return v
+}
+fn cfold_add() -> i64 with Panic, Mut, Div {
+    var v = cfold_mul()
+    while CF_OK != 0 {
+        let k = cfold_peek()
+        if k == 17 { CF_P = CF_P + 1; let r = cfold_mul(); v = v + r }
+        else if k == 18 { CF_P = CF_P + 1; let r = cfold_mul(); v = v - r }
+        else { break }
+    }
+    return v
+}
+fn cfold_shift() -> i64 with Panic, Mut, Div {
+    var v = cfold_add()
+    while CF_OK != 0 {
+        let k = cfold_peek()
+        if k == 40 { CF_P = CF_P + 1; let r = cfold_add(); if r < 0 || r > 63 { CF_OK = 0 } else { v = v << r } }
+        else if k == 39 { CF_P = CF_P + 1; let r = cfold_add(); if r < 0 || r > 63 { CF_OK = 0 } else { v = v >> r } }
+        else { break }
+    }
+    return v
+}
+fn cfold_band() -> i64 with Panic, Mut, Div {
+    var v = cfold_shift()
+    while CF_OK != 0 && cfold_peek() == 44 { CF_P = CF_P + 1; let r = cfold_shift(); v = v & r }
+    return v
+}
+fn cfold_bor() -> i64 with Panic, Mut, Div {
+    var v = cfold_band()
+    while CF_OK != 0 && cfold_peek() == 45 { CF_P = CF_P + 1; let r = cfold_band(); v = v | r }
+    return v
+}
+fn cfold_expr_at(p: i64) -> i64 with Panic, Mut, Div {
+    CF_P = p
+    CF_OK = 1
+    let v = cfold_bor()
+    return v
+}
+
+fn scan_all_consts() with Panic, Mut, Div {
     CONST_COUNT = 0
     var p: i64 = 0
     var cv: i64 = 0
@@ -6783,6 +6861,24 @@ fn scan_all_consts() with Panic, Mut {
                 while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
             }
             if TK[p as usize] == 16 { p = p + 1 }
+            // Constant EXPRESSION initializer (`0 - 1`, `1 << 3`, `(A + 1) * 2`): fold it.
+            // Before this, only `[-]LITERAL` was read and the rest of the expression was
+            // silently dropped -- `let EG_INVALID: i64 = 0 - 1` became 0 in every source
+            // build, so the small e-graph discarded its first node (id 0 == "invalid").
+            // A bare literal still takes the original path below (cfold consumes 1 token).
+            if TK[p as usize] == 4 || TK[p as usize] == 6 || (TK[p as usize] == 18 && TK[(p + 1) as usize] != 53) {
+                let cfv = cfold_expr_at(p)
+                if CF_OK != 0 && CF_P > p + 1 {
+                    CONST_NS[CONST_COUNT as usize] = cn_ns
+                    CONST_NE[CONST_COUNT as usize] = cn_ne
+                    CONST_VAL[CONST_COUNT as usize] = cfv
+                    CONST_TYPE[CONST_COUNT as usize] = 1
+                    CONST_TOK_IDX[CONST_COUNT as usize] = -1
+                    CONST_COUNT = CONST_COUNT + 1
+                    p = CF_P
+                    continue
+                }
+            }
             cv = 0; neg_c = 0
             if TK[p as usize] == 18 { neg_c = 1; p = p + 1 }
             if TK[p as usize] == 4 { cv = TV[p as usize]; p = p + 1 }
@@ -6814,6 +6910,24 @@ fn scan_all_consts() with Panic, Mut {
                 while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
             }
             if TK[p as usize] == 16 { p = p + 1 }
+            // Constant EXPRESSION initializer (`0 - 1`, `1 << 3`, `(A + 1) * 2`): fold it.
+            // Before this, only `[-]LITERAL` was read and the rest of the expression was
+            // silently dropped -- `let EG_INVALID: i64 = 0 - 1` became 0 in every source
+            // build, so the small e-graph discarded its first node (id 0 == "invalid").
+            // A bare literal still takes the original path below (cfold consumes 1 token).
+            if TK[p as usize] == 4 || TK[p as usize] == 6 || (TK[p as usize] == 18 && TK[(p + 1) as usize] != 53) {
+                let cfv = cfold_expr_at(p)
+                if CF_OK != 0 && CF_P > p + 1 {
+                    CONST_NS[CONST_COUNT as usize] = cn_ns
+                    CONST_NE[CONST_COUNT as usize] = cn_ne
+                    CONST_VAL[CONST_COUNT as usize] = cfv
+                    CONST_TYPE[CONST_COUNT as usize] = 1
+                    CONST_TOK_IDX[CONST_COUNT as usize] = -1
+                    CONST_COUNT = CONST_COUNT + 1
+                    p = CF_P
+                    continue
+                }
+            }
             cv = 0; neg_c = 0
             if TK[p as usize] == 18 { neg_c = 1; p = p + 1 }
             if TK[p as usize] == 4 { cv = TV[p as usize]; p = p + 1 }
@@ -6848,6 +6962,24 @@ fn scan_all_consts() with Panic, Mut {
                 while p < TC && TK[p as usize] != 16 && TK[p as usize] != 0 { p = p + 1 }
             }
             if TK[p as usize] == 16 { p = p + 1 }
+            // Constant EXPRESSION initializer (`0 - 1`, `1 << 3`, `(A + 1) * 2`): fold it.
+            // Before this, only `[-]LITERAL` was read and the rest of the expression was
+            // silently dropped -- `let EG_INVALID: i64 = 0 - 1` became 0 in every source
+            // build, so the small e-graph discarded its first node (id 0 == "invalid").
+            // A bare literal still takes the original path below (cfold consumes 1 token).
+            if TK[p as usize] == 4 || TK[p as usize] == 6 || (TK[p as usize] == 18 && TK[(p + 1) as usize] != 53) {
+                let cfv = cfold_expr_at(p)
+                if CF_OK != 0 && CF_P > p + 1 {
+                    CONST_NS[CONST_COUNT as usize] = cn_ns
+                    CONST_NE[CONST_COUNT as usize] = cn_ne
+                    CONST_VAL[CONST_COUNT as usize] = cfv
+                    CONST_TYPE[CONST_COUNT as usize] = 1
+                    CONST_TOK_IDX[CONST_COUNT as usize] = -1
+                    CONST_COUNT = CONST_COUNT + 1
+                    p = CF_P
+                    continue
+                }
+            }
             cv = 0; neg_c = 0
             if TK[p as usize] == 18 { neg_c = 1; p = p + 1 }
             if TK[p as usize] == 4 { cv = TV[p as usize]; p = p + 1 }
