@@ -13398,6 +13398,30 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprIf {
             return self.opt_block_tail_is_string_ref(&(*e).block) || self.opt_expr_result_is_string_ref(&(*e).else_expr)
         }
+        // `base.field[i]` where the field is declared `[string; N]`. The last
+        // println-poison refusal in a gen2 self-compile is this shape:
+        // `let file_path = work_imports.paths[dep_i]` then `print(file_path)`,
+        // with `paths: [string; 256]`. The let-binding below already asks this
+        // function and binds kind 3 on a yes; it had no ExprIndex case to say so.
+        //
+        // POSITIVE only: the element type must be declared `string`. The integer
+        // classifier defaults ANY non-float index to kind 1, so a symmetric
+        // "index means string" here would send an i64 element to the char*
+        // printer and strlen would dereference it -- the exact fault this whole
+        // family of refusals exists to prevent. elem_type_name_id already carries
+        // the declared element type; nothing read it for string-ness.
+        if (*e).kind == ExprKind::ExprIndex {
+            match (*e).left {
+                Some(indexed) => {
+                    if (*indexed).kind == ExprKind::ExprFieldAccess {
+                        if lower_name_is_string_type(self.field_array_elem_type_name_for_base_ref(&(*indexed).left, (*indexed).name)) {
+                            return true
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
         if (*e).kind == ExprKind::ExprBinary {
             if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpConcat {
                 return self.opt_expr_result_is_string_ref(&(*e).left) || self.opt_expr_result_is_string_ref(&(*e).right)
