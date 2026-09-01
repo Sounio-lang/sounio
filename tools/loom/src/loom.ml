@@ -8380,6 +8380,155 @@ let snapshot_from_files root query =
                 ("X-Loom-Instance", table_value values "instance_id") ],
               Bytes.unsafe_to_string bytes ))
 
+type ui_write_config = {
+  ui_write_agent : string;
+  ui_write_lane : string;
+  ui_write_token : string;
+  ui_coord_command : string;
+}
+
+let loopback_address address =
+  match Unix.string_of_inet_addr address with
+  | "127.0.0.1" | "::1" -> true
+  | _ -> false
+
+let ui_write_config cli cwd address =
+  let agent = optional cli "--write-agent" |> Option.value ~default:"" in
+  let lane = optional cli "--write-lane" |> Option.value ~default:"" in
+  if (agent = "") <> (lane = "") then
+    failf "Loom GUI write mode requires both --write-agent and --write-lane";
+  if agent = "" then None
+  else if not (loopback_address address) then
+    failf "Loom GUI write mode requires a loopback bind"
+  else
+    match coordination_snapshot_command cwd with
+    | None -> failf "Loom GUI write mode requires the coordination runtime"
+    | Some command ->
+        Some
+          { ui_write_agent = agent;
+            ui_write_lane = lane;
+            ui_write_token = random_hex 32;
+            ui_coord_command = command.snapshot_command_path }
+
+let ui_write_state_json = function
+  | None ->
+      "{\"schema\":\"loom-ui-write-state-v1\",\"enabled\":false,\"agent\":\"\",\"lane\":\"\",\"token\":\"\"}"
+  | Some config ->
+      Printf.sprintf
+        "{\"schema\":\"loom-ui-write-state-v1\",\"enabled\":true,\"agent\":%s,\"lane\":%s,\"token\":%s}"
+        (json_quote config.ui_write_agent) (json_quote config.ui_write_lane)
+        (json_quote config.ui_write_token)
+
+let ui_header request name =
+  Hashtbl.find_opt request.http_headers name |> Option.value ~default:""
+
+let ui_same_origin request =
+  let fetch_site =
+    ui_header request "sec-fetch-site" |> String.lowercase_ascii
+  in
+  let origin = ui_header request "origin" |> trim in
+  let host = ui_header request "host" |> trim in
+  fetch_site = "same-origin"
+  && origin <> ""
+  && host <> ""
+  && (origin = "http://" ^ host || origin = "https://" ^ host)
+
+let ui_write_request_authorized config request =
+  let token = ui_header request "x-loom-write-token" in
+  let content_type =
+    ui_header request "content-type" |> String.lowercase_ascii
+  in
+  token = config.ui_write_token
+  && ui_same_origin request
+  && starts_with content_type "application/json"
+
+let ui_valid_atom value =
+  let length = String.length value in
+  length > 0 && length <= 128
+  && String.for_all
+       (function
+         | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9'
+         | '.' | '_' | '-' | '/' | ':' -> true
+         | _ -> false)
+       value
+
+let ui_message_has_control value =
+  String.exists
+    (fun character -> Char.code character < 32 || Char.code character = 127)
+    value
+
+let ui_message_kind value =
+  match value with
+  | "info" | "request" | "blocker" -> value
+  | _ -> failf "ui-message-kind-refused"
+
+let ui_send_message cwd config request =
+  if not (ui_write_request_authorized config request) then
+    ("403 Forbidden", "{\"error\":\"ui-write-authorization-refused\"}")
+  else
+    try
+      let body = parse_json request.http_body in
+      let to_agent = json_string_field body [ "toAgent"; "to_agent" ] in
+      let to_lane = json_string_field body [ "toLane"; "to_lane" ] in
+      let kind =
+        json_string_field ~default:"info" body [ "kind" ] |> ui_message_kind
+      in
+      let message = json_string_field body [ "message" ] |> trim in
+      if to_agent = "" then failf "ui-message-target-agent-empty";
+      if to_lane = "" then failf "ui-message-target-lane-empty";
+      if not (ui_valid_atom to_agent) then failf "ui-message-target-agent-invalid";
+      if not (ui_valid_atom to_lane) then failf "ui-message-target-lane-invalid";
+      if message = "" then failf "ui-message-text-empty";
+      if String.length message > 16384 then failf "ui-message-text-too-large";
+      if ui_message_has_control message then failf "ui-message-text-control-character";
+      let arguments =
+        [| config.ui_coord_command; "send"; "--agent";
+           config.ui_write_agent; "--lane"; config.ui_write_lane;
+           "--to-agent"; to_agent; "--to-lane"; to_lane; "--kind"; kind;
+           "--message"; message |]
+      in
+      let code, output =
+        process_output_all cwd config.ui_coord_command arguments
+      in
+      if code <> 0 then
+        ( "409 Conflict",
+          Printf.sprintf
+            "{\"error\":\"coordination-send-refused\",\"detail\":%s}"
+            (json_quote (trim output)) )
+      else
+        let sent_line =
+          split_on '\n' output
+          |> List.find_opt (fun line -> starts_with (trim line) "SENT ")
+          |> Option.value ~default:""
+        in
+        let fields = split_on ' ' (trim sent_line) |> snapshot_fields in
+        let message_id = table_value fields "message_id" in
+        if message_id = "" then
+          ( "409 Conflict",
+            "{\"error\":\"coordination-send-receipt-missing\"}" )
+        else
+          let wake =
+            if String.contains output '\n'
+               && List.exists
+                    (fun line -> starts_with (trim line) "WAKE_DELIVERED ")
+                    (split_on '\n' output)
+            then "delivered"
+            else if
+              List.exists
+                (fun line -> starts_with (trim line) "WAKE_UNAVAILABLE ")
+                (split_on '\n' output)
+            then "unavailable"
+            else "not-reported"
+          in
+          ( "201 Created",
+            Printf.sprintf
+              "{\"schema\":\"loom-ui-message-receipt-v1\",\"durable\":true,\"messageId\":%s,\"toAgent\":%s,\"toLane\":%s,\"kind\":%s,\"wake\":%s}"
+              (json_quote message_id) (json_quote to_agent)
+              (json_quote to_lane) (json_quote kind) (json_quote wake) )
+    with Loom_error message ->
+      ( "400 Bad Request",
+        Printf.sprintf "{\"error\":%s}" (json_quote message) )
+
 let serve_http cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
@@ -8391,6 +8540,7 @@ let serve_http cli =
     try Unix.inet_addr_of_string bind
     with _ -> (Unix.gethostbyname bind).h_addr_list.(0)
   in
+  let write_config = ui_write_config cli cwd address in
   let server = Unix.socket PF_INET SOCK_STREAM 0 in
   Unix.setsockopt server SO_REUSEADDR true;
   Unix.bind server (ADDR_INET (address, port));
@@ -8400,21 +8550,25 @@ let serve_http cli =
   let stop _ = running := false in
   Sys.set_signal Sys.sigterm (Sys.Signal_handle stop);
   Sys.set_signal Sys.sigint (Sys.Signal_handle stop);
-  Printf.printf "LOOM_GUI url=http://%s:%d read_only=true\n%!" bind actual_port;
+  Printf.printf "LOOM_GUI url=http://%s:%d read_only=%s write_agent=%s write_lane=%s\n%!"
+    bind actual_port
+    (if write_config = None then "true" else "false")
+    (match write_config with None -> "-" | Some config -> config.ui_write_agent)
+    (match write_config with None -> "-" | Some config -> config.ui_write_lane);
   while !running do
     let readable, _, _ = Unix.select [ server ] [] [] 0.25 in
     if readable <> [] then
       let client, _ = Unix.accept server in
       (try
-         let bytes = Bytes.create 16384 in
-         let count = Unix.read client bytes 0 (Bytes.length bytes) in
-         let request = Bytes.sub_string bytes 0 count in
-         let first_line = match split_on '\n' request with line :: _ -> trim line | [] -> "" in
+         let request = read_http_request client in
          let response =
-           match split_on ' ' first_line with
-           | [ "GET"; uri; _ ] ->
-               let path, query = parse_query uri in
+           match request.http_method with
+           | "GET" ->
+               let path, query = parse_query request.http_target in
                if path = "/" then http_response "200 OK" "text/html; charset=utf-8" html
+               else if path = "/api/write-state" then
+                 http_response "200 OK" "application/json"
+                   (ui_write_state_json write_config)
                else if path = "/api/sessions" then
                  http_response "200 OK" "application/json" (sessions_json root)
                else if path = "/api/fleet" then
@@ -8454,7 +8608,21 @@ let serve_http cli =
                  let status, headers, body = snapshot_from_files root query in
                  http_response ~headers status "application/octet-stream" body
                else http_response "404 Not Found" "text/plain" "not found\n"
-           | _ -> http_response "400 Bad Request" "text/plain" "bad request\n"
+           | "POST" ->
+               let path, _ = parse_query request.http_target in
+               if path <> "/api/send" then
+                 json_response "404 Not Found" "{\"error\":\"not_found\"}"
+               else
+                 (match write_config with
+                 | None ->
+                     json_response "403 Forbidden"
+                       "{\"error\":\"ui-write-disabled\"}"
+                 | Some config ->
+                     let status, body = ui_send_message cwd config request in
+                     json_response status body)
+           | _ ->
+               json_response "405 Method Not Allowed"
+                 "{\"error\":\"method_not_allowed\"}"
          in
          write_all client response
        with _ -> ());
@@ -13503,6 +13671,8 @@ let usage () =
   Printf.eprintf
     "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude|cursor|grok\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  host-enroll --agent A --lane L [--replace] [--state-dir DIR]\n  host-reconcile [--agent A --lane L] [--apply] [--service-enabled] [--state-dir DIR]\n  host-supervise [--once] [--interval-seconds N] [--apply] [--service-enabled] [--state-dir DIR]\n  host-verify --agent A --lane L [--state-dir DIR]\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
+  Printf.eprintf
+    "  serve write mode: --bind 127.0.0.1 --write-agent A --write-lane L\n";
   Printf.eprintf
     "  provider-start accepts --wait to observe the turn until terminal state\n";
   Printf.eprintf
