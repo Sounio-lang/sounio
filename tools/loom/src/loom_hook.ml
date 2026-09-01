@@ -1359,6 +1359,11 @@ let hook_session_paths root agent lane raw_session_id =
   (directory, Filename.concat directory (key ^ ".lock"),
    Filename.concat directory (key ^ ".closed"))
 
+let hook_session_watcher_path root agent lane raw_session_id =
+  let directory, _, _ = hook_session_paths root agent lane raw_session_id in
+  let key = sha256 (agent ^ "\000" ^ lane ^ "\000" ^ raw_session_id) in
+  Filename.concat directory (key ^ ".watcher")
+
 let validate_hook_session_tombstone path agent lane raw_session_id =
   let stat = Unix.lstat path in
   if stat.st_kind <> S_REG then failf "hook-session-tombstone-not-regular";
@@ -1370,8 +1375,8 @@ let validate_hook_session_tombstone path agent lane raw_session_id =
      || required fields "session_id_sha256" <> sha256 raw_session_id
   then failf "hook-session-tombstone-invalid"
 
-let write_hook_session_tombstone path agent lane raw_session_id =
-  let pid, pid_start, boot_id, pid_namespace, _ = process_identity () in
+let write_hook_session_tombstone_for_identity path agent lane raw_session_id
+    (pid, pid_start, boot_id, pid_namespace) =
   write_atomic path
     (String.concat "\n"
        [ "schema=loom-hook-session-lifecycle-v1"; "state=CLOSED";
@@ -1380,6 +1385,11 @@ let write_hook_session_tombstone path agent lane raw_session_id =
          "caller_pid=" ^ string_of_int pid; "caller_pid_start=" ^ pid_start;
          "caller_boot_id=" ^ boot_id; "caller_pid_namespace=" ^ pid_namespace;
          "closed_utc=" ^ utc_now (); "" ])
+
+let write_hook_session_tombstone path agent lane raw_session_id =
+  let pid, pid_start, boot_id, pid_namespace, _ = process_identity () in
+  write_hook_session_tombstone_for_identity path agent lane raw_session_id
+    (pid, pid_start, boot_id, pid_namespace)
 
 let append_hook_session_lifecycle root action agent lane raw_session_id event =
   let directory, _, _ = hook_session_paths root agent lane raw_session_id in
@@ -1399,7 +1409,205 @@ let append_hook_session_lifecycle root action agent lane raw_session_id event =
       Unix.fsync descriptor;
       Unix.lockf descriptor F_ULOCK 0)
 
-let with_hook_session_lifecycle root agent lane raw_session_id event action =
+let process_start pid =
+  try
+    let stat = read_file (Printf.sprintf "/proc/%d/stat" pid) in
+    let closing =
+      match String.rindex_opt stat ')' with
+      | Some index -> index
+      | None -> raise Exit
+    in
+    let tail =
+      String.sub stat (closing + 2) (String.length stat - closing - 2)
+      |> String.split_on_char ' ' |> List.filter (( <> ) "")
+    in
+    List.nth_opt tail 19
+  with _ -> None
+
+let process_generation_alive pid pid_start =
+  match process_start pid with Some observed -> observed = pid_start | None -> false
+
+let watcher_record path agent lane raw_session_id =
+  let stat = Unix.lstat path in
+  if stat.st_kind <> S_REG then failf "hook-session-watcher-not-regular";
+  let fields = parse_manifest path in
+  if required fields "schema" <> "loom-hook-session-watcher-v1"
+     || required fields "state" <> "WATCHING"
+     || required fields "agent" <> agent
+     || required fields "lane" <> lane
+     || required fields "session_id_sha256" <> sha256 raw_session_id
+  then failf "hook-session-watcher-invalid";
+  let integer key =
+    try int_of_string (required fields key)
+    with _ -> failf "hook-session-watcher-invalid:%s" key
+  in
+  (integer "watcher_pid", required fields "watcher_pid_start",
+   integer "target_pid", required fields "target_pid_start",
+   required fields "target_boot_id", required fields "target_pid_namespace")
+
+let remove_and_sync path =
+  if Sys.file_exists path then (
+    Unix.unlink path;
+    fsync_directory (Filename.dirname path))
+
+let close_dead_hook_session tool_root root agent lane raw_session_id target_identity
+    watcher_path watcher_pid watcher_pid_start =
+  let _directory, lock_path, tombstone_path =
+    hook_session_paths root agent lane raw_session_id
+  in
+  let descriptor = Unix.openfile lock_path [ O_WRONLY; O_CREAT ] 0o600 in
+  Fun.protect
+    ~finally:(fun () ->
+      (try Unix.lockf descriptor F_ULOCK 0 with _ -> ());
+      Unix.close descriptor)
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      let owns_record =
+        if not (Sys.file_exists watcher_path) then false
+        else
+          let observed_pid, observed_start, target_pid, target_start,
+              target_boot, target_namespace =
+            watcher_record watcher_path agent lane raw_session_id
+          in
+          let expected_pid, expected_start, expected_boot, expected_namespace =
+            target_identity
+          in
+          observed_pid = watcher_pid && observed_start = watcher_pid_start
+          && target_pid = expected_pid && target_start = expected_start
+          && target_boot = expected_boot && target_namespace = expected_namespace
+      in
+      if not owns_record then ()
+      else if Sys.file_exists tombstone_path then (
+        validate_hook_session_tombstone tombstone_path agent lane raw_session_id;
+        remove_and_sync watcher_path)
+      else (
+        write_hook_session_tombstone_for_identity tombstone_path agent lane
+          raw_session_id target_identity;
+        let release =
+          run_coord tool_root root
+            [ "release"; "--agent"; agent; "--lane"; lane; "--reason";
+              "native hook provider process exited" ]
+        in
+        let cleaned =
+          if release.code = 0 then true
+          else if claim_missing agent lane release then
+            let endpoint =
+              run_coord tool_root root
+                [ "endpoint-unregister"; "--agent"; agent; "--lane"; lane ]
+            in
+            let presence =
+              run_coord tool_root root
+                [ "presence-unregister"; "--agent"; agent; "--lane"; lane ]
+            in
+            endpoint.code = 0 && presence.code = 0
+          else false
+        in
+        if cleaned then (
+          append_hook_session_lifecycle root "PROCESS_EXIT_CLOSED" agent lane
+            raw_session_id "ProcessExit";
+          remove_and_sync watcher_path)
+        else
+          append_hook_session_lifecycle root "PROCESS_EXIT_CLOSE_FAILED" agent lane
+            raw_session_id "ProcessExit"))
+
+let redirect_watcher_stdio () =
+  let null = Unix.openfile "/dev/null" [ O_RDWR ] 0 in
+  Unix.dup2 null Unix.stdin;
+  Unix.dup2 null Unix.stdout;
+  Unix.dup2 null Unix.stderr;
+  if null <> Unix.stdin && null <> Unix.stdout && null <> Unix.stderr then
+    Unix.close null
+
+let wait_for_watcher_start pid =
+  let rec loop attempts =
+    match process_start pid with
+    | Some value -> value
+    | None when attempts > 0 ->
+        ignore (Unix.select [] [] [] 0.001);
+        loop (attempts - 1)
+    | None -> failf "hook-session-watcher-start-missing"
+  in
+  loop 100
+
+let ensure_hook_session_watcher tool_root root agent lane raw_session_id
+    replace_existing =
+  let watcher_path = hook_session_watcher_path root agent lane raw_session_id in
+  let target_pid, target_start, target_boot, target_namespace, _ =
+    process_identity ()
+  in
+  let existing =
+    if not (Sys.file_exists watcher_path) then false
+    else
+      let watcher_pid, watcher_start, observed_pid, observed_start,
+          observed_boot, observed_namespace =
+        watcher_record watcher_path agent lane raw_session_id
+      in
+      if process_generation_alive watcher_pid watcher_start then
+        if observed_pid = target_pid && observed_start = target_start
+           && observed_boot = target_boot && observed_namespace = target_namespace
+        then true
+        else if replace_existing then false
+        else failf "hook-session-watcher-generation-conflict"
+      else false
+  in
+  if not existing then (
+    remove_and_sync watcher_path;
+    let ready_read, ready_write = Unix.pipe () in
+    match Unix.fork () with
+    | 0 ->
+        Unix.close ready_write;
+        (try
+           ignore (Unix.setsid ());
+           redirect_watcher_stdio ();
+           let signal = Bytes.create 1 in
+           let started = Unix.read ready_read signal 0 1 = 1 in
+           Unix.close ready_read;
+           if started then (
+             let rec watch () =
+               if Sys.file_exists
+                    (let _, _, path = hook_session_paths root agent lane raw_session_id in
+                     path)
+                  || not (process_generation_alive target_pid target_start)
+               then ()
+               else (
+                 ignore (Unix.select [] [] [] 0.1);
+                 watch ())
+             in
+             watch ();
+             let watcher_pid = Unix.getpid () in
+             let watcher_start =
+               Option.value ~default:"missing" (process_start watcher_pid)
+             in
+             close_dead_hook_session tool_root root agent lane raw_session_id
+               (target_pid, target_start, target_boot, target_namespace)
+               watcher_path watcher_pid watcher_start)
+         with _ -> ());
+        Unix._exit 0
+    | watcher_pid ->
+        Unix.close ready_read;
+        let watcher_start = wait_for_watcher_start watcher_pid in
+        write_atomic watcher_path
+          (String.concat "\n"
+             [ "schema=loom-hook-session-watcher-v1"; "state=WATCHING";
+               "agent=" ^ agent; "lane=" ^ lane;
+               "session_id_sha256=" ^ sha256 raw_session_id;
+               "watcher_pid=" ^ string_of_int watcher_pid;
+               "watcher_pid_start=" ^ watcher_start;
+               "target_pid=" ^ string_of_int target_pid;
+               "target_pid_start=" ^ target_start;
+               "target_boot_id=" ^ target_boot;
+               "target_pid_namespace=" ^ target_namespace;
+               "created_utc=" ^ utc_now (); "" ]);
+        write_all ready_write "1";
+        Unix.close ready_write;
+        append_hook_session_lifecycle root "WATCHING" agent lane raw_session_id
+          "SessionStart")
+
+let process_exit_watcher_enabled () =
+  Sys.getenv_opt "SOUNIO_LOOM_PROCESS_EXIT_WATCHER" <> Some "0"
+  || not (test_mode ())
+
+let with_hook_session_lifecycle tool_root root agent lane raw_session_id event action =
   let directory, lock_path, tombstone_path =
     hook_session_paths root agent lane raw_session_id
   in
@@ -1422,6 +1630,8 @@ let with_hook_session_lifecycle root agent lane raw_session_id event action =
             fsync_directory directory;
             append_hook_session_lifecycle root "REOPENED" agent lane raw_session_id
               event);
+          if process_exit_watcher_enabled () then
+            ensure_hook_session_watcher tool_root root agent lane raw_session_id closed;
           result
       | "SessionEnd" when closed ->
           append_hook_session_lifecycle root "LATE_NOOP" agent lane raw_session_id
@@ -1931,7 +2141,7 @@ let run arguments =
     in
     receipt := Some authorized_receipt;
     let hook_output =
-      with_hook_session_lifecycle current_root !agent !lane raw_session_id
+      with_hook_session_lifecycle tool_root current_root !agent !lane raw_session_id
         !event_name (fun () ->
           execute_event tool_root current_root event !agent !lane raw_session_id
             file_capability_fixture (sha256 raw_event))

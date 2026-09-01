@@ -33,6 +33,10 @@ WRONG_CWD_ID="native-tmux-wrong-cwd-$$"
 WRONG_CWD_LANE="session-${WRONG_CWD_ID:0:24}"
 WRONG_CWD_READY="$TEST_ROOT/native-hook-wrong-cwd.ready"
 WRONG_CWD_LOG="$TEST_ROOT/native-hook-wrong-cwd.log"
+PROCESS_EXIT_SCRIPT="$TEST_ROOT/native-hook-process-exit-harness.sh"
+PROCESS_EXIT_LOG="$TEST_ROOT/native-hook-process-exit.log"
+PROCESS_EXIT_ID="native-process-exit-$$"
+PROCESS_EXIT_LANE="session-${PROCESS_EXIT_ID:0:24}"
 
 cleanup() {
   tmux -S "$TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
@@ -116,6 +120,7 @@ export SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME="$AUTHORITY_RUNTIME"
 export SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_RUNTIME="$CUTOVER_RUNTIME"
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$DECISION_LOG"
 export SOUNIO_LOOM_HOOK_TEST_MODE=1
+export SOUNIO_LOOM_PROCESS_EXIT_WATCHER=0
 export SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1
 export SOUNIO_COORD_NATIVE_HOOK_WAKE_SELFTEST=1
 unset TMUX TMUX_PANE SOUNIO_AGENTD_SOCKET SOUNIO_AGENTD_TOKEN_FILE SOUNIO_AGENTD_WORKTREE
@@ -552,5 +557,45 @@ SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
   "$ROOT_DIR/bin/sounio-coord" release --agent sender --lane native-tmux-fixture \
   --reason 'native tmux fixture complete' >/dev/null
 
+cat >"$PROCESS_EXIT_SCRIPT" <<'HARNESS'
+#!/usr/bin/env bash
+set -euo pipefail
+
+loom="$1"
+root="$2"
+session_id="$3"
+event="{\"hook_event_name\":\"SessionStart\",\"session_id\":\"$session_id\",\"cwd\":\"$root\"}"
+printf '%s\n' "$event" | "$loom" agent-hook --agent codex
+HARNESS
+chmod 0755 "$PROCESS_EXIT_SCRIPT"
+SOUNIO_LOOM_PROCESS_EXIT_WATCHER=1 \
+  "$TMUX_HARNESS" "$PROCESS_EXIT_SCRIPT" "$LOOM" "$ROOT_DIR" "$PROCESS_EXIT_ID" \
+  >"$PROCESS_EXIT_LOG" 2>&1
+process_exit_closed=0
+for _ in $(seq 1 200); do
+  if [[ ! -f "$COORD_DIR/claims/codex--$PROCESS_EXIT_LANE.claim" && \
+    ! -f "$COORD_DIR/process-presences/codex--$PROCESS_EXIT_LANE.presence" && \
+    ! -f "$COORD_DIR/hook-capabilities/codex--$PROCESS_EXIT_LANE.capability" ]]; then
+    process_exit_closed=1
+    break
+  fi
+  sleep 0.05
+done
+[[ "$process_exit_closed" -eq 1 ]] ||
+  fail "native process-exit supervisor left active state: $(cat "$PROCESS_EXIT_LOG")"
+grep -Fq $'action=PROCESS_EXIT_CLOSED\tagent=codex\tlane='"$PROCESS_EXIT_LANE"$'\tsession_id_sha256=' \
+  "$COORD_DIR/hook-session-lifecycle/events.tsv" ||
+  fail 'native process-exit supervisor omitted its closure receipt'
+watcher_closed=0
+for _ in $(seq 1 200); do
+  if [[ "$(find "$COORD_DIR/hook-session-lifecycle" -maxdepth 1 -type f -name '*.watcher' | wc -l)" -eq 0 ]]; then
+    watcher_closed=1
+    break
+  fi
+  sleep 0.05
+done
+[[ "$watcher_closed" -eq 1 ]] ||
+  fail 'native process-exit supervisor left a watcher record behind'
+
 printf '%s\n' \
-  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio action=9045 session=roundtrip duplicate_session_end=idempotent late_stop=noop late_execution=refused tombstone_tamper=refused session_reopen=explicit hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused cutover_policy_missing=refused cutover_policy_tamper=refused cutover_runtime_tamper=refused log_redirect=refused providers=codex,claude,cursor,grok dialect_mismatch=refused config_missing=refused config_non_native=refused decision_receipt=complete python=not-executed rust=not-executed'
+  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio action=9045 session=roundtrip duplicate_session_end=idempotent late_stop=noop late_execution=refused tombstone_tamper=refused session_reopen=explicit process_exit=closed hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused cutover_policy_missing=refused cutover_policy_tamper=refused cutover_runtime_tamper=refused log_redirect=refused providers=codex,claude,cursor,grok dialect_mismatch=refused config_missing=refused config_non_native=refused decision_receipt=complete python=not-executed rust=not-executed'
