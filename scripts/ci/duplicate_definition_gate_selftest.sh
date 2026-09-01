@@ -87,6 +87,42 @@ F
 check "identical duplicate is caught" fail "identical" || exit 1
 rm "$W/src/dup_same.sio"
 
+# GREEN — a trait DECLARES a method with no body; the impl that provides it is
+# not a second definition of the signature. Before this, the body-skip walk ran
+# past the bodyless declaration and swallowed the impl block whole.
+cat > "$W/src/trait_decl.sio" <<'F'
+trait R {
+    fn radd(self, o: Self) -> Self
+}
+
+impl R for i64 {
+    fn radd(self, o: Self) -> Self { self + o }
+}
+F
+check "a trait method signature is not a duplicate of its impl" pass "identical=0" || exit 1
+
+# GREEN — two impls of ONE trait for TWO types are two scopes, not one.
+cat > "$W/src/trait_two_types.sio" <<'F'
+impl Mapping for Alpha {
+    fn apply(self, n: i64) -> i64 { n + 1 }
+}
+
+impl Mapping for Beta {
+    fn apply(self, n: i64) -> i64 { n * 2 }
+}
+F
+check "one trait implemented for two types is not a duplicate" pass "identical=0" || exit 1
+
+# GREEN — #[cfg]-guarded arms are alternatives; exactly one is ever compiled.
+cat > "$W/src/cfg_arms.sio" <<'F'
+#[cfg(target_arch = "x86_64")]
+fn fast_hash(x: i64) -> i64 { x * 31 }
+
+#[cfg(target_arch = "aarch64")]
+fn fast_hash(x: i64) -> i64 { x * 33 }
+F
+check "cfg-guarded alternatives are not duplicates" pass "identical=0" || exit 1
+
 # RED — a brace inside a string literal must not hide the duplicate BELOW it.
 # This is the case the gate missed in production: one unmatched brace in a
 # pattern string kept the body-skip walking for 4012 lines, and a genuine
@@ -125,4 +161,4 @@ check_empty() {
 }
 mkdir -p "$W/nothing"; check_empty || exit 1
 
-echo "DUPLICATE_DEFINITION_SELFTEST_OK: 7 controls, 4 of them RED, each behaved as stated"
+echo "DUPLICATE_DEFINITION_SELFTEST_OK: 10 controls, 4 of them RED, each behaved as stated"
