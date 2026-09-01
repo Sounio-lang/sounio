@@ -1273,10 +1273,17 @@ let coordination_environment () =
   |> drop_environment_prefix "SOUNIO_AGENTD_"
   |> replace_environment "SOUNIO_COORD_TTL_SECONDS" ttl
 
+let coordination_executable root =
+  let sibling =
+    Filename.concat (Filename.dirname Sys.executable_name) "sounio-coord-runtime"
+  in
+  if Sys.file_exists sibling then sibling
+  else Filename.concat root "bin/sounio-coord"
+
 let run_coord root worktree arguments =
   run_process ~environment:(coordination_environment ())
     ~timeout_seconds:coordination_process_timeout_seconds ~cwd:worktree
-    (Filename.concat root "bin/sounio-coord") arguments
+    (coordination_executable root) arguments
 
 let coord_ok root worktree arguments =
   let result = run_coord root worktree arguments in
