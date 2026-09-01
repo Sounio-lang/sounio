@@ -269,6 +269,27 @@ is to **document** that exact agreement with Cantera requires Cantera's R, and
 to stop attributing the residual to the integrator. Whether to align the
 constant is a decision for the operator, not a defect to patch here.
 
+> **Decided and implemented 2026-09-01, after this section was written.** The
+> operator's decision was to align **both** constants, as two changes with
+> distinct justifications kept in separate commits: `R_cal` 1.9872041 →
+> 1.9872042586408316 (Cantera's `R_SI/4.184`, the subject of this section) and
+> the molar-volume constant `1/(82.057·T)` → `101325.0/(8.31446261815324·T)·1e-6`
+> (CODATA-2018 `R_SI` and the exact standard state, which removes a second
+> truncation). Both land in
+> [#2382](https://github.com/Sounio-lang/sounio/pull/2382), not here. The
+> paragraph above records the state of the evidence at the time of measurement
+> and the reasoning that was put to the operator; it is **not** the final
+> disposition. The caveat it raises stands and is unresolved: whether
+> GRI-Mech 3.0's rate parameters were regressed under this or another rounding
+> of R is still not established from the regression documentation, which is not
+> in this repository. The alignment was chosen with that uncertainty explicit,
+> not because it was closed.
+>
+> Measured separately, by 2×2 factorial: under `TDY` initialisation the
+> molar-volume constant contributes **exactly zero** to the parity gap —
+> `R_cal` is the entire effect. The second change is justified on its own terms
+> (removing a truncated constant), not by an improvement it does not produce.
+
 ---
 
 ## 2. The reverse-rate defect — real, historical, fixed, and reproduced here
