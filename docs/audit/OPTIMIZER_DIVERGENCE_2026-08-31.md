@@ -301,7 +301,57 @@ Guarded by a second fixture in `madaros_opt_chained_call_gate.sh`,
 `opt_cse_branch_dominance_main.sio`, verified to fail on a compiler that carries
 the DSE fix but not this one.
 
-### How the 51 were narrowed — kept for the 40 that remain
+### THIRD DEFECT FIXED — `ocp_mfi_dedup_imm` never invalidated a register
+
+The peel mask named it in one pass: three of the four remaining output-changers
+are fixed by disabling `dedup_imm`, the fourth by `copy_prop`.
+
+`ocp_mfi_dedup_imm` records "register R holds immediate K" and rewrites a later
+load of K as a copy of R. It never invalidated that record when another
+instruction WROTE R. Five lines:
+
+    var a = 5      // seen[ra] = 5
+    a = a + 1      // ra is now 6, seen[ra] still says 5
+    var b = 5      // became copy(rb, ra)  ->  b == 6
+
+    without -O   b == 5      with -O   b == 6
+
+And `var c = 7; c = c * 2; var d = 7; var e = 7` gives `d + e == 28` instead of
+14 — both loads collapsed onto the mutated register.
+
+This is the most ordinary code of the three defects. The first needed a chained
+accumulator, the second needed two branches with a constant bound to a local
+after a specific preceding call. This one needs a variable reassigned and the
+same literal used again.
+
+**`#1667` is worth reading as a warning.** That issue fixed this same peel for
+block boundaries, and its comment is still in the source: it promises to kill the
+table at a label and after a terminator, and both halves are present and correct.
+It was not a sloppy fix. It was a fix that was complete for the problem it
+examined, and the real defect had a third dimension nobody had named.
+
+    after the CSE fix    40 diverged   (36 exit-code, 4 output)
+    after this fix       29            (28 exit-code, 1 output)
+    fixed                11            zero regressions
+
+All three together: **632 -> 29** over `tests/run-pass`, 603 programs recovered,
+and the silent class — wrong output, exit 0, no signal — went **51 -> 1**. The
+survivor is `gum_reporting.sio`, which the mask attributes to `copy_prop`.
+
+### The shape all three share
+
+    ocp_mfi_dse        table of last write per register    missed: CALLS
+    ocp_mfi_cse        table of computed expressions       missed: BLOCK BOUNDARY
+    ocp_mfi_dedup_imm  table of immediates per register    missed: WRITES
+
+Each peel keeps state across an event that invalidates it, and in every case a
+neighbouring peel in the same file already handles that event correctly. DSE
+resets at blocks and CSE did not; CSE invalidates on writes and dedup_imm did
+not. Finding these needed no understanding of the compiler as a whole — only
+comparing two adjacent peels and asking why one does something the other
+does not.
+
+### How the 51 were narrowed — kept for the 29 that remain
 
 The DSE fix removed 587. The remainder splits:
 

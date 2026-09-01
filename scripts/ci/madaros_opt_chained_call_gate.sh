@@ -37,7 +37,8 @@ CASES="$ROOT_DIR/tests/multimodule"
 
 # entry|expected-token. One line per defect this gate has caught.
 FIXTURES="opt_chained_call_accumulator_main.sio|OPT_CHAINED_CALL_ACCUMULATOR_OK
-opt_cse_branch_dominance_main.sio|OPT_CSE_BRANCH_DOMINANCE_OK"
+opt_cse_branch_dominance_main.sio|OPT_CSE_BRANCH_DOMINANCE_OK
+opt_dedup_imm_stale_reg_main.sio|OPT_DEDUP_IMM_STALE_REG_OK"
 
 fail() { echo "MADAROS_OPT_CHAINED_CALL_FAIL: $*" >&2; exit 1; }
 
@@ -80,7 +81,9 @@ while IFS='|' read -r ENTRY WANT; do
     ocp_mfi_dse must treat a CALL as a barrier -- its argument reads live in
       instr.call_args and the SRC1/SRC2 scan cannot see them.
     ocp_mfi_cse must drop its table at a BASIC-BLOCK boundary -- it has no
-      dominance information, so a match from another block is not substitutable."
+      dominance information, so a match from another block is not substitutable.
+    ocp_mfi_dedup_imm must invalidate a register on any WRITE to it -- a
+      recorded immediate goes stale the moment something else assigns there."
 
   [[ "$plain" == "$opt" ]] || fail "$ENTRY: the two builds printed different text
   without -O: $plain
