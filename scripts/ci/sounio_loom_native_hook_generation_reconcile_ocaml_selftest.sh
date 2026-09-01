@@ -226,5 +226,24 @@ set -e
 expect_text "$PYTHON_OUTPUT" 'authority-runtime-hash-mismatch' python-pre-exec-refusal
 [[ ! -s "$FORBIDDEN_LOG" ]] || fail 'forbidden Python or Rust executable ran'
 
+UI_LOG="$WORK/ui.log"
+SOUNIO_LOOM_NATIVE_HOOK_RECONCILE_STATE_DIR="$PYTHON_STATE" \
+  "$LOOM" serve --cwd "$ROOT_DIR" --port 0 >"$UI_LOG" 2>&1 &
+UI_PID=$!
+CHILDREN+=("$UI_PID")
+for _ in {1..100}; do grep -q '^LOOM_GUI url=' "$UI_LOG" && break; sleep 0.05; done
+UI_URL="$(sed -n 's/^LOOM_GUI url=\([^ ]*\).*/\1/p' "$UI_LOG" | head -1)"
+[[ -n "$UI_URL" ]] || fail "UI server did not start: $(<"$UI_LOG")"
+UI_HTML="$(curl --fail --silent "$UI_URL/")"
+expect_text "$UI_HTML" 'CAUSAL GENERATION RECONCILIATION' ui-panel
+expect_text "$UI_HTML" 'refreshReconcile' ui-polling
+UI_JSON="$(curl --fail --silent \
+  "$UI_URL/api/hook-generation-reconcile?agent=test&lane=python")"
+expect_text "$UI_JSON" '"decision":"QUARANTINE_ELIGIBLE"' ui-authority-decision
+expect_text "$UI_JSON" '"mutation_applied":false' ui-read-only
+kill "$UI_PID"
+wait "$UI_PID" || true
+CHILDREN=()
+
 printf '%s\n' \
-  'sounio-loom-native-hook-generation-reconcile-ocaml-selftest: PASS semantic_authority=Sounio action=9047 stage=PARITY_OPEN operational_realization=OCaml live=KEEP heartbeat_only=KEEP pid_absent_plan=QUARANTINE_ELIGIBLE pid_absent_apply=QUARANTINE_READY related_artifacts=4 wal=COMMITTED audit=ALLOW+DENY identity_drift=FAIL_CLOSED shared_lock=flock2 timeout=FAIL_CLOSED python_oracle_attempt=PRE_EXEC_REFUSED causal_control=LIVE_THEN_PID_ABSENT python_executed=false rust_executed=false disposable_oracle_executed=false same_uid_peer_isolation=false quarantine_committed=true native_entry_open=false cutover_ready=false bridge_free_current=false'
+  'sounio-loom-native-hook-generation-reconcile-ocaml-selftest: PASS semantic_authority=Sounio action=9047 stage=PARITY_OPEN operational_realization=OCaml live=KEEP heartbeat_only=KEEP pid_absent_plan=QUARANTINE_ELIGIBLE pid_absent_apply=QUARANTINE_READY related_artifacts=4 wal=COMMITTED audit=ALLOW+DENY identity_drift=FAIL_CLOSED shared_lock=flock2 timeout=FAIL_CLOSED python_oracle_attempt=PRE_EXEC_REFUSED causal_control=LIVE_THEN_PID_ABSENT ui_route=READ_ONLY_AUTHORITY python_executed=false rust_executed=false disposable_oracle_executed=false same_uid_peer_isolation=false quarantine_committed=true native_entry_open=false cutover_ready=false bridge_free_current=false'

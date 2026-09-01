@@ -529,6 +529,23 @@ let fail_closed_json reason =
     "{\"schema\":\"loom-native-hook-generation-reconcile-v1\",\"action\":9047,\"stage\":\"PARITY_OPEN\",\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"decision\":\"FAIL_CLOSED\",\"reason\":\"%s\",\"mutation_applied\":false,\"python_executed\":false,\"rust_executed\":false,\"disposable_oracle_executed\":false,\"same_uid_peer_isolation\":false}"
     (json_escape reason)
 
+let plan_json ~cwd ~agent ~lane =
+  try
+    if agent = "" || lane = "" then failf "agent-and-lane-required";
+    let root = find_source_root (Unix.realpath cwd) in
+    let policy = load_policy root in
+    let state = state_directory root in
+    with_state_lock state (fun () ->
+        let observation = observe_locked state agent lane in
+        let decision, output, frame =
+          evaluate policy root observation 1 ~transaction_ready:true
+        in
+        if starts_with decision "DENY" then
+          failf "authority-refused-plan:%s" decision;
+        result_json policy observation decision output frame ~applied:false ~moved:0
+          ~receipt:"")
+  with error -> fail_closed_json (Printexc.to_string error)
+
 let parse_arguments arguments =
   let rec loop cwd agent lane apply = function
     | [] -> (cwd, agent, lane, apply)

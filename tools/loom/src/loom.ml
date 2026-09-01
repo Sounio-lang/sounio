@@ -8422,6 +8422,11 @@ let serve_http cli =
                else if path = "/api/hook-generation-drain" then
                  http_response "200 OK" "application/json"
                    (Loom_hook_generation_drain.live_json ~cwd)
+               else if path = "/api/hook-generation-reconcile" then
+                 http_response "200 OK" "application/json"
+                   (Loom_hook_generation_reconcile.plan_json ~cwd
+                      ~agent:(table_value query "agent")
+                      ~lane:(table_value query "lane"))
                else if path = "/api/events" then
                  http_response "200 OK" "application/json" (events_json root)
                else if path = "/api/events.arrow" then
