@@ -274,3 +274,46 @@ exist. A material decommission dispatcher remains deliberately absent.
 
 The full draft semantic contract is
 [`spark-pair-reversible-decommission.md`](../../concepts/spark-pair-reversible-decommission.md).
+
+## Pireus Restore Capsule v1
+
+The next prerequisite now has its own effect-free Sounio surface. Frame `9027`
+defines an immutable binding between an ordered two-node manifest, the two
+canonical node manifests and a deterministic offline replay witness. Its first
+phrase is: **decommission is reversible only when the state we intend to
+restore has an identity before anything is removed**.
+
+The evidence order is:
+
+```text
+GARDEN
+-> SOUNIO_CAPSULE_EXECUTABLE
+-> CAPSULE_SCHEMA_FROZEN
+-> READ_ONLY_CAPTURE
+-> OFFLINE_REPLAY_PROVEN
+-> LIVE_REPLAY_GATE
+```
+
+The current lane reaches `CAPSULE_SCHEMA_FROZEN` with 77 executable Sounio
+vectors and opens parity. It does not claim capture or replay. The adapter
+accepts only complete lowercase 64-hex SHA-256 identities, converts them to
+eight 32-bit limbs and emits
+`effect=NONE`. It neither reads hosts nor computes a snapshot.
+
+The schema freezes UTF-8, LF, fixed field order, normalized decimal and path
+representations, unique keys and four distinct digest domains: ordered pair,
+node 0, node 1 and replay witness. A lowercase hash is necessary but not
+sufficient; explicit facts also bind the algorithm, canonical bytes and
+domain separation.
+
+Current host observations cannot satisfy historical pre-install provenance.
+Boot IDs, PIDs, cgroups, Kubernetes UIDs, monotonic timestamps and BPF link IDs
+are boot-scoped observations, not restore targets. The current protected-path
+baseline is also insufficient because a new boot may replace it with the
+current inode identity and canonize drift after power loss.
+
+Live snapshot, historical pre-install receipt, material capture/replay,
+live restore/recommission, a bridge into frame `9026`, cluster credentials,
+external network, full material parity and `CLAIM_READY` remain `NOT_PRESENT`.
+The frame transports the exact parent `9026` freeze digest and a predecessor
+receipt digest; neither identity is represented by a bare boolean alone.

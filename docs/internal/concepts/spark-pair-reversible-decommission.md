@@ -150,3 +150,43 @@ Evidence-Refuse: tests/fixtures/spark_pair_arbiter/spark_pair_decommission_vecto
 - current material effect: `NONE`;
 - current blocking evidence: exact two-node live restore snapshot and replay are
   both `NOT_PRESENT`.
+
+## Restore Capsule Interface
+
+Frame `9027` is the content-addressed prerequisite surface for the two frozen
+frame `9026` restore facts. It is a separate Sounio authority with states
+`20..23`, actions `50..53`, 77 executable vectors and a unique output prefix.
+Every decision has `effect=NONE` and no material consumer.
+
+The frame transports four lowercase 64-hex SHA-256 content identities: ordered
+pair manifest, node-0 manifest, node-1 manifest and offline replay witness. It
+also transports the exact parent `9026` freeze identity and the predecessor
+decision-receipt identity. Sounio converts each identity to eight canonical
+32-bit limbs, checks the parent digest against the frozen constant, rejects
+zero or reused identities where evidence is required, and admits only explicit
+coverage masks.
+
+Snapshot coverage includes pre-install provenance, system and user service
+enablement, restart and linger relationships, Docker recreate identity,
+NodeSet and device-plugin manifests, complete taints and labels, capture boot
+identity, protected-path content receipts, toolchain/hardware/commands,
+read-only capture and explicit absence for unknown fields.
+
+Replay coverage requires an isolated filesystem root with no network, cluster
+credentials, source-host mounts or privileged effects. It binds exactly two
+replay nodes, the parent frame `9026` freeze, the service/container/scheduler
+surfaces and a byte-identical repeated witness.
+
+This is schema authority, not replay evidence. The current receipts say
+`offline_replay_evidence=SCHEMA_ONLY_NOT_RUN`. No frame `9027` receipt promotes
+`restore_snapshot_pair_exact` or `restore_snapshot_replay_verified` into frame
+`9026`; a future bridge needs its own Sounio-first contract and material gate.
+
+Executable surfaces:
+
+- `stdlib/coordination/spark_pair_restore_capsule.sio`;
+- `tests/fixtures/spark_pair_arbiter/spark_pair_restore_capsule_vectors.sio`;
+- `tools/cluster/spark_pair_restore_capsule.first.v1`;
+- `tools/cluster/spark_pair_restore_capsule.freeze.v1`;
+- `tools/cluster/spark_pair_restore_capsule.parity-open.v1`;
+- `scripts/ci/spark_pair_restore_capsule_selftest.sh`.
