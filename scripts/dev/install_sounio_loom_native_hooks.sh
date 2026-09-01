@@ -80,6 +80,15 @@ validate_candidate_config() {
     die 'candidate attaches Bash/Exec before Sounio freezes its authority contract'
 }
 
+target_hooks_match_candidate() {
+  [[ -f "$TARGET_CODEX" && -f "$TARGET_CLAUDE" && \
+    -f "$TARGET_CURSOR" && -f "$TARGET_GROK" ]] || return 1
+  cmp -s "$SOURCE_CODEX" "$TARGET_CODEX" && \
+    cmp -s "$SOURCE_CLAUDE" "$TARGET_CLAUDE" && \
+    cmp -s "$SOURCE_CURSOR" "$TARGET_CURSOR" && \
+    cmp -s "$SOURCE_GROK" "$TARGET_GROK"
+}
+
 atomic_copy() {
   local source="$1" target="$2" tmp
   tmp="$(mktemp "$(dirname "$target")/.loom-hook-promote.XXXXXX")"
@@ -210,10 +219,12 @@ flock -n 9 || die 'another native hook promotion is active'
 
 TARGET_HEAD="$(git -C "$TARGET_ROOT" rev-parse HEAD)"
 TARGET_BRANCH="$(git -C "$TARGET_ROOT" symbolic-ref --short -q HEAD || printf detached)"
-git -C "$TARGET_ROOT" diff --quiet -- \
-  .codex/hooks.json .claude/settings.json .cursor/hooks.json \
-  .grok/hooks/loom-native.json ||
-  die 'target hook configurations have unstaged changes'
+if ! git -C "$TARGET_ROOT" diff --quiet -- \
+    .codex/hooks.json .claude/settings.json .cursor/hooks.json \
+    .grok/hooks/loom-native.json; then
+  target_hooks_match_candidate ||
+    die 'target hook configurations have non-candidate unstaged changes'
+fi
 git -C "$TARGET_ROOT" diff --cached --quiet -- \
   .codex/hooks.json .claude/settings.json .cursor/hooks.json \
   .grok/hooks/loom-native.json ||
@@ -318,10 +329,12 @@ trap 'exit 130' INT TERM
 
 [[ "$(git -C "$TARGET_ROOT" rev-parse HEAD)" == "$TARGET_HEAD" ]] ||
   die 'target HEAD changed before promotion lock acquisition'
-git -C "$TARGET_ROOT" diff --quiet -- \
-  .codex/hooks.json .claude/settings.json .cursor/hooks.json \
-  .grok/hooks/loom-native.json ||
-  die 'target hooks changed before promotion lock acquisition'
+if ! git -C "$TARGET_ROOT" diff --quiet -- \
+    .codex/hooks.json .claude/settings.json .cursor/hooks.json \
+    .grok/hooks/loom-native.json; then
+  target_hooks_match_candidate ||
+    die 'target hooks changed before promotion lock acquisition'
+fi
 
 TRANSACTION_OPEN=1
 mkdir -p "$(dirname "$TARGET_CURSOR")" "$(dirname "$TARGET_GROK")"
