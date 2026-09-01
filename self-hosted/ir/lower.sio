@@ -11064,54 +11064,67 @@ impl Lowerer {
                         lo = lo.emit(ir_binop_typed(f2, d2reg, BinaryOp::OpMul, s2p.1, true, true))
                         lo = lo.emit(ir_mark_float_reg(f2))
                     }
-                    // Read the argument's Hessian HERE, not from the snapshot taken
-                    // before fo_lower_nth_arg_value re-walked the argument: measured,
-                    // the earlier snapshot holds a partial cross term rather than the
-                    // finished H, and the chain rule then multiplies f' by s_u^2.
-                    let hNow = lo.so_snapshot_expr_hess()
-                    // Only when the argument carries no Hessian of its own. Then
-                    // H(f(g)) = f''(g)*s_g^2 exactly, and that is measured: with a
-                    // leaf or linear inner the results are exact to six places.
+                    // H_jk(f(g)) = f''(g)*s_j*s_k + f'(g)*H_jk(g) for compound
+                    // inners too. so_mul_or_none takes Lowerer by value; at this
+                    // depth that copy lands on the caller's locals, a [i64;36]
+                    // snapshot is smashed, and the H_g argument is read as a
+                    // leftover register holding s_g². Measured: hessian_of(x*x)
+                    // is 2.0 in the slot, and the same id fed through
+                    // so_mul_or_none produces f'*s_g². Emit the muls in place
+                    // so the register ids never cross that ABI.
                     //
-                    // With a compound inner -- exp(sin x), exp(x*x) -- the f'(g)*H(g)
-                    // term reads s_g^2 where H_g belongs, and the answer comes out
-                    // wrong: 2.487814 against 0.469556 for exp(sin x). I do not yet
-                    // know why; hNow and the earlier snapshot agree, so it is not
-                    // the read point. Refusing that case leaves it returning the 0.0
-                    // it returned before, which is honestly wrong rather than
-                    // plausibly wrong -- a confident 2.487814 is much harder to catch
-                    // than a zero. Same reasoning as log's absence from
-                    // fo_xfer_seed_transcendentals, one comment above.
-                    var arg_has_hess = false
-                    var hq: i64 = 0
-                    while hq < 36 {
-                        if hNow[hq as usize] >= 0 { arg_has_hess = true }
-                        hq = hq + 1
-                    }
-                    // Refusing means CLEARING, not skipping. Measured: with the
-                    // write skipped, so_expr_hess still holds the ARGUMENT's Hessian
-                    // and hessian_of reports it as the outer expression's --
-                    // hessian_of(exp(x*x)) came back 2.0, which is H(x*x) wearing the
-                    // wrong name and looks entirely respectable. Clearing puts it back
-                    // to the honest 0.0 this case returned before any of this.
+                    // sj/sk from s0 (argument gradient; fo_combine_sens_mul has
+                    // not run yet). hg from the Lowerer field, not a local
+                    // snapshot. Tuple .1 is bound on the next line -- same
+                    // discipline as fo_emit_analytic_deriv.
                     var hj: i64 = 0
-                    if arg_has_hess {
-                        hj = 8
-                        lo = lo.so_clear_expr_hess()
-                    }
                     while hj < 8 {
                         var hk: i64 = hj
                         while hk < 8 {
+                            let sj = s0[hj as usize]
+                            let sk = s0[hk as usize]
                             let hid = lo.so_hess_idx(hj, hk)
-                            let t1 = lo.so_mul_or_none(factor, hNow[hid as usize])
-                            lo = t1.0
-                            let sp2 = lo.so_mul_or_none(s0[hj as usize], s0[hk as usize])
-                            lo = sp2.0
-                            let t2 = lo.so_mul_or_none(f2, sp2.1)
-                            lo = t2.0
-                            let hacc = lo.so_add_or_take(t1.1, t2.1)
-                            lo = hacc.0
-                            lo.so_expr_hess[hid as usize] = hacc.1
+                            let hg = lo.so_expr_hess[hid as usize]
+                            var acc: i64 = 0 - 1
+                            if factor >= 0 && hg >= 0 {
+                                let d = lo.fresh_reg()
+                                lo = d.0
+                                let dr = d.1
+                                lo = lo.emit(ir_binop_typed(dr, factor, BinaryOp::OpMul, hg, true, true))
+                                lo = lo.emit(ir_mark_float_reg(dr))
+                                acc = dr
+                            }
+                            var sp: i64 = 0 - 1
+                            if sj >= 0 && sk >= 0 {
+                                let d = lo.fresh_reg()
+                                lo = d.0
+                                let dr = d.1
+                                lo = lo.emit(ir_binop_typed(dr, sj, BinaryOp::OpMul, sk, true, true))
+                                lo = lo.emit(ir_mark_float_reg(dr))
+                                sp = dr
+                            }
+                            var t2: i64 = 0 - 1
+                            if f2 >= 0 && sp >= 0 {
+                                let d = lo.fresh_reg()
+                                lo = d.0
+                                let dr = d.1
+                                lo = lo.emit(ir_binop_typed(dr, f2, BinaryOp::OpMul, sp, true, true))
+                                lo = lo.emit(ir_mark_float_reg(dr))
+                                t2 = dr
+                            }
+                            if t2 >= 0 {
+                                if acc < 0 {
+                                    acc = t2
+                                } else {
+                                    let d = lo.fresh_reg()
+                                    lo = d.0
+                                    let dr = d.1
+                                    lo = lo.emit(ir_binop_typed(dr, acc, BinaryOp::OpAdd, t2, true, true))
+                                    lo = lo.emit(ir_mark_float_reg(dr))
+                                    acc = dr
+                                }
+                            }
+                            lo.so_expr_hess[hid as usize] = acc
                             hk = hk + 1
                         }
                         hj = hj + 1
