@@ -232,5 +232,39 @@ The Sounio policy must refuse at least:
 - Enabling MIG or device-plugin time sharing invalidates the one-GPU-one-owner
   proof and must fail the preflight gate.
 - Phase 1 has no Sounio-authorized decommission action yet. Deleting the
-  DaemonSet must not silently re-enable legacy GPU services; reversible restore
-  remains an explicit gate before `CLAIM_READY`.
+  DaemonSet must not silently re-enable legacy GPU services.
+
+## Reversible decommission seed
+
+The phrase to preserve is: **removing the DaemonSet is not decommission**.
+Decommission is a custody transfer from the active scheduler arbiter to one
+explicit terminal owner. The proposed concept
+`SOUNIO-REVERSIBLE-COMPUTE-CUSTODY` defines that owner as
+`LEGACY_HOST_OWNED`, with Slurm drained and its GPU workers absent, Kubernetes
+GPU capacity withdrawn, and only the exact snapshotted legacy services restored.
+
+The proposed path is:
+
+```text
+SLURM_OWNED
+  -> DECOMMISSION_DRAINING
+  -> DECOMMISSION_FENCED
+  -> SCHEDULERS_WITHDRAWN
+  -> LEGACY_RESTORING
+  -> LEGACY_HOST_OWNED
+```
+
+A failure enters decommission-specific recovery and can return only to a fenced
+pair. It cannot restore either scheduler or a legacy service from absence,
+timeout, Lease expiry, or a one-node observation. Recommission is the reverse
+Sounio-authorized transfer, not manual reconstruction after deletion.
+
+This remains `Garden` until the Mac-side inventory supplies the exact two-node
+pre-install service and restart-policy snapshot. The first executable bridge is
+not an uninstall script: it is a Sounio decision surface and negative vector set
+for the proposed states, owner modes, snapshot binding, pair-wide prepare/commit,
+and recovery refusals. Material restore code may exist only after that Sounio
+artifact is frozen by hash.
+
+The full draft semantic contract is
+[`spark-pair-reversible-decommission.md`](../../concepts/spark-pair-reversible-decommission.md).
