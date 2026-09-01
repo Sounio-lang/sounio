@@ -78,6 +78,11 @@ python3 benchmarks/chemistry/rep_traj_bug.py
 Three figures, three matches, the last one to three significant figures. The
 provenance is closed.
 
+**In one line: the most-cited numerical claim of this project — "majors
+0.2–2 %, radicals ~3 %, H2O2 ~16 %" — was produced by the buggy form of the
+reverse rate, `reac − nu`, and is an artefact of the defect the project would
+later discover.**
+
 What was wrong was the **label**, not the number. No pairing of Sounio,
 replica and Cantera produces percent-level deviations — that part of the
 earlier finding stands, and §1.2 measures it. But claim (A) was never a
@@ -440,7 +445,10 @@ python3 benchmarks/chemistry/rep_adiabatic_bug.py            # all four
 > than carrying its own chemistry, so it cannot drift from the replica it
 > characterises. The replica now ships in the snapshot. Reproduced to every
 > printed digit: 674.9575 / 675.6025 / +0.096 % and 46.3075 / 50.2675 /
-> +8.552 %.
+> +8.552 %. Run from the frozen snapshot, whose replica is aligned, the same
+> four delays print identically: the constant shift moves a 675 µs delay by
+> ~7e-4 µs, below the 0.005 µs resolution of dt = 5e-9, so this section is one
+> of the few that reproduces to every digit in both regimes.
 
 Ignition delay at the time of maximum d[H2O]/dt, dt = 5e-9:
 
@@ -1626,10 +1634,46 @@ python3 benchmarks/chemistry/rep_resolution.py --dir <aligned tree>
 | part | how measured | value | share of residual |
 |---|---|---|---|
 | **total residual**, replica vs Cantera `rtol=1e-12` | §7.5b, worst species (H2O) | **2.074e-11** | 100% |
-| **oracle's own resolution** at `rtol=1e-12` | Cantera `1e-12` vs `1e-13`, fresh `gas` | **1.416e-11** | 68% |
+| **oracle's own resolution** at `rtol=1e-12`, one state | Cantera `1e-12` vs `1e-13`, fresh `gas` | 1.416e-11 | 68% *at that one state* |
+| **oracle's own resolution**, ten states at ±1e-6 density | `rep_floor_spread.py`, fresh `gas` each | **3.730e-12 … 4.142e-11** | **18% … 200%** |
 | **replica truncation + roundoff**, upper bound | `\|c(1e-8) − c(5e-9)\|/\|c\|`, worst (H2O2) | **≤ 3.465e-14** | 0.17% |
 | — of which truncation alone | see below | **not separable at this step** | — |
-| **unaccounted** | 2.074e-11 − 1.416e-11, *not* a measurement | ~6.6e-12 | 32% |
+| **unaccounted** | not a measurement; see the interval row | **undefined** — the oracle's band spans the residual | — |
+
+> **Corrected 2026-09-01: the 68/32 partition was a single sample from a
+> distribution, and the distribution swallows it.** §6.3 (4) found the
+> oracle's tolerance spread differs 7.7× between two regimes 5.7e-06 apart in
+> initial density. So the "floor" of 1.416e-11 was measured at *one* state.
+> Measured at ten states with the initial density scaled by 1 + δ,
+> δ ∈ [−1e-6, +1e-6], fresh `gas` per run, worst over ten species:
+>
+> ```sh
+> python3 benchmarks/chemistry/rep_floor_spread.py
+> ```
+>
+> | δ | floor | δ | floor |
+> |---|---|---|---|
+> | −1.00e-06 | 6.281e-12 | +1.11e-07 | 2.214e-11 |
+> | −7.78e-07 | 8.964e-12 | +3.33e-07 | 8.260e-12 |
+> | −5.56e-07 | **4.142e-11** | +5.56e-07 | 1.104e-11 |
+> | −3.33e-07 | **3.730e-12** | +7.78e-07 | 7.592e-12 |
+> | −1.11e-07 | 8.728e-12 | +1.00e-06 | 1.045e-11 |
+>
+> **Interval [3.730e-12, 4.142e-11], a factor of 11.1**, from perturbations
+> of one part per million. At the top of the interval the oracle's own floor
+> **exceeds the residual**, so the partition is not merely fragile there —
+> it is undefined. The correct statement replaces a number with a range:
+> **the oracle explains between 18 % and more than 100 % of the aligned
+> residual.** The residual is inside the oracle's noise band.
+>
+> The observation that generalises: **the resolution of an adaptive
+> integrator is not a smooth function of the initial state.** CVODE re-selects
+> its step sequence under a perturbation of 1e-6, and the re-selection moves
+> the tolerance-induced error by an order of magnitude with no monotone trend
+> in δ (the table is not sorted by floor because it cannot be — there is no
+> order to recover). An adaptive oracle's resolution therefore has no value
+> independent of the state it is run from, and must be measured **in regime,
+> every time**, over an ensemble rather than at a point.
 
 ### Why truncation and roundoff cannot be separated here — and why that is itself the finding
 
@@ -1654,11 +1698,36 @@ signature of **roundoff dominance**: at 10,000 to 40,000 steps the accumulated
 double-precision error is of order √N·ε ≈ 2e-14 … 4e-14, which is exactly the
 band these differences sit in. A difference of a few ULP has no stable ratio.
 
-So at dt = 1e-8 the replica is **already at the double-precision floor**:
-truncation is below roundoff, and reducing the step would add error rather
-than remove it. The upper bound of 3.465e-14 on truncation-plus-roundoff is the
-best this instrument gives, and it is three orders below the residual, so
-**the replica contributes nothing measurable to the 2.074e-11.**
+> **Corrected 2026-09-01: "at the floor" was the wrong word, and the 12–140×
+> is not explained.** The growth of the self-difference under halving was
+> attributed above to roundoff. It cannot be: a random-walk roundoff gives
+> √2 = 1.41× per halving, a systematic one 2×, fourth-order truncation
+> 1/16. Nothing known gives 12× to 140×. The one further hypothesis with a
+> mechanism — **step stagnation**, where dt·|dc/dt| drops below half an ULP
+> of c so the update rounds back to c and the step is lost — was tested:
+>
+> ```sh
+> python3 benchmarks/chemistry/rep_stagnation.py
+> ```
+>
+> | sp | dt=1e-8 | dt=5e-9 | dt=2.5e-9 |
+> |---|---|---|---|
+> | H2 | 8.29e+11 | 4.15e+11 | 2.07e+11 |
+> | H2O | 9.07e+12 | 4.54e+12 | 2.27e+12 |
+> | HO2 | 5.04e+11 | 2.52e+11 | 1.26e+11 |
+> | *(all eight)* | *> 1e+11* | *> 1e+11* | *> 1e+11* |
+>
+> Each entry is the per-step increment in units of half an ULP of the state.
+> Stagnation needs it below 1; it is above 10¹¹ for every species at every
+> step. **Not confirmed.** The 12–140× growth is therefore recorded as
+> **unexplained**, with that label, and the sentence that followed it is
+> withdrawn: the replica's self-difference at dt = 1e-8 is a **ceiling on
+> what step refinement can deliver here, not a floor on the method's
+> accuracy** — refinement makes it worse for reasons this document does not
+> know. What survives is the bound: whatever the mechanism, the replica's
+> self-difference is ≤ 3.465e-14, three orders below the residual, so **the
+> replica contributes nothing measurable to the 2.074e-11**, and that line of
+> the table stands.
 
 ### The honest statement of the central result
 
@@ -1666,11 +1735,11 @@ best this instrument gives, and it is three orders below the residual, so
   180,000× the oracle's resolution.** Its existence, magnitude and attribution
   are far above every noise source in this table. That result stands
   unqualified.
-- **After alignment, the residual is 2.074e-11, of which the oracle's own
-  uncertainty accounts for 1.416e-11 and the replica for at most 3.5e-14.** The
-  remaining ~6.6e-12 is within a factor 1.5 of the instrument floor and is
-  **unresolved** — it may be a real difference between the two implementations
-  or may be oracle noise, and this configuration cannot say which.
+- **After alignment, the residual is 2.074e-11; the oracle's own uncertainty,
+  measured over an ensemble of initial states, spans 3.7e-12 to 4.1e-11, and
+  the replica accounts for at most 3.5e-14.** The residual lies *inside* the
+  oracle's noise band. No part of it can be attributed to a real difference
+  between the two implementations, and no part can be excluded from being one.
 - **Therefore: with the constants aligned, replica and Cantera agree to within
   the oracle's resolution.** Not "to 2e-11". Not "at the floor of rtol". *To
   within the resolution of the instrument used to compare them.*
