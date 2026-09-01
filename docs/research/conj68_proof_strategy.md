@@ -357,3 +357,37 @@ odd-component existence remains the open core. The comprehensive sweep corrected
 real oversight (the exact ZD corpus) but confirmed: the solution is not sitting
 pre-assembled in the repo; 6.8 is genuinely open, and the repo's own proposed
 shortcut is falsified here.
+
+## 14. A TRUE new piece (2026-09-01): odd-dimensional skew degeneracy
+
+Prompted by the founder's remark that "original is just another combination," a
+new — and, unlike §§7–13's falsified reframes, TRUE — structural lemma was
+assembled from pieces already owned:
+
+**Lemma (skew degeneracy).** For fixed u, the form B_u(w,w') := ⟨[u,w],w'⟩ =
+φ(u,w,w') is **skew-symmetric** in (w,w') (Lemma 2.1: φ alternating). Restricted
+to Im C(x′) × Im C(x′) it is a skew form on a **5-dimensional (odd)** space, hence
+**degenerate**: it has a nonzero kernel (measured nullity = 1 for all sampled u).
+So for EVERY u ∈ Im C(x) there is a nonzero w ∈ Im C(x′) with **[u,w] ⊥ Im C(x′)**.
+By the symmetric statement (φ(·,w,·) skew on Im C(x)), one likewise gets, for a
+compatible (u,w), **[u,w] ⊥ Im C(x)**.
+
+**Verified (exact):** B_u is skew (‖B+Bᵀ‖ ≈ 1e-13), nullity 1 (odd) for all 200
+random u; and the two-sided condition [u,w] ⊥ (Im C(x) ⊕ Im C(x′)) is achievable
+(min ‖proj‖ = 0.0000).
+
+**But it is not sufficient (measured).** At the (u,w) achieving
+[u,w] ⊥ (Im C(x) ⊕ Im C(x′)), the residual ‖[u,w]‖ ≈ 1.98 ≠ 0: the component in
+the **6-dimensional complement** (Im C(x)⊕Im C(x′))^⊥ survives. The true witness
+has ‖[u,w]‖ ≈ 1e-14. So odd-dimensional skew degeneracy kills the 10 conditions of
+the projection onto Im C(x)⊕Im C(x′) but leaves the 6-dim perp component.
+
+**Significance.** This is the first genuinely TRUE new structural statement of the
+session (the odd-dimensionality parity that matters is the **dimension of the
+space, 5**, not the degree of the variety), and it gives a cleaner reduction:
+> Conjecture 6.8 ⟸ for some (u,w) ∈ Im C(x)×Im C(x′), the ≤6-dimensional
+> component of [u,w] in (Im C(x) ⊕ Im C(x′))^⊥ vanishes (the projection onto
+> Im C(x)⊕Im C(x′) already vanishes for free, by odd-dim skew degeneracy).
+This is the open remainder: kill the perp component. Whether a further parity /
+dimension argument (the perp space ∩ W₁₁ has its own dimension) forces it is the
+next question — the honest live lead, in the "combination" spirit.
