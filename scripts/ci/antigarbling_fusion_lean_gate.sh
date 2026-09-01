@@ -69,9 +69,9 @@ echo "C2 PASS: sorry-free, native_decide-free"
 
 # ---- C3: axiom footprint ----------------------------------------------------------------
 AXLINES="$(grep 'depends on axioms' "${OUT}" || true)"
-[[ -n "${AXLINES}" ]] || fail "no '#print axioms' output captured (expected ≥ 18 lines)"
+[[ -n "${AXLINES}" ]] || fail "no '#print axioms' output captured (expected ≥ 24 lines)"
 NAX="$(printf '%s\n' "${AXLINES}" | wc -l | tr -d ' ')"
-[[ "${NAX}" -ge 18 ]] || fail "expected ≥ 18 axiom reports, got ${NAX}"
+[[ "${NAX}" -ge 24 ]] || fail "expected ≥ 24 axiom reports, got ${NAX}"
 while IFS= read -r line; do
     axs="$(printf '%s' "${line}" | sed -E 's/.*\[(.*)\].*/\1/' | tr ',' ' ')"
     for ax in ${axs}; do
@@ -94,7 +94,11 @@ for thm in cdMul_add_left cdMul_add_right cdMul_smul_left cdMul_smul_right normS
            w1_typable w1_cert_refused w1_reassoc_changes_value w1_sensitivity_changes \
            "w1'_cert" "w1'_reassoc_sound" assocCert_level0 w2_untypable w2_understates \
            sed_shortcut_understates sed_x_typable oct_shortcut_exact sed_shortcut_overstates \
-           shortcut_eq_sensitivity_level0; do
+           shortcut_eq_sensitivity_level0 \
+           lin_zero_of_basis polarBasis3 not_polarBasis4 polar_zero_of_polarBasis basis_bil_zero \
+           bil_zero_of_polarBasis norm_mult_of_polarBasis octonion_norm_multiplicative \
+           quaternion_norm_multiplicative sedenion_norm_not_multiplicative inner_mulR_eq inner_mulL_eq \
+           trueVar_scaleR_eq trueVar_scaleL_eq shortcut_eq_sensitivity_of_polarBasis octonion_shortcut_exact; do
     grep -qE "^theorem ${thm}( |$|\()" "${LEAN_FILE}" || fail "theorem ${thm} not found"
 done
 echo "C4 PASS: all load-bearing theorems present"
