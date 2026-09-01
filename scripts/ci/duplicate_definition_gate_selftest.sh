@@ -87,6 +87,25 @@ F
 check "identical duplicate is caught" fail "identical" || exit 1
 rm "$W/src/dup_same.sio"
 
+# RED — a brace inside a string literal must not hide the duplicate BELOW it.
+# This is the case the gate missed in production: one unmatched brace in a
+# pattern string kept the body-skip walking for 4012 lines, and a genuine
+# duplicate past it was reported as absent. Without this control the scanner
+# can go blind again and every count still reads green.
+cat > "$W/src/dup_after_brace_literal.sio" <<'F'
+fn parses(path: i64) -> bool {
+    contains(path, "CorePair { left:")
+}
+
+fn twice_here(x: i64) -> i64 { x * 2 }
+
+fn twice_here(x: i64) -> i64 {
+    x * 2
+}
+F
+check "a brace in a string literal does not hide a later duplicate" fail "identical" || exit 1
+rm "$W/src/dup_after_brace_literal.sio"
+
 # RED — and the divergent case is reported as DIVERGENT, not merely counted.
 cat > "$W/src/dup_diff.sio" <<'F'
 fn twice(x: i64) -> i64 { x * 2 }
@@ -106,4 +125,4 @@ check_empty() {
 }
 mkdir -p "$W/nothing"; check_empty || exit 1
 
-echo "DUPLICATE_DEFINITION_SELFTEST_OK: 6 controls, 3 of them RED, each behaved as stated"
+echo "DUPLICATE_DEFINITION_SELFTEST_OK: 7 controls, 4 of them RED, each behaved as stated"
