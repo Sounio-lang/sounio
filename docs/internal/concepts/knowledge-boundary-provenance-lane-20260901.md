@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Semantic lane: Knowledge boundary provenance — wire the socket
 
-Status: proposed (awaiting founder acknowledgment before first compiler write)
+Status: executable (gate green from-source 2026-09-01; Slurm r770)
 Date: 2026-09-01 · Lane: kimi-cli2 / `knowledge-boundary-provenance`
 
 ## Required Lane Declaration
