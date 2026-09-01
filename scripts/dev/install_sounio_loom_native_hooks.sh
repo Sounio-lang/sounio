@@ -272,6 +272,15 @@ INDEX_LOCK_OWNED=1
 TRANSACTION_OPEN=0
 CANARY_PID=''
 CANARY_CONTINUE=''
+CANARY_STATE=''
+
+stop_canary_supervisor() {
+  local state_root="$1"
+  [[ -n "$state_root" ]] || return 0
+  SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$state_root" \
+    "$RUNTIME_BUNDLE/bin/sounio-coord-runtime" obligation-supervisor-stop \
+      --timeout-seconds 30 >/dev/null
+}
 
 cleanup() {
   local status=$?
@@ -282,6 +291,7 @@ cleanup() {
     fi
     wait "$CANARY_PID" 2>/dev/null || true
   fi
+  stop_canary_supervisor "${CANARY_STATE:-}" >/dev/null 2>&1 || true
   if [[ "${TRANSACTION_OPEN:-0}" -eq 1 ]]; then
     rollback_owned_file "$CANDIDATE_CODEX" \
       "$TXN_DIR/original/codex-hooks.json" "$TARGET_CODEX" \
@@ -436,9 +446,10 @@ run_provider_canary() {
       printf "%s\n" "$cleanup" | /bin/bash -c "$hook" >"$root/cleanup.out" 2>"$root/cleanup.err"
       printf "%s\n" "$?" >"$root/cleanup.rc"
     fi
-  ' _ "$provider_root" "$hook_command" "$start_event" "$prompt_event" "$end_event" '' &
+  ' _ "$provider_root" "$hook_command" "$start_event" "$prompt_event" "$end_event" '' 9>&- &
   CANARY_PID=$!
   CANARY_CONTINUE="$provider_root/continue"
+  CANARY_STATE="$provider_state"
   # A production join may serialize key setup and supervisor recovery under load.
   for _ in $(seq 1 1200); do
     if [[ -e "$provider_root/ready" ]]; then ready=1; break; fi
@@ -489,7 +500,7 @@ run_provider_canary() {
       SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$provider_state" \
       TMUX='' TMUX_PANE='' SOUNIO_AGENTD_SOCKET='' SOUNIO_AGENTD_TOKEN_FILE='' \
       /bin/bash -c "$hook_command" \
-        >"$provider_root/cleanup.out" 2>"$provider_root/cleanup.err"
+        >"$provider_root/cleanup.out" 2>"$provider_root/cleanup.err" 9>&-
     cleanup_rc=$?
     set -e
     printf '%s\n' "$cleanup_rc" >"$provider_root/cleanup.rc"
@@ -502,6 +513,9 @@ run_provider_canary() {
       --agent "$provider" --lane "$lane" >/dev/null 2>&1; then
     die "policyless $provider promotion canary left its capability active"
   fi
+  stop_canary_supervisor "$provider_state" ||
+    die "policyless $provider promotion canary left its supervisor active"
+  CANARY_STATE=''
   [[ "$(grep -Fc $'provider='"$provider"$'\tdialect='"$dialect" "$provider_receipt")" -eq "$expected_receipts" ]] ||
     die "policyless $provider promotion canary emitted the wrong provider-bound receipt count"
   "$RUNTIME_BUNDLE/bin/sounio-loom-runtime" hook-generation-canary \

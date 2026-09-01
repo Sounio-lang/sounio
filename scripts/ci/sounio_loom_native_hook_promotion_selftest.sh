@@ -85,6 +85,13 @@ grep -q '^LOOM_NATIVE_HOOKS_ACTIVATED ' <<< "$output" ||
   fail 'positive promotion retained the target Git index lock'
 receipt="$(sed -n 's/.* receipt=\(.*\)$/\1/p' <<< "$output")"
 [[ -f "$receipt" ]] || fail 'positive promotion receipt is missing'
+transaction_dir="$(dirname "$receipt")"
+promotion_lock="$positive/.git/sounio-loom-native-hook-promotions/.promotion.lock"
+exec {promotion_lock_fd}>"$promotion_lock"
+flock -n "$promotion_lock_fd" ||
+  fail 'positive promotion leaked its repository-wide promotion lock'
+flock -u "$promotion_lock_fd"
+exec {promotion_lock_fd}>&-
 grep -q '^result=ACTIVATED$' "$receipt" || fail 'positive promotion receipt is not activated'
 grep -q '^canary_lifecycle_receipts=12$' "$receipt" ||
   fail 'positive promotion did not retain its twelve lifecycle receipts'
@@ -115,6 +122,14 @@ for provider in codex claude cursor grok; do
     fail "positive promotion receipt omitted the $provider configuration"
   grep -q "^canary_${provider}_lane=session-" "$receipt" ||
     fail "positive promotion receipt omitted the $provider lane"
+  supervisor_status="$(
+    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" \
+      SOUNIO_COORD_DIR="$transaction_dir/canary/$provider/state" \
+      "$RUNTIME_ROOT/native-next/bin/sounio-coord-runtime" \
+        obligation-supervisor-status
+  )"
+  grep -Fq 'state=stopped' <<< "$supervisor_status" ||
+    fail "positive promotion left the $provider canary supervisor live"
 done
 
 rollback="$TEST_ROOT/rollback"
@@ -171,4 +186,4 @@ grep -q '^foreign-index-lock$' "$locked/.git/index.lock" ||
   fail 'promotion removed a foreign target Git index lock'
 
 printf '%s\n' \
-  'sounio-loom-native-hook-promotion-selftest: PASS promotion=atomic selector=native-next legacy_current=unchanged runtime=manifest-bound git_index=locked policyless_canary=13-ALLOW lifecycle_receipts=12 codex_cleanup_receipts=1 providers=codex+claude+cursor+grok action=9045+9046 guardian=prepared canary_mask=15 rollback=exact dirty_target=refused foreign_lock=preserved python_oracle=absent rust_oracle=absent'
+  'sounio-loom-native-hook-promotion-selftest: PASS promotion=atomic selector=native-next legacy_current=unchanged runtime=manifest-bound git_index=locked promotion_lock=released canary_supervisors=stopped policyless_canary=13-ALLOW lifecycle_receipts=12 codex_cleanup_receipts=1 providers=codex+claude+cursor+grok action=9045+9046 guardian=prepared canary_mask=15 rollback=exact dirty_target=refused foreign_lock=preserved python_oracle=absent rust_oracle=absent'
