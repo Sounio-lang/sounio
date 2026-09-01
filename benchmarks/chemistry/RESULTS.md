@@ -31,19 +31,34 @@ checkpoint (T = 1500 K, t = 1e-4 s):
   fixed-step RK4 versus CVODE;
 - **(B)** agreement to 5–6 significant figures, deviations 2e-7 to 6e-6.
 
-**Claim (A) does not appear anywhere in this repository.** It is absent from
-the current `benchmarks/chemistry/README.md` and from every version of that
-file reachable from any ref in this clone:
+### 1.1a Claim (A) is a real measurement of a real defect, mislabelled
+
+**Superseded 2026-09-01, after the measurement in §2. An earlier revision of
+this file said claim (A) "has no provenance and should not be cited". That was
+wrong, and the correction matters more than the original claim.**
+
+Claim (A) is not a parity table. It is the **per-species error profile of the
+`reac - nu` reverse-rate defect** at the isothermal pre-front checkpoint —
+a real number, from a real measurement, of a real defect, presented as though
+it were a Sounio-versus-Cantera comparison.
 
 ```sh
-git log --all --format='%h' -- benchmarks/chemistry/README.md | while read h; do
-  git show "$h:benchmarks/chemistry/README.md" | grep -qiE "H2O2.*1[0-9]%|~?16 ?%" && echo "$h"
-done          # -> no output
+python3 - < the harness in §2.3     # trajectory under prod vs reac-nu
 ```
 
-No pairing measured below produces percent-level deviations. Claim (A) is
-**not reproduced and has no provenance in this repository**; it should not be
-cited.
+| claim (A) | measured under `reac - nu` |
+|---|---|
+| "majors within **0.2–2%**" | H2 **0.21%**, O2 **0.18%**, HO2 0.14%, O 1.49%, H2O 1.69%, H 1.76% |
+| "radicals **~3%**" | OH **3.44%** |
+| "H2O2 **~16%**" | H2O2 **16.17%** |
+
+Three figures, three matches, the last one to three significant figures. The
+provenance is closed.
+
+What was wrong was the **label**, not the number. No pairing of Sounio,
+replica and Cantera produces percent-level deviations — that part of the
+earlier finding stands, and §1.2 measures it. But claim (A) was never a
+statement about that comparison.
 
 ### 1.2 The three-way measurement
 
@@ -114,7 +129,7 @@ magnitude**:
    1–30 ULP against a double-precision eps of 2.220e-16, that is exactly what
    is measured. There is no cross-language discrepancy to explain.
 2. **Sounio vs Cantera: 2.2e-07 to 2.7e-06** under the protocol the README
-   documents — a **5-to-6-significant-figure** agreement, not 0.2–2%. The
+   documents — a **5-to-6-significant-figure** agreement. The
    published claim of "2e-7 through 6e-6" is **confirmed** for the major
    species and radicals. But its stated *cause* is wrong: this is **not** the
    fixed-step-RK4-versus-CVODE difference. RK4 truncation at dt = 1e-8 is
@@ -233,49 +248,136 @@ constant is a decision for the operator, not a defect to patch here.
 
 ---
 
-## 2. Reverse-rate path in the H/O replica — no defect present
+## 2. The reverse-rate defect — real, historical, fixed, and reproduced here
 
-The reported defect was, in `rates_net()`:
+**Superseded 2026-09-01. An earlier revision of this file said this defect
+"does not exist and never existed". That was true of the file the brief named
+and false as a statement about the repository.**
 
-```python
-p = reac[r][s] - nu[r][s]     # reported as the buggy line
-```
+### 2.1 It existed, in the adiabatic replica
 
-**This line does not exist and never existed in this repository.**
+`benchmarks/chemistry/README.md` documents it, and I found it only after
+reporting the opposite:
 
-```sh
-grep -n "reac\[r\]\[s\] - nu" benchmarks/chemistry/*.py           # -> no match
-git log --all --format='%h' -- benchmarks/chemistry/gri30_h2_python_replica.py |
-  while read h; do git show "$h:benchmarks/chemistry/gri30_h2_python_replica.py" |
-  grep -q "reac\[r\]\[s\] - nu" && echo "BUG AT $h"; done      # -> no output
-```
+> *the first version of the **adiabatic** Python replica computed reverse
+> rates with product exponents derived as `reac - nu` … which silently zeroed
+> the reverse channels of H2+O2 → H+HO2 and the back-dissociation reactions at
+> states where only major species are present. The error grew with temperature
+> (0.1% at 1100 K → 8.6% at 2000 K on the delay) and was invisible to every
+> Sounio↔replica pin. Per-reaction rate comparison against Cantera at t0
+> exposed it in one shot.*
 
-The H/O replica already reads `p = prod[r][s]` directly, exactly as the
-full-mechanism replica does via `prod_nz`. The file entered the repository
-already correct (added in `67dccf1e`, 2026-08-30); there was no back-port to
-perform.
+The buggy revision is not recoverable — history for these files in this clone
+begins at `d25b43a4` and no version under any ref contains `reac - nu`. The
+README is testimony, not artefact. **Method error worth naming: I searched the
+file the brief named, found nothing, and generalised from "absent here" to
+"never existed".**
 
-**Verified against the oracle rather than by inspection.** All 29 net rates of
-progress, at T = 1500 K with a radical-loaded state chosen to exercise the
-reverse path (H=1e-9, OH=1e-10, O=1e-10, H2O=1e-9, HO2=1e-12, H2O2=1e-13
-mol/cm³), against `Cantera.net_rates_of_progress`:
+### 2.2 The mechanism, at the exponent
 
-| quantity | result |
+`reac - nu` ≡ `2·reac - prod`. The guard is `if p > 0`, so a negative exponent
+is *skipped*. In all **29 of 29** reactions the products (correct exponent ≥ 1)
+go negative and drop out, while the reactants (correct exponent 0) come in at
++2 or +4. The reverse term stops depending on product concentrations.
+
+For `H + HO2 <=> O2 + H2` — the channel the brief singles out:
+
+| species | correct | under `reac - nu` |
+|---|---|---|
+| H2 | 1 | **−1** (skipped) |
+| O2 | 1 | **−1** (skipped) |
+| H | 0 | **+2** |
+| HO2 | 0 | **+2** |
+
+Its products are O2 and H2, the majors, so its **reverse direction is
+H2 + O2 → H + HO2 — chain initiation**. In a majors-only state the correct
+reverse rate is large; the buggy one is ∝ c[H]²·c[HO2]² ≈ 0. That is exactly
+the README's "zeroed the reverse channels of H2+O2 → H+HO2", derived
+independently.
+
+### 2.3 Per-species deltas, isothermal checkpoint, all three forms
+
+Three forms, not two:
+
+| form | expression | equals |
+|---|---|---|
+| shipped | `p = prod[r][s]` | `prod` |
+| proposed "fix" | `p = reac + nu` | **≡ `prod` — an identity** |
+| reported bug | `p = reac - nu` | `2·reac − prod` |
+
+**The proposed fix is a no-op**, confirmed by measurement and not only by
+algebra: **exactly 0**, bit-for-bit, on all eight species, at the checkpoint
+**and** in the 1-σ band.
+
+Under the bug (aligned regime, T = 1500 K, t = 1e-4 s, dt = 1e-8):
+
+| sp | shipped | under `reac - nu` | delta | band |
+|---|---|---|---|---|
+| H2 | 1.45202409180648259e-07 | 1.44896760284528512e-07 | **2.105e-03** | 4.755e-04 |
+| H | 9.78118787162766235e-09 | 9.95290506208524791e-09 | **1.756e-02** | 5.072e-02 |
+| O | 1.45235755728164051e-09 | 1.47399979085128111e-09 | **1.490e-02** | 7.585e-02 |
+| O2 | 7.39988119297947390e-08 | 7.38675293103348018e-08 | **1.774e-03** | 9.361e-05 |
+| OH | 1.22456521149193150e-09 | 1.26670674554832556e-09 | **3.441e-02** | 7.543e-02 |
+| H2O | 1.17789779335583026e-08 | 1.19776593065772939e-08 | **1.687e-02** | 3.408e-02 |
+| HO2 | 1.70510868870023519e-11 | 1.70748634715518421e-11 | **1.394e-03** | 1.100e-02 |
+| H2O2 | 1.62463513786769239e-13 | 1.88736066163527837e-13 | **1.617e-01** | 1.398e+00 |
+
+This table is claim (A). See §1.1a.
+
+### 2.4 d[HO2]/dt — the −34% does not reproduce
+
+| quantity | value |
 |---|---|
-| reactions compared | 28 non-zero of 29 (H + O2 + AR is exactly 0 both sides — no Ar present) |
-| worst relative deviation | **7.877e-07** |
-| median | ~4e-08 |
-| pure-Arrhenius reactions (no falloff/third-body) | 1e-14 … 1e-16 |
-| **H + HO2 <=> O2 + H2** (the initiation channel called out for watching) | replica 2.080890177001593e-08, Cantera 2.0808902365210865e-08, **rel 2.860e-08** |
+| d[HO2]/dt, shipped | −8.13560209958764591e-08 |
+| d[HO2]/dt, under the bug | −8.93741991782262909e-08 |
+| **relative change** | **−9.86%** |
 
-The residual ~1e-07 floor is the CHEMKIN activation-energy gas constant: the
-replica uses `R = 1.9872041` cal/mol/K where Cantera uses a marginally
-different value. It is not a stoichiometry error.
+Not −34%. And distinct from the **−50.5%** figure, which is R16's *net rate of
+progress* at a radical-loaded probe state — a different quantity at a
+different state. Three numbers, three quantities; the −34% matches none of
+them and is **left unexplained rather than forced into agreement**.
 
-**STEP 2 deltas: none. There was no patch to apply, so the checkpoint and the
-1-σ band do not move.** The tables in section 1 are the unmodified replica.
+### 2.5 Why the shipped and fixed forms are identical yet the bug is not
 
----
+R16 at the checkpoint:
+
+```
+forward          5.22176484288829602e-06
+reverse          8.54651292554704534e-09
+reverse/forward  1.637e-03
+```
+
+The reverse channel is 0.16% of the forward. The *fix* is the same expression,
+so its delta is exactly zero. The *bug* does not merely delete that 0.16% —
+it substitutes a term keyed to reactant rather than product concentrations,
+and ten thousand steps of chain branching turn that substitution into the
+percent-level profile of §2.3.
+
+### 2.6 Adiabatic provenance: the README's magnitudes reproduce
+
+Reintroducing `reac - nu` in `gri30_h2_adiabatic_replica.py` (working copy,
+not committed), ignition delay, dt = 5e-9:
+
+| T₀ (K) | correct (µs) | under the bug (µs) | error | README |
+|---|---|---|---|---|
+| 1100 | 674.9575 | 675.6025 | **+0.096%** | **0.1%** |
+| 1400 | 169.6625 | 173.7175 | +2.390% | — |
+| 1700 | 78.9775 | 81.9575 | +3.773% | — |
+| 2000 | 46.3075 | 50.2675 | **+8.552%** | **8.6%** |
+
+Both documented anchors reproduce. Every sign is positive: the defect always
+delays ignition, consistent with removing a radical source.
+
+### 2.7 The shipped isothermal path is correct
+
+Verified against the oracle rather than by inspection — all 29 net rates of
+progress against `Cantera.net_rates_of_progress`, radical-loaded state:
+
+| | worst relative deviation |
+|---|---|
+| shipped reverse path | **7.877e-07** (the R_cal residual of §1.5, since closed) |
+| `reac - nu` | **1.838e+00** (184%) |
+| R16 specifically | shipped 2.860e-08, bug 5.046e-01 |
 
 ## 3. Standard-state reference pressure — no defect present
 
@@ -380,6 +482,10 @@ git stash list; git worktree list; git fsck --dangling
 | `examples/chemistry/band_sweep.sio` | no | no | no | none |
 | `benchmarks/chemistry/rep_prodfix.py` | no | no | no | none |
 | `benchmarks/chemistry/rep_1atm.py` | no | no | no | none |
+
+**Data Availability wording, to be used verbatim:** *reconstructed from the
+described protocol on 2026-09-01; the original artefacts were not recoverable
+from the repository history.*
 
 **None is recoverable.** They were never committed to this repository — the
 object scan finds no blob under any of those names in any tree reachable from
@@ -776,6 +882,138 @@ arithmetic over `Int`, and the numerical agreement is the business of §1–§6.
 
 ---
 
+## 6.2b STEP 6 re-measured in the aligned regime
+
+The §6 tables above were measured in the **published** regime and are stale
+once the constants are aligned (`claude/align-molar-volume-constant`,
+`8acb16c0` + `fb474888`). Re-measured, t = 4e-6 s, P = 101325.124717 Pa:
+
+| sp | Sounio (native) | S↔replica | ULP | S↔Cantera |
+|---|---|---|---|---|
+| H2 | 1.62485234694381110e-07 | **0.000e+00** | **0** | 1.629e-15 |
+| H | 1.05531016903763002e-11 | 1.531e-16 | 1 | 5.119e-12 |
+| O | 1.24299936798135503e-12 | 1.137e-15 | 7 | 1.188e-11 |
+| O2 | 8.12417702326992007e-08 | 1.629e-16 | 1 | 6.516e-16 |
+| OH | 1.09368026746034605e-12 | 1.108e-15 | 6 | 3.175e-11 |
+| H2O | 1.83311859985921710e-12 | 4.407e-16 | 2 | 2.127e-11 |
+| HO2 | 1.20493001257778295e-13 | 1.886e-15 | 9 | 1.702e-12 |
+| H2O2 | 2.04377109287929189e-16 | 1.930e-15 | 16 | 3.630e-12 |
+| N2 | 7.88066565562194265e-06 | 2.150e-16 | 1 | 3.224e-15 |
+| NNH | 1.57673756335980780e-17 | 1.954e-16 | 1 | 5.129e-12 |
+| **worst** | | **1.930e-15** | **16** | **3.175e-11** |
+
+| checkpoint | published | aligned |
+|---|---|---|
+| t = 4e-6 s | 5.268e-07 | **3.175e-11** |
+| t = 2e-5 s | 8.242e-07 | **1.024e-11** |
+
+The full mechanism reproduces the H/O result: ~5 orders, landing at the floor
+of CVODE's own `rtol`. NNH — the Δn = +1 species of §3.2 — tracks to 5.129e-12.
+
+**Dependency.** These numbers require the constant alignment. This branch and
+`claude/align-molar-volume-constant` must land together, or the probes here
+will set an initial state the modules do not share.
+
+---
+
+## 6.3 The instrument hid the defect — five instances
+
+Every defect in this document was invisible to the instrument that was
+supposed to find it, and in each case the instrument had **less resolution
+than the defect it was asked to measure**. The readings then came out
+attributed to the object rather than to the instrument. This is the pattern
+worth carrying out of this work; the individual numbers are secondary.
+
+### (1) A reduced mechanism hides a standard-state error
+
+12 of 29 H/O reactions carry Δn ≠ 0, so a 1-bar/1-atm confusion would be
+*present* in 41% of the submechanism. It is unobservable there anyway, because
+Kc enters only the reverse term and at 1500 K in the induction period that term
+is 6–15 orders below the forward one. §3.2. It becomes observable only where an
+equilibrium pins a population — NNH, Δn = +1, in the full mechanism.
+
+### (2) A tolerance 57× too loose hides a constant
+
+`test_g30_sim` asserts `1.452024295e-7` at 1e-4 relative tolerance. The
+molar-volume shorthand moved the module by **1.740e-06** — **1.7% of the
+tolerance**. The gate could not have failed on it. After alignment the same
+gate sits at 0.14% of tolerance, 12.4× tighter, and now has room to see a
+future regression of this size.
+
+### (3) A shared initialisation hides an initial-state error
+
+Under TDY both sides are built from the *same* `mtot`, so an error in it
+cancels and the comparison is blind to it:
+
+| regime | init | P initial (Pa) | worst replica-vs-Cantera |
+|---|---|---|---|
+| published | TDY | 101325.576758 | 2.660e-06 |
+| published | TPX | 101325.000000 | 3.922e-05 |
+| aligned | TDY | 101325.124717 | **2.032e-11** |
+| aligned | TPX | 101325.000000 | 9.055e-06 |
+
+Aligning `R_cgs` moves the TDY column **not at all** — 2.660e-06 before and
+after. Under TPX, which does not share `mtot`, the same change is worth
+3.922e-05 → 6.576e-06. The protocol choice, not the constant, decided what the
+test could see.
+
+### (4) A loose reference tolerance hides the integrator's own error
+
+| comparison | deviation |
+|---|---|
+| RK4 dt=1e-8 vs CVODE `rtol=1e-12` | 2.032e-11 |
+| RK4 dt=1e-8 vs CVODE **default** (`rtol=1e-9`) | 2.517e-08 |
+| CVODE default vs CVODE `rtol=1e-12` | **2.515e-08** |
+
+The last two are the same number: the deviation is the *reference's* error,
+not RK4's. A harness trusting the default would attribute 2.5e-08 to RK4
+truncation, which is measured at **6.6e-12** — three orders lower. §7.3.
+
+### (5) Integrated observables hide what per-reaction comparison exposes
+
+The `reac - nu` defect was "invisible to every Sounio↔replica pin" and fell in
+one shot to a per-reaction rate comparison against Cantera. I reproduced that
+path without knowing I was repeating it: the shipped reverse path matches
+Cantera to 7.877e-07 per reaction, the buggy one to 1.838e+00. §2.7.
+
+### The hazard that is NOT an instance here
+
+**Sharing the integrator would hide the integrator's error**, and would do it
+invisibly: agreement *improves*, which reads as confirmation. Checked, and it
+does not occur in this tree —
+
+```sh
+grep -n "IdealGasReactor\|net.advance" benchmarks/chemistry/*.py
+```
+
+all three Cantera harnesses call `IdealGasReactor` + `ReactorNet` +
+`net.advance(t_end)`; the replica's `rk4_step` calls only its own `dc_dt`.
+Two independent integrations, no contact. Recorded as a hazard to guard, not
+as a finding, because reporting it as observed would be inventing it.
+
+---
+
+## 6.4 One constant deliberately left divergent
+
+`benchmarks/chemistry/flame1d_replica.py:81` keeps `R = 8.314462618`, the
+truncated value, while every other constant in the GRI-Mech path is now
+`8.31446261815324`. **This is deliberate.**
+
+`flame1d_replica.py` is a different benchmark — a 1-D flame, not the GRI-Mech
+cross-validation — with its own published reference values and its own gates
+in `README.md`. Aligning it would move those numbers, and I have not measured
+by how much. Changing a separate benchmark's published results as a side
+effect of a chemistry-constant fix is the unmeasured widening this document
+argues against everywhere else.
+
+The divergence is therefore intentional and recorded here so it is not read as
+an oversight. Whoever aligns it should measure the effect on the flame
+reference table first. `stdlib/constants/physical.sio` carries the same
+truncated value under an "(exact)" label — filed as issue #2381, deliberately
+not fixed in this pass.
+
+---
+
 ## 7. Reproduction
 
 ### 7.1 Commands, in order
@@ -808,12 +1046,71 @@ see section 4 and their own headers.
 
 ---
 
+### 7.3 Are the two sides really independent integrations?
+
+Asked because the answer is not obvious from the numbers: **two independent
+integrators agreeing to 2e-11 deserves an explanation, not an assumption.**
+
+**They are independent.** The decisive lines:
+
+```python
+# gri30_h2_cantera_parity.py — Cantera side
+r = ct.IdealGasReactor(gas, energy="off", clone=False)
+net = ct.ReactorNet([r]); net.rtol = 1e-12; net.atol = 1e-22
+net.advance(t_end)              # ONE call. CVODE, its own adaptive stepping.
+
+# gri30_h2_python_replica.py — replica side
+def rk4_step(c, t, dt, kc):
+    k1 = dc_dt(t, c, kc)        # dc_dt is replica code. Never calls Cantera.
+```
+
+Cantera is never a rate evaluator inside the RK4 loop; the replica never calls
+Cantera. Same for `gri30_full_cantera_parity.py` and
+`gri30_full_cantera_uq_reference.py`.
+
+**Why the agreement is nevertheless possible.** RK4's truncation error at this
+checkpoint is tiny, because the pre-front trajectory is smooth and slow
+relative to dt = 1e-8. Measured against CVODE at `rtol=1e-13`:
+
+| dt | worst relative error |
+|---|---|
+| 8e-7 | 1.384e-06 |
+| 4e-7 | 7.738e-08 |
+| 2e-7 | 4.554e-09 |
+| 1e-7 | 2.739e-10 |
+| **1e-8** | **6.580e-12** |
+
+Successive-error ratios, which must be 2⁴ = 16 for a fourth-order method:
+
+| pair | H2 | H | O | O2 | OH | H2O | HO2 | H2O2 |
+|---|---|---|---|---|---|---|---|---|
+| 8e-7/4e-7 | 15.53 | 15.44 | 15.57 | 15.64 | 16.60 | 15.46 | 20.36 | 17.89 |
+| 4e-7/2e-7 | 15.72 | 15.68 | 15.73 | 15.78 | 16.27 | 15.69 | 18.26 | 16.99 |
+| 2e-7/1e-7 | 15.19 | 15.17 | 15.15 | 15.23 | 15.75 | 15.15 | 17.49 | 16.62 |
+
+**Fourth order confirmed empirically.** The order test fails at dt ≤ 1e-8 only
+because the differences fall below the roundoff floor — which is itself the
+finding that RK4 truncation there is ~1e-12, not that the method misbehaves.
+
+**A caution against a natural mis-inference.** The README's statement that
+dt-convergence "agrees to 4 significant figures" is about **ignition delays**
+(126.315 vs 126.317 µs), a phase-sensitive quantity measured at the front.
+Reading it as the checkpoint's accuracy suggests an RK4 error near 1e-4 and
+makes the 2e-11 agreement look impossible. At the pre-front checkpoint,
+dt = 1e-8 and dt = 5e-9 agree to ~1e-14.
+
+**And it does not rescue claim (A).** Extrapolating the now-established dt⁴
+law, reaching 0.2% would need dt ≈ 4.9e-6 s — 493× the step used, far outside
+RK4 stability for this mechanism. Claim (A) is not an integrator-comparison
+artefact; §1.1a gives what it actually is.
+
 ## 8. Claims still lacking a reproduction path
 
 | claim | status |
 |---|---|
 | "H2O2 agrees to 5.9e-3 relative" (README, headline) | **contradicted** — measured 1.891e-06 |
-| "majors 0.2–2%, radicals ~3%, H2O2 ~16%" | **no provenance** — absent from every version of every file in this repo; no pairing reproduces it |
+| "majors 0.2–2%, radicals ~3%, H2O2 ~16%" | **provenance closed** — it is the `reac - nu` defect's per-species profile (0.21% / 0.18% / 3.44% / 16.17%), not a parity table. §1.1a |
+| "d[HO2]/dt changes by −34%" | **not reproduced** — measured **−9.86%**. Distinct from the −50.5% on R16's net rate of progress, which is a different quantity at a different state. §2.4 |
 | "factor 4 in dt, ratio √2" (log) | **contradicted** — factor 4 gives 2.0; √2 is the factor-2 ratio |
 | "√(T/dt) is exact at T = 1e-6, 1e-5, 1e-4" | **contradicted** — off by 59×–242× over the second decade |
 | Sounio native **full-mechanism** trajectory at 4e-6 / 2e-5 s | **closed** — measured this session via the reconstructed `full_probe.sio`; section 6 |
