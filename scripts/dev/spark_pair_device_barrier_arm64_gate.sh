@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 SOURCE="$ROOT_DIR/tools/cluster/pireus_spark_device_barrier.cpp"
 FREEZE="$ROOT_DIR/tools/cluster/spark_pair_arbiter.freeze.v1"
+POLICY="$ROOT_DIR/tools/cluster/spark_pair_arbiter.policy.v1"
 NAMESPACE=beagle
 LABEL='app.kubernetes.io/name=pireus-device-barrier-cgroup-canary'
 NODES=(spark-3c59 spark-8e54)
@@ -26,6 +27,11 @@ require_command() {
 freeze_value() {
   local key="$1"
   awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2) }' "$FREEZE"
+}
+
+policy_value() {
+  local key="$1"
+  awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2) }' "$POLICY"
 }
 
 cleanup_best_effort() {
@@ -58,7 +64,9 @@ render_pod() {
   short="${node#spark-}"
   sed -e "s/__NODE__/$node/g" -e "s/__SHORT__/$short/g" \
       -e "s/__CONFIGMAP__/$CONFIGMAP/g" \
-      -e "s|__IMAGE__|$FROZEN_CANARY_IMAGE|g" <<'EOF'
+      -e "s|__IMAGE__|$FROZEN_CANARY_IMAGE|g" \
+      -e "s/__INVENTORY_MAJORS__/$INVENTORY_MAJORS/g" \
+      -e "s/__DENY_MAJORS__/$DENY_MAJORS/g" <<'EOF'
 apiVersion: v1
 kind: Pod
 metadata:
@@ -99,9 +107,9 @@ spec:
           chroot /host /usr/bin/c++ --version | sed -n '1,2p'
           chroot /host /usr/bin/sha256sum "$host_work/source.cpp" "$host_work/barrier"
           chroot /host "$host_work/barrier" selftest
-          chroot /host "$host_work/barrier" verify-devices /dev 195,226,247,498,501
+          chroot /host "$host_work/barrier" verify-devices /dev __INVENTORY_MAJORS__
           if chroot /host "$host_work/barrier" canary-self-fail \
-              /sys/fs/cgroup "$host_work" 195,226,247,498,501 \
+              /sys/fs/cgroup "$host_work" __DENY_MAJORS__ \
               >"$work/failure.log" 2>&1; then
             printf 'injected failure unexpectedly succeeded\n' >&2
             exit 1
@@ -109,7 +117,7 @@ spec:
           cat "$work/failure.log"
           grep -Fq 'PIREUS_DEVICE_BARRIER_CANARY_FAILURE_CLEANUP_PASS' \
             "$work/failure.log"
-          chroot /host "$host_work/barrier" canary-self /sys/fs/cgroup "$host_work" 195,226,247,498,501
+          chroot /host "$host_work/barrier" canary-self /sys/fs/cgroup "$host_work" __DENY_MAJORS__
       env:
         - name: NODE_NAME
           valueFrom:
@@ -210,13 +218,13 @@ validate_log() {
   local pod="$1" log="$2" observed_cgroup
   grep -Fq "$SOURCE_SHA  /tmp/pireus-barrier-canary-" <<<"$log" ||
     fail "$pod did not compile the frozen source bytes"
-  grep -Fq 'PIREUS_DEVICE_BARRIER_SELFTEST_PASS majors=195,226,247,498,501 default=ALLOW matched=DENY duplicates=REFUSE root_target=REFUSE' \
+  grep -Fq "PIREUS_DEVICE_BARRIER_SELFTEST_PASS majors=$DENY_MAJORS default=ALLOW matched=DENY duplicates=REFUSE root_target=REFUSE" \
     <<<"$log" || fail "$pod failed the instruction selftest"
-  grep -Fq 'PIREUS_DEVICE_BARRIER_INVENTORY_PASS root=/dev majors=195,226,247,498,501' \
+  grep -Fq "PIREUS_DEVICE_BARRIER_INVENTORY_PASS root=/dev majors=$INVENTORY_MAJORS" \
     <<<"$log" || fail "$pod failed the device inventory gate"
   grep -Eq 'PIREUS_DEVICE_BARRIER_CANARY_PASS .* baseline_programs=[0-9]+ access=MKNOD_DENIED detach=BASELINE_RESTORED' \
     <<<"$log" || fail "$pod failed the kernel attach/deny/detach canary"
-  grep -Fq " tag=$FROZEN_BPF_TAG majors=195,226,247,498,501 " <<<"$log" ||
+  grep -Fq " tag=$FROZEN_BPF_TAG majors=$DENY_MAJORS " <<<"$log" ||
     fail "$pod did not prove the frozen BPF tag"
   grep -Eq 'PIREUS_DEVICE_BARRIER_CANARY_FAILURE_CLEANUP_PASS cgroup=/sys/fs/cgroup/[^ ]+ lifetime=FD_SCOPED baseline=RESTORED' \
     <<<"$log" || fail "$pod failed the injected-failure cleanup proof"
@@ -233,7 +241,8 @@ validate_log() {
 for command in awk cut grep jq kubectl sed seq sha256sum sleep tail; do
   require_command "$command"
 done
-[[ -f "$SOURCE" && -f "$FREEZE" ]] || fail 'source or freeze is missing'
+[[ -f "$SOURCE" && -f "$FREEZE" && -f "$POLICY" ]] ||
+  fail 'source, freeze, or material policy is missing'
 
 SOURCE_SHA="$(sha256sum "$SOURCE" | cut -d ' ' -f 1)"
 FROZEN_SHA="$(freeze_value device_barrier_source_sha256)"
@@ -243,6 +252,16 @@ GATE_SHA="$(sha256sum "${BASH_SOURCE[0]}" | cut -d ' ' -f 1)"
 FROZEN_GATE_SHA="$(freeze_value device_barrier_arm64_gate_sha256)"
 [[ "$GATE_SHA" == "$FROZEN_GATE_SHA" ]] ||
   fail "ARM64 gate source is not frozen: source=$GATE_SHA freeze=$FROZEN_GATE_SHA"
+POLICY_SHA="$(sha256sum "$POLICY" | cut -d ' ' -f 1)"
+FROZEN_POLICY_SHA="$(freeze_value material_policy_sha256)"
+[[ "$POLICY_SHA" == "$FROZEN_POLICY_SHA" ]] ||
+  fail "material policy is not frozen: source=$POLICY_SHA freeze=$FROZEN_POLICY_SHA"
+INVENTORY_MAJORS="$(policy_value host_device_inventory_majors)"
+DENY_MAJORS="$(policy_value host_device_barrier_majors)"
+[[ "$INVENTORY_MAJORS" == 195,226,247,498,501 ]] ||
+  fail "unexpected device inventory profile: $INVENTORY_MAJORS"
+[[ "$DENY_MAJORS" == 498,501 ]] ||
+  fail "unsafe compute deny profile: $DENY_MAJORS"
 FROZEN_BINARY_SHA="$(freeze_value device_barrier_arm64_binary_sha256)"
 FROZEN_BPF_TAG="$(freeze_value device_barrier_arm64_bpf_tag)"
 FROZEN_CANARY_IMAGE="$(freeze_value device_barrier_arm64_canary_image)"
@@ -304,5 +323,6 @@ CREATED=0
 remaining="$(kubectl -n "$NAMESPACE" get pod,configmap -l "$LABEL" -o name)"
 [[ -z "$remaining" ]] || fail "canary cleanup left objects behind: $remaining"
 
-printf 'SPARK_PAIR_DEVICE_BARRIER_ARM64_GATE_PASS nodes=2 gate_sha=%s source_sha=%s binary_sha=%s image_id=%s bpf_tag=%s target=STRICT_CHILD lifetime=FD_SCOPED access=MKNOD_DENIED detach=BASELINE_RESTORED injected_failure_cleanup=PASS cleanup=PASS\n' \
-  "$GATE_SHA" "$SOURCE_SHA" "$binary_sha" "$container_image_id" "$FROZEN_BPF_TAG"
+printf 'SPARK_PAIR_DEVICE_BARRIER_ARM64_GATE_PASS nodes=2 gate_sha=%s source_sha=%s binary_sha=%s image_id=%s bpf_tag=%s inventory_majors=%s deny_majors=%s shared195=ALLOWED drm226=ALLOWED target=STRICT_CHILD lifetime=FD_SCOPED access=MKNOD_DENIED detach=BASELINE_RESTORED injected_failure_cleanup=PASS cleanup=PASS\n' \
+  "$GATE_SHA" "$SOURCE_SHA" "$binary_sha" "$container_image_id" \
+  "$FROZEN_BPF_TAG" "$INVENTORY_MAJORS" "$DENY_MAJORS"

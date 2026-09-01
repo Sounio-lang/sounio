@@ -65,7 +65,7 @@ fi
 c++ -std=c++20 -O2 -Wall -Wextra -Werror "$DEVICE_BARRIER" \
   -o "$DEVICE_BARRIER_EXECUTABLE"
 [[ "$($DEVICE_BARRIER_EXECUTABLE selftest)" == \
-    'PIREUS_DEVICE_BARRIER_SELFTEST_PASS majors=195,226,247,498,501 default=ALLOW matched=DENY duplicates=REFUSE root_target=REFUSE' ]] || \
+    'PIREUS_DEVICE_BARRIER_SELFTEST_PASS majors=498,501 default=ALLOW matched=DENY duplicates=REFUSE root_target=REFUSE' ]] || \
   fail 'device barrier executable selftest failed'
 [[ "$(sed -n '1p' "$RESERVATION_PROBE_SCRIPT")" == '#!/usr/bin/env bash' ]] || \
   fail 'reservation probe ConfigMap script key or extraction boundary drifted'
@@ -79,6 +79,14 @@ reservation_probe_sha="$(sha256sum "$RESERVATION_PROBE_SCRIPT" | cut -d ' ' -f 1
 [[ "$(awk -F= '$1 == "host_device_barrier_configmap" { print $2 }' "$POLICY")" == \
     "pireus-spark-device-barrier-${device_barrier_sha:0:12}" ]] || \
   fail 'device barrier ConfigMap is not content addressed by its C++ source'
+[[ "$(awk -F= '$1 == "host_device_inventory_majors" { print $2 }' "$POLICY")" == \
+    '195,226,247,498,501' ]] || fail 'device inventory profile drifted'
+[[ "$(awk -F= '$1 == "host_device_barrier_majors" { print $2 }' "$POLICY")" == \
+    '498,501' ]] || fail 'compute-only device deny profile drifted'
+grep -Fq 'readonly DEVICE_INVENTORY_MAJORS=195,226,247,498,501' "$HOST_FENCE_SCRIPT" || \
+  fail 'host fence does not preserve the exact device inventory profile'
+grep -Fq 'readonly DEVICE_BARRIER_MAJORS=498,501' "$HOST_FENCE_SCRIPT" || \
+  fail 'host fence does not use the compute-only deny profile'
 [[ "$(awk -F= '$1 == "reservation_probe_configmap" { print $2 }' "$POLICY")" == \
     "pireus-spark-pair-reservation-probe-${reservation_probe_sha:0:12}" ]] || \
   fail 'reservation probe ConfigMap is not content addressed by its script'
@@ -324,13 +332,29 @@ for bootstrap_failure in drain-slurm install-fence install-host-fence fence-host
 done
 
 reset_mock
-SOUNIO_SPARK_PAIR_HOLDER=holder-first "$ARBITER" hold 4 >"$work/first-holder.log" 2>&1 &
+heartbeat_seconds="$(awk -F= '$1 == "heartbeat_seconds" { print $2 }' "$POLICY")"
+[[ "$heartbeat_seconds" =~ ^[1-9][0-9]*$ ]] || fail 'heartbeat policy is not a positive integer'
+timing_window_seconds=$((heartbeat_seconds * 3))
+SOUNIO_SPARK_PAIR_HOLDER=holder-first "$ARBITER" hold "$timing_window_seconds" >"$work/first-holder.log" 2>&1 &
 first_pid=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+for ((attempt = 1; attempt <= timing_window_seconds; attempt++)); do
   [[ "$(sed -n '1p' "$MOCK_DIR/state")" == K8S_OWNED ]] && break
   sleep 1
 done
-[[ "$(sed -n '1p' "$MOCK_DIR/state")" == K8S_OWNED ]] || fail 'first holder did not reach K8S_OWNED'
+if [[ "$(sed -n '1p' "$MOCK_DIR/state")" != K8S_OWNED ]]; then
+  first_state="$(sed -n '1p' "$MOCK_DIR/state")"
+  if kill -0 "$first_pid" >/dev/null 2>&1; then
+    first_status=RUNNING
+    kill "$first_pid" >/dev/null 2>&1 || true
+    wait "$first_pid" >/dev/null 2>&1 || true
+  else
+    set +e
+    wait "$first_pid"
+    first_status=$?
+    set -e
+  fi
+  fail "first holder did not reach K8S_OWNED: state=$first_state status=$first_status log=$(sed -n '1,120p' "$work/first-holder.log")"
+fi
 expect_refusal concurrent-holder env SOUNIO_SPARK_PAIR_HOLDER=holder-second "$ARBITER" hold 1
 wait "$first_pid" || fail "first holder failed: $(sed -n '1,120p' "$work/first-holder.log")"
 [[ "$(sed -n '1p' "$MOCK_DIR/state")" == SLURM_OWNED ]] || fail 'concurrent-holder test did not restore Slurm'
@@ -394,7 +418,7 @@ expect_refusal partial-reservation env SOUNIO_SPARK_PAIR_MOCK_PARTIAL_RESERVATIO
 
 reset_mock
 expect_refusal heartbeat-loss env SOUNIO_SPARK_PAIR_MOCK_FAIL=lease-renew \
-  SOUNIO_SPARK_PAIR_HOLDER=holder-heartbeat "$ARBITER" hold 12
+  SOUNIO_SPARK_PAIR_HOLDER=holder-heartbeat "$ARBITER" hold "$timing_window_seconds"
 [[ "$(sed -n '1p' "$MOCK_DIR/state")" == SLURM_OWNED ]] || fail 'heartbeat rollback did not restore Slurm'
 
 reset_mock

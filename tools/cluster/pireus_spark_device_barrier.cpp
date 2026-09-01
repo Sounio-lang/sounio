@@ -661,7 +661,7 @@ bool simulated_allow(const std::set<unsigned>& denied, unsigned value) {
 }
 
 void selftest() {
-  const std::set<unsigned> denied = parse_majors("195,226,247,498,501");
+  const std::set<unsigned> denied = parse_majors("498,501");
   const auto program = deny_major_program(denied);
   bool duplicate_refused = false;
   bool root_target_refused = false;
@@ -675,8 +675,9 @@ void selftest() {
   } catch (const std::exception&) {
     root_target_refused = true;
   }
-  if (program.size() != denied.size() + 5 || simulated_allow(denied, 195) ||
-      simulated_allow(denied, 498) || !simulated_allow(denied, 1) ||
+  if (program.size() != denied.size() + 5 || !simulated_allow(denied, 195) ||
+      simulated_allow(denied, 498) || simulated_allow(denied, 501) ||
+      !simulated_allow(denied, 1) ||
       !duplicate_refused || !root_target_refused) {
     fail("instruction generator selftest failed");
   }

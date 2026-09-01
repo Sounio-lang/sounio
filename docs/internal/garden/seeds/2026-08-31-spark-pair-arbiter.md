@@ -64,11 +64,21 @@ On 2026-09-01 the frozen C++ helper was compiled natively with GCC 13.3.0 on
 both canonical ARM64 Sparks running Linux 6.17.0-1021-nvidia. A transient canary
 rejected the cgroup root as a target, canonically resolved each Pod's strict
 child cgroup, and attached the helper through an FD-scoped BPF link. It denied
-`mknod` for majors 195, 226, 247, 498, and 501, proved exact baseline restoration
-after an injected post-deny failure, then repeated the successful path. Both
+`mknod` for compute majors 498 and 501 while leaving shared NVIDIA major 195 and
+DRM major 226 allowed, proved exact baseline restoration after an injected
+post-deny failure, then repeated the successful path. Both
 nodes produced binary SHA-256
-`427ae944d4bb2922930ffb23baf65aa65a128df355050b6079da0945c725acf3` and BPF
-tag `539451426e7078af`. No root-cgroup attachment was attempted.
+`f7f087cf2015004d90f49e35d76b1c6473ea84413cf167370a4b98de17e870fd` and BPF
+tag `bfdb0f3533dc586c`. No root-cgroup attachment was attempted.
+
+The child canary originally denied the complete inventory. Read-only host
+evidence then showed majors `195` and `226` are both held by Xorg/GNOME on both
+Sparks and that `247` is not part of the compute fence. The production profile
+therefore keeps exact inventory `195,226,247,498,501` while denying only NVIDIA
+compute majors `498,501`; a future root fence must leave `195` and `226`
+available. This canary proves denial of new access, not eviction of an existing
+process with an already-open device, so consumer quiescence remains a separate
+host-fence gate.
 
 ## Authority
 

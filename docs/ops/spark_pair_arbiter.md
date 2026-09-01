@@ -59,18 +59,27 @@ bash scripts/ci/spark_pair_arbiter_live_gate.sh --check
 The ARM64 gate is a separate, transient material-parity probe. Its `--apply`
 mode compiles the frozen C++20 helper natively on both Sparks, resolves and
 canonically proves a target strictly below `/sys/fs/cgroup`, and attaches an
-FD-scoped BPF link only there. It proves `mknod` denial for the frozen NVIDIA/DRM
-majors, injects a post-deny failure and proves link-close restoration, repeats
+FD-scoped BPF link only there. It proves `mknod` denial for the frozen NVIDIA
+compute majors, injects a post-deny failure and proves link-close restoration, repeats
 the successful path, and deletes its content-addressed ConfigMap and Pods. The
 orchestration image is pinned by digest; the compiler and resulting helper
 execute from the host root:
+
+The exact device inventory remains `195,226,247,498,501`, but the barrier denies
+only compute majors `498,501`. Shared NVIDIA major `195` and DRM major `226` are
+deliberately inventory-only because both are used by the local Xorg/GNOME
+session; `247` is likewise observed but not denied. Reintroducing any of these
+three into the deny profile fails the frozen gate.
 
 ```bash
 bash scripts/dev/spark_pair_device_barrier_arm64_gate.sh --apply
 ```
 
 This evidence does not authorize installation on `/sys/fs/cgroup` and does not
-replace the live pair-wide exclusion gate.
+replace the live pair-wide exclusion gate. It proves denial of new device
+access, not termination of a process that already holds an open device; the
+host fence must still quiesce and verify all existing GPU consumers before a
+root grant changes ownership.
 
 Root installation and the live gate are separate operator decisions. The live
 gate will not install an absent arbiter:
