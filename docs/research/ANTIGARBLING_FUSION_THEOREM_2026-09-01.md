@@ -323,6 +323,18 @@ Gate: `scripts/ci/antigarbling_third_axis_gate.sh` (refusals paired with accepte
 on the same compiler), named in `ci.yml`. Fixtures: `tests/compile-fail/e251_*.sio`,
 `e252_*.sio`; controls in `tests/run-pass/`. Catalogue rows E251/E252 with explanations.
 
+**One more fail-open, caught by the gate itself (CI run of PR #2361).** The gate was first
+named in the `lean-proofs` job, which builds no compiler. There `bin/souc` resolves the
+COMMITTED Madaros ELF — which predates E251/E252 — and the very first refusal failed:
+`sedenion Knowledge product (third axis, NS on) expected refusal, got rc=0`. That is the
+pairing discipline doing its job: a gate whose refusals were not paired with a live compiler
+would have been a green step measuring nothing. The step now lives in `madaros-witness-gate`,
+which builds Madaros from the PR's own source (`build_modular_madaros.sh → /tmp/madaros-ci.elf`)
+and hands it to the gate through `MADAROS_RAW_BIN`, exactly as the axis-2 sibling
+`ns_antigarbling_gate.sh` already ran. Rule worth keeping: **a checker gate named in a job that
+does not build the checker measures the committed binary, not the PR** — same defect class as
+the #2318 false positive, from the other side.
+
 ## 9. Theorem map
 
 | claim | Lean |
