@@ -31,6 +31,7 @@ create_target() {
   git -C "$target" -c user.name='LOOM selftest' -c user.email='loom-selftest@invalid' \
     commit -q -m 'fixture'
   ln -s "$RUNTIME_ROOT" "$target/.git/sounio-coord-runtime"
+  ln -s "$STATE_ROOT" "$target/.git/sounio-coord-state"
 }
 
 config_sha() {

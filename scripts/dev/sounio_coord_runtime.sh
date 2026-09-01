@@ -1501,9 +1501,30 @@ active_coord_runtime_root() {
   printf '%s\n' "$runtime_root"
 }
 
+native_hook_bundle_is_selected() {
+  local runtime_root="$1" bundle="$2" current_bundle candidate_bundle manifest
+  current_bundle="$(readlink -f "$runtime_root/current" 2>/dev/null || true)"
+  [[ -n "$current_bundle" ]] || return 1
+  if [[ "$bundle" == "$current_bundle" ]]; then
+    return 0
+  fi
+
+  candidate_bundle="$(readlink -f "$runtime_root/native-next" 2>/dev/null || true)"
+  [[ -n "$candidate_bundle" && "$bundle" == "$candidate_bundle" ]] || return 1
+  manifest="$candidate_bundle/manifest"
+  [[ -r "$manifest" ]] || return 1
+  grep -Fqx 'capability=loom-native-hook-cutover-v1' "$manifest" || return 1
+  grep -Fqx 'capability=loom-native-hook-generation-drain-v1' "$manifest" || return 1
+  if [[ -d "$candidate_bundle/hooks" ]] &&
+    find "$candidate_bundle/hooks" -type f -name '*.py' -print -quit | grep -q .; then
+    return 1
+  fi
+  return 0
+}
+
 native_hook_runtime_parent_identity() {
   local parent_pid="$PPID" runtime_self local_runtime local_loom
-  local runtime_root parent_bundle runtime_bundle current_bundle manifest runtime_version expected_parent_sha expected_coord_sha
+  local runtime_root parent_bundle runtime_bundle manifest runtime_version expected_parent_sha expected_coord_sha
   NATIVE_HOOK_PARENT_EXECUTABLE="$(readlink -f "/proc/$parent_pid/exe" 2>/dev/null || true)"
   [[ -n "$NATIVE_HOOK_PARENT_EXECUTABLE" ]] || return 1
   runtime_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
@@ -1541,8 +1562,7 @@ native_hook_runtime_parent_identity() {
       "$runtime_root"/versions/*) ;;
       *) return 1 ;;
     esac
-    current_bundle="$(readlink -f "$runtime_root/current" 2>/dev/null || true)"
-    [[ -n "$current_bundle" && "$parent_bundle" == "$current_bundle" ]] || return 1
+    native_hook_bundle_is_selected "$runtime_root" "$parent_bundle" || return 1
     [[ "$NATIVE_HOOK_PARENT_EXECUTABLE" == "$parent_bundle/bin/sounio-loom-runtime" ]] || return 1
     manifest="$parent_bundle/manifest"
     [[ -r "$manifest" ]] || return 1
@@ -1684,7 +1704,7 @@ HOOK_CAPABILITY_REASON='absent'
 hook_capability_binding_is_current() {
   local agent="$1" lane="$2" generation="$3" capability_file presence_file
   local current_generation current_sha256 current_coord_sha256 current_caller_sha256
-  local manifest runtime_root bundle runtime_self active_bundle
+  local manifest runtime_root bundle runtime_self
   HOOK_CAPABILITY_REASON='absent'
   capability_file="$(hook_capability_path "$agent" "$lane")"
   [[ -f "$capability_file" ]] || return 1
@@ -1740,15 +1760,16 @@ hook_capability_binding_is_current() {
       { HOOK_CAPABILITY_REASON='runtime-root-absent'; return 1; }
     runtime_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
     bundle="$(readlink -f "$(dirname "$HC_PRODUCER_EXECUTABLE")/.." 2>/dev/null || true)"
-    active_bundle="$(readlink -f "$runtime_root/current" 2>/dev/null || true)"
     manifest="$bundle/manifest"
-    [[ "$runtime_self" == "$HC_COORD_EXECUTABLE" && \
-      "$bundle" == "$active_bundle" && -r "$manifest" && \
-      "$(manifest_field "$manifest" runtime_id)" == "$HC_RUNTIME_ID" && \
-      "$(manifest_field "$manifest" source_sha)" == "$HC_SOURCE_SHA" && \
-      "$(manifest_field "$manifest" loom_runtime_sha256)" == "$HC_PRODUCER_SHA256" && \
-      "$(manifest_field "$manifest" coord_runtime_sha256)" == "$HC_COORD_SHA256" ]] || \
-      { HOOK_CAPABILITY_REASON='manifest-binding-drift'; return 1; }
+    if [[ "$runtime_self" != "$HC_COORD_EXECUTABLE" || ! -r "$manifest" ]] ||
+      ! native_hook_bundle_is_selected "$runtime_root" "$bundle" ||
+      [[ "$(manifest_field "$manifest" runtime_id)" != "$HC_RUNTIME_ID" ||
+        "$(manifest_field "$manifest" source_sha)" != "$HC_SOURCE_SHA" ||
+        "$(manifest_field "$manifest" loom_runtime_sha256)" != "$HC_PRODUCER_SHA256" ||
+        "$(manifest_field "$manifest" coord_runtime_sha256)" != "$HC_COORD_SHA256" ]]; then
+      HOOK_CAPABILITY_REASON='manifest-binding-drift'
+      return 1
+    fi
   fi
   HOOK_CAPABILITY_REASON='native-generation-attested'
   return 0
