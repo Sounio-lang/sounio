@@ -391,3 +391,28 @@ space, 5**, not the degree of the variety), and it gives a cleaner reduction:
 This is the open remainder: kill the perp component. Whether a further parity /
 dimension argument (the perp space ∩ W₁₁ has its own dimension) forces it is the
 next question — the honest live lead, in the "combination" spirit.
+
+## 15. The residual edge (2026-09-01): odd parity is one-shot; residual is even
+
+Following the §14 skew lemma to its conclusion. Measured exactly:
+- The residual space (Im C(x)⊕Im C(x'))^⊥ ∩ W₁₁ where [u,w] lands after the skew
+  reduction is **4-dimensional (EVEN)** in every config (and the associator
+  relations [u,w,w],[w,u,u] are automatically satisfied by [u,w], so they don't
+  reduce it further). So there is **no second odd-parity** to exploit: the odd
+  parity of §14 is **one-shot** — spent on the two 5-dimensional (odd) factors
+  Im C(x), Im C(x') — leaving an even residual where parity forces nothing. This
+  is a structural EXPLANATION of why all degree/parity arguments failed all
+  session (§11): the usable odd parity is exhausted by the first reduction.
+- Attempt to close via a rank-4 section over ℝP⁴ (w₄ ∈ H⁴(ℝP⁴;ℤ/2)=ℤ/2): the
+  canonical section R(u) = residual of [u, w(u)] with w(u)=ker(B_u) (skew kernel,
+  a degree-2 Pfaffian vector) FAILS: its real zeros number 141/142/148 across
+  configs (not uniform, not clean parity), and **none of them are actual
+  witnesses** — because w(u) only enforces [u,w]⊥Im C(x'), so [u,w(u)] retains
+  components in Im C(x), x̃, x̃' outside the 4-dim residual; R=0 ≠ [u,w]=0.
+
+**Net.** §14's skew lemma is a genuine TRUE reduction (kills the projection onto
+Im C(x)⊕Im C(x') for free, by odd-dim degeneracy), but the residual is even and
+the natural rank-4-over-ℝP⁴ closing construction does not have witnesses as its
+zeros. The conjecture is not closed by this edge. The keeper is §14 (the true
+lemma + the "dimension parity, not degree parity" insight) and this §15
+explanation of why the parity is one-shot.
