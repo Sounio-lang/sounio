@@ -1081,12 +1081,14 @@ TDY form reports `0.000000e+00` (or one ULP once aligned), the TPX form
 
 ---
 
-## 6.3 The instrument hid the defect — eight instances
+## 6.3 The instrument hid the defect — nine instances
 
 > **A note on the count.** The brief that commissioned this section asked for
 > two new findings, bringing it to *six*. It brought it to **seven** — the
-> section already carried five instances, not four — and then to **eight**,
-> when the operator recorded his own falsified premise as instance (8). The
+> section already carried five instances, not four — then to **eight**,
+> when the operator recorded his own falsified premise as instance (8), and
+> to **nine** when the archive layer failed silently under the release that
+> was meant to freeze the other eight. The
 > miscount is worth keeping rather than absorbing, because the instance most
 > easily dropped from a mental list is (4), where the *reference's* own error
 > was the thing being attributed to the method under test, and that is the one
@@ -1104,7 +1106,7 @@ Instances **(1)–(4) are instruments set too coarse**: the resolution is a
 number, the defect is a number, and the first is larger. They are fixable by
 tightening a tolerance or choosing a finer probe.
 
-Instances **(5)–(8) have no *syntactic* signature**. They are invisible to
+Instances **(5)–(9) have no *syntactic* signature**. They are invisible to
 every tool that reads the program as text or as types — no token to grep, no
 dimension to check, no diff to review, no unit test that could have been
 written against the source alone, because each branch, file and literal
@@ -1115,7 +1117,7 @@ said they were, and then this document built an instrument that catches one of
 them, which is a contradiction and is corrected here. The distinction that
 survives is:
 
-| | (1)–(4) | (5)–(8) |
+| | (1)–(4) | (5)–(9) |
 |---|---|---|
 | signature | a magnitude | none in the syntax |
 | detected by | a tighter setting | a **behavioural** invariant, printed |
@@ -1332,6 +1334,56 @@ and it carries no resolution label. That is the general form: **prose reports
 numbers without their resolution, and a reader supplies a plausible one.**
 
 ---
+
+### (9) The archive layer failed silently, and reported it where no check could see
+
+The eight instances above are failures *inside* the measurement. This one is
+a layer further out, in the machinery that was supposed to freeze the other
+eight, and it is a new kind: **the failure was reported, but only on a page
+that requires the owner's login, while every public signal read as success.**
+
+v1.0.0 of the frozen snapshot received its Zenodo DOI 45 seconds after the
+GitHub release. v1.0.1 — the version carrying every remediation in this
+document — received none in ten minutes, and would never have. Its
+`.zenodo.json` had gained a `related_identifiers` entry with the relation
+`isVersionOf`. That relation does not exist: Zenodo's legacy deposit schema
+enumerates 33 (`isNewVersionOf` among them), and this one was invented by
+the author while adding the ORCID and DOIs the archive was asked to carry.
+Zenodo's GitHub integration rejected the deposit. The GitHub release
+published normally, with its tarball and checksum; the public Zenodo API
+listed one version of the concept and said nothing about a second; the only
+notice was on the owner's authenticated Zenodo GitHub page.
+
+Every check that existed had passed. The snapshot verifier passed. The
+provenance auditor passed. The release workflow's own guard — verify the
+tree at the tagged commit before publishing — passed, because the tree was
+correct. The defect was in a metadata file none of them read, in a field
+whose vocabulary lives on a server, and the layer that read it reported
+failure into a channel the checks could not reach. **A silent failure with a
+private error message is, from the outside, indistinguishable from
+success**, and it had every appearance of success for as long as nobody
+polled for the DOI.
+
+Detected the same way as (5)–(8) — behaviourally, by measuring what should
+have changed and did not — and remedied the same way. Zenodo's schema is
+vendored into the snapshot as `zenodo-legacyrecord.schema.json`, fetched
+from the `zenodo/zenodo` source because `zenodo.org` no longer serves it at
+its documented path, and `verify_snapshot.py` validates `.zenodo.json`
+against it **offline, before a release** — with `jsonschema` when present,
+by enumeration otherwise — so the rejection happens on the author's machine
+with a message, not on an archive server without one. Proved to
+discriminate by negative control: re-inserting `isVersionOf` fails the
+verifier. That check is the reference implementation for this instance, as
+the fail-closed probes are for (5)–(7).
+
+v1.0.1 stays published without a DOI, and its README says why. v1.0.2 is
+its results tree byte-for-byte, with metadata the archive accepts.
+
+The general form: **the last layer in a pipeline is the one no earlier layer
+can check, and when it reports failure only to an authenticated view, the
+public record certifies what it was asked to reject.** The remedy is to
+pull that layer's contract — here, a schema — down to where it can be
+checked before the irreversible step.
 
 ### The hazard that is NOT an instance here
 
