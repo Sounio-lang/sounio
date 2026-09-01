@@ -10,7 +10,8 @@ results have a reproduction path of their own.
 Protocol (identical to the replica and to the Sounio module):
 
   2% H2 / 1% O2 / 97% N2 at T = 1500 K, total concentration exactly
-  1/(82.057*T) mol/cm3, plus an ADDITIVE H-atom seed of 1e-11 mol/cm3.
+  P0/(R_SI*T)*1e-6 mol/cm3 with P0 = 101325.0 Pa and R_SI = 8.31446261815324
+  (CODATA 2018), plus an ADDITIVE H-atom seed of 1e-11 mol/cm3.
   Isothermal, constant volume.  Checkpoints t = 4e-6 s and t = 2e-5 s.
 
   The reference fixed-step integrator uses RK4 with dt = 2e-9 (the full
@@ -41,13 +42,20 @@ T_CHECK = 1500.0
 DT_REPLICA = 2e-9          # provenance only; Cantera integrates adaptively
 CHECKPOINTS = (4e-6, 2e-5)
 SEED_C = 1e-11             # mol/cm^3, absolute (additive)
+# Standard state and gas constant, aligned with stdlib/chemistry/gri30_full.sio
+# and gri30_full_python_replica.py.  The 1/(82.057*T) shorthand this carried
+# until 2026-09-01 is a truncated cm^3.atm/(mol.K) constant; it put this oracle
+# at a different initial density than the module it is the oracle FOR, which is
+# the one thing an oracle may not do.
+P0 = 101325.0              # Pa, CHEMKIN/GRI standard state
+R_SI = 8.31446261815324    # J/(mol*K), CODATA 2018
 # the eight H/O species the parity tables are reported over
 REPORT = ["H2", "H", "O", "O2", "OH", "H2O", "HO2", "H2O2"]
 
 
 def initial_concentrations(gas, T):
     """Intended absolute initial concentrations, mol/cm^3 (Sounio protocol)."""
-    mtot = 1.0 / (82.057 * T)
+    mtot = P0 / (R_SI * T) * 1e-6
     c = {s: 0.0 for s in gas.species_names}
     c["H2"], c["O2"], c["N2"] = mtot * 0.02, mtot * 0.01, mtot * 0.97
     c["H"] = SEED_C

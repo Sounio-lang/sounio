@@ -721,12 +721,41 @@ python3 benchmarks/chemistry/gri30_full_cantera_parity.py
 python3 benchmarks/chemistry/gri30_full_python_replica.py
 ```
 
+> **The committed oracle is now the aligned one; the tables in this section
+> are the pre-alignment record.** The script initially carried the same
+> `1.0/(82.057*T)` shorthand as everything else, which put it at a *different
+> initial density than `stdlib/chemistry/gri30_full.sio`, the module it is the
+> oracle for* — the one thing an oracle may not do. Caught 2026-09-01 by
+> re-running it and finding it print the published-regime pressure while
+> section 6.2b reports the aligned one: **6.2b had been measured with a working
+> copy that was never committed.** The constant is now
+> `P0/(R_SI*T)*1e-6`, so **section 6.2b reproduces from the committed file and
+> this section's tables no longer do.** They are kept as the published-regime
+> measurement, not deleted.
+
+Output of the **pre-alignment** version (the regime of the tables below):
+
 ```
 cantera 3.2.0
 FULLMECH species=53 reactions=325
 INIT worst relative deviation from intended concentrations = 0.000000e+00
 INIT pressure = 101325.576758 Pa
 ```
+
+Output of the **committed, aligned** version (the regime of section 6.2b):
+
+```
+cantera 3.2.0
+FULLMECH species=53 reactions=325
+INIT worst relative deviation from intended concentrations = 1.629030e-16
+INIT pressure = 101325.124717 Pa
+```
+
+The residual 1.629030e-16 is one ULP: with the aligned constant the intended
+total concentration *is* the ideal-gas concentration at P0, so the TDY round
+trip through molar masses lands within a single unit in the last place instead
+of exactly on it. It is 1e-10 times smaller than the deviation the TPX defect
+of section 1.4 introduced, and does not change any digit reported in 6.2b.
 
 Isothermal, constant volume, T = 1500 K, 2% H2 / 1% O2 / 97% N2, additive
 H seed 1e-11 mol/cm³. Replica: fixed-step RK4, dt = 2e-9 (dt = 1e-8 is outside
@@ -955,9 +984,22 @@ once the constants are aligned (`claude/align-molar-volume-constant`,
 The full mechanism reproduces the H/O result: ~5 orders, landing at the floor
 of CVODE's own `rtol`. NNH — the Δn = +1 species of §3.2 — tracks to 5.129e-12.
 
-**Dependency.** These numbers require the constant alignment. This branch and
-`claude/align-molar-volume-constant` must land together, or the probes here
-will set an initial state the modules do not share.
+**Dependency, and a conflict between the two branches.** These numbers require
+the constant alignment on both sides. The oracle side is aligned in this branch
+(section 6); the module side is aligned in
+`claude/align-molar-volume-constant`. The two must land together, or the probes
+here will set an initial state the modules do not share.
+
+They also **conflict semantically**, which a textual merge will not surface.
+`claude/align-molar-volume-constant` is cut from `main`, which never carried
+the TPX → TDY fix of section 1.4; its `gri30_h2_cantera_parity.py` therefore
+restores `gas.TPX = T, P0, X` and deletes `initial_concentrations` and
+`initial_state_deviation`. Taking that file wholesale — merging carelessly, or
+building an artefact from that branch — **silently reverts the only real defect
+this work fixed**. The correct merged state is the TDY structure of this branch
+with the aligned constants of that one. Verified by the deviation print: the
+TDY form reports `0.000000e+00` (or one ULP once aligned), the TPX form
+`5.692129e-06`.
 
 ---
 
