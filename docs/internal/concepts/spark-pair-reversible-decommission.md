@@ -302,15 +302,51 @@ The exact frozen surface is:
 - source assessment:
   `tools/cluster/spark_pair_historical_provenance.source-assessment.v1`,
   SHA-256
-  `a84e418c33784d47393e72ed32228fb066216cda9d8440c81927e4713a0b66a7`;
-- gate: `scripts/ci/spark_pair_historical_provenance_selftest.sh`.
+  `f17d9c3c30f27bfd25268177b423187a4b5fd446f79027d73025cab944225801`;
+- material observer receipt:
+  `tools/cluster/spark_pair_historical_source_observation.material-parity.v1`,
+  SHA-256
+  `a5fb6ac133df8eb7b9448d125ab52caad1d061ddaa995767d78a7110075d759e`;
+- gates: `scripts/ci/spark_pair_historical_provenance_selftest.sh` and
+  `scripts/ci/spark_pair_historical_source_assessment_selftest.sh`.
 
-The read-only assessment found no admissible class `1..4` source. The retained
-etcd and Slurm database backups are class `5` component evidence without the
-two node leaves, host services, protected payloads or ordered pair closure.
-The existing pair capture is class `6` and is refused with
-`POSTINSTALL_SOURCE/354`. Slurm live accounting, ext4 timestamps and live
-Kubernetes objects are class `7` clock or mutable evidence.
+The material assessment found no admissible class `1..4` source, but it did
+recover two content-addressed class `5` fragments that were absent from the
+first assessment. The etcd snapshot reports completion at
+`2026-08-30T02:17:13Z`, revision `113864385` and `5739` keys. During the
+read-only observation on 1 September, its current bytes hashed to
+`f7835e3ddb9e9b757405e6f78e6edf294ed1310d3412296c4d1c7f882583a7aa`,
+both before and after inspection. It contains both ordered Spark Node identities
+and both device-plugin identities, with the Spark NodeSet and Pireus surfaces
+absent. The Velero archive reports completion at `03:00:44Z`; the object bytes
+observed on 1 September, bound to ETag `b85c9338b7c199074bea1d8fb97be2c6-2`,
+hashed to
+`8c406131e096932bdda861decf7128be2e6597ea9461748c5f9c9ab80461689e`,
+contains raw Node leaves for both machines. Both precede the exact NodeSet
+creation at `09:54:03Z`.
+
+The etcd inspection mapped the read-write-capable backing RBD with
+`--read-only --options noudev`, mounted ext4 with `ro,noload`, and removed the
+mount and device map after rehashing. No Kubernetes object or
+`VolumeAttachment` was created, and the source hash was unchanged. Those
+effects belong to the separate material observer receipt; the assessment
+command only synthesizes evidence and applies the fail-closed gate.
+
+These fragments remain non-authoritative. Their SHA-256 values were not
+recorded before the NodeSet boundary, their backing stores were mutable, Velero
+excluded the `slurm-pilot` namespace, and neither source includes host services,
+container recreate identities or protected payloads. The Slurm database backup
+is also class `5` component evidence without ordered-pair closure. The existing
+pair capture is class `6` and is refused with `POSTINSTALL_SOURCE/354`. Slurm
+live accounting, ext4 timestamps and live Kubernetes objects are class `7`
+clock or mutable evidence.
+
+Frame `9028` currently represents class `4` only by aggregate masks. It has no
+executable list of leaves and no per-leaf proof of class, digest, ordering,
+custody or coverage. Until a Sounio producer profile proves those facts, the
+repository forbids class-4 submission rather than letting a material producer
+assert aggregate closure. This is an additional fail-closed constraint, not a
+claim that the known class-5 fragments compose.
 
 There is also a concrete temporal falsifier for reconstructing the complete
 current surface as if it were pre-mutation history. The first observed Slurm

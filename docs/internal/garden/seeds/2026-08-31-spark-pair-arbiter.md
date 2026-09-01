@@ -427,12 +427,40 @@ HISTORICAL_SOURCE_EMPTY
 -> HISTORICAL_PROVENANCE_ADMITTED
 ```
 
-The admission search remains at the first state. No class `1..4` source was
-found. The content-addressed Slurm MariaDB backup is class `5` and lacks both
+The admission state remains `HISTORICAL_SOURCE_EMPTY`: no class `1..4` source
+was found. Two additional pre-NodeSet fragments are now content-addressed, but
+both remain class `5` and therefore cannot advance that state.
+
+The etcd snapshot reports a capture from `2026-08-30T02:17:06Z` through
+`02:17:13Z`, revision `113864385` and `5739` keys. Its current bytes, observed
+read-only on 1 September, hashed before and after inspection to
+`f7835e3ddb9e9b757405e6f78e6edf294ed1310d3412296c4d1c7f882583a7aa`,
+and contain both Spark Node identities and both device-plugin names and UIDs
+while the Spark NodeSet and all Pireus surfaces are absent. The Velero archive
+reports completion at `03:00:44Z`; its current object bytes, observed on
+1 September and bound to ETag `b85c9338b7c199074bea1d8fb97be2c6-2`, hashed to
+`8c406131e096932bdda861decf7128be2e6597ea9461748c5f9c9ab80461689e`
+and binds raw Node leaves for `spark-3c59` and `spark-8e54`. Both precede the
+exact NodeSet creation at `09:54:03Z`.
+
+Neither source closes admission. The etcd RBD has no 30-Aug volume snapshot;
+the Velero bucket is unversioned, its backup expires, and the `slurm-pilot`
+namespace was excluded. Their SHA-256 identities were observed after the
+installation boundary rather than anchored before it. Neither carries host
+services, container recreate state or protected payloads. The
+content-addressed Slurm MariaDB backup is likewise class `5` and lacks both
 node leaves and pair closure (`DENY346`; terminal admission would be
 `DENY357`). The current pair receipt is class `6` (`DENY354`). Live Slurm,
 Kubernetes state and ext4 timestamps are class `7` (`DENY344`). No immutable
 two-node root snapshot exists (`DENY343`).
+
+Material observation is recorded separately from semantic assessment. The
+read-write-capable etcd backing RBD was mapped with `--read-only --options
+noudev`, ext4 was mounted with `ro,noload`, and the identical source hash was
+measured before and after. The mount and device map were removed, no Kubernetes
+object or `VolumeAttachment` was created, and source bytes were not mutated.
+The Sounio assessment command only synthesizes these facts and preserves the
+denial.
 
 The retained temporal observations also prevent a retrospective composite:
 the first observed Slurm DRAIN occurred on `2026-08-30T17:58:11Z`, before the
@@ -446,6 +474,13 @@ boundary, the current pair can be proposed as pre-fence; it is still refused
 with `FIRST_INSTALL_ANCHOR/349` and lacks protected payload closure. Under the
 cluster boundary it remains post-install. Neither reading produces an admitted
 receipt.
+
+A second fail-closed boundary is now explicit. Frame `9028` represents class
+`4` with aggregate masks only; it has no executable per-leaf class, digest,
+ordering, custody or coverage proof. A composite submission is therefore
+forbidden until a Sounio producer profile proves every leaf, exact coverage
+union and zero conflict. The newly found class `5` fragments cannot be promoted
+by merely asserting the aggregate masks.
 
 The frozen order is now:
 
@@ -462,5 +497,9 @@ GARDEN(completed)
 
 The assessment receipt is
 `tools/cluster/spark_pair_historical_provenance.source-assessment.v1`, SHA-256
-`a84e418c33784d47393e72ed32228fb066216cda9d8440c81927e4713a0b66a7`.
-It records read-only observation, not a waiver and not a semantic promotion.
+`f17d9c3c30f27bfd25268177b423187a4b5fd446f79027d73025cab944225801`.
+The separate material observer receipt is
+`tools/cluster/spark_pair_historical_source_observation.material-parity.v1`,
+SHA-256
+`a5fb6ac133df8eb7b9448d125ab52caad1d061ddaa995767d78a7110075d759e`.
+Neither is a waiver or a semantic promotion.
