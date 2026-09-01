@@ -279,3 +279,41 @@ miracle flatness (non-CM, §5), or the subalgebra reframe (§7, falsified here).
 This is the genuine research frontier. The most valuable computational
 contribution of this work is the **obstruction map (§4) plus this scoreboard**:
 they tell the next attempt exactly which avenues are dead, saving the effort.
+
+## 12. External model consult (OpenRouter, strong+exotic) — no valid mechanism
+
+Fanned the corrected question ("prove D always has an odd-degree ℝ-rational
+component"; total degree varies 6/7/9) to the strongest available models:
+GPT-5.4, DeepSeek V4 Pro, Nemotron-Ultra-550B, Minimax M3, Kimi K2, Grok 4.3,
+Gemini 2.5 Pro, DeepSeek R1. **None produced a valid mechanism**; each founders on
+the exact deg-6 (even) counterexample:
+
+- **GPT-5.4** (best): correctly moves to the incidence variety
+  Y = {([u],[w]) : [u,w]=0} ⊂ ℝP⁴×ℝP⁴ and proposes deg₂(π₁)=1 (unique generic
+  commuting partner). Two gaps: (i) "deg₂(π₁)=1" is birationality of Y→D and does
+  NOT imply D(ℝ)≠∅; (ii) it admits the deg-6 case gives mod-2 total 0 and
+  hand-waves "there must be another odd contribution."
+- **DeepSeek V4 Pro**: novel idea — alternativity ⇒ eigenvalues of C_u=[u,·] in
+  ±λ pairs + a structural zero ⇒ a fixed component. FALSE premise: [u,·] maps
+  Im C(x′)→𝕊, not to itself, so it is not an endomorphism and has no eigenvalues.
+- **Grok 4.3**: dimensionally-confused sketches (a curve→ℝP² "topological degree";
+  a 15×5 "determinant").
+- **Nemotron/Minimax/Gemini/R1/Qwen**: errored or stalled on the basic setup.
+
+**Takeaway.** The frontier models converge on the *right object* (the incidence
+variety Y and a component-level, not total-degree, invariant) but none closes it —
+consistent with this being a genuine open problem. The residue worth a dedicated
+effort:
+1. Work on Y ⊂ ℝP⁴×ℝP⁴ (bidegree class), not on deg D.
+2. The invariant must be component-level: "∃ odd-degree ℝ-component," which is
+   NOT a mod-2 total (the total is even for deg-6 configs — two lines + two
+   conics, 1+2+2+1). So a mod-2 homology class argument alone cannot work; the
+   mechanism must produce an actual odd component (e.g. a canonical rational
+   curve/line in D of odd degree), likely from a natural ℝ-rational construction
+   tied to the Cayley–Dickson/Moufang structure.
+3. The DeepSeek instinct (a structurally forced component), repaired to the pair
+   (w₁,w₂) where [u,·] does act, may be the way in — but was not completed by any
+   model.
+
+This closes the external-consult avenue: the strongest models available (incl.
+GPT-5.4, DeepSeek V4 Pro) do not solve it. The problem is genuinely open.
