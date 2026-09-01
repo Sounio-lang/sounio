@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Spark Pair Reversible Decommission
 
-Status: executable (`SEMANTICS_FROZEN`; `PARITY_OPEN`; `CLAIM_READY=false`)
+Status: executable (`SEMANTICS_FROZEN`; bounded parity proven; `CLAIM_READY=false`)
 Concept-ID: `SOUNIO-REVERSIBLE-COMPUTE-CUSTODY`
 Authority: founder direction, bounded by executable Sounio and material receipts
 
@@ -135,6 +135,18 @@ Evidence-Refuse: tests/fixtures/spark_pair_arbiter/spark_pair_decommission_vecto
 - first executable receipt: `tools/cluster/spark_pair_decommission.first.v1`;
 - semantic freeze: `tools/cluster/spark_pair_decommission.freeze.v1`;
 - parity opening: `tools/cluster/spark_pair_decommission.parity-open.v1`;
+- Lean structural parity: action 41 remains non-terminal, only action 49 enters
+  legacy custody from a non-owned state, recovery exits only through `FENCED`,
+  and every admitted structural plan has effect `NONE`;
+- Koka effect parity: the complete action namespace `33..49` is inferred pure
+  and maps only to `effect=NONE`;
+- C++ material parity: the consumer accepts only the exact frame `9026`
+  `effect=NONE` surface and exposes no process, filesystem, network, BPF,
+  Kubernetes, or Slurm dispatch API;
+- parity gate: `scripts/ci/spark_pair_decommission_parity_selftest.sh`;
+- intentionally unproved: full cross-language guard/reason equivalence;
+- intentionally absent: a material decommission implementation and any live
+  cluster execution;
 - current material effect: `NONE`;
 - current blocking evidence: exact two-node live restore snapshot and replay are
   both `NOT_PRESENT`.

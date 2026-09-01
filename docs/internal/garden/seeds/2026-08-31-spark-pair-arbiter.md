@@ -261,13 +261,16 @@ timeout, Lease expiry, or a one-node observation. Recommission is the reverse
 Sounio-authorized transfer, not manual reconstruction after deletion.
 
 The Garden phase is complete. Frame `9026` now has 69 executable Sounio vectors,
-a first-executable receipt, a semantic freeze, and a parity-open receipt. It is
-not an uninstall script: every result says `effect=NONE`, and the unchanged
-frame `9025` controller rejects its schema, action namespace, and output prefix.
+a first-executable receipt, a semantic freeze, and bounded post-freeze parity.
+Lean proves the structural custody invariants, Koka proves the planning action
+namespace is pure, and C++ proves that the only current material interpretation
+is a no-op consumer. This is not full guard equivalence and it is not an
+uninstall script: every result says `effect=NONE`, and the unchanged frame
+`9025` controller rejects its schema, action namespace, and output prefix.
 
 `CLAIM_READY` remains blocked until the Mac-side inventory supplies the exact
-two-node pre-install service and restart-policy snapshot, replay evidence exists,
-and a post-freeze material parity implementation passes its negative gates.
+two-node pre-install service and restart-policy snapshot and replay evidence
+exist. A material decommission dispatcher remains deliberately absent.
 
 The full draft semantic contract is
 [`spark-pair-reversible-decommission.md`](../../concepts/spark-pair-reversible-decommission.md).
