@@ -80,3 +80,67 @@ by the focused ontology checks.
 - `stdlib/ontology/proof_carrying_inference.sio`
 - `scripts/research/proof_carrying_model_contest_oracle.py`
 - `scripts/ci/proof_carrying_model_contest_gate.sh`
+
+## SYNC-004 Worldline Merge Advice Boundary
+
+```text
+Semantic-Lane-ID: sync004-worldline-epistemic-abi
+Owner: codex-root
+Concept-IDs: SOUNIO-PROOF-CARRYING-INFERENCE
+Intent-Preserved: preserve contradictions and missing evidence without giving a model authority over personal continuity
+Transformation: verified conflict metadata becomes a digest-only epistemic analysis artifact
+Types-Changed: none; a new library receipt and stable C ABI are additive
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: Sounio can classify six evidence categories and emit byte-exact EpistemicMergeAnalysis v1 CBOR
+Claims-Forbidden: Sounio selected a branch, resolved truth, authorized a merge, observed protected plaintext, or mutated a ledger
+Assumptions: conflict frames, membership, signatures, domains, and causal completeness were already verified by the UNEQSELF runtime
+Write-Set: the new worldline advice module, focused witness, versioned FFI crate, and selftest
+Read-Set: UNEQSELF worldline-merge-v1 protocol and public analysis vector
+Positive-Witness: the FFI emits the exact 420-byte public analysis vector and the Sounio receipt keeps all six categories distinct
+Negative-Witness: malformed pointers fail closed; exported ABI contains no decide, commit, select, mutate, or authorization symbol
+Acceptance-Gate: scripts/ci/sounio_worldline_merge_epistemic_selftest.sh
+Integration-Target: UNEQSELF Swift runtime EpistemicMergeAnalysis decoder
+Authoritative-Only-If: never; a current authorize_merge member must sign a separate MergeDecision
+```
+
+The additive surfaces are:
+
+- `stdlib/epistemic/worldline_merge_advice.sio`
+- `tools/uneqself-worldline-merge-ffi/`
+- `tests/run-pass/worldline_merge_advice.sio`
+- `scripts/ci/sounio_worldline_merge_epistemic_selftest.sh`
+
+This is an instance of proof-carrying inference, not a new truth predicate.
+The six lists preserve observations, inferences, contradictions, missing
+evidence, open obligations, and alternatives as different categories. An empty
+or unavailable category is not silently promoted into negative evidence.
+
+### Semantic Outcome Receipt
+
+- Status before: the UNEQSELF protocol had a public, digest-only merge-analysis
+  vector, but Sounio had no executable receipt type or ABI for producing it.
+- Status after: an additive Sounio receipt and one-function C ABI reproduce the
+  canonical 420-byte `EpistemicMergeAnalysis` artifact without reading protected
+  plaintext or acquiring decision authority.
+- Distinctions added: the receipt keeps observations, inferences,
+  contradictions, missing evidence, open obligations, and alternatives in six
+  independent digest categories.
+- Distinctions preserved: missing evidence is not negative evidence; analysis
+  is not selection; synthesis is not authorization; a model output is not a
+  ledger mutation.
+- Distinctions erased: none.
+- Positive evidence: the focused Sounio run-pass witness checks complete,
+  deferred, and invalid inventories; the Rust unit test reproduces the public
+  vector byte for byte and verifies its artifact digest.
+- Negative evidence: null or malformed ABI inputs fail closed, and the release
+  library exports exactly `uneqself_worldline_merge_analyze_v1` with no decide,
+  commit, select, mutate, or authorization symbol.
+- Validation route: `bin/souc check` and the focused `.sio` suite ran in the
+  canonical remote worktree. Rust `fmt`, `clippy -D warnings`, tests, release
+  build, and symbol inspection ran from an isolated copy on `t560-proxmox`
+  because the workspace pod has no active Rust toolchain.
+- Legacy behavior: preserved; all surfaces are additive.
+- Known semantic conflicts: none within this lane's declared write set.
+- Next interface: Swift loads the versioned ABI output and still requires a
+  separately authenticated `authorize_merge` signer for `MergeDecision`.
