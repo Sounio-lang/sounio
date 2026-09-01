@@ -90,13 +90,37 @@ verdict: `artifacts/audit/knowledge_provenance_boundary/status.json`.
 Not wired into CI — a red-by-design accusation belongs to whoever picks up
 the fix, not to every PR.
 
-## What closes it
+## RESOLVED — 2026-09-01 (the fix landed)
 
-`TypeEntry` persisting validity/provenance metadata (the comment at
-`self-hosted/check/epistemic.sio:49` is the unwired organ), so that
-`validity_subsumes` / `provenance_subsumes` receive real inputs. When that
-lands, this gate is the witness that it works — and the validity half of the
-matrix says the fix has TWO slots to unflatten, not one.
+The gate is **green**: `silence madaros-check: refused:provenance`,
+`silence madaros-compile: refused:provenance`, all capability controls
+intact, from-source build on Slurm r770. The semantic-clock engine now
+refuses a provenance-only mismatch at a Knowledge call boundary with
+`error[E244]`, which names the cause.
+
+The fix needed THREE unwirings, not one — each layer was measured dead before
+the next was found:
+
+1. **The in-place twin.** `checker_lower_knowledge_type_mut`
+   (check.sio:2059) — the path Madaros actually takes for Knowledge
+   annotations — dropped the meta, exactly like the value-path
+   `check_knowledge_type`. Both now persist `knowledge_provenance_kind`.
+2. **The manual clone.** `type_entry_clone` (types.sio:1746) rebuilt
+   TypeEntry field-by-field and the inserter's default `-1` silently dropped
+   the payload on every clone. It now copies the field. (Same pattern already
+   bit `noise_set_id: -1` in the same function.)
+3. **match-on-const is broken in both engines.** `provenance_is_trusted`'s
+   `match prov.kind { PROVENANCE_KIND_SOURCE => ... }` bound instead of
+   matching in Madaros (first arm wins) and fell through in lean_single —
+   `provenance_subsumes` was dead code regardless of the payload. Rewritten
+   as an if-chain with the same trusted set. The general bug is filed as
+   issue #2377 with a minimal repro and a census of 41 suspect arms in the
+   checker.
+
+What remains open, by design: the **validity** payload (ValidUntil strings
+currently evaluate to 0.0 in Madaros's `knowledge_validity_expr_to_f64` — the
+date parser is the next slice), the `lean-raw` leg (legacy engine, out of
+scope), and the E244 help text carrying the two class names.
 
 ## What this receipt is not
 
