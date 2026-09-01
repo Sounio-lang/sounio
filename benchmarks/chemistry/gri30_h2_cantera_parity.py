@@ -55,13 +55,48 @@ def build_submechanism():
                        species=keep_species, reactions=keep_rxns)
 
 
+def initial_concentrations(T):
+    """Intended absolute initial concentrations, mol/cm^3 (Sounio protocol)."""
+    mtot = 1.0 / (82.057 * T)
+    c = {s: 0.0 for s in SUB_SPECIES}
+    c["H2"], c["O2"], c["N2"] = mtot * 0.02, mtot * 0.01, mtot * 0.97
+    c["H"] = SEED_C  # additive H-atom seed, NOT taken out of the bath
+    return c
+
+
 def initial_state(gas, T):
-    mtot = 1.0 / (82.057 * T)  # mol/cm^3 at 1 atm
-    X = {s: 0.0 for s in SUB_SPECIES}
-    X["H2"], X["O2"], X["N2"] = 0.02, 0.01, 0.97
-    X["H"] = SEED_C / mtot  # absolute seed -> mole fraction
-    gas.TPX = T, P0, X
+    """Set T and the exact absolute concentrations WITHOUT renormalising.
+
+    The additive seed makes the true initial pressure 101325.576758 Pa, not
+    101325 Pa.  The previous implementation used `gas.TPX = T, P0, X`, which
+    renormalises the mole fractions and pins P = 101325 Pa exactly; that
+    shifts EVERY initial concentration by -5.692129e-06 relative, which chain
+    branching then amplifies to ~3.9e-05 in the radicals by the t = 1e-4 s
+    pre-front checkpoint -- about 15x the deviation of the protocol the
+    README documents.  Setting unnormalised mole fractions and then fixing
+    the density reproduces the intended concentrations to 0.0e+00 relative.
+    Superseded 2026-09-01; see benchmarks/chemistry/RESULTS.md section 1.
+    """
+    c = initial_concentrations(T)
+    conc = [c[s] * 1e3 for s in gas.species_names]  # mol/cm^3 -> kmol/m^3
+    total = sum(conc)
+    gas.set_unnormalized_mole_fractions([x / total for x in conc])
+    rho = sum(conc[i] * gas.molecular_weights[i] for i in range(gas.n_species))
+    gas.TD = T, rho
     return gas
+
+
+def initial_state_deviation(gas, T):
+    """Worst relative deviation of the realised initial state from intent."""
+    want = initial_concentrations(T)
+    initial_state(gas, T)
+    worst = 0.0
+    for s, w in want.items():
+        if w == 0.0:
+            continue
+        got = gas.concentrations[gas.species_index(s)] * 1e-3
+        worst = max(worst, abs(got - w) / w)
+    return worst, gas.P
 
 
 def integrate(gas, T, t_end, dt=DT):
@@ -103,12 +138,17 @@ def main():
     print(f"SUBMECH species={gas.n_species} reactions={gas.n_reactions}")
     assert gas.n_species == 10 and gas.n_reactions == 29, "sub-mechanism mismatch"
 
+    worst, p_init = initial_state_deviation(gas, T_CHECK)
+    print(f"INIT worst relative deviation from intended concentrations = {worst:.6e}")
+    print(f"INIT pressure = {p_init:.6f} Pa (renormalising TPX would pin {P0:.0f})")
+    assert worst == 0.0, "initial state was renormalised"
+
     t0 = time.perf_counter()
     conc = integrate(gas, T_CHECK, T_END)
     wall = time.perf_counter() - t0
     print(f"CHECK T=1500K t=1e-4s wall={wall:.3f}s")
     for name in SUB_SPECIES:
-        print(f"  {name:5s} {conc[gas.species_index(name)]:.6e}")
+        print(f"  {name:5s} {conc[gas.species_index(name)]:.17e}")
 
     print("IGNITION DELAYS (isothermal, seed H=1e-11 mol/cm3, 2%H2/1%O2/97%N2, 1 atm)")
     for T in (1400.0, 1500.0, 1600.0, 1700.0, 1800.0):
