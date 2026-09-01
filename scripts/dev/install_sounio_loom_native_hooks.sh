@@ -439,7 +439,8 @@ run_provider_canary() {
   ' _ "$provider_root" "$hook_command" "$start_event" "$prompt_event" "$end_event" '' &
   CANARY_PID=$!
   CANARY_CONTINUE="$provider_root/continue"
-  for _ in $(seq 1 400); do
+  # A production join may serialize key setup and supervisor recovery under load.
+  for _ in $(seq 1 1200); do
     if [[ -e "$provider_root/ready" ]]; then ready=1; break; fi
     if ! kill -0 "$CANARY_PID" 2>/dev/null; then break; fi
     sleep 0.05
