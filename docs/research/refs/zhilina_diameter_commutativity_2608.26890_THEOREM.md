@@ -1,3 +1,18 @@
+<!-- docs:meta
+topic_id: repo.docs.research.refs.zhilina-diameter-commutativity-2608.26890-theorem
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.refs.zhilina-diameter-commutativity-2608.26890-theorem
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Conjecture 6.8 IS A THEOREM — Zhilina, arXiv 2608.26890 (2026-08-27)
 
 **Svetlana Zhilina, "Diameter of the commutativity graph of the real sedenions",

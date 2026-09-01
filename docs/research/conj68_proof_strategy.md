@@ -1,3 +1,18 @@
+<!-- docs:meta
+topic_id: repo.docs.research.conj68-proof-strategy
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.conj68-proof-strategy
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 >>> RESOLVED 2026-09-01: Conjecture 6.8 is a THEOREM — Zhilina, arXiv 2608.26890, Theorem 4.13 (diam Γ_C^Z(𝕊)=3), a companion paper to 2608.26903 that we had cited but never fetched. Proof = dimension count: find (a',b')∈Im C(x')∩span{(a,-b),(b,a),(ab,0),(0,ab)}^⊥ (5∩codim4≥1), then Lemma 4.12 gives d(x,(a',b'))≤2; length-3 path. VERIFIED computationally 8/8. See refs/zhilina_diameter_commutativity_2608.26890_THEOREM.md. Our §§2-5 rank laws stand independently.
 
 # Conjecture 6.8 (diam Γ_C^Z(𝕊) = 3): proof strategy and obstruction map

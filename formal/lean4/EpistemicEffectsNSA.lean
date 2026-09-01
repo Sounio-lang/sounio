@@ -1389,6 +1389,233 @@ theorem shortcut_eq_sensitivity_level0 (x : Vec) (a : Aff) (y : Vec) (b : Aff) (
   simp only [gMulShortcut, gMulMeta, trueVar, normSq]
   rw [hx, hy, innerA1_scaleR, innerA1_scaleL, inner1, inner1]; simp only [trueVar]
 
+
+-- ================================================================
+-- §K. Hurwitz in the kernel: norm multiplicativity from the polarized sign identity,
+--     for every level where it holds (≤ 3) — and its failure at 4. This is what makes the
+--     variance SHORTCUT exact on ℝ,ℂ,ℍ,𝕆 and unsound on 𝕊 (the third axis, as a theorem).
+-- ================================================================
+
+theorem inner_smul_left (m : Nat) (c : Int) (a b : Vec) : inner m (smul c a) b = c * inner m a b := by
+  unfold inner; rw [← sumR_smul]; apply sumR_congr; intro i _; simp only [smul]; exact Int.mul_assoc _ _ _
+theorem inner_smul_right (m : Nat) (c : Int) (a b : Vec) : inner m a (smul c b) = c * inner m a b := by
+  rw [inner_comm, inner_smul_left, inner_comm]
+theorem inner_zero_left_of {m : Nat} {a : Vec} (b : Vec) (ha : eqOn m a vzero) : inner m a b = 0 := by
+  rw [inner_congr ha (eqOn_refl m b)]; exact inner_zero_left m b
+
+/-- GENERIC SUPPORT INDUCTION: an additive, ℤ-homogeneous functional that reads only live
+    coordinates and kills every basis vector kills every vector. (Abstracts the
+    `assoc_slot*` pattern.) -/
+theorem lin_zero_of_basis (n : Nat) (F : Vec → Int)
+    (hadd : ∀ u v, F (vadd u v) = F u + F v)
+    (hsmul : ∀ c u, F (smul c u) = c * F u)
+    (hlive : ∀ u, eqOn (2^n) u vzero → F u = 0)
+    (hb : ∀ i, i < 2^n → F (e i) = 0) : ∀ v, F v = 0 := by
+  have key : ∀ L : List Nat, (∀ i ∈ L, F (e i) = 0) → ∀ v, qCoversL n L v → F v = 0 := by
+    intro L
+    induction L with
+    | nil => intro _ v hv; exact hlive v (eqOn_zero_of_qCoversL_nil hv)
+    | cons i L ih =>
+      intro hL v hv
+      rw [peel_decomp i v, hadd, hsmul, hL i (List.mem_cons_self),
+          ih (fun j hj => hL j (List.mem_cons_of_mem i hj)) _ (qCoversL_peel hv)]
+      simp
+  intro v
+  exact key (List.range (2^n)) (fun i hi => hb i (List.mem_range.mp hi)) v (qCoversL_range n v)
+
+/-- The doubly-polarized composition form on basis LEFT factors `e_i, e_i'` and arbitrary
+    right factors `b, b'`:  ⟨e_i b, e_i' b'⟩ + ⟨e_i b', e_i' b⟩ − 2·[i=i']·⟨b,b'⟩. -/
+def polar (n : Nat) (i i' : Nat) (b b' : Vec) : Int :=
+  inner (2^n) (cdMul n (e i) b) (cdMul n (e i') b') + inner (2^n) (cdMul n (e i) b') (cdMul n (e i') b)
+    - (if i = i' then 2 * inner (2^n) b b' else 0)
+
+/-- The composition identity on BASIS quadruples — decidable at each level. -/
+def polarBasis (n : Nat) : Prop :=
+  ∀ i, i < 2^n → ∀ i', i' < 2^n → ∀ l, l < 2^n → ∀ l', l' < 2^n → polar n i i' (e l) (e l') = 0
+instance (n : Nat) : Decidable (polarBasis n) := by unfold polarBasis; infer_instance
+
+theorem polarBasis0 : polarBasis 0 := by decide
+theorem polarBasis1 : polarBasis 1 := by decide
+theorem polarBasis2 : polarBasis 2 := by decide
+theorem polarBasis3 : polarBasis 3 := by decide
+/-- …and it FAILS for the sedenions: the quadruple behind `sed_shortcut_understates`. -/
+theorem not_polarBasis4 : ¬ polarBasis 4 := by
+  intro h
+  have := h 1 (by decide) 10 (by decide) 4 (by decide) 15 (by decide)
+  revert this; decide
+
+theorem polar_add_right (n i i' : Nat) (b c b' : Vec) :
+    polar n i i' (vadd b c) b' = polar n i i' b b' + polar n i i' c b' := by
+  unfold polar
+  rw [cdMul_add_right, cdMul_add_right, inner_add_left, inner_add_right, inner_add_left]
+  by_cases h : i = i' <;> simp only [h, if_true, if_false] <;> omega
+theorem polar_smul_right (n i i' : Nat) (c : Int) (b b' : Vec) :
+    polar n i i' (smul c b) b' = c * polar n i i' b b' := by
+  unfold polar
+  rw [cdMul_smul_right, cdMul_smul_right, inner_smul_left, inner_smul_right, inner_smul_left]
+  by_cases h : i = i' <;> simp only [h, if_true, if_false]
+  · rw [Int.mul_sub, Int.mul_add, Int.mul_left_comm c 2]
+  · rw [Int.mul_sub, Int.mul_add, Int.mul_zero]
+theorem polar_live_right (n i i' : Nat) {b : Vec} (b' : Vec) (hb : eqOn (2^n) b vzero) :
+    polar n i i' b b' = 0 := by
+  unfold polar
+  have h1 : eqOn (2^n) (cdMul n (e i) b) vzero := by
+    have := cdMul_congr_right n (e i) hb; rw [cdMul_zero_right] at this; exact this
+  have h2 : eqOn (2^n) (cdMul n (e i') b) vzero := by
+    have := cdMul_congr_right n (e i') hb; rw [cdMul_zero_right] at this; exact this
+  rw [inner_zero_left_of _ h1, inner_zero_right_of _ h2, inner_zero_left_of _ hb]
+  by_cases h : i = i' <;> simp [h]
+theorem polar_comm (n i i' : Nat) (b b' : Vec) : polar n i i' b b' = polar n i i' b' b := by
+  unfold polar; rw [inner_comm (2^n) b' b]; omega
+
+/-- From the basis identity to all `b, b'` (two support inductions). -/
+theorem polar_zero_of_polarBasis {n : Nat} (hp : polarBasis n) {i i' : Nat}
+    (hi : i < 2^n) (hi' : i' < 2^n) : ∀ b b', polar n i i' b b' = 0 := by
+  have step1 : ∀ l, l < 2^n → ∀ b', polar n i i' (e l) b' = 0 := by
+    intro l hl
+    apply lin_zero_of_basis n (fun b' => polar n i i' (e l) b')
+    · intro u v; rw [polar_comm, polar_add_right, polar_comm n i i' u, polar_comm n i i' v]
+    · intro c u; rw [polar_comm, polar_smul_right, polar_comm]
+    · intro u hu; rw [polar_comm]; exact polar_live_right n i i' (e l) hu
+    · intro l' hl'; exact hp i hi i' hi' l hl l' hl'
+  intro b b'
+  apply lin_zero_of_basis n (fun b => polar n i i' b b')
+  · intro u v; exact polar_add_right n i i' u v b'
+  · intro c u; exact polar_smul_right n i i' c u b'
+  · intro u hu; exact polar_live_right n i i' b' hu
+  · intro l hl; exact step1 l hl b'
+
+/-- `⟨e_i b, e_i' b⟩ = [i=i']·‖b‖²` — the right-multiplication matrix is ‖b‖-orthogonal. -/
+theorem basis_bil_zero {n : Nat} (hp : polarBasis n) {i i' : Nat} (hi : i < 2^n) (hi' : i' < 2^n) (b : Vec) :
+    inner (2^n) (cdMul n (e i) b) (cdMul n (e i') b) - (if i = i' then normSq (2^n) b else 0) = 0 := by
+  have h := polar_zero_of_polarBasis hp hi hi' b b
+  unfold polar at h; unfold normSq
+  by_cases hii : i = i' <;> simp only [hii, if_true, if_false] at h ⊢ <;> omega
+
+theorem sumR_ite_eq (m x : Nat) (hx : x < m) (g : Nat → Int) :
+    sumR m (fun k => if k = x then g k else 0) = g x := by
+  induction m with
+  | zero => exact absurd hx (Nat.not_lt_zero x)
+  | succ m ih =>
+    simp only [sumR]
+    by_cases h : x = m
+    · have hz : sumR m (fun k => if k = x then g k else 0) = 0 :=
+        sumR_eq_zero_of m _ (fun i hi => if_neg (by omega))
+      rw [hz]; simp [h]
+    · have hx' : x < m := Nat.lt_of_le_of_ne (Nat.le_of_lt_succ hx) h
+      rw [ih hx']; simp [Ne.symm h]
+
+theorem inner_e_e (m i j : Nat) (hi : i < m) : inner m (e i) (e j) = if i = j then 1 else 0 := by
+  unfold inner
+  have : (fun k => e i k * e j k) = (fun k => if k = i then e j k else 0) := by
+    funext k; simp only [e]; by_cases h : k = i <;> simp [h]
+  rw [this, sumR_ite_eq m i hi]; simp only [e]
+
+/-- The bilinear defect `⟨a b, a' b⟩ − ⟨a,a'⟩‖b‖²`, killed on every pair by two more
+    support inductions. -/
+def bil (n : Nat) (b a a' : Vec) : Int :=
+  inner (2^n) (cdMul n a b) (cdMul n a' b) - inner (2^n) a a' * normSq (2^n) b
+
+theorem bil_add_left (n : Nat) (b u v a' : Vec) : bil n b (vadd u v) a' = bil n b u a' + bil n b v a' := by
+  unfold bil; rw [cdMul_add_left, inner_add_left, inner_add_left, Int.add_mul]; omega
+theorem bil_smul_left (n : Nat) (b : Vec) (c : Int) (u a' : Vec) : bil n b (smul c u) a' = c * bil n b u a' := by
+  unfold bil; rw [cdMul_smul_left, inner_smul_left, inner_smul_left, Int.mul_sub, Int.mul_assoc]
+theorem bil_live_left (n : Nat) (b : Vec) {u : Vec} (a' : Vec) (hu : eqOn (2^n) u vzero) : bil n b u a' = 0 := by
+  unfold bil
+  rw [cdMul_congr_left n b hu, cdMul_zero_left, inner_zero_left, inner_zero_left_of _ hu]; simp
+theorem bil_comm (n : Nat) (b a a' : Vec) : bil n b a a' = bil n b a' a := by
+  unfold bil; rw [inner_comm (2^n) (cdMul n a b), inner_comm (2^n) a a']
+
+theorem bil_zero_of_polarBasis {n : Nat} (hp : polarBasis n) (b : Vec) : ∀ a a', bil n b a a' = 0 := by
+  have step1 : ∀ i, i < 2^n → ∀ a', bil n b (e i) a' = 0 := by
+    intro i hi
+    apply lin_zero_of_basis n (fun a' => bil n b (e i) a')
+    · intro u v; rw [bil_comm, bil_add_left, bil_comm n b u, bil_comm n b v]
+    · intro c u; rw [bil_comm, bil_smul_left, bil_comm]
+    · intro u hu; rw [bil_comm]; exact bil_live_left n b (e i) hu
+    · intro i' hi'
+      have h := basis_bil_zero hp hi hi' b
+      unfold bil; rw [inner_e_e (2^n) i i' hi]
+      by_cases hii : i = i' <;> simp only [hii, if_true, if_false] at h ⊢ <;> omega
+  intro a a'
+  apply lin_zero_of_basis n (fun a => bil n b a a')
+  · intro u v; exact bil_add_left n b u v a'
+  · intro c u; exact bil_smul_left n b c u a'
+  · intro u hu; exact bil_live_left n b a' hu
+  · intro i hi; exact step1 i hi a'
+
+/-- HURWITZ (kernel form): wherever the basis composition identity holds, the norm is
+    multiplicative on ALL vectors. Levels 0–3 qualify (`polarBasis0..3`); level 4 does not. -/
+theorem norm_mult_of_polarBasis {n : Nat} (hp : polarBasis n) (a b : Vec) :
+    normSq (2^n) (cdMul n a b) = normSq (2^n) a * normSq (2^n) b := by
+  have h := bil_zero_of_polarBasis hp b a a
+  unfold bil at h; unfold normSq at h ⊢; omega
+
+theorem octonion_norm_multiplicative (a b : Vec) : normSq 8 (cdMul 3 a b) = normSq 8 a * normSq 8 b :=
+  norm_mult_of_polarBasis polarBasis3 a b
+theorem quaternion_norm_multiplicative (a b : Vec) : normSq 4 (cdMul 2 a b) = normSq 4 a * normSq 4 b :=
+  norm_mult_of_polarBasis polarBasis2 a b
+/-- The sedenion counter-witness, restated against the general theorem's hypothesis. -/
+theorem sedenion_norm_not_multiplicative :
+    ¬ (∀ a b : Vec, normSq 16 (cdMul 4 a b) = normSq 16 a * normSq 16 b) := by
+  intro h
+  have := h sedD sedY
+  revert this; decide
+
+/-- Bilinear consequence (polarization): `⟨d·y, d'·y⟩ = ⟨d,d'⟩·‖y‖²` and `⟨x·d, x·d'⟩ = ‖x‖²·⟨d,d'⟩`. -/
+theorem inner_mulR_eq {n : Nat} (hp : polarBasis n) (d d' y : Vec) :
+    inner (2^n) (cdMul n d y) (cdMul n d' y) = inner (2^n) d d' * normSq (2^n) y := by
+  have h := bil_zero_of_polarBasis hp y d d'; unfold bil at h; omega
+theorem inner_mulL_eq {n : Nat} (hp : polarBasis n) (x d d' : Vec) :
+    inner (2^n) (cdMul n x d) (cdMul n x d') = normSq (2^n) x * inner (2^n) d d' := by
+  have h1 := norm_mult_of_polarBasis hp x (vadd d d')
+  have h2 := norm_mult_of_polarBasis hp x d
+  have h3 := norm_mult_of_polarBasis hp x d'
+  rw [cdMul_add_right, normSq_add, normSq_add, h2, h3, Int.mul_add, Int.mul_add] at h1
+  have := Int.mul_left_comm (normSq (2^n) x) 2 (inner (2^n) d d')
+  omega
+
+theorem trueVar_scaleR_eq {n : Nat} (hp : polarBasis n) (a : Aff) (y : Vec) :
+    trueVar (2^n) (scaleR n a y) = normSq (2^n) y * trueVar (2^n) a := by
+  unfold trueVar
+  suffices h : ∀ b : Aff, innerA (2^n) (scaleR n a y) (scaleR n b y) = normSq (2^n) y * innerA (2^n) a b from h a
+  intro b
+  induction a with
+  | nil => simp [scaleR, innerA]
+  | cons p r ih =>
+    rcases p with ⟨s, c⟩
+    have hcons : scaleR n ((s, c) :: r) y = (s, cdMul n c y) :: scaleR n r y := rfl
+    rw [hcons]; simp only [innerA]
+    rw [ih, coeff_scaleR, inner_mulR_eq hp, Int.mul_add, Int.mul_comm (inner (2^n) c (coeff b s))]
+theorem trueVar_scaleL_eq {n : Nat} (hp : polarBasis n) (x : Vec) (a : Aff) :
+    trueVar (2^n) (scaleL n x a) = normSq (2^n) x * trueVar (2^n) a := by
+  unfold trueVar
+  suffices h : ∀ b : Aff, innerA (2^n) (scaleL n x a) (scaleL n x b) = normSq (2^n) x * innerA (2^n) a b from h a
+  intro b
+  induction a with
+  | nil => simp [scaleL, innerA]
+  | cons p r ih =>
+    rcases p with ⟨s, c⟩
+    have hcons : scaleL n x ((s, c) :: r) = (s, cdMul n x c) :: scaleL n x r := rfl
+    rw [hcons]; simp only [innerA]
+    rw [ih, coeff_scaleL, inner_mulL_eq hp, Int.mul_add]
+
+/-- THE THIRD AXIS, AS A THEOREM. On every level where the composition identity holds
+    (ℝ, ℂ, ℍ, 𝕆), the GUM variance shortcut coincides with the sensitivity propagator on
+    exact operands — so it inherits Axis-2 exactness. Beyond Hurwitz (𝕊) the hypothesis
+    fails (`not_polarBasis4`) and so does the conclusion (`sed_shortcut_understates`). -/
+theorem shortcut_eq_sensitivity_of_polarBasis {n : Nat} (hp : polarBasis n)
+    (x : Vec) (a : Aff) (y : Vec) (b : Aff) (ma mb : KMeta)
+    (hx : ma.gumVar = trueVar (2^n) a) (hy : mb.gumVar = trueVar (2^n) b) :
+    (gMulShortcut n x y ma mb).gumVar = (gMulMeta n x a y b ma mb).gumVar := by
+  simp only [gMulShortcut, gMulMeta]
+  rw [hx, hy, trueVar_scaleR_eq hp, trueVar_scaleL_eq hp]
+
+theorem octonion_shortcut_exact (x : Vec) (a : Aff) (y : Vec) (b : Aff) (ma mb : KMeta)
+    (hx : ma.gumVar = trueVar 8 a) (hy : mb.gumVar = trueVar 8 b) :
+    (gMulShortcut 3 x y ma mb).gumVar = (gMulMeta 3 x a y b ma mb).gumVar :=
+  shortcut_eq_sensitivity_of_polarBasis polarBasis3 x a y b ma mb hx hy
+
 end Sounio.EpistemicEffectsNSA
 
 -- ================================================================
@@ -1412,3 +1639,9 @@ end Sounio.EpistemicEffectsNSA
 #print axioms Sounio.EpistemicEffectsNSA.sed_shortcut_understates
 #print axioms Sounio.EpistemicEffectsNSA.oct_shortcut_exact
 #print axioms Sounio.EpistemicEffectsNSA.shortcut_eq_sensitivity_level0
+#print axioms Sounio.EpistemicEffectsNSA.lin_zero_of_basis
+#print axioms Sounio.EpistemicEffectsNSA.norm_mult_of_polarBasis
+#print axioms Sounio.EpistemicEffectsNSA.octonion_norm_multiplicative
+#print axioms Sounio.EpistemicEffectsNSA.sedenion_norm_not_multiplicative
+#print axioms Sounio.EpistemicEffectsNSA.shortcut_eq_sensitivity_of_polarBasis
+#print axioms Sounio.EpistemicEffectsNSA.not_polarBasis4
