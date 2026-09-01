@@ -31,6 +31,12 @@ D = json.load(open(os.path.join(HERE, "gri30_h2_mechanism.json")))
 RX = D["reactions"]
 NR = len(RX)
 R_SI = 8.31446261815324
+# Arrhenius activation-energy gas constant, cal/(mol*K).
+# Cantera converts the cal/mol Ea values of gri30.yaml with 4.184 J/cal exactly
+# and its own R, giving 8.31446261815324/4.184 = 1.9872042586408316.  The older
+# 1.9872041 is 7.98e-08 away, which sits inside exp(-Ea/(R*T)) and therefore made
+# this replica run DIFFERENT rate constants from the mechanism Cantera reads.
+R_CAL = 1.9872042586408316
 P0 = 101325.0  # CHEMKIN/GRI standard state: 1 atm
 
 nasa = {s: D["species"][s]["coeffs"] for s in SP}
@@ -81,12 +87,12 @@ def g_rt(si, t):
 
 
 def kfwd_eff(r, t, m_eff):
-    kf = A[r] * t**B[r] * math.exp(-EA[r] / (1.9872041 * t))
+    kf = A[r] * t**B[r] * math.exp(-EA[r] / (R_CAL * t))
     if TYPE[r] == 1:
         return kf * m_eff
     if TYPE[r] == 2:
         _, low = LOW
-        k0 = low[0] * t**low[1] * math.exp(-low[2] / (1.9872041 * t))
+        k0 = low[0] * t**low[1] * math.exp(-low[2] / (R_CAL * t))
         pr = k0 * m_eff / kf
         at, t3, t1, t2 = TROE[1]
         fcent = (1 - at) * math.exp(-t / t3) + at * math.exp(-t / t1) + math.exp(-t2 / t)
