@@ -86,7 +86,8 @@ write_related() {
     >"$state/claims/$key.claim"
   printf '%s\n' 'schema=loom-native-hook-capability-v1' \
     'state=NATIVE_HOOK_ATTESTED' "agent=$agent" "lane=$lane" \
-    "worktree=$worktree" 'session_id=reconcile-test-session' 'generation=7' \
+    "worktree=$worktree" 'session_id=reconcile-test-session' \
+    "generation=process-reconcile-test-session-g7-$RELATED_PID-$RELATED_PID_START" \
     'harness=codex' "presence_pid=$RELATED_PID" \
     "presence_pid_start=$RELATED_PID_START" "presence_boot_id=$BOOT_ID" \
     "presence_pid_namespace=$PID_NAMESPACE" \
@@ -123,6 +124,19 @@ LIVE_OUTPUT="$(run_reconcile "$LIVE_STATE" --agent test --lane live)"
 expect_text "$LIVE_OUTPUT" '"decision":"KEEP"' live-control
 expect_text "$LIVE_OUTPUT" '"absence_reason":"none"' live-cause
 expect_text "$LIVE_OUTPUT" '"mutation_applied":false' live-mutation
+
+sed -i 's/^generation=.*/generation=7/' \
+  "$LIVE_STATE/hook-capabilities/test--live.capability"
+set +e
+RAW_GENERATION_OUTPUT="$(run_reconcile "$LIVE_STATE" --agent test --lane live 2>&1)"
+RAW_GENERATION_RC=$?
+set -e
+[[ "$RAW_GENERATION_RC" -eq 42 ]] ||
+  fail "raw capability generation returned $RAW_GENERATION_RC"
+expect_text "$RAW_GENERATION_OUTPUT" '"decision":"FAIL_CLOSED"' raw-generation-decision
+expect_text "$RAW_GENERATION_OUTPUT" 'related-hook-capabilities-generation-drift:generation' \
+  raw-generation-cause
+write_related "$LIVE_STATE" test live "$WORK"
 
 HEARTBEAT_STATE="$(new_state heartbeat)"
 write_presence "$HEARTBEAT_STATE" test heartbeat "$LIVE_PID" "$LIVE_START" 1 1 "$WORK"

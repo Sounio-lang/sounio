@@ -11,8 +11,13 @@ LOOM="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 AUTHORITY="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-native-hook-generation-drain"
 FORBIDDEN_BIN="$TEST_ROOT/forbidden-bin"
 FORBIDDEN_LOG="$TEST_ROOT/forbidden-exec.log"
+LIVE_PID=''
 
 cleanup() {
+  if [[ -n "$LIVE_PID" ]] && kill -0 "$LIVE_PID" 2>/dev/null; then
+    kill "$LIVE_PID" 2>/dev/null || true
+    wait "$LIVE_PID" 2>/dev/null || true
+  fi
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
@@ -233,6 +238,163 @@ set -e
   "$missing_output" == *'"authority_observed":false'* ]] ||
   fail "missing manifest did not fail closed: $missing_output"
 
+LIVE_COMMON="$TEST_ROOT/live-common"
+LIVE_STATE="$LIVE_COMMON/sounio-coord-state"
+LIVE_RUNTIME_ROOT="$LIVE_COMMON/sounio-coord-runtime"
+LIVE_CURRENT="$LIVE_RUNTIME_ROOT/versions/legacy-test"
+LIVE_CANDIDATE="$LIVE_RUNTIME_ROOT/versions/native-test"
+LIVE_MARKERS="$LIVE_RUNTIME_ROOT/native-hook-drain"
+mkdir -p "$LIVE_STATE/process-presences" "$LIVE_STATE/hook-capabilities" \
+  "$LIVE_CURRENT/hooks" "$LIVE_CANDIDATE/bin" "$LIVE_MARKERS"
+printf '%s\n' 'runtime_id=legacy-test' > "$LIVE_CURRENT/manifest"
+printf '%s\n' '# legacy bridge fixture; never executed' \
+  > "$LIVE_CURRENT/hooks/sounio_coord_agent_hook_runtime.py"
+cp "$LOOM" "$LIVE_CANDIDATE/bin/sounio-loom-runtime"
+cp /bin/true "$LIVE_CANDIDATE/bin/sounio-coord-runtime"
+chmod 0555 "$LIVE_CANDIDATE/bin/sounio-loom-runtime" \
+  "$LIVE_CANDIDATE/bin/sounio-coord-runtime"
+ln -s "versions/legacy-test" "$LIVE_RUNTIME_ROOT/current"
+ln -s "versions/native-test" "$LIVE_RUNTIME_ROOT/native-next"
+
+LIVE_LOOM_SHA="$(sha256sum "$LIVE_CANDIDATE/bin/sounio-loom-runtime" | awk '{print $1}')"
+LIVE_COORD_SHA="$(sha256sum "$LIVE_CANDIDATE/bin/sounio-coord-runtime" | awk '{print $1}')"
+CODEX_CONFIG_SHA="$(sha256sum "$ROOT_DIR/.codex/hooks.json" | awk '{print $1}')"
+CLAUDE_CONFIG_SHA="$(sha256sum "$ROOT_DIR/.claude/settings.json" | awk '{print $1}')"
+CURSOR_CONFIG_SHA="$(sha256sum "$ROOT_DIR/.cursor/hooks.json" | awk '{print $1}')"
+GROK_CONFIG_SHA="$(sha256sum "$ROOT_DIR/.grok/hooks/loom-native.json" | awk '{print $1}')"
+printf '%s\n' \
+  'runtime_id=native-test' \
+  'source_sha=native-test-source' \
+  'loom_native_hook_cutover_python_bridge_absent=true' \
+  "loom_runtime_sha256=$LIVE_LOOM_SHA" \
+  "coord_runtime_sha256=$LIVE_COORD_SHA" \
+  "loom_native_hook_cutover_codex_config_sha256=$CODEX_CONFIG_SHA" \
+  "loom_native_hook_cutover_claude_config_sha256=$CLAUDE_CONFIG_SHA" \
+  "loom_native_hook_cutover_cursor_config_sha256=$CURSOR_CONFIG_SHA" \
+  "loom_native_hook_cutover_grok_config_sha256=$GROK_CONFIG_SHA" \
+  > "$LIVE_CANDIDATE/manifest"
+
+CONFIG_COMPONENTS="$TEST_ROOT/config-components.bin"
+: > "$CONFIG_COMPONENTS"
+for relative in .codex/hooks.json .claude/settings.json .cursor/hooks.json \
+    .grok/hooks/loom-native.json; do
+  printf '%s\0%s' "$relative" "$(sha256sum "$ROOT_DIR/$relative" | awk '{print $1}')" \
+    >> "$CONFIG_COMPONENTS"
+  [[ "$relative" == .grok/hooks/loom-native.json ]] || printf '\0' >> "$CONFIG_COMPONENTS"
+done
+CONFIG_BUNDLE_SHA="$({ printf 'loom-hook-config-bundle-v1\0'; cat "$CONFIG_COMPONENTS"; } | sha256sum | awk '{print $1}')"
+CANDIDATE_MANIFEST_SHA="$(sha256sum "$LIVE_CANDIDATE/manifest" | awk '{print $1}')"
+printf '%s\n' 'fixture guardian public key' > "$LIVE_MARKERS/guardian-ed25519-public.pem"
+GUARDIAN_PUBLIC_SHA="$(sha256sum "$LIVE_MARKERS/guardian-ed25519-public.pem" | awk '{print $1}')"
+printf '%s\n' \
+  'schema=loom-native-hook-final-config-v1' \
+  'state=FINAL_CONFIG_BOUND' \
+  'runtime_id=native-test' \
+  "runtime_manifest_sha256=$CANDIDATE_MANIFEST_SHA" \
+  "config_bundle_sha256=$CONFIG_BUNDLE_SHA" \
+  "guardian_public_key_sha256=$GUARDIAN_PUBLIC_SHA" \
+  'semantic_authority=Sounio' \
+  'action=9046' > "$LIVE_MARKERS/final-config.v1"
+
+/bin/sleep 120 &
+LIVE_PID=$!
+LIVE_PID_START="$(sed 's/^[^)]*) //' "/proc/$LIVE_PID/stat" | awk '{print $20}')"
+LIVE_BOOT_ID="$(cat /proc/sys/kernel/random/boot_id)"
+LIVE_PID_NAMESPACE="$(readlink "/proc/$LIVE_PID/ns/pid")"
+LIVE_CALLER="$(readlink -f "/proc/$LIVE_PID/exe")"
+LIVE_CALLER_SHA="$(sha256sum "$LIVE_CALLER" | awk '{print $1}')"
+LIVE_NOW="$(date +%s)"
+
+write_presence() {
+  local lane="$1" session_id="$2" key
+  key="grok--$lane"
+  printf '%s\n' \
+    "presence_id=$key" 'agent=grok' "lane=$lane" "worktree=$ROOT_DIR" \
+    'harness=grok' "session_id=$session_id" 'host=selftest' \
+    "boot_id=$LIVE_BOOT_ID" "pid_namespace=$LIVE_PID_NAMESPACE" \
+    "pid=$LIVE_PID" "pid_start=$LIVE_PID_START" 'generation=1' \
+    'created_utc=2026-09-01T00:00:00Z' \
+    'last_seen_utc=2026-09-01T00:00:00Z' "last_seen_epoch=$LIVE_NOW" \
+    'ttl_seconds=1800' > "$LIVE_STATE/process-presences/$key.presence"
+}
+
+write_capability() {
+  local lane="$1" session_id="$2" generation="$3" key
+  key="grok--$lane"
+  printf '%s\n' \
+    'schema=loom-native-hook-capability-v1' 'state=NATIVE_HOOK_ATTESTED' \
+    'agent=grok' "lane=$lane" "session_id=$session_id" \
+    "generation=$generation" "worktree=$ROOT_DIR" 'harness=grok' \
+    "presence_pid=$LIVE_PID" "presence_pid_start=$LIVE_PID_START" \
+    "presence_boot_id=$LIVE_BOOT_ID" \
+    "presence_pid_namespace=$LIVE_PID_NAMESPACE" \
+    "producer_executable=$LIVE_CANDIDATE/bin/sounio-loom-runtime" \
+    "producer_sha256=$LIVE_LOOM_SHA" \
+    "coord_executable=$LIVE_CANDIDATE/bin/sounio-coord-runtime" \
+    "coord_sha256=$LIVE_COORD_SHA" "caller_pid=$LIVE_PID" \
+    "caller_pid_start=$LIVE_PID_START" "caller_boot_id=$LIVE_BOOT_ID" \
+    "caller_pid_namespace=$LIVE_PID_NAMESPACE" \
+    "caller_executable=$LIVE_CALLER" "caller_sha256=$LIVE_CALLER_SHA" \
+    'wake_eligible=1' 'runtime_id=native-test' \
+    'source_sha=native-test-source' 'created_utc=2026-09-01T00:00:00Z' \
+    "created_epoch=$LIVE_NOW" "expires_epoch=$((LIVE_NOW + 1800))" \
+    > "$LIVE_STATE/hook-capabilities/$key.capability"
+}
+
+FLEET_LANE='fleet-positive'
+FLEET_SESSION='fleet-positive-session'
+NATIVE_LANE='session-positive'
+NATIVE_SESSION='native-positive-session'
+write_presence "$FLEET_LANE" "$FLEET_SESSION"
+write_presence "$NATIVE_LANE" "$NATIVE_SESSION"
+NATIVE_GENERATION="process-$NATIVE_SESSION-g1-$LIVE_PID-$LIVE_PID_START"
+write_capability "$NATIVE_LANE" "$NATIVE_SESSION" "$NATIVE_GENERATION"
+
+observe_isolated_live() {
+  SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+  SOUNIO_LOOM_NATIVE_HOOK_DRAIN_COMMON_DIR="$LIVE_COMMON" \
+  SOUNIO_LOOM_NATIVE_HOOK_DRAIN_SKIP_UI_ATTESTATION=1 \
+    "$LOOM" hook-generation-drain-snapshot --cwd "$ROOT_DIR" 2>&1
+}
+
+set +e
+live_positive_output="$(observe_isolated_live)"
+live_positive_rc=$?
+set -e
+[[ "$live_positive_rc" -eq 42 && \
+  "$live_positive_output" == *'"authority_observed":true'* && \
+  "$live_positive_output" == *'"process_generation_bound":true'* && \
+  "$live_positive_output" == *'"hook_capability_bound":true'* && \
+  "$live_positive_output" == *'"records":2,"processes":1,"collapsed_aliases":1,"total":1,"classified":1,"native":1,"legacy":0,"unknown":0,"unresponsive":0'* && \
+  "$live_positive_output" == *'"lane":"session-positive"'* && \
+  "$live_positive_output" != *'"lane":"fleet-positive"'* ]] ||
+  fail "canonical live capability or process alias collapse failed: $live_positive_output"
+
+write_capability "$NATIVE_LANE" "$NATIVE_SESSION" '1'
+set +e
+generation_drift_output="$(observe_isolated_live)"
+generation_drift_rc=$?
+set -e
+[[ "$generation_drift_rc" -eq 42 && \
+  "$generation_drift_output" == *'"decision":"DENY675"'* && \
+  "$generation_drift_output" == *'"hook_capability_bound":false'* && \
+  "$generation_drift_output" == *'"native":0,"legacy":0,"unknown":1,"unresponsive":0'* ]] ||
+  fail "non-canonical capability generation did not fail closed: $generation_drift_output"
+
+write_capability "$NATIVE_LANE" "$NATIVE_SESSION" "$NATIVE_GENERATION"
+FLEET_GENERATION="process-$FLEET_SESSION-g1-$LIVE_PID-$LIVE_PID_START"
+write_capability "$FLEET_LANE" "$FLEET_SESSION" "$FLEET_GENERATION"
+set +e
+alias_conflict_output="$(observe_isolated_live)"
+alias_conflict_rc=$?
+set -e
+[[ "$alias_conflict_rc" -eq 42 && \
+  "$alias_conflict_output" == *'"decision":"DENY675"'* && \
+  "$alias_conflict_output" == *'"capability_reason":"process-alias-capability-conflict"'* && \
+  "$alias_conflict_output" == *'"native":0,"legacy":0,"unknown":1,"unresponsive":0'* ]] ||
+  fail "conflicting capabilities for one kernel process were not refused: $alias_conflict_output"
+rm -f "$LIVE_STATE/hook-capabilities/grok--$FLEET_LANE.capability"
+
 live_output=''
 for _attempt in 1 2 3 4 5; do
   set +e
@@ -270,4 +432,4 @@ grep -Fq 'refreshDrain' "$ROOT_DIR/tools/loom/src/loom_ui.ml" ||
   fail "forbidden Python or Rust executable ran: $(tr '\n' ' ' < "$FORBIDDEN_LOG")"
 
 printf '%s\n' \
-  'sounio-loom-native-hook-generation-drain-ocaml-selftest: PASS semantic_authority=Sounio operational_realization=OCaml direct_state_inventory=true kernel_process_binding=true stable_double_snapshot=true incomplete_inventory=DENY673 false_zero=DENY680 generation_or_capability_unbound=DENY675 canary_or_rollback_incomplete=DENY678 config_unbound=DENY672 arithmetic_invalid=DENY674 runtime_tamper=fail_closed manifest_tamper=fail_closed manifest_missing=fail_closed live_drift=fail_closed forbidden_python_rust_exec=absent ui_route=wired cutover_command=native+hidden_until_ready'
+  'sounio-loom-native-hook-generation-drain-ocaml-selftest: PASS semantic_authority=Sounio operational_realization=OCaml direct_state_inventory=true kernel_process_binding=true canonical_process_generation=true fleet_session_alias_collapse=true duplicate_capability_conflict=DENY675 stable_double_snapshot=true incomplete_inventory=DENY673 false_zero=DENY680 generation_or_capability_unbound=DENY675 canary_or_rollback_incomplete=DENY678 config_unbound=DENY672 arithmetic_invalid=DENY674 runtime_tamper=fail_closed manifest_tamper=fail_closed manifest_missing=fail_closed live_drift=fail_closed forbidden_python_rust_exec=absent ui_route=wired cutover_command=native+hidden_until_ready'

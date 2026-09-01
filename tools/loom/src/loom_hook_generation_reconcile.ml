@@ -252,10 +252,17 @@ let related_artifacts state key agent lane worktree presence_values =
             same_field_when_present "related-delivery-endpoints" values "harness_pid_start"
               (required "presence-record" presence_values "pid_start"));
           if directory = "hook-capabilities" then (
+            let canonical_generation =
+              Loom_hook_generation_drain.canonical_process_generation_fields
+                ~session_id:(required "presence-record" presence_values "session_id")
+                ~generation:(required "presence-record" presence_values "generation")
+                ~pid:(required "presence-record" presence_values "pid")
+                ~pid_start:(required "presence-record" presence_values "pid_start")
+            in
             same_field "related-hook-capabilities" values "session_id"
               (required "presence-record" presence_values "session_id");
             same_field "related-hook-capabilities" values "generation"
-              (required "presence-record" presence_values "generation");
+              canonical_generation;
             same_field "related-hook-capabilities" values "harness"
               (required "presence-record" presence_values "harness");
             same_field "related-hook-capabilities" values "presence_pid"

@@ -269,6 +269,7 @@ type observation = {
   current_legacy_bridge : bool;
   activation_requested : bool;
   zero_legacy_claimed : bool;
+  records : int;
   total : int;
   classified : int;
   native : int;
@@ -467,6 +468,13 @@ let find_candidate runtime_root current =
           |> List.find_opt (fun path -> path <> current && bridge_free_runtime path)
           |> Option.value ~default:"")
 
+let canonical_process_generation_fields ~session_id ~generation ~pid ~pid_start =
+  Printf.sprintf "process-%s-g%s-%s-%s" session_id generation pid pid_start
+
+let canonical_process_generation member =
+  canonical_process_generation_fields ~session_id:member.session_id
+    ~generation:member.generation ~pid:member.pid ~pid_start:member.pid_start
+
 let capability_for common member current candidate =
   let path =
     Filename.concat common
@@ -484,7 +492,7 @@ let capability_for common member current candidate =
         && field values "state" = "NATIVE_HOOK_ATTESTED"
         && field values "agent" = member.agent && field values "lane" = member.lane
         && field values "session_id" = member.session_id
-        && field values "generation" = member.generation
+        && field values "generation" = canonical_process_generation member
         && field values "worktree" = member.worktree
         && field values "harness" = member.harness
         && field values "presence_pid" = member.pid
@@ -548,6 +556,82 @@ let count classification members =
     (fun total member -> if member.classification = classification then total + 1 else total)
     0 members
 
+let positive_decimal_string value =
+  value <> ""
+  && value.[0] <> '0'
+  && String.for_all (function '0' .. '9' -> true | _ -> false) value
+
+let kernel_process_identity member =
+  if positive_decimal_string member.pid
+     && positive_decimal_string member.pid_start
+     && member.boot_id <> "" && member.boot_id <> "unknown"
+     && member.pid_namespace <> "" && member.pid_namespace <> "unknown"
+  then
+    Some
+      (String.concat "\000"
+         [ member.pid; member.pid_start; member.boot_id; member.pid_namespace ])
+  else None
+
+let process_alias_group members =
+  match members with
+  | [] -> false
+  | first :: _ ->
+      List.for_all
+        (fun member ->
+          member.agent = first.agent && member.harness = first.harness
+          && member.worktree = first.worktree)
+        members
+      && List.exists (fun member -> starts_with member.lane "fleet-") members
+      && List.exists (fun member -> starts_with member.lane "session-") members
+
+let member_order left right =
+  String.compare
+    (String.concat "\000" [ left.agent; left.lane; left.session_id ])
+    (String.concat "\000" [ right.agent; right.lane; right.session_id ])
+
+let best_unbound_member members =
+  let preferred =
+    List.filter (fun member -> member.classification = Unknown) members
+  in
+  match List.sort member_order (if preferred = [] then members else preferred) with
+  | member :: _ -> member
+  | [] -> failf "process-alias-group-empty"
+
+let collapse_process_alias_group members =
+  if not (process_alias_group members) then members
+  else
+    match
+      List.filter
+        (fun member ->
+          member.classification = Native || member.classification = Legacy)
+        members
+    with
+    | [ member ] -> [ member ]
+    | [] ->
+        let member = best_unbound_member members in
+        [ { member with capability_reason = "process-alias-unbound" } ]
+    | bound ->
+        let member = List.sort member_order bound |> List.hd in
+        [ { member with classification = Unknown;
+                        capability_reason = "process-alias-capability-conflict" } ]
+
+let collapse_process_aliases members =
+  let rec loop = function
+    | [] -> []
+    | member :: tail ->
+        (match kernel_process_identity member with
+        | None -> member :: loop tail
+        | Some identity ->
+            let aliases, rest =
+              List.partition
+                (fun candidate ->
+                  kernel_process_identity candidate = Some identity)
+                tail
+            in
+            collapse_process_alias_group (member :: aliases) @ loop rest)
+  in
+  loop members
+
 let digest_regular path =
   try sha256_file "binding" path with _ -> String.make 64 '0'
 
@@ -558,6 +642,17 @@ let marker_directory common =
         failf "drain-state-override-requires-test-mode";
       value
   | _ -> Filename.concat common "sounio-coord-runtime/native-hook-drain"
+
+let observation_common root =
+  match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_DRAIN_COMMON_DIR" with
+  | Some value when value <> "" ->
+      if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
+        failf "drain-common-override-requires-test-mode";
+      let resolved = Unix.realpath value in
+      if (Unix.stat resolved).st_kind <> S_DIR then
+        failf "drain-common-override-not-directory";
+      resolved
+  | _ -> git_common_dir root
 
 let read_marker common name =
   let path = Filename.concat (marker_directory common) name in
@@ -701,7 +796,7 @@ let member_from_record ~now ~boot_id ~pid_namespace record =
        with Error _ -> invalid_member record "presence-record-invalid")
 
 let live_observation ?(verify_canaries = true) root =
-  let common = git_common_dir root in
+  let common = observation_common root in
   let runtime_root = Filename.concat common "sounio-coord-runtime" in
   let current =
     try Unix.realpath (Filename.concat runtime_root "current") with _ -> ""
@@ -736,7 +831,7 @@ let live_observation ?(verify_canaries = true) root =
     List.map fst parsed_members
     |> List.filter (fun member -> provider_harness member.harness)
   in
-  let members =
+  let classified_members =
     raw_members
     |> List.map (fun member ->
            if member.presence_state <> "live" then
@@ -748,6 +843,8 @@ let live_observation ?(verify_canaries = true) root =
              in
              { member with classification; capability_reason })
   in
+  let members = collapse_process_aliases classified_members in
+  let records = List.length raw_members in
   let native = count Native members and legacy = count Legacy members in
   let unknown = count Unknown members and unresponsive = count Unresponsive members in
   let total = List.length members in
@@ -824,7 +921,7 @@ let live_observation ?(verify_canaries = true) root =
     current_legacy_bridge =
       current <> ""
       && Sys.file_exists (Filename.concat current "hooks/sounio_coord_agent_hook_runtime.py");
-    activation_requested = false; zero_legacy_claimed = false; total;
+    activation_requested = false; zero_legacy_claimed = false; records; total;
     classified = total; native; legacy; unknown; unresponsive;
     inventory_sha256 = sha256 ("loom-hook-presence-inventory-v1\000" ^ second_signature);
     old_runtime_sha256;
@@ -859,7 +956,8 @@ let fixture_observation path =
     current_legacy_bridge = get_bool "current_legacy_bridge";
     activation_requested = get_bool "activation_requested";
     zero_legacy_claimed = get_bool "zero_legacy_claimed";
-    total = get_int "total"; classified = get_int "classified";
+    records = get_int "total"; total = get_int "total";
+    classified = get_int "classified";
     native = get_int "native"; legacy = get_int "legacy";
     unknown = get_int "unknown"; unresponsive = get_int "unresponsive";
     inventory_sha256 = get_hash "inventory_sha256";
@@ -962,7 +1060,7 @@ let snapshot_json policy observation frame output decision =
   let admitted = decision = "DRAINING" || decision = "CUTOVER_READY" in
   let ready = decision = "CUTOVER_READY" in
   Printf.sprintf
-    "{\"schema\":\"loom-native-hook-generation-drain-snapshot-v1\",\"action\":9046,\"stage\":\"SEMANTICS_FROZEN\",\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"authority_observed\":true,\"decision\":\"%s\",\"decision_code\":%d,\"admitted\":%s,\"cutover_ready\":%s,\"cutover_command_exposed\":%s,\"block_reason\":\"%s\",\"snapshot_utc\":\"%s\",\"inventory\":{\"fresh\":%s,\"complete\":%s,\"classification_complete\":%s,\"process_generation_bound\":%s,\"hook_capability_bound\":%s,\"sha256\":\"%s\",\"total\":%d,\"classified\":%d,\"native\":%d,\"legacy\":%d,\"unknown\":%d,\"unresponsive\":%d},\"bindings\":{\"current_runtime_id\":\"%s\",\"candidate_runtime_id\":\"%s\",\"old_runtime_bound\":%s,\"candidate_runtime_bound\":%s,\"candidate_config_bound\":%s,\"final_config_bound\":%s,\"old_runtime_sha256\":\"%s\",\"candidate_runtime_sha256\":\"%s\",\"config_pair_sha256\":\"%s\"},\"canaries\":{\"mask\":%d,\"required_mask\":15,\"four_provider_complete\":%s},\"rollback_pair_tested\":%s,\"native_entry_open\":%s,\"bridge_free_candidate\":%s,\"current_legacy_bridge\":%s,\"authority\":{\"manifest_sha256\":\"%s\",\"semantics_sha256\":\"%s\",\"executable_sha256\":\"%s\",\"frame_sha256\":\"%s\",\"output_sha256\":\"%s\",\"output\":\"%s\"},\"members\":[%s]}"
+    "{\"schema\":\"loom-native-hook-generation-drain-snapshot-v1\",\"action\":9046,\"stage\":\"SEMANTICS_FROZEN\",\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"authority_observed\":true,\"decision\":\"%s\",\"decision_code\":%d,\"admitted\":%s,\"cutover_ready\":%s,\"cutover_command_exposed\":%s,\"block_reason\":\"%s\",\"snapshot_utc\":\"%s\",\"inventory\":{\"fresh\":%s,\"complete\":%s,\"classification_complete\":%s,\"process_generation_bound\":%s,\"hook_capability_bound\":%s,\"sha256\":\"%s\",\"records\":%d,\"processes\":%d,\"collapsed_aliases\":%d,\"total\":%d,\"classified\":%d,\"native\":%d,\"legacy\":%d,\"unknown\":%d,\"unresponsive\":%d},\"bindings\":{\"current_runtime_id\":\"%s\",\"candidate_runtime_id\":\"%s\",\"old_runtime_bound\":%s,\"candidate_runtime_bound\":%s,\"candidate_config_bound\":%s,\"final_config_bound\":%s,\"old_runtime_sha256\":\"%s\",\"candidate_runtime_sha256\":\"%s\",\"config_pair_sha256\":\"%s\"},\"canaries\":{\"mask\":%d,\"required_mask\":15,\"four_provider_complete\":%s},\"rollback_pair_tested\":%s,\"native_entry_open\":%s,\"bridge_free_candidate\":%s,\"current_legacy_bridge\":%s,\"authority\":{\"manifest_sha256\":\"%s\",\"semantics_sha256\":\"%s\",\"executable_sha256\":\"%s\",\"frame_sha256\":\"%s\",\"output_sha256\":\"%s\",\"output\":\"%s\"},\"members\":[%s]}"
     decision (decision_code decision) (string_of_bool admitted) (string_of_bool ready)
     (string_of_bool ready) (block_reason decision) (json_escape observation.snapshot_utc)
     (string_of_bool observation.inventory_fresh)
@@ -970,6 +1068,7 @@ let snapshot_json policy observation frame output decision =
     (string_of_bool observation.classification_complete)
     (string_of_bool observation.process_generation_bound)
     (string_of_bool observation.hook_capability_bound) observation.inventory_sha256
+    observation.records observation.total (observation.records - observation.total)
     observation.total observation.classified observation.native observation.legacy
     observation.unknown observation.unresponsive (json_escape observation.current_runtime_id)
     (json_escape observation.candidate_runtime_id)
@@ -1032,8 +1131,14 @@ let attach_ui_attestation common snapshot =
 
 let evaluate_live root =
   let snapshot, code = evaluate root (live_observation root) in
-  let common = git_common_dir root in
-  (attach_ui_attestation common snapshot, code)
+  let common = observation_common root in
+  let snapshot =
+    match Sys.getenv_opt "SOUNIO_LOOM_NATIVE_HOOK_DRAIN_SKIP_UI_ATTESTATION" with
+    | Some "1" when Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" = Some "1" -> snapshot
+    | Some "1" -> failf "drain-ui-attestation-skip-requires-test-mode"
+    | _ -> attach_ui_attestation common snapshot
+  in
+  (snapshot, code)
 
 let cutover_observation observation =
   let affirmative_absence =
@@ -1047,13 +1152,13 @@ let evaluate_cutover_live root observation =
   let snapshot, _authority_code, decision =
     evaluate_with_decision root (cutover_observation observation)
   in
-  let common = git_common_dir root in
+  let common = observation_common root in
   let signed_snapshot = attach_ui_attestation common snapshot in
   (signed_snapshot, if decision = "CUTOVER_READY" then 0 else 42)
 
 let fail_closed_json reason =
   Printf.sprintf
-    "{\"schema\":\"loom-native-hook-generation-drain-snapshot-v1\",\"action\":9046,\"stage\":\"SEMANTICS_FROZEN\",\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"authority_observed\":false,\"decision\":\"FAIL_CLOSED\",\"decision_code\":424,\"admitted\":false,\"cutover_ready\":false,\"cutover_command_exposed\":false,\"block_reason\":\"%s\",\"snapshot_utc\":\"\",\"inventory\":{\"fresh\":false,\"complete\":false,\"classification_complete\":false,\"process_generation_bound\":false,\"hook_capability_bound\":false,\"sha256\":\"\",\"total\":0,\"classified\":0,\"native\":0,\"legacy\":0,\"unknown\":0,\"unresponsive\":0},\"bindings\":{\"current_runtime_id\":\"\",\"candidate_runtime_id\":\"\",\"old_runtime_bound\":false,\"candidate_runtime_bound\":false,\"candidate_config_bound\":false,\"final_config_bound\":false,\"old_runtime_sha256\":\"\",\"candidate_runtime_sha256\":\"\",\"config_pair_sha256\":\"\"},\"canaries\":{\"mask\":0,\"required_mask\":15,\"four_provider_complete\":false},\"rollback_pair_tested\":false,\"native_entry_open\":false,\"bridge_free_candidate\":false,\"current_legacy_bridge\":false,\"authority\":{\"manifest_sha256\":\"%s\",\"semantics_sha256\":\"%s\",\"executable_sha256\":\"\",\"frame_sha256\":\"\",\"output_sha256\":\"\",\"output\":\"\"},\"members\":[]}"
+    "{\"schema\":\"loom-native-hook-generation-drain-snapshot-v1\",\"action\":9046,\"stage\":\"SEMANTICS_FROZEN\",\"semantic_authority\":\"Sounio\",\"operational_realization\":\"OCaml\",\"authority_observed\":false,\"decision\":\"FAIL_CLOSED\",\"decision_code\":424,\"admitted\":false,\"cutover_ready\":false,\"cutover_command_exposed\":false,\"block_reason\":\"%s\",\"snapshot_utc\":\"\",\"inventory\":{\"fresh\":false,\"complete\":false,\"classification_complete\":false,\"process_generation_bound\":false,\"hook_capability_bound\":false,\"sha256\":\"\",\"records\":0,\"processes\":0,\"collapsed_aliases\":0,\"total\":0,\"classified\":0,\"native\":0,\"legacy\":0,\"unknown\":0,\"unresponsive\":0},\"bindings\":{\"current_runtime_id\":\"\",\"candidate_runtime_id\":\"\",\"old_runtime_bound\":false,\"candidate_runtime_bound\":false,\"candidate_config_bound\":false,\"final_config_bound\":false,\"old_runtime_sha256\":\"\",\"candidate_runtime_sha256\":\"\",\"config_pair_sha256\":\"\"},\"canaries\":{\"mask\":0,\"required_mask\":15,\"four_provider_complete\":false},\"rollback_pair_tested\":false,\"native_entry_open\":false,\"bridge_free_candidate\":false,\"current_legacy_bridge\":false,\"authority\":{\"manifest_sha256\":\"%s\",\"semantics_sha256\":\"%s\",\"executable_sha256\":\"\",\"frame_sha256\":\"\",\"output_sha256\":\"\",\"output\":\"\"},\"members\":[]}"
     (json_escape reason) pinned_manifest_sha256 semantics_sha256
 
 let live_json ~cwd =
