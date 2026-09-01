@@ -302,14 +302,23 @@ operands are refused by design) and with `SOUNIO_NS_DISABLE=1` (E230 vanishes, E
 survive — causal separability, the same move the NS gate makes for E245). The octonion
 control is therefore a gate-only fixture (`tests/fixtures/antigarbling/`), not a suite test.
 
-**What was NOT changed, and why.** The small e-graph's `fano_selective` gate reads
-`EgNode.value` as a basis index, but `opt_cleanup.sio` creates VAR nodes with IR *register*
-ids. The gate therefore compares register numbers against Fano lines. It is inert in
-practice — octonion/sedenion products are single IR instructions (`IrHyperMulO/S`) that never
-enter the FADD/FMUL e-graph, whose FMULs are scalar f64 (associative in ℝ) — so nothing is
-unsound today, but the "Q certificate" it pretends to be does not exist there. Making it real
-needs a basis-support mask on e-graph nodes fed from the IR; that is the `Q` propagation of
-§2 (`qUnion`/`qProd`) as engineering, left explicitly open.
+**The small e-graph's `fano_selective` gate — made real (same day, branch
+`fable/egraph-q-certificate-20260901`).** The gate read `EgNode.value` as a basis index, but
+`opt_cleanup.sio` creates VAR nodes with IR *register* ids, so the 168-theorem predicate was
+evaluated on register numbers: an arbitrary per-register decision, not a certificate. It was
+inert for soundness — octonion/sedenion products are single IR instructions (`IrHyperMulO/S`)
+that never enter the FADD/FMUL e-graph, whose FMULs are scalar f64 — but the `Q` certificate
+of §2 did not exist there. Now every node carries `q_mask`, the basis support: scalar f64 leaves
+from the epistemic feed certify `{e₀}` (`real_assoc`), declared basis leaves certify `{e_k}`
+(`eg_small_add_basis_var`), FADD/FSUB unite (`qCovers_vadd`), FMUL maps `i xor j`
+(`qCovers_cdMul`), anything else is ⊤. The gate admits `(a·b)·c ↔ a·(b·c)` iff *every* basis
+triple in `Q(a)×Q(b)×Q(c)` associates (`assoc_zero_of_qCoversL`, with
+`ir_can_reassociate_triple` per triple); an uncertified operand refuses — an id is not a
+certificate. Consequence in the optimizer: under `fano_selective` plus the precision-preserving
+opt-in, scalar product chains reassociate deterministically (they are real numbers) instead of
+depending on register numbering. Tests: `egraph.sio` T81/T82 migrated to basis leaves, T86–T90
+added; live mirrors T143e–h in `main.sio`; `epistemic_egraph_rewrite_gate.sh` checks the
+machinery structurally and the four live tests. Measurement: see the entry below.
 
 **Measured (Slurm job 11425, source build of `b1775894cc`, ELF `fca28454`):**
 `antigarbling_third_axis_gate.sh` 8/8 PASS — E251 refused with NS on and surviving

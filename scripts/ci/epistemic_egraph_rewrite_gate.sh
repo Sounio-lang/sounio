@@ -96,7 +96,7 @@ cg "main:T143e_fn"                "fn compiler_main_test_eg_q_scalar_leaves_reas
 cg "main:T143f_fn"                "fn compiler_main_test_eg_q_unknown_leaves_block" "$M"
 cg "main:T143g_fn"                "fn compiler_main_test_eg_q_union_support_blocks" "$M"
 cg "main:T143h_fn"                "fn compiler_main_test_eg_q_mask_algebra" "$M"
-cg "main:total_1160"              "let total: i64 = 1160" "$M"
+cg "main:total_1161"              "let total: i64 = 1161" "$M"
 
 echo ""
 echo "--- Live check: main.sio self-tests, T143b/c/d (three axes) + T143e/f/g/h (Q certificate) (requires a Madaros built from current source) ---"
