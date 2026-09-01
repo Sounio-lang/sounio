@@ -190,3 +190,79 @@ Executable surfaces:
 - `tools/cluster/spark_pair_restore_capsule.freeze.v1`;
 - `tools/cluster/spark_pair_restore_capsule.parity-open.v1`;
 - `scripts/ci/spark_pair_restore_capsule_selftest.sh`.
+
+## Read-Only Capture Interface
+
+Read-Only Capture v1 is a strict producer profile for frame `9027`; it does
+not add a frame or relax a restore fact. Sounio is the first executable
+authority and freezes four canonical material schemas: the 38-field node
+manifest, 17-field post-install restorable candidate, 29-field boot-scoped
+observation and 16-field ordered pair manifest. It also freezes the 22-domain
+prefix-free framing used by the native SHA-256 collector.
+
+The complete current observation projects to action `51`, state `20`,
+authority mask `473`, snapshot mask `491455` and replay mask `0`. Frame `9027`
+is invoked and refuses the candidate with `PREINSTALL_PROVENANCE/315`. The
+current manifests deliberately say:
+
+```text
+capture_temporality=CURRENT_POSTINSTALL_OBSERVATION
+historical_preinstall_receipt=NOT_PRESENT
+protected_content_receipt=NOT_OBSERVED
+restorable=false
+snapshot_binding_receipt=NOT_ISSUED
+state_transition=false
+```
+
+The C++20 material observer was compiled natively and produced byte-identical
+fixtures on both ARM64 Sparks. Its source SHA-256 is pinned and checked before
+any privileged transport. Its fixed domain enum and SHA-256 implementation
+produce the observation digests; the shell gate only transports fixed queries
+and bytes. The Multus bridge must report the same pinned runtime `imageID`
+digest on both nodes, not merely the expected mutable image tag. Kubernetes API
+GETs remain the material source for NodeSet,
+device-plugin, taint, label and node identity. Slurm observation uses only the
+existing login Pod and read-only `scontrol`, `squeue` and `sinfo` queries.
+
+The accepted live evidence is:
+
+- profile freeze:
+  `3edfa1e7394b8e82ce8d5e4c81e0450b88dc5b72e1eb71c6acf33f6e2c705223`;
+- ordered pair receipt:
+  `deb5285f1cf1a2e46b8cdf49d4040419b9a6fe57eb3385ddd1197b56a105b6eb`;
+- material parity receipt:
+  `235b85efcd7be87db6e073773bf51eb09caf8e2e8869cade4e80f0d0a623781d`;
+- both node manifests and observations bind `scheduler_mutation=NONE`,
+  `host_configuration_mutation=NONE` and equal pre/post managed-state
+  sentinels;
+- the `/dev/shm` source and binary materializations were removed and verified
+  absent on both hosts before the receipts were published.
+
+An earlier pair receipt,
+`c0f6235dc7b93aca8d674ba66c28d66ea34d00b0bcd5b36904cef8b8891120a9`,
+is rejected and explicitly superseded. It domain-separated the pre and post
+sentinels, making equality impossible, while its aggregate receipt still said
+`NONE`. The corrected gate uses one frozen sentinel domain and refuses to
+publish unless each node manifest, each observation and the aggregate decision
+agree on the exact mutation state.
+
+`pods/exec` creates processes and Kubernetes audit events, so the producer
+effect is `READ_ONLY_OBSERVATION`, not `NONE`. Native compilation makes a
+bounded ephemeral `/dev/shm` write. Neither effect changes scheduler or host
+configuration and neither is a decommission or restore dispatch.
+
+Executable surfaces:
+
+- `stdlib/coordination/spark_pair_read_only_capture_profile.sio`;
+- `tools/cluster/spark_pair_read_only_capture_profile_main.sio`;
+- `tools/cluster/spark_pair_read_only_capture_profile.freeze.v1`;
+- `tools/cluster/spark_pair_read_only_capture.cpp`;
+- `scripts/dev/spark_pair_read_only_capture_arm64_gate.sh`;
+- `scripts/ci/spark_pair_read_only_capture_profile_selftest.sh`;
+- `scripts/ci/spark_pair_read_only_capture_material_selftest.sh`;
+- `tools/cluster/spark_pair_read_only_capture.material-parity.v1`.
+
+This closes material parity only for current read-only observation. It does not
+open offline replay, supply protected content, create historical pre-install
+provenance, promote a fact into frame `9026`, dispatch decommission, or make
+the concept `CLAIM_READY`.

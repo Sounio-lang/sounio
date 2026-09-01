@@ -312,8 +312,97 @@ are boot-scoped observations, not restore targets. The current protected-path
 baseline is also insufficient because a new boot may replace it with the
 current inode identity and canonize drift after power loss.
 
-Live snapshot, historical pre-install receipt, material capture/replay,
-live restore/recommission, a bridge into frame `9026`, cluster credentials,
-external network, full material parity and `CLAIM_READY` remain `NOT_PRESENT`.
+Historical pre-install snapshot and receipt, material replay, live
+restore/recommission, a bridge into frame `9026`, external network, full
+restore parity and `CLAIM_READY` remain `NOT_PRESENT`. A current post-install
+live observation now exists under the separate strict Capture v1 profile; it
+cannot satisfy the historical snapshot fact.
 The frame transports the exact parent `9026` freeze digest and a predecessor
 receipt digest; neither identity is represented by a bare boolean alone.
+
+## Pireus Read-Only Capture v1
+
+The phrase to preserve is: **Pireus may know the current machine without
+pretending that the current machine is its own history**.
+
+This phase is a strict producer profile for frozen frame `9027`, not a new
+frame. A material collector may observe both Sparks and produce canonical
+current-state manifests. Only Sounio projects those observations into the
+`9027` facts, and it always derives:
+
+```text
+capture_temporality=CURRENT_POSTINSTALL_OBSERVATION
+historical_preinstall_receipt=NOT_PRESENT
+preinstall_provenance_exact=false
+restorable=false
+snapshot_binding_receipt=NOT_ISSUED
+state_transition=false
+```
+
+For a complete two-node observation, the exact expected result is a refusal:
+
+```text
+action=51
+state=20
+authority_mask=473
+snapshot_mask=491455
+replay_mask=0
+reason=PREINSTALL_PROVENANCE
+code=315
+next_state=20
+```
+
+That `DENY` is the positive witness for Read-Only Capture v1. A missing earlier
+observation fact must instead produce its earlier `9027` reason in the range
+`311..314` or `316..323`; such a result means the capture is incomplete, not
+that historical provenance has been established. Any `ALLOW`, state `21`,
+snapshot-binding receipt, replay opening, bridge into `9026` or `CLAIM_READY`
+claim is a phase failure.
+
+The profile deliberately leaves `protected_paths_exact=false` because its node
+manifest says `protected_content_receipt=NOT_OBSERVED`. Exact current metadata
+is still recorded as an observation, but explicit non-observation cannot be
+promoted into a restorable content fact.
+
+The producer effect is `READ_ONLY_OBSERVATION`, not `NONE`. Kubernetes exec,
+host reads and hardware queries can create processes, audit traffic or atime
+changes. The bounded claim is therefore `scheduler_mutation=NONE` and
+`host_configuration_mutation=NONE`, proven with a command allowlist, complete
+return-code transcript, stable boot identities and pre/post sentinels over the
+managed surfaces.
+
+Restorable facts and boot-scoped observations remain separate. Boot IDs, PIDs,
+cgroups, Kubernetes UIDs, monotonic timestamps, BPF identifiers and current
+inodes may be recorded only as observations. Current protected-path state may
+not replace a historical content receipt. A future historical receipt requires
+its own nonzero content identity, source authority and ordering evidence from
+before the first installation; Capture v1 has no path that can manufacture it.
+
+The material phase is now closed with native C++20 execution on both ARM64
+Sparks. Eight frozen fixture surfaces were byte-identical on both nodes, all
+domain hashes came from the native fixed-enum collector, the collector source
+is pinned before privileged transport, the Multus runtime `imageID` is pinned
+by digest on each node, and the ordered pair
+receipt is
+`deb5285f1cf1a2e46b8cdf49d4040419b9a6fe57eb3385ddd1197b56a105b6eb`.
+The exact Sounio result is frame `9027` `DENY315`; both node surfaces bind equal
+managed-state sentinels and mutation state `NONE`.
+
+The rejected earlier pair
+`c0f6235dc7b93aca8d674ba66c28d66ea34d00b0bcd5b36904cef8b8891120a9`
+is retained by hash in the material receipt. Its distinct pre/post domain tags
+made sentinel equality impossible and exposed a missing cross-surface check.
+The fixed gate uses one sentinel domain and refuses aggregate publication until
+the manifests, observation receipts and Sounio decision agree.
+
+Current evidence therefore advances only:
+
+```text
+GARDEN(completed)
+-> SOUNIO_EXECUTABLE(completed)
+-> SEMANTICS_FROZEN(completed)
+-> PARITY_OPEN(completed)
+-> MATERIAL_PARITY_DENY315(completed)
+-> OFFLINE_REPLAY(not_open)
+-> CLAIM_READY(blocked)
+```
