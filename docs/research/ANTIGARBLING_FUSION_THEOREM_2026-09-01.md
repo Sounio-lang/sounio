@@ -451,6 +451,42 @@ Measured: `lean --threads=1`, 41 s, sorry-free, axioms ⊆ {propext, Quot.sound}
 `decide` instances at `n = 4` kernel-checked; `antigarbling_fusion_lean_gate.sh` C1–C5 PASS
 with the §L names added to C4.
 
+## 12. Narrowing E251 by the Q certificate — design (`§L.3`; implementation is a type-level change)
+
+**What the checker actually propagates.** `knowledge_binary_result → epsilon_combine_relative`:
+one scalar ε per Knowledge value, products combine relative errors. That is the *relative*
+noise model `δx = ε·x` — the perturbation direction **is the value**. In the Lean calculus this
+is the affine form `relAff s x = [(s, x)]`, and the certificate hypothesis of §L collapses to
+the **value supports**: `relative_shortcut_exact_of_xorFree` — if `xorFree(Q(x), Q(y))`, the
+shortcut equals the sensitivity propagator at every level; `relative_shortcut_exact_of_monomial`
+— a monomial operand is exact against any partner. The sedenion witness of §4 is exactly a
+relative-model direction with two-line support (`sed_witness_is_relative`), so the model that
+the checker uses is the model in which the third axis bites.
+
+**The rule E251 could enforce instead of `kind ≥ 4 ⇒ refuse`:**
+
+> `Knowledge<Hyper<A>> * Knowledge<Hyper<A>>` with `level(A) ≥ 4` is admitted iff both operands
+> carry a basis-support certificate `Q` and `(Q(x)⊕Q(x)) ∩ (Q(y)⊕Q(y)) ⊆ {0}` — otherwise E251.
+
+Sound by `relative_shortcut_exact_of_xorFree`; conservative (xorFree is sufficient, not
+necessary — Grok 4.6's note in the math-review); decidable from two 16-bit masks.
+
+**Why it is not wired today, measured.** At the E251 site the checker sees *types* only
+(`left_ty`, `right_ty`); the operands in every existing program are **parameters** — no
+run-pass test constructs a `Hyper<Sedenion, f64>` value at all (grep 2026-09-01), so there is
+no literal-flow path on which to infer `Q`. `HyperExprInfo` records span/algebra/op per hyper
+product, not support. A `Q` at the checker therefore has to be a **type-level refinement** —
+e.g. `Hyper<Sedenion, f64, Support<{1,10}>>` or a `where Q(x) ⊆ …` clause — and that is a
+syntax change: compiler-owner territory (codex-2), routed as a design dispatch, not
+self-implemented. What is ready on the theory side: the mask algebra (`eg_q_union/prod`,
+already live in the e-graph), the decidable `xorFree`, and the kernel theorems above.
+
+**Two smaller, syntax-free steps that are sound now:** (i) admit the product when one operand's
+*type* is a declared one-line subalgebra (an `algebra` declaration whose basis is `{e_0, e_k}`)
+— `norm_mult_of_monomial` generalises to the real span of a line since `{0,k}⊕{0,k} = {0,k}`
+and `xorFree({0,k}, LB)` fails only if `k ∈ LB⊕LB`; (ii) keep E251 but make its message name
+the certificate that would lift it, so the refusal teaches the rule.
+
 ## 9. Theorem map
 
 | claim | Lean |
@@ -473,4 +509,5 @@ with the §L names added to C4.
 | third axis | `sed_shortcut_understates`, `sed_x_typable`, `oct_shortcut_exact`, `sed_shortcut_overstates`, `shortcut_eq_sensitivity_level0` |
 | Hurwitz in the kernel (§K) | `polarBasis0..3`, `not_polarBasis4`, `lin_zero_of_basis`, `bil_zero_of_polarBasis`, `norm_mult_of_polarBasis`, `octonion_norm_multiplicative`, `sedenion_norm_not_multiplicative`, `shortcut_eq_sensitivity_of_polarBasis` |
 | third axis relative to `Q` (§L) | `polarOn`, `lin_zero_of_qCoversL`, `bil_zero_of_polarOn`, `norm_mult_of_polarOn`, `shortcut_eq_sensitivity_of_polarOn`, `not_polarOn4_witness`, `polarOn4_1_10_x_2_5`, `sedenion_shortcut_exact_on_1_10_x_2_5` |
+| relative model / checker rule (§L.3) | `relAff`, `qCoversAff_relAff`, `relative_shortcut_exact_of_xorFree`, `relative_shortcut_exact_of_monomial`, `sed_witness_is_relative` |
 | syntactic criterion (§L.2) | `cdSigma_pm`, `cdSigma_sq`, `cdMul_e_e`, `polar_e_e`, `xorFree`, `polarOn_of_xorFree`, `norm_mult_of_xorFree`, `shortcut_eq_sensitivity_of_xorFree`, `not_xorFree_witness`, `xorFree_singleton`, `norm_mult_of_monomial` |
