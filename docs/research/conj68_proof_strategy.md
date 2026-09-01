@@ -252,3 +252,30 @@ component** — a statement about the *component structure* of the determinantal
 locus, not about its total degree (which is genuinely config-dependent). The Φ_u
 operator reduction (§8) remains the tool; the question is why an odd-degree piece
 is always present in the degeneracy locus of (Ψ − R_{u₁}⁻¹L_{u₂}).
+
+## 11. Scoreboard of clean reframes — all falsified by exact computation except one
+
+Exact computation (Sounio native operators + Singular over ℚ and ℚ(t)) served
+primarily to FALSIFY clean-but-false claims before they hardened:
+
+| Clean reframe | Verdict |
+|---|---|
+| deg D = 7 uniform | FALSE — ℚ(t) generic family gives 9 |
+| reduced top-dim degree odd | FALSE — that family's reduced degree is 6 (even) |
+| scheme multiplicity odd | FALSE — (e₁,e₂)v(e₂,e₁) gives mult 2 |
+| deg D = dim Im A | FALSE — dim A = 8 configs give both 7 and 9 |
+| **∃ odd-degree ℝ-rational component of D** | **survives** (~50 configs); no structural mechanism |
+
+**Honest status of Conjecture 6.8.** All evidence supports it (a real witness in
+every configuration examined). But it is a ∀-statement over a continuous ~8-dim
+moduli of pairs (mod G₂); computation at any scale gives evidence, not proof. The
+proof is structural, and the clean structural reframes above are all falsified.
+The surviving open core — "D always contains an odd-degree ℝ-rational component"
+— is a statement about the component structure of the degeneracy locus of
+(Ψ − R_{u₁}⁻¹L_{u₂}) (§8), not about any single numerical invariant. It has not
+yielded to: the six standard mechanisms (§4), Thom–Porteous (dead bundle, §9),
+miracle flatness (non-CM, §5), or the subalgebra reframe (§7, falsified here).
+
+This is the genuine research frontier. The most valuable computational
+contribution of this work is the **obstruction map (§4) plus this scoreboard**:
+they tell the next attempt exactly which avenues are dead, saving the effort.
