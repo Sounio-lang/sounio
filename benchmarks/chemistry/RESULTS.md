@@ -219,13 +219,17 @@ This is the same root cause as the 1.843e-11 Kc floor in section 3.1 (there it
 was `R_SI = 8.314462618` against Cantera's `8.31446261815324`). Two independent
 truncated gas constants, two residual floors, both fully accounted for.
 
-**Not changed in the shipped code, deliberately.** `R = 1.9872041` is the
-CHEMKIN convention the GRI-Mech 3.0 rate parameters were fitted under;
-silently retuning it to Cantera's value would change what the mechanism means
-in order to make one comparison look better. The correct action is to
-**document** that exact agreement with Cantera requires Cantera's R, and to
-stop attributing the residual to the integrator. That is a mechanism-semantics
-decision for the operator, not a defect to patch here.
+**Not changed in the shipped code, deliberately.** `R = 1.9872041` cal/mol/K
+is the rounded value the Sounio module and both replicas use, of the kind
+conventional in CHEMKIN-family codes. *Whether GRI-Mech 3.0's published rate
+parameters were themselves regressed under this or another rounding of R has
+not been established here* — that would need the GRI-Mech regression
+documentation, which is not in this repository. Until it is, retuning the
+constant to Cantera's value would be changing a mechanism-semantics choice on
+no evidence, in order to make one comparison look better. The correct action
+is to **document** that exact agreement with Cantera requires Cantera's R, and
+to stop attributing the residual to the integrator. Whether to align the
+constant is a decision for the operator, not a defect to patch here.
 
 ---
 
@@ -656,6 +660,59 @@ bit-identical), and the 1e-7-scale figure is the RK4-vs-CVODE integrator
 difference, not a cross-language one. NNH — the Δn = +1 quasi-equilibrium
 species of section 3.2 — tracks both to 2.5e-16 / 5.1e-07.
 
+### 6.1 Coherent band vs the independent Cantera central-difference referee
+
+```sh
+python3 benchmarks/chemistry/gri30_full_cantera_uq_reference.py --jobs 4
+```
+
+```
+Cantera 3.2.0 gri30.yaml species=53 reactions=325 wall=7.908s
+T=1500K t=4.0e-07s energy=off rtol=1e-12 atol=1e-22 delta=1e-03
+```
+
+| species | referee y (mol/cm³) | referee u (1-σ) |
+|---|---|---|
+| H2   | 1.624886332731066e-07 | 1.624886621846326e-09 |
+| H    | 9.827370721628137e-12 | 1.728153747753403e-14 |
+| O    | 1.963474015362450e-13 | 1.962035152319852e-14 |
+| O2   | 8.124411817497948e-08 | 8.124413369241644e-10 |
+| OH   | 1.921444969736858e-13 | 1.935251605949693e-14 |
+| H2O  | 2.746525927522075e-14 | 3.727791931739965e-15 |
+| HO2  | 1.212910166879070e-14 | 2.605446150229169e-15 |
+| H2O2 | 2.482543463532573e-18 | 9.167378486142805e-19 |
+| NNH  | 1.468598577480058e-17 | 2.625142477347715e-20 |
+
+**The referee is reproducible.** Its H2 value, `1.624886332731066e-07`,
+reproduces the figure the README publishes for this checkpoint **to all 16
+digits**.
+
+The Sounio side now exists too, via `examples/chemistry/full_probe.sio`
+(1% standard uncertainty on initial H2 and O2, 200 steps at dt = 2e-9):
+
+| species | Sounio σ (coherent) | referee σ (central difference) | σ rel dev | y rel dev |
+|---|---|---|---|---|
+| HO2  | 2.60544574413659306e-15 | 2.60544615022916889e-15 | **1.559e-07** | 7.237e-09 |
+| H2   | 1.62488635103136998e-09 | 1.62488662184632606e-09 | 1.667e-07 | 1.360e-13 |
+| O2   | 8.12441201519362670e-10 | 8.12441336924164370e-10 | 1.667e-07 | 1.157e-12 |
+| H2O2 | 9.16738051753079131e-19 | 9.16737848614280495e-19 | 2.216e-07 | 1.482e-07 |
+| H2O  | 3.72779413164159965e-15 | 3.72779193173996469e-15 | 5.901e-07 | 5.434e-07 |
+| O    | 1.96203382476252415e-14 | 1.96203515231985209e-14 | 6.766e-07 | 4.427e-07 |
+| OH   | 1.93525021825764087e-14 | 1.93525160594969299e-14 | **7.171e-07** | 4.492e-07 |
+| H    | 1.72815224012817700e-14 | 1.72815374775340311e-14 | **8.724e-07** | 7.312e-09 |
+
+**This README claim reproduces exactly — every figure in it.** The largest
+relative σ deviation is **8.724e-07 on H**, and the other seven span
+**1.559e-07 to 7.171e-07**, matching the published sentence term for term.
+The published Sounio H2 value `1.624886332731288e-7` is measured here as
+`1.624886332731287e-07` — a one-digit difference in the last place, which is
+the probe's integer-mantissa truncation, not a disagreement.
+
+Worth stating plainly, because section 1 corrected two other README claims:
+**the full-mechanism UQ section of the README is not stale.** It is exactly
+right, to every digit it publishes. The corrections in section 1 apply to the
+H/O checkpoint prose, not to this.
+
 ---
 
 ## 7. Reproduction
@@ -672,6 +729,7 @@ python3 benchmarks/chemistry/gri30_h2_python_replica.py          # ~4 s (det.)
 python3 benchmarks/chemistry/gri30_h2_cantera_parity.py          # ~1 s
 python3 benchmarks/chemistry/gri30_full_python_replica.py        # ~20 s
 python3 benchmarks/chemistry/gri30_full_cantera_parity.py        # ~1 s
+python3 benchmarks/chemistry/gri30_full_cantera_uq_reference.py --jobs 4   # ~8 s
 
 cd benchmarks/chemistry/cpp
 g++ -std=c++20 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
@@ -695,7 +753,7 @@ see section 4 and their own headers.
 | "factor 4 in dt, ratio √2" (log) | **contradicted** — factor 4 gives 2.0; √2 is the factor-2 ratio |
 | "√(T/dt) is exact at T = 1e-6, 1e-5, 1e-4" | **contradicted** — off by 59×–242× over the second decade |
 | Sounio native **full-mechanism** trajectory at 4e-6 / 2e-5 s | **closed** — measured this session via the reconstructed `full_probe.sio`; section 6 |
-| Full-mechanism coherent band vs "Cantera central-difference referee", largest σ deviation 8.724e-07 at t = 4e-7 s (README) | **not reproduced** — `gri30_full_cantera_uq_reference.py` was not run this session |
+| Full-mechanism coherent band vs "Cantera central-difference referee", largest σ deviation 8.724e-07 at t = 4e-7 s (README) | **closed — reproduced exactly**, both sides, every figure: largest σ dev 8.724e-07 (H), others 1.559e-07 … 7.171e-07. Section 6.1. |
 | Ignition-delay table 1400–1800 K, Sounio column | reproduced (Cantera column re-measured: 169.66 / 126.34 / 98.29 / 79.00 / 65.08 µs) |
 | Preprint Results 2–5 (probe-based) | **no original artefacts** — see section 4. Four reconstructed `.sio` probes and two reconstructed `.py` probes now exist and all check and run clean, but they reproduce the *protocols*, not the originals |
 | Sounio native band vs dt (step invariance) | **closed** — measured this session, `band_sweep.sio`, section 5.4 |

@@ -115,7 +115,8 @@ major species and radicals; H2O2 agrees to 5.9e-3 relative.
 >    inside `exp(-Ea/(R*T))`. Substituting Cantera's value collapses the gap
 >    to **8.9e-13 .. 1.2e-11** (a 155,000x-296,000x improvement), at the floor
 >    of CVODE's own `rtol = 1e-12`. The shipped constant is deliberately left
->    at the CHEMKIN value -- see `RESULTS.md` section 1.5.
+>    at the CHEMKIN-conventional value; whether GRI-Mech was itself regressed
+>    under that rounding is not established here -- see `RESULTS.md` 1.5.
 >
 > No claim of the form "majors 0.2-2%, radicals ~3%, H2O2 ~16%" has ever
 > appeared in this file or anywhere else in this repository, and no pairing
