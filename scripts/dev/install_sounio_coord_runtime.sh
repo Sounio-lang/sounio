@@ -411,12 +411,16 @@ activate_runtime() {
       loom_change_source_path:loom_change_source_sha256 \
       loom_source_path:loom_source_sha256 \
       hook_source_path:hook_source_sha256 \
+      canary_source_path:canary_source_sha256 \
+      drain_source_path:drain_source_sha256 \
+      guardian_source_path:guardian_source_sha256 \
       c_stub_path:c_stub_sha256 \
       provider_fixture_path:provider_fixture_sha256 \
       dune_path:dune_sha256 \
       loom_build_path:loom_build_sha256 \
       installer_path:installer_sha256 \
       coord_runtime_path:coord_runtime_sha256 \
+      canary_gate_path:canary_gate_sha256 \
       operational_gate_path:operational_gate_sha256 \
       ci_entrypoint_path:ci_entrypoint_sha256; do
       change_path_key="${change_pair%%:*}"
@@ -933,7 +937,11 @@ loom_change_sources=(
   "$SOURCE_ROOT/tools/loom/src/loom_change_provider_fixture.ml"
   "$SOURCE_ROOT/tools/loom/src/loom.ml"
   "$SOURCE_ROOT/tools/loom/src/loom_hook.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_canary.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_drain.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_guardian.ml"
   "$SOURCE_ROOT/tools/loom/src/dune"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_native_hook_generation_canary_ocaml_selftest.sh"
 )
 [[ -x "$installer_source" ]] || die "runtime installer source missing or not executable: $installer_source"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"

@@ -123,6 +123,7 @@ cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_execution_kernel_product_freeze_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_receipt_admit.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_canary_ocaml_selftest.sh" \
   "$REPO/scripts/ci/"
 mkdir -p "$REPO/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
