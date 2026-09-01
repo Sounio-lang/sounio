@@ -282,12 +282,25 @@ checker derives the most permissive certified strategy (associative → free; al
 level 3 → fano_selective; otherwise blocked). Before, an omitted clause was silently `free` —
 an alternative algebra received free reassociation.
 
-**A third finding, fixed by ordering.** `collect_algebra_def` walked the op declarations
-into `entries[idx]` and then overwrote the entry with `info` (defaults: associative), so the
-checker's algebra registry never recorded `alternative`; `check_hyper_binary`'s NonAssoc
-requirement for a *declared* alternative algebra could never fire. The store now precedes the
-walk. No test in the tree depended on the clobber (no declared-algebra fixture multiplies
-`Hyper<…>`).
+**Two findings about the algebra registry, both measured on source builds.**
+(i) In the by-value spine, `collect_algebra_def` walked the op declarations into
+`entries[idx]` and then overwrote the entry with `info` (defaults: associative) — the registry
+never recorded `alternative`. Fixed by ordering. (ii) More consequential: that spine is **dead
+for Madaros**. The live collector is the `*mut` if-chain `checker_collect_item_inplace`, which
+had **no `ItemAlgebra` arm** — every `algebra … { }` declaration was inert in the Madaros
+checker (registry empty; `check_hyper_binary` fell back to hard-coded predicates; the IR
+algebra table saw only name-derived defaults). Proven by an env-gated trace on a source build
+(Slurm job 11422, ELF `25a43cbb`): the by-value collector never ran, so the first E252 build
+was silent. `checker_collect_algebra_def_inplace` now exists, registers the declaration
+(tag, laws) and carries E252 and the fail-closed default. A related parser slip surfaced on
+the same build: the branch for an explicit `reassociate: free` never assigned, so with the new
+−1 default an explicit `free` read as omitted — fixed.
+
+**Measurement discipline that made this visible.** Every refusal is paired with an accepted
+control on the same compiler; E251 is measured with NS on (E230 also fires: ⊤-parameter
+operands are refused by design) and with `SOUNIO_NS_DISABLE=1` (E230 vanishes, E251 must
+survive — causal separability, the same move the NS gate makes for E245). The octonion
+control is therefore a gate-only fixture (`tests/fixtures/antigarbling/`), not a suite test.
 
 **What was NOT changed, and why.** The small e-graph's `fano_selective` gate reads
 `EgNode.value` as a basis index, but `opt_cleanup.sio` creates VAR nodes with IR *register*
@@ -297,6 +310,14 @@ enter the FADD/FMUL e-graph, whose FMULs are scalar f64 (associative in ℝ) —
 unsound today, but the "Q certificate" it pretends to be does not exist there. Making it real
 needs a basis-support mask on e-graph nodes fed from the IR; that is the `Q` propagation of
 §2 (`qUnion`/`qProd`) as engineering, left explicitly open.
+
+**Measured (Slurm job 11425, source build of `b1775894cc`, ELF `fca28454`):**
+`antigarbling_third_axis_gate.sh` 8/8 PASS — E251 refused with NS on and surviving
+`SOUNIO_NS_DISABLE=1`; octonion product + sedenion sum accepted; `free` on alternative and
+`fano_selective` on Sedenion refused with E252; omitted clause on alternative accepted;
+`algebra_decl_basic` and `octonion_hessian_fano_annotated` still accepted. `ns_antigarbling_gate.sh`
+(E230) still OK. The hyper/algebra check sweep has 6 failures (E015/E004/E008/E036), all
+identical on the committed compiler `ff69dae4` — pre-existing, not regressions.
 
 Gate: `scripts/ci/antigarbling_third_axis_gate.sh` (refusals paired with accepted controls
 on the same compiler), named in `ci.yml`. Fixtures: `tests/compile-fail/e251_*.sio`,

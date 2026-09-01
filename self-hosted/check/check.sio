@@ -4762,9 +4762,95 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         checker_collect_models_def_inplace(c, item.name, item.models_def)
     } else if item.kind == ItemKind::ItemPolicy {
         checker_collect_policy_def_inplace(c, item.name, item.policy_def)
+    } else if item.kind == ItemKind::ItemAlgebra {
+        // Until 2026-09-01 this arm did not exist: every `algebra ... { }` declaration was
+        // INERT in the Madaros checker (registry never populated; check_hyper_binary fell
+        // back to the hard-coded predicates; the IR algebra table saw only name-derived
+        // defaults). Measured with SOUNIO_E252_TRACE=1 on a source build: the by-value
+        // collect_algebra_def never ran. Wired here, with the Axis-1 certificate (E252).
+        checker_collect_algebra_def_inplace(c, item.algebra_def)
     } else {
         // ItemSession / typealias / policy / … — not yet collected by the
         // *mut spine (no-op, same as before). *mut collectors pending.
+    }
+}
+
+// Declared laws of an algebra as a bitmask, first line per op wins:
+//   bit0 add_commutative, bit1 add_associative, bit2 mul_commutative,
+//   bit3 mul_associative, bit4 mul_alternative. Defaults = `empty_algebra_info` (15).
+fn checker_algebra_def_law_mask(ops: Option<Box<AlgebraOpDeclList> >) -> i64 with Mut, Panic, Div {
+    match ops {
+        None => 15
+        Some(list) => {
+            var mask = checker_algebra_def_law_mask((*list).tail)
+            let op = (*list).head
+            if op.op_name.len == 3 && op.op_name.buf[0] == 97 as i8 {
+                mask = mask & (0 - 4)  // clear bits 0,1
+                if op.is_commutative { mask = mask | 1 }
+                if op.is_associative { mask = mask | 2 }
+            } else if op.op_name.len == 3 && op.op_name.buf[0] == 109 as i8 {
+                mask = mask & (0 - 29)  // clear bits 2,3,4  (~28)
+                if op.is_commutative { mask = mask | 4 }
+                if op.is_associative { mask = mask | 8 }
+                if op.is_alternative { mask = mask | 16 }
+            }
+            mask
+        }
+    }
+}
+
+// *mut collector for `algebra Name over T { add: ...; mul: ...; reassociate: ... }`.
+// Registers the algebra (name-derived Cayley-Dickson tag, declared laws) and checks the
+// Axis-1 order certificate at the declaration -- mirrors formal/lean4/EpistemicEffectsNSA.lean
+// `assocCert`: `free` needs an associative product, `fano_selective` needs the octonion
+// level; an OMITTED clause (parser -1) derives the most permissive certified strategy.
+fn checker_collect_algebra_def_inplace(c: *mut Checker, opt: Option<Box<AlgebraDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        None => {}
+        Some(adef) => {
+            let idx = (*c).algebras.count
+            if idx >= 16 { return }
+            var info = empty_algebra_info()
+            info.name = (*adef).name
+            info.is_valid = true
+            if info.name.len == 8 && info.name.buf[0] == 79 as i8 {
+                info.algebra_tag = 3  // Octonion
+            } else if info.name.len == 8 && info.name.buf[0] == 83 as i8 {
+                info.algebra_tag = 4  // Sedenion
+            } else if info.name.len == 10 && info.name.buf[0] == 81 as i8 {
+                info.algebra_tag = 2  // Quaternion
+            }
+            let mask = checker_algebra_def_law_mask((*adef).ops)
+            info.add_commutative = (mask & 1) != 0
+            info.add_associative = (mask & 2) != 0
+            info.mul_commutative = (mask & 4) != 0
+            info.mul_associative = (mask & 8) != 0
+            info.mul_alternative = (mask & 16) != 0
+            let mul_assoc = info.mul_associative
+            let mul_alt = info.mul_alternative
+            let declared = (*adef).reassoc_strategy
+            if str_eq(read_env("SOUNIO_E252_TRACE"), "1") {
+                print("e252-trace: tag=") print_int(info.algebra_tag)
+                print(" declared=") print_int(declared)
+                print(" mask=") print_int(mask)
+                print("\n")
+            }
+            var strategy = declared
+            if declared < 0 {
+                if mul_assoc { strategy = 0 }
+                else if mul_alt && info.algebra_tag == 3 { strategy = 2 }
+                else { strategy = 1 }
+            } else if declared == 0 && !mul_assoc {
+                checker_report_error_at_inplace(c, (*adef).span, 252, 0, 0, 0)
+                strategy = 1
+            } else if declared == 2 && info.algebra_tag >= 4 {
+                checker_report_error_at_inplace(c, (*adef).span, 252, 0, 0, 0)
+                strategy = 1
+            }
+            info.reassoc_strategy = strategy
+            (*c).algebras.entries[idx] = info
+            (*c).algebras.count = idx + 1
+        }
     }
 }
 
@@ -20860,13 +20946,6 @@ impl Checker {
                 let mul_assoc = checker_algebra_def_mul_assoc((*adef).ops)
                 let mul_alt = checker_algebra_def_mul_alt((*adef).ops)
                 let declared = (*adef).reassoc_strategy
-                if str_eq(read_env("SOUNIO_E252_TRACE"), "1") {
-                    print("e252-trace: tag=") print_int(info.algebra_tag)
-                    print(" declared=") print_int(declared)
-                    print(" mul_assoc=") if mul_assoc { print("1") } else { print("0") }
-                    print(" mul_alt=") if mul_alt { print("1") } else { print("0") }
-                    print("\n")
-                }
                 var strategy = declared
                 if declared < 0 {
                     if mul_assoc { strategy = 0 }
