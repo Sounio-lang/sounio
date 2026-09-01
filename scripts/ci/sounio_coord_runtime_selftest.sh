@@ -129,6 +129,8 @@ cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_guardian_ocaml_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_drain_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_drain_freeze_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_reconcile_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_reconcile_freeze_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_reconcile_ocaml_selftest.sh" \
   "$REPO/scripts/ci/"
 mkdir -p "$REPO/tools/loom/src"
@@ -141,8 +143,10 @@ cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/native_hook_generation_drain_authority_main.sio" \
   "$ROOT_DIR/tools/loom/native_hook_generation_drain.freeze.v1" \
   "$ROOT_DIR/tools/loom/native_hook_generation_drain.first.v1" \
+  "$ROOT_DIR/tools/loom/GARDEN_NATIVE_HOOK_GENERATION_RECONCILE_V1.md" \
   "$ROOT_DIR/tools/loom/native_hook_generation_reconcile_authority_main.sio" \
   "$ROOT_DIR/tools/loom/native_hook_generation_reconcile.freeze.v1" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_reconcile.first.v1" \
   "$ROOT_DIR/tools/loom/execution_authority.freeze.v2" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
   "$ROOT_DIR/tools/loom/custody_transfer.freeze.v1" "$REPO/tools/loom/"
@@ -213,6 +217,8 @@ cp "$ROOT_DIR/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v5-20260901.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-drain-first-v1-20260831.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-drain-frozen-v1-20260831.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-reconcile-first-v1-20260901.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-reconcile-frozen-v1-20260901.txt" \
   "$REPO/tools/loom/evidence/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
