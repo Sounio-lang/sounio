@@ -91,24 +91,50 @@ def scan(path):
     i = 0
     while i < len(lines):
         code = structure(lines[i])
-        m = re.match(r'\s*impl\s+([A-Za-z_][A-Za-z0-9_]*)', code)
+        # `impl Trait for Type` is scoped by the TYPE, not the trait. Two impls
+        # of one trait for two types are two different scopes; keying on the
+        # trait collapsed them and called every method they share a duplicate.
+        m = re.match(r'\s*impl\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*<[^>]*>)?\s+for\s+([A-Za-z_][A-Za-z0-9_]*)', code) \
+            or re.match(r'\s*impl\s+([A-Za-z_][A-Za-z0-9_]*)', code)
         f = None if m else re.match(r'\s*(pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(', code)
         if f:
-            j, d, started = i, 0, False
+            j, d, started, decl_only = i, 0, False, False
             while j < len(lines):
                 body = structure(lines[j])
+                # A trait DECLARES methods with no body -- `fn radd(self) -> Self`
+                # and nothing else. This walk looks for braces, so it ran past
+                # the declaration and swallowed what followed, usually the impl
+                # block, whose method then surfaced as a duplicate of the
+                # signature it implements. Stop at the next definition or at the
+                # end of the enclosing block, and record nothing for it.
+                if j > i and not started and re.match(r'\s*(pub\s+)?(fn|impl|struct|trait)\s', body):
+                    decl_only = True
+                    break
+                if j > i and not started and re.match(r'\s*\}', body):
+                    decl_only = True
+                    break
                 d += body.count('{') - body.count('}')
                 if '{' in body: started = True
                 if started and d <= 0: break
                 j += 1
+            if decl_only:
+                i = j
+                continue
             scope = impl_stack[-1][0] if impl_stack else '<top>'
-            seen[(scope, f.group(2))].append((i + 1, tokens('\n'.join(lines[i:j+1]))))
+            # A definition guarded by #[cfg(...)] is an ALTERNATIVE, not a
+            # duplicate: the arms are mutually exclusive by construction and
+            # exactly one is compiled. Counting them made every
+            # architecture-switched helper in examples/ look like a defect.
+            guarded = i > 0 and re.match(r'\s*#\[\s*cfg', lines[i - 1])
+            if not guarded:
+                seen[(scope, f.group(2))].append((i + 1, tokens('\n'.join(lines[i:j+1]))))
             i = j + 1                       # SKIP the body outright
             continue
         opened = depth
         depth += code.count('{') - code.count('}')
         if m:
-            impl_stack.append((m.group(1), opened))
+            impl_name = m.group(2) if m.lastindex and m.lastindex >= 2 and m.group(2) else m.group(1)
+            impl_stack.append((impl_name, opened))
         while impl_stack and depth <= impl_stack[-1][1]:
             impl_stack.pop()
         i += 1
