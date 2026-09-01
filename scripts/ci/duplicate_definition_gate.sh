@@ -51,6 +51,24 @@ def tokens(text):
     text = re.sub(r'//.*$', '', text, flags=re.M)
     return re.findall(r'[A-Za-z_][A-Za-z0-9_]*|0[xX][0-9a-fA-F]+|\d+|[^\s;]', text)
 
+def structure(line):
+    """One line with comments AND string/char literals removed.
+
+    Only for finding braces and definitions -- never for comparing bodies,
+    where two different string constants must still read as different.
+
+    A FOURTH way to measure this wrong, found 2026-09-01: braces were counted
+    inside string literals. module_frontend.sio:4355 holds the pattern
+    "CorePair { left:", one line into a function, and that unmatched brace kept
+    the body-skip walking for 4012 lines -- past a genuine duplicate at 6425,
+    which this gate then reported as absent. Stripping literals brings 1905 more
+    function names into view across self-hosted/ and raises the duplicate count
+    from 6 to the frozen figures below."""
+    line = re.sub(r'//.*$', '', line)
+    line = re.sub(r'"([^"\\]|\\.)*"', '""', line)
+    line = re.sub(r"'([^'\\]|\\.)*'", "''", line)
+    return line
+
 def scan(path):
     """Scope by BRACE DEPTH, walking with an explicit index.
 
@@ -72,14 +90,15 @@ def scan(path):
     impl_stack = []            # (name, depth at which the impl block opened)
     i = 0
     while i < len(lines):
-        code = re.sub(r'//.*$', '', lines[i])
+        code = structure(lines[i])
         m = re.match(r'\s*impl\s+([A-Za-z_][A-Za-z0-9_]*)', code)
         f = None if m else re.match(r'\s*(pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(', code)
         if f:
             j, d, started = i, 0, False
             while j < len(lines):
-                d += lines[j].count('{') - lines[j].count('}')
-                if '{' in lines[j]: started = True
+                body = structure(lines[j])
+                d += body.count('{') - body.count('}')
+                if '{' in body: started = True
                 if started and d <= 0: break
                 j += 1
             scope = impl_stack[-1][0] if impl_stack else '<top>'
