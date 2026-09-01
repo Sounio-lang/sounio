@@ -836,3 +836,36 @@ leitura do witness como caminho de comprimento 3. Manuscrito §8 reescrito como 
 "argumento de grau ímpar" (rota viva; substitui o placeholder construtivo/discriminante —
 o grau ímpar dispensa provar disc≥0 de cada cônica). Rigor restante delimitado: (a)
 deg D=7 uniforme via flatness+conexidade, fechando o locus-ruim; (b) redução top-dim geral.
+
+## Rodada 21: o locus ruim MAPEADO — grau REDUZIDO top-dim ímpar (correção do "deg=7")
+
+Caça ao locus ruim (Fix 2 do revisor) em 31 configs de base ALINHADAS
+(e_i,e_j)v(e_k,e_l) + super-simétrica + par duro. Achados:
+- Grau NÃO é uniformemente 7. Histograma (dim,mult_esquema): curvas (dim1 proj):
+  (2,7)×13, (2,9)×4 [grau 9 também ocorre]; estratos maiores: (3,3)×7 [dim2,deg3],
+  (4,1)×4 [hiperplano], (5,1)×2 [D=tudo], **(4,2)×1 = config 6**.
+- **Config 6 = (e₁,e₂)v(e₂,e₁): mult_esquema=2 (PAR)** — parecia falsificador. MAS
+  decomposição: comp1 = hiperplano {k₀=0} REAL dim3 deg1 (com MULTIPLICIDADE 2 no
+  esquema → mult 2) + comp2 quadric complexa k2²+k3²=0 (real-point-free) + origem.
+  O grau REDUZIDO top-dim = 1 (ÍMPAR). Witnesses reais existem (o hiperplano). NÃO
+  é contraexemplo. O "grau par" era artefato de não-redução (esquema vs reduzido).
+
+**CORREÇÃO do §8:** "deg D = 7 uniforme" estava ERRADO. O grau do esquema varia
+(1,2,3,7,9…) e pode ser par por multiplicidade. A afirmação CORRETA e uniforme é:
+**o grau REDUZIDO da parte top-dimensional de D é sempre ÍMPAR** (medido: 7 e 9 nas
+curvas d≥3 genéricas; 3 e 1 nos estratos alinhados). Grau reduzido ímpar (qualquer
+dim) ⟹ ponto real (seção linear real de dim complementar → 0-ciclo ímpar conjugação-
+estável → ponto real) ⟹ witness real. Cobre TODOS os estratos.
+
+**Papel de d≥3 (afinal essencial):** os estratos de dim D grande (hiperplano/tudo)
+são configs alinhadas degeneradas, provavelmente d≤2 (witnesses abundantes, fora do
+escopo). Config 6 tem [x1,x2]≠0 (d≥2). Hipótese: d≥3 ⟺ dim D=1 (curva grau 7 ou 9,
+ímpar); d≤2 ⟺ dim D≥2. Se verdade, na curva-estrato (o escopo) o grau ímpar 7/9 fecha
+tudo, e os estratos grandes (d≤2) são triviais. FALTA: caracterizar d por dim D.
+
+**Gaps restantes p/ prova completa (honesto):**
+(a) grau REDUZIDO top-dim ímpar UNIFORME — provavelmente um número característico
+    mod-2 (grau mod-2 do determinantal), config-independente = 1. Não provado.
+(b) correlação d≥3 ⟺ dim D=1 (para localizar o argumento no escopo). Não provado.
+(c) redução top-dim (para a seção-hiperplana). Medido, não geral.
+Progresso real; núcleo ainda aberto. Ferramenta exata (Singular) foi decisiva.

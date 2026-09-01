@@ -224,44 +224,44 @@ witness locus is the determinantal variety
 
   D(x,x′) = { [u] ∈ ℙ(Im C(x)) = ℝP⁴ : rank M(u) ≤ 4 }.
 
-**Measured, exactly (Singular, primary decomposition over ℚ; ~17 configurations,
-including the special stratum a = 2e₃ − 2e₄):**
+**Measured, exactly (Singular, primary decomposition over ℚ; ~50 configurations,
+including special strata and aligned basis pairs):**
 
-**Fact 8.1 [M].** D(x,x′) is a curve (projective dimension 1) of **degree 7**.
-Its reduced structure has degree 7 as well (the scheme's non-reduced part is
-supported on lower-dimensional embedded components — a conjugate pair of complex
-points and the origin — which do not touch the curve; deg D = deg √D = 7). The
-curve splits, over ℚ, as two conics + one **cubic** for generic pairs
-(2 + 2 + 3 = 7), or one **line** + three conics for flatter pairs (1 + 2 + 2 + 2
-= 7): in every case an **odd-degree** component is present, forced by the odd
-total degree.
+**Fact 8.1 [M].** The **reduced top-dimensional part** of D(x,x′) has **odd**
+degree, in every configuration examined. The strata seen:
+- *Generic pairs (dim D = 1, a curve):* reduced degree **7** (2 conics + 1 cubic)
+  or **9** (higher split), always odd. E.g. one generic pair decomposes as
+  2 + 2 + 3 over ℚ, the cubic being a ternary form (odd, hence with a real point).
+- *Aligned/degenerate pairs (dim D = 2 or 3):* the top component is a real
+  hyperplane {k₀ = 0} or a rational surface — reduced degree **1** or **3**, odd,
+  though the *scheme* degree can be even by multiplicity (e.g. (e₁,e₂)v(e₂,e₁):
+  the hyperplane appears with multiplicity 2, scheme degree 2, reduced degree 1).
+The **scheme** degree is therefore *not* a uniform invariant (it takes values
+1,2,3,7,9,…); the **reduced top-dimensional degree** is the one that is uniformly
+odd.
 
-**Theorem 8.2 (existence, conditional on uniformity of Fact 8.1).** deg D = 7 is
-odd. A reduced real projective curve of odd degree has a real point: a generic
-real hyperplane H (defined over ℝ) meets D in a conjugation-stable 0-cycle of
-degree 7, whose complex points pair off, leaving an odd — hence positive —
-number of real points. A real [u] ∈ D is a real line in Im C(x); M(u) is a real
-matrix of rank ≤ 4, so ker M(u) contains a real nonzero w ∈ Im C(x′). Then
-(u, w) is a witness with u, w ≠ 0 and [u, w] = 0. Hence every pair admits a
-witness, and **diam Γ_C^Z(𝕊) = 3**.
+**Theorem 8.2 (existence, conditional on uniform oddness in Fact 8.1).** Let
+V = reduced top-dimensional part of D, of dimension δ and odd degree d. A generic
+real linear subspace of codimension δ meets V in a conjugation-stable 0-cycle of
+degree d (odd); complex points pair off, so at least one real point remains. A
+real [u] ∈ V ⊆ D is a real line in Im C(x); M(u) is a real matrix of rank ≤ 4, so
+ker M(u) contains a real nonzero w ∈ Im C(x′), and (u,w) is a witness. Hence
+every pair admits a real witness, and **diam Γ_C^Z(𝕊) = 3**.
 
-*(Note: the argument never uses d(x,x′) ≥ 3 — it produces a witness for every
-pair, which for d ≤ 2 is unsurprising. The hypothesis enters only in reading the
-witness as a length-3 path.)*
-
-**What remains for a proof.** Two points, both about making Fact 8.1 uniform:
-1. **deg D = 7 for every admissible pair.** The right argument is *not* a
-   Thom–Porteous class in the rank-7 bundle E₇ — that bundle is exactly the one
-   §6 shows fails to exist over Z. Instead: over the connected space of
-   admissible pairs (connectivity should follow from the transitivity results of
-   [GZ26]), the family {D(x,x′)} is flat wherever dim D = 1, so deg D is locally
-   constant, hence ≡ 7 from the measured value. The genuine gap is the **bad
-   locus** where dim D jumps to 2 (there the degree says nothing): we have not
-   found such a pair (dim D = 1 on every sampled configuration, mod-p rank test),
-   but ruling it out is open.
-2. **The curve is reduced of odd degree.** Measured (deg D = deg √D = 7) on the
-   sampled configurations; the general statement is needed for the hyperplane
-   section in Theorem 8.2.
+**What remains for a proof — the open core.** Three points:
+1. **Uniform oddness of the reduced top-dimensional degree.** This is the crux.
+   It is *not* a Thom–Porteous class in the rank-7 bundle E₇ (that bundle is
+   exactly the one §6 kills over Z). The natural candidate is a **mod-2 degree /
+   characteristic number** of the determinantal locus — config-independent and
+   equal to 1 — but we do not yet have it. Measured odd on ~50 configurations
+   (curve strata: 7, 9; higher strata: 1, 3); no even reduced degree found.
+2. **The role of d ≥ 3.** The large-dim strata (hyperplane, whole space) are
+   aligned degenerate pairs, plausibly d ≤ 2 (abundant witnesses, out of scope);
+   the conjecture's scope (d ≥ 3) may coincide with dim D = 1 (curve, degree 7/9).
+   Establishing "d ≥ 3 ⟹ dim D = 1" would localize the argument to the curve
+   stratum, where oddness is cleanest. Unproven.
+3. **Top-dimensional reducedness** for the linear-section argument (measured; not
+   general).
 
 This is the enumerative parity R14 sensed as "c₇ odd" — but attached to the
 correct object. The degree of the witness curve, an intersection number, is a
