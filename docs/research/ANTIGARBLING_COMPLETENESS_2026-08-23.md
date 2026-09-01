@@ -13,6 +13,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.antig
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
 <!-- docs:status-note:end -->
 
+> **CORRECTION / SUPERSEDED IN PART — 2026-09-01.** The two-certificate soundness below is now a
+> THEOREM in a typed calculus over every Cayley–Dickson algebra (`formal/lean4/EpistemicEffectsNSA.lean`,
+> `reassoc_sound`), and the "exactly two structural axes" claim (C) is **corrected**: it holds for
+> propagators that carry per-source *sensitivity vectors*; for *variance-only* propagators (the GUM
+> shortcut `‖y‖²·Var x + ‖x‖²·Var y`, i.e. `ep_mul`) there is a THIRD structural axis —
+> norm-multiplicativity — free on ℝ,ℂ,ℍ,𝕆 (Hurwitz) and FALSE on the sedenions (kernel-checked
+> understatement 4 vs 8 with disjoint sources and no re-association). See
+> `ANTIGARBLING_FUSION_THEOREM_2026-09-01.md`.
+
 # Anti-Garbling Completeness: fabricated precision as the kernel of the free-algebra quotient
 
 **Date:** 2026-08-23 · **Author:** fable-1 (agent=claude), ns-antigarbling-wire lane
