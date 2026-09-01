@@ -23,12 +23,27 @@ oracles.
   H/O sub-mechanism had a Cantera oracle and the full-mechanism results had
   no reproduction path. Parity table in `RESULTS.md` section 6.
   Run: `python3 gri30_full_cantera_parity.py`
-- `cpp/gri30_h2_band_crosscheck.cpp` — independent C++20 third
+- `cpp/gri30_h2_band_crosscheck.cpp` — independent C++23 third
   implementation (no dependencies) of the H/O kinetics and the GUM band,
   written from the protocol rather than translated. Reproduces the Python
   replica's deterministic checkpoint to all 17 digits; used to settle the
-  band-scaling law in `RESULTS.md` section 5.
-  Run: `g++ -std=c++20 -O2 -o band_crosscheck cpp/gri30_h2_band_crosscheck.cpp && ./band_crosscheck gri30_h2_mechanism.json`
+  band-scaling law in `RESULTS.md` section 5. Uses `std::expected` for a
+  fail-closed loader (a silently defaulted rate constant is the failure mode
+  that makes a cross-check agree for the wrong reason) and the C++23
+  multidimensional subscript `reac[r, s]` for the stoichiometric tables.
+  `std::mdspan` is deliberately NOT used: libstdc++ 13 does not ship it, so a
+  nine-line `Mat2` stand-in provides the same access syntax. Migrated from
+  C++20 on 2026-09-01; the output is **bit-for-bit identical** across the two
+  standards, which is the acceptance criterion — the language standard is not
+  a numerical variable.
+  Run: `g++ -std=c++23 -O2 -o band_crosscheck cpp/gri30_h2_band_crosscheck.cpp && ./band_crosscheck gri30_h2_mechanism.json`
+- `formal/lean4/SounioIndepComposition.lean` — the machine-checked side of the
+  same result: 15 theorems, zero `sorry`, establishing that quadrature is the
+  ρ = 0 case of the JCGM combination law, that it understates under positive
+  correlation, and that N fully-correlated steps combined in quadrature
+  understate by exactly √N — which is the √(T/dt) law measured in
+  `RESULTS.md` section 5.3, derived rather than fitted.
+  Run: `cd formal/lean4 && lake build SounioIndepComposition`
 - `gri30_h2_cantera_parity.py` — Cantera 3.2 reference: builds the same
   sub-mechanism from Cantera's own `gri30.yaml`, runs the identical isothermal
   protocol, prints the parity table and ignition delays.

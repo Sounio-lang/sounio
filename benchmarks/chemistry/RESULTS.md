@@ -394,11 +394,11 @@ See section 6 for what was reconstructed in their place, and how it is marked.
 
 ```sh
 cd benchmarks/chemistry/cpp
-g++ -std=c++20 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
+g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
 ./band_crosscheck ../gri30_h2_mechanism.json
 ```
 
-This is an **independent third implementation** (C++20, no dependencies),
+This is an **independent third implementation** (C++23, no dependencies),
 written from the published protocol rather than translated from either the
 Sounio module or the Python replica. Its deterministic checkpoint reproduces
 the Python replica **to all 17 printed digits on all 8 species** (e.g. H2
@@ -519,7 +519,7 @@ This is the whole contrast, in one sweep and on one page:
 | implementation | band under a factor 4 in dt |
 |---|---|
 | Python replica (per-step independent quadrature) | **1.99994 – 2.00841** |
-| C++20 cross-check (same formula, independent code) | **1.99994 – 2.00841** |
+| C++23 cross-check (same formula, independent code) | **1.99994 – 2.00841** |
 | **Sounio native (coherent sensitivity propagation)** | **0.999999 – 1.000001** |
 
 The Sounio module carries this as a declared, tested property —
@@ -715,6 +715,67 @@ H/O checkpoint prose, not to this.
 
 ---
 
+## 6.2 The measured law is a theorem — `formal/lean4/SounioIndepComposition.lean`
+
+```sh
+cd formal/lean4 && lake build SounioIndepComposition
+```
+
+Section 5 measures a band that scales as √dt and an underestimation that grows
+as √(T/dt). That is not a fitted exponent — it is derivable, and it is now
+machine-checked.
+
+The per-step parameter term `(ν·net·dt·u_r)²` carries the **same** rate
+parameter at every step. Successive steps are therefore correlated with ρ = +1,
+not 0. For N contributions of equal uncertainty `u`:
+
+| | variance | uncertainty |
+|---|---|---|
+| truth (ρ = +1, uncertainties add) | (N·u)² | N·u |
+| quadrature (as if independent) | N·u² | √N·u |
+| **ratio** | **N** | **√N** |
+
+With N = T/dt that is **√(T/dt)** — precisely the law measured in §5.3, and
+read along dt instead of T it is the **√dt** dependence of §5.1.
+
+`quadrature_understates_correlated_sum` states exactly this, and 14 further
+theorems establish the rest of #1758's contract:
+
+| theorem | content |
+|---|---|
+| `quadrature_iff_zero_covariance` | quadrature agrees with JCGM eq. (13) **iff** cov = 0 — it is the independence law, not an approximation |
+| `quadrature_understates_of_positive_covariance` | cov > 0 → quadrature is **strictly tighter than the truth** (unsound; `SEMANTICS.md` Invariant 2) |
+| `quadrature_sound_iff_nonpositive_covariance` | quadrature is an upper bound **exactly** when cov ≤ 0 |
+| `additive_sound` | the additive default is sound for **every** admissible ρ |
+| `additive_tight_at_unit_correlation` | and is tight at ρ = +1, so it is the least such bound |
+| `quadrature_understates_correlated_sum` | **the √N law above** |
+| `accumulation_agrees_at_one_step` | at N = 1 the two agree — why the defect is invisible in a single composition |
+| `collider_opened_by_conditioning` | conditioning on a collider **opens** the path (Berkson 1946) |
+| `conditioning_not_monotone` | ∃ a junction where conditioning turns a blocked path active — so a reachability check with a blocklist is unsound |
+
+**Method.** Mathlib-free, core Lean 4 only, matching the discipline of
+`SounioMeasConf.lean`. Every claim is stated on **variances**, not standard
+uncertainties: since √ is monotone on the non-negatives, comparing variances
+*is* comparing uncertainties, and the square root never has to be constructed.
+In that form every statement is polynomial, and the linear ones close under
+`omega`.
+
+**Verification.** 15 theorems, **zero `sorry`**. `#print axioms` reports only
+`propext` and `Quot.sound` — the standard Lean axioms — on the arithmetic
+theorems, and the d-separation theorems **depend on no axioms at all**
+(`collider_opened_by_conditioning`, `collider_inverts_the_others`,
+`conditioning_not_monotone` are closed by `rfl`). Built under
+`leanprover/lean4:v4.33.0`, the toolchain `formal/lean4/lean-toolchain` pins.
+
+**What this does not establish.** The theorems say what follows *given* a
+correlation structure; they do not certify that any particular program's
+declared graph matches the world. #1758 is explicit on the same point — the
+system makes the premise explicit and auditable, not true. Nor does the Lean
+development verify the floating-point numerics of the integrator: it is exact
+arithmetic over `Int`, and the numerical agreement is the business of §1–§6.
+
+---
+
 ## 7. Reproduction
 
 ### 7.1 Commands, in order
@@ -732,8 +793,11 @@ python3 benchmarks/chemistry/gri30_full_cantera_parity.py        # ~1 s
 python3 benchmarks/chemistry/gri30_full_cantera_uq_reference.py --jobs 4   # ~8 s
 
 cd benchmarks/chemistry/cpp
-g++ -std=c++20 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
+g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
 ./band_crosscheck ../gri30_h2_mechanism.json                     # ~6 min
+
+cd ../../../formal/lean4
+lake build SounioIndepComposition                                # ~1 s
 ```
 
 ### 7.2 Oracle-verification probes
