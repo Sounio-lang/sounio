@@ -436,7 +436,16 @@ The etcd snapshot reports a capture from `2026-08-30T02:17:06Z` through
 read-only on 1 September, hashed before and after inspection to
 `f7835e3ddb9e9b757405e6f78e6edf294ed1310d3412296c4d1c7f882583a7aa`,
 and contain both Spark Node identities and both device-plugin names and UIDs
-while the Spark NodeSet and all Pireus surfaces are absent. The Velero archive
+while the Spark NodeSet and all Pireus surfaces are absent. The file is exactly
+`969453568 + 32` bytes: its trailing 32 bytes are
+`fe297ecfddc1bf23dc070a2d20bea0b313beaf6ffd5668e9666451dea6acddf7`,
+equal to SHA-256 of the preceding database payload. The current layout is
+consistent with the etcd capture-protocol format. The etcd server logged
+`sending database sha256 checksum to client` at
+`2026-08-30T02:17:12.326579Z` and successful completion 125 microseconds later.
+Because the log does not contain the checksum value and the RBD was mutable,
+this layout match does not establish immutable custody or an external temporal
+anchor for that exact value. The Velero archive
 reports completion at `03:00:44Z`; its current object bytes, observed on
 1 September and bound to ETag `b85c9338b7c199074bea1d8fb97be2c6-2`, hashed to
 `8c406131e096932bdda861decf7128be2e6597ea9461748c5f9c9ab80461689e`
@@ -445,8 +454,11 @@ exact NodeSet creation at `09:54:03Z`.
 
 Neither source closes admission. The etcd RBD has no 30-Aug volume snapshot;
 the Velero bucket is unversioned, its backup expires, and the `slurm-pilot`
-namespace was excluded. Their SHA-256 identities were observed after the
-installation boundary rather than anchored before it. Neither carries host
+namespace was excluded. The exact full-file and complete-source SHA-256
+identities were observed after the installation boundary rather than externally
+anchored before it. The current etcd payload/trailer match improves layout
+integrity evidence for one fragment but does not repair custody or completeness.
+Neither carries host
 services, container recreate state or protected payloads. The
 content-addressed Slurm MariaDB backup is likewise class `5` and lacks both
 node leaves and pair closure (`DENY346`; terminal admission would be
@@ -459,6 +471,17 @@ read-write-capable etcd backing RBD was mapped with `--read-only --options
 noudev`, ext4 was mounted with `ro,noload`, and the identical source hash was
 measured before and after. The mount and device map were removed, no Kubernetes
 object or `VolumeAttachment` was created, and source bytes were not mutated.
+The checksum follow-up used a second read-only RBD map and a `debugfs` byte
+stream without mounting ext4; it verified the payload/suffix equality, removed
+the ephemeral device, and again left no `VolumeAttachment`. Its full-file hash
+was the same `f783...a7aa` measured before and after the initial observation,
+binding the payload/trailer read to the frozen source bytes. A later attempt to
+obtain another before/after pair failed closed twice before map creation; it
+produced no new hash, exposed no secret in `argv`, and the final clean check
+found neither an ephemeral RBD map nor a `VolumeAttachment`.
+One failed observer-side SSH attempt added a host key to local `known_hosts`;
+the target hosts and cluster remained unchanged. The material effect records
+that local side effect explicitly.
 The Sounio assessment command only synthesizes these facts and preserves the
 denial.
 
@@ -468,6 +491,17 @@ current recovered `vxlan-cluster.service` content and protected `/opt` surfaces
 existed. The service timestamp includes a Claude recovery edit and is not
 treated as original installation history. The exact first-install anchor
 remains unknown, so ordering is not promoted from those clocks.
+
+Two external chronology searches also remain non-sources. The Mac Time Machine
+destination `BACKUP EXT` has no cataloged snapshot after March 2025, no
+`backupd` event in the 29-Aug-to-NodeSet window, and local snapshots begin only
+on 31 August. A content-addressed Beagle Git blob from 15 August records
+Kubernetes and Slurm integration as planned rather than installed, but its
+commit is unsigned, the clone is shallow with the parent absent, and it carries
+no restore payload. A mutable Codex rollout observation at `09:26:59.192Z`
+corroborates device plugins present and the Spark worker NodeSet absent 27
+minutes before creation. These are negative chronology corroborations, not
+ordering authority, custody, or source completeness.
 
 The persistent Pireus fence itself has never been installed. Under that narrow
 boundary, the current pair can be proposed as pre-fence; it is still refused
@@ -497,9 +531,9 @@ GARDEN(completed)
 
 The assessment receipt is
 `tools/cluster/spark_pair_historical_provenance.source-assessment.v1`, SHA-256
-`f17d9c3c30f27bfd25268177b423187a4b5fd446f79027d73025cab944225801`.
+`3c6eb80341bcbfabd292c67933c05a2c0bb9a7d25545261cc8a79b8f110964aa`.
 The separate material observer receipt is
 `tools/cluster/spark_pair_historical_source_observation.material-parity.v1`,
 SHA-256
-`a5fb6ac133df8eb7b9448d125ab52caad1d061ddaa995767d78a7110075d759e`.
+`44db8dbe2a9b9a7121bd671a7595e12d21d9f31c69b460716ad27cb1bb8aa362`.
 Neither is a waiver or a semantic promotion.

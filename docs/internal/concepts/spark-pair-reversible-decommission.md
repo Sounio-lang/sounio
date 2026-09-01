@@ -302,11 +302,11 @@ The exact frozen surface is:
 - source assessment:
   `tools/cluster/spark_pair_historical_provenance.source-assessment.v1`,
   SHA-256
-  `f17d9c3c30f27bfd25268177b423187a4b5fd446f79027d73025cab944225801`;
+  `3c6eb80341bcbfabd292c67933c05a2c0bb9a7d25545261cc8a79b8f110964aa`;
 - material observer receipt:
   `tools/cluster/spark_pair_historical_source_observation.material-parity.v1`,
   SHA-256
-  `a5fb6ac133df8eb7b9448d125ab52caad1d061ddaa995767d78a7110075d759e`;
+  `44db8dbe2a9b9a7121bd671a7595e12d21d9f31c69b460716ad27cb1bb8aa362`;
 - gates: `scripts/ci/spark_pair_historical_provenance_selftest.sh` and
   `scripts/ci/spark_pair_historical_source_assessment_selftest.sh`.
 
@@ -316,9 +316,16 @@ first assessment. The etcd snapshot reports completion at
 `2026-08-30T02:17:13Z`, revision `113864385` and `5739` keys. During the
 read-only observation on 1 September, its current bytes hashed to
 `f7835e3ddb9e9b757405e6f78e6edf294ed1310d3412296c4d1c7f882583a7aa`,
-both before and after inspection. It contains both ordered Spark Node identities
-and both device-plugin identities, with the Spark NodeSet and Pireus surfaces
-absent. The Velero archive reports completion at `03:00:44Z`; the object bytes
+both before and after inspection. Its `969453600` bytes split into a
+`969453568`-byte database payload and a trailing 32-byte SHA-256 checksum. That
+current-layout checksum is
+`fe297ecfddc1bf23dc070a2d20bea0b313beaf6ffd5668e9666451dea6acddf7`
+and exactly matches SHA-256 of the current payload. This is a file-layout
+integrity observation, not a temporal anchor. The capture server logged
+that it sent a 32-byte SHA-256 checksum at `02:17:12.326579Z` and completed at
+`02:17:12.326704Z`. It contains both ordered Spark Node identities and both
+device-plugin identities, with the Spark NodeSet and Pireus surfaces absent. The
+Velero archive reports completion at `03:00:44Z`; the object bytes
 observed on 1 September, bound to ETag `b85c9338b7c199074bea1d8fb97be2c6-2`,
 hashed to
 `8c406131e096932bdda861decf7128be2e6597ea9461748c5f9c9ab80461689e`,
@@ -331,15 +338,37 @@ mount and device map after rehashing. No Kubernetes object or
 `VolumeAttachment` was created, and the source hash was unchanged. Those
 effects belong to the separate material observer receipt; the assessment
 command only synthesizes evidence and applies the fail-closed gate.
+A second read-only mapping streamed the file through `debugfs` without a mount,
+proved the payload/checksum equality, and was cleanly unmapped with no
+`VolumeAttachment` before or after. The same read produced full-file SHA-256
+`f783...a7aa`, equal to the initial observation's before/after digests. A later
+double-hash reverification was refused twice before map creation and is recorded
+as producing no new hash; the final state check was clean.
+One failed observer-side SSH attempt added a host key to local `known_hosts`;
+this is declared in the material effect while target hosts and cluster objects
+remain unchanged.
 
-These fragments remain non-authoritative. Their SHA-256 values were not
-recorded before the NodeSet boundary, their backing stores were mutable, Velero
+These fragments remain non-authoritative. The current etcd file has a trailing
+checksum that matches its current payload and a layout consistent with the
+capture protocol, but the exact value was not logged externally and the backing
+RBD remained mutable. Its full-file digest and the
+complete-source bundle digest were not anchored before the NodeSet boundary.
+Velero's SHA-256 was also observed later, its backing store was mutable, Velero
 excluded the `slurm-pilot` namespace, and neither source includes host services,
 container recreate identities or protected payloads. The Slurm database backup
 is also class `5` component evidence without ordered-pair closure. The existing
 pair capture is class `6` and is refused with `POSTINSTALL_SOURCE/354`. Slurm
 live accounting, ext4 timestamps and live Kubernetes objects are class `7`
 clock or mutable evidence.
+
+The Mac Time Machine catalog closes another apparent route: its external
+destination has no snapshot after March 2025, no backup event in the critical
+29-30 August window, and local snapshots begin only after the NodeSet. The best
+Git chronology is a content-addressed 15-August Beagle planning document, but
+its commit is unsigned and shallow, with no external time anchor or restore
+payload. A mutable Codex rollout at `09:26:59.192Z` independently observes the
+device plugins and absence of the worker NodeSet. Both Git and rollout evidence
+corroborate negative chronology only; neither is a historical source.
 
 Frame `9028` currently represents class `4` only by aggregate masks. It has no
 executable list of leaves and no per-leaf proof of class, digest, ordering,
