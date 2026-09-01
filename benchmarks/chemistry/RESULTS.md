@@ -66,7 +66,7 @@ a real number, from a real measurement, of a real defect, presented as though
 it were a Sounio-versus-Cantera comparison.
 
 ```sh
-python3 - < the harness in §2.3     # trajectory under prod vs reac-nu
+python3 benchmarks/chemistry/rep_traj_bug.py
 ```
 
 | claim (A) | measured under `reac - nu` |
@@ -353,7 +353,21 @@ Three forms, not two:
 algebra: **exactly 0**, bit-for-bit, on all eight species, at the checkpoint
 **and** in the 1-σ band.
 
-Under the bug (aligned regime, T = 1500 K, t = 1e-4 s, dt = 1e-8):
+```sh
+python3 benchmarks/chemistry/rep_traj_bug.py
+```
+
+Under the bug (T = 1500 K, t = 1e-4 s, dt = 1e-8):
+
+> **Provenance, corrected 2026-09-01.** The absolute columns below were
+> measured in the *aligned* regime from a working copy that was never
+> committed — the same defect as §6.2b, in the section that closes the
+> provenance of claim (A). `rep_traj_bug.py` is that harness, committed. It
+> runs in whatever regime the committed oracle is in, so its absolute columns
+> sit in the sixth digit from those below. **The deltas — which are the
+> claim — reproduce to four significant figures**: 2.105e-03, 1.756e-02,
+> 1.490e-02, 1.774e-03, 3.441e-02, 1.687e-02, 1.394e-03, 1.617e-01, and
+> `fix − shipped` is 0.000e+00 bit-for-bit on all eight.
 
 | sp | shipped | under `reac - nu` | delta | band |
 |---|---|---|---|---|
@@ -370,6 +384,13 @@ This table is claim (A). See §1.1a.
 
 ### 2.4 d[HO2]/dt — the −34% does not reproduce
 
+```sh
+python3 benchmarks/chemistry/rep_traj_bug.py
+```
+
+Reproduced by the committed harness: shipped −8.13588260837949163e-08,
+under the bug −8.93772453622013026e-08, **−9.86%**.
+
 | quantity | value |
 |---|---|
 | d[HO2]/dt, shipped | −8.13560209958764591e-08 |
@@ -382,6 +403,10 @@ different state. Three numbers, three quantities; the −34% matches none of
 them and is **left unexplained rather than forced into agreement**.
 
 ### 2.5 Why the shipped and fixed forms are identical yet the bug is not
+
+```sh
+python3 benchmarks/chemistry/rep_traj_bug.py
+```
 
 R16 at the checkpoint:
 
@@ -454,7 +479,7 @@ commit**. Code and prose already agree, and they agree with the oracle.
 ### 3.1 Kc verified against Cantera, all 29 reactions
 
 ```sh
-python3 - < the harness in section 7.2
+python3 benchmarks/chemistry/rep_1atm.py
 ```
 
 | Δn class | count | worst `|Kc_replica/Kc_Cantera − 1|` |
@@ -1003,13 +1028,30 @@ TDY form reports `0.000000e+00` (or one ULP once aligned), the TPX form
 
 ---
 
-## 6.3 The instrument hid the defect — five instances
+## 6.3 The instrument hid the defect — seven instances
+
+> **A note on the count.** The brief that commissioned this section asked for
+> the two new findings to bring it to *six*. It brings it to **seven**: the
+> section already carried five instances, not four. The miscount is worth
+> recording rather than absorbing, because the instance most easily dropped
+> from a mental list — (4), where the *reference's* own error was the thing
+> being attributed to the method under test — is the one this document had to
+> correct twice, and the second correction is in this revision.
 
 Every defect in this document was invisible to the instrument that was
 supposed to find it, and in each case the instrument had **less resolution
 than the defect it was asked to measure**. The readings then came out
 attributed to the object rather than to the instrument. This is the pattern
 worth carrying out of this work; the individual numbers are secondary.
+
+The instances divide into two kinds, and the division is the point. Instances
+(1)–(4) are **instruments set too coarse**: the resolution is a number, the
+defect is a number, and the first is larger. Those are fixable by tightening a
+tolerance or choosing a finer probe. Instances (5)–(6) are not. In those, the
+defect **has no signature the instrument could have been set to detect** — no
+syntax to match, no type to check, no diff to read. Tightening nothing would
+have found them. That is a stronger claim than "the tolerance was loose", and
+it is the one that generalises beyond combustion kinetics.
 
 ### (1) A reduced mechanism hides a standard-state error
 
@@ -1046,15 +1088,33 @@ test could see.
 
 ### (4) A loose reference tolerance hides the integrator's own error
 
-| comparison | deviation |
-|---|---|
-| RK4 dt=1e-8 vs CVODE `rtol=1e-12` | 2.032e-11 |
-| RK4 dt=1e-8 vs CVODE **default** (`rtol=1e-9`) | 2.517e-08 |
-| CVODE default vs CVODE `rtol=1e-12` | **2.515e-08** |
+> **Corrected 2026-09-01, and the correction is the instance repeating itself.**
+> This table previously reported 2.517e-08 and 2.515e-08 with no committed
+> producer. Re-measured across all ten species with fresh `gas` objects, the
+> oracle's own tolerance spread is **3.251e-09**, not 2.515e-08 — the published
+> figure does not reproduce and is withdrawn. The section arguing that an
+> unproducible number gets attributed to the wrong object was itself carrying
+> one.
 
-The last two are the same number: the deviation is the *reference's* error,
-not RK4's. A harness trusting the default would attribute 2.5e-08 to RK4
-truncation, which is measured at **6.6e-12** — three orders lower. §7.3.
+```sh
+python3 benchmarks/chemistry/rep_tolerance.py
+```
+
+| comparison | worst rel | what it measures |
+|---|---|---|
+| CVODE default (`rtol=1e-9`) vs CVODE `rtol=1e-12` | **3.251e-09** (HO2) | the *oracle's* own resolution |
+| RK4 dt=1e-8 vs CVODE default | 2.662e-06 (O) | replica vs a loosely-set oracle |
+| RK4 dt=1e-8 vs CVODE `rtol=1e-12` | 2.660e-06 (O) | replica vs a tightly-set oracle |
+| RK4 dt=1e-8 vs RK4 dt=5e-9 | **2.222e-14** (H2O2) | RK4 truncation — the only row that is |
+
+The argument survives the correction and is sharper for it. RK4's truncation at
+the operating step is **2.222e-14**; the oracle's own resolution is
+**3.251e-09** — five orders larger. **Any replica-vs-Cantera agreement claimed
+tighter than 3.3e-09 is below the oracle's resolution and cannot be attributed
+to the replica at all.** That bound applies to this document's own aligned-regime
+figures (8.9e-13 … 1.2e-11): they are meaningful *only* because the committed
+oracle pins `rtol=1e-12`, and would be uninterpretable against a default-tolerance
+Cantera. §7.3.
 
 ### (5) Integrated observables hide what per-reaction comparison exposes
 
@@ -1062,6 +1122,68 @@ The `reac - nu` defect was "invisible to every Sounio↔replica pin" and fell in
 one shot to a per-reaction rate comparison against Cantera. I reproduced that
 path without knowing I was repeating it: the shipped reverse path matches
 Cantera to 7.877e-07 per reaction, the buggy one to 1.838e+00. §2.7.
+
+### (6) A convention constant has no syntactic signature, so it is not searchable
+
+The alignment of §1.5 changed the molar-volume and activation-energy constants
+at **30 sites** across `stdlib/chemistry/`, both Python replicas, the demo and
+the tests. One site survived it: `adiabatic_init` in
+`examples/chemistry/h2_ignition_uq_demo.sio`, twelve lines below the
+`demo_init` the same commit did change, still carrying a **truncated**
+`R_SI = 8.314462618` against CODATA's `8.31446261815324` — 1.5e-10 relative.
+
+Why the sweep missed it is the finding. `8.314462618` and `8.31446261815324`
+are both well-formed `f64` literals. They have the same type, the same
+dimension, the same units, the same magnitude, and differ only in digits a
+reader's eye compresses to "8.31446…". A convention constant carries **no
+syntactic signature**: there is no token, no annotation and no shape that
+distinguishes the truncated form from the exact one, so no grep, linter or
+type-checker can enumerate the sites reliably. The 30 that were found were
+found by searching for the *old* spelling; a site already half-migrated to a
+different wrong value matches neither the old pattern nor the new one.
+
+The general form: **a constant is the one kind of program content whose
+correctness is invisible to every tool that reads the program.** Detecting it
+needs a value-level invariant — a unit-carrying type, a named constant with a
+single definition site, or a gate that recomputes the constant rather than
+matching its text.
+
+### (7) Provenance of a number is a property of the git topology, and no type system sees it
+
+`claude/align-molar-volume-constant` and the branch carrying the TPX → TDY fix
+of §1.4 are **each internally correct**. Every file in each branch is
+self-consistent; both pass CI; a reviewer reading either diff sees nothing
+wrong, because nothing in either diff is wrong.
+
+The defect exists only in the **ancestry**. The alignment branch is cut from
+`main`, which never carried the TDY fix, so its copy of
+`gri30_h2_cantera_parity.py` restores `gas.TPX = T, P0, X` and deletes
+`initial_concentrations` and `initial_state_deviation`. Merging it, or building
+a release artefact from it, silently reverts the only real defect this work
+fixed — and the result is a *plausible* number, not a crash.
+
+No type system, test suite or review process examines the topology of the
+graph that produced a working tree. The only signature is numerical:
+
+| initialisation | worst deviation from intended initial concentrations |
+|---|---|
+| `TPX` | **5.692129e-06** |
+| `TDY`, unaligned constant | **0.000000e+00** |
+| `TDY`, aligned constant | **1.629030e-16** (one ULP) |
+
+**This table is a provenance signature carried by a number.** It identifies
+which merge produced the tree that produced the result, from the result alone,
+with ten orders of magnitude between the failing case and the passing ones.
+`benchmarks/chemistry/rep_tolerance.py` and `rep_traj_bug.py` therefore refuse
+to report at all when the oracle they load exposes no
+`initial_concentrations` — the absence of that helper *is* the TPX variant, so
+the probes fail closed on the ancestry rather than comparing two protocols
+that were never the same.
+
+The general form: **a numerical result inherits its meaning from a merge
+history that no static analysis of the merged tree can recover.** The remedy
+is not a stronger type system; it is an invariant printed alongside the result,
+chosen so that different ancestries give different values.
 
 ### The hazard that is NOT an instance here
 
@@ -1179,6 +1301,50 @@ Successive-error ratios, which must be 2⁴ = 16 for a fourth-order method:
 because the differences fall below the roundoff floor — which is itself the
 finding that RK4 truncation there is ~1e-12, not that the method misbehaves.
 
+**The direct falsification, added 2026-09-01.** The order table above argues
+from the *coarse-dt* regime and then extrapolates. The decisive test is at the
+operating step itself: halve dt and watch the deviation to Cantera.
+
+```sh
+python3 benchmarks/chemistry/rep_tolerance.py
+```
+
+| sp | \|dev\| dt=1e-8 | \|dev\| dt=5e-9 | ratio |
+|---|---|---|---|
+| H2 | 2.854e-07 | 2.854e-07 | **1.000** |
+| H | 2.365e-06 | 2.365e-06 | **1.000** |
+| O | 2.660e-06 | 2.660e-06 | **1.000** |
+| O2 | 2.388e-07 | 2.388e-07 | **1.000** |
+| OH | 2.624e-06 | 2.624e-06 | **1.000** |
+| H2O | 2.400e-06 | 2.400e-06 | **1.000** |
+| HO2 | 2.247e-07 | 2.247e-07 | **1.000** |
+| H2O2 | 1.891e-06 | 1.891e-06 | **1.000** |
+
+A fourth-order truncation error falls by 2⁴ = 16 under this halving. It does
+not move — **ratio 1.000 on all eight species, to four significant figures**.
+The residual is a *fixed offset, invariant under step size*: the constant of
+§1.5, not the integrator. This is a direct falsification of the truncation
+hypothesis at the step actually used, and it does not rely on extrapolating the
+coarse-dt law.
+
+The same run gives RK4's self-convergence, `|c(1e-8) − c(5e-9)|/|c|`, as
+**2.7e-15 … 2.2e-14** — eight orders below the 2.66e-06 gap. Truncation cannot
+account for the gap even in principle.
+
+**And the integration modes, checked mechanically rather than by reading.**
+Parsing `gri30_h2_cantera_parity.py` and inspecting `integrate()`:
+
+```
+params            ['gas', 'T', 't_end', 'dt']
+params used       ['gas', 'T', 't_end']        <- dt is NEVER referenced
+method calls      ['IdealGasReactor', 'ReactorNet', 'advance']
+loops in body     0                             <- there is no stepping at all
+```
+
+and `grep -c 'cantera\|ct\.'` over the whole replica returns **0**. Cantera is
+not a rate evaluator inside an RK4 loop, and the replica holds no reference to
+Cantera by which it could become one.
+
 **A caution against a natural mis-inference.** The README's statement that
 dt-convergence "agrees to 4 significant figures" is about **ignition delays**
 (126.315 vs 126.317 µs), a phase-sensitive quantity measured at the front.
@@ -1190,6 +1356,63 @@ dt = 1e-8 and dt = 5e-9 agree to ~1e-14.
 law, reaching 0.2% would need dt ≈ 4.9e-6 s — 493× the step used, far outside
 RK4 stability for this mechanism. Claim (A) is not an integrator-comparison
 artefact; §1.1a gives what it actually is.
+
+## 7.4 Provenance audit of this document
+
+Prompted by §6.2b, where a published table turned out to have been measured
+with a working copy that was never committed. That is the STEP 4 pathology —
+an artefact cited but not present — reappearing *inside* the work correcting
+it, which made it worth asking whether §6.2b was the only one.
+
+**It was not.** Criterion applied to every section: does the section report
+high-precision numbers, and if so, does a command block name a file that
+exists in the released tree?
+
+```sh
+python3 benchmarks/chemistry/audit_provenance.py          # audits the working tree
+python3 benchmarks/chemistry/audit_provenance.py --tree .  # or an unpacked release
+```
+
+The auditor is itself committed, and it exits non-zero on a finding, so this
+contract is checkable rather than asserted.
+
+| section | numbers | finding, before remediation |
+|---|---|---|
+| §1.1a claim (A) provenance | — | command was ```python3 - < the harness in §2.3``` — **a placeholder, not a command** |
+| §2.3 per-species under the bug | 32 | no committed producer; measured from an uncommitted working copy |
+| §2.4 d[HO2]/dt | 2 | inherited from §2.3, therefore also unproducible |
+| §2.5 R16 forward/reverse | 3 | output block with no command at all |
+| §2.6 adiabatic anchors | 8 | cites `gri30_h2_adiabatic_replica.py`, **absent from the released tree** |
+| §3.1 Kc, 29 reactions | 6 | command was ```python3 - < the harness in section 7.2``` — the same placeholder |
+| §6.2b STEP 6 aligned | 40 | uncommitted working copy (found first; fixed in `cad8a9c0`) |
+| §6.3 instance (4) | 3 | no producer, **and the headline figure did not reproduce** (2.515e-08 published, 3.251e-09 measured) |
+| §6.4 divergent constant | 2 | cites `flame1d_replica.py` and `stdlib/constants/physical.sio`, absent from the released tree |
+
+Everything else — 8 sections running from a named committed file, 19 inheriting
+a parent section's command — passes.
+
+**Remediated in this revision**, each by a committed producer rather than by
+softening the claim:
+
+| was | now |
+|---|---|
+| §1.1a, §2.3, §2.4, §2.5 | `benchmarks/chemistry/rep_traj_bug.py` — runs all three exponent forms and prints the per-species table, d[HO2]/dt and R16's forward/reverse |
+| §3.1 | `benchmarks/chemistry/rep_1atm.py`, which already produced these numbers and merely was not named |
+| §6.3 (4), §7.3 | `benchmarks/chemistry/rep_tolerance.py` — oracle resolution, replica-vs-oracle at both settings, and RK4 self-convergence |
+
+**What the audit cost, stated plainly.** One published number was withdrawn as
+unreproducible (§6.3's 2.515e-08). One table's absolute columns shifted in the
+sixth digit because the committed producer runs in the regime the committed
+oracle is in, while the original ran aligned — the deltas, which carry the
+claim, reproduce to four figures. No claim was weakened to fit a measurement.
+
+**Two probes now fail closed on provenance.** `rep_traj_bug.py` and
+`rep_tolerance.py` both draw the initial state from the oracle's
+`initial_concentrations()` and *raise* if it is absent, because its absence is
+the signature of the TPX variant (§6.3 instance (7)). They refuse to print
+rather than compare two protocols that were never the same.
+
+---
 
 ## 8. Claims still lacking a reproduction path
 
