@@ -1,4 +1,4 @@
-// Independent C++20 cross-check of the Sounio GRI-Mech 3.0 H/O kinetics and of
+// Independent C++23 cross-check of the Sounio GRI-Mech 3.0 H/O kinetics and of
 // the first-order diagonal GUM uncertainty band, written from the published
 // protocol rather than translated from either the Sounio module or the Python
 // replica.  Third implementation: Sounio (native), Python (replica), C++ (this).
@@ -9,22 +9,82 @@
 // ~ sqrt(T*dt).  A factor f in dt must therefore move the band by sqrt(f),
 // and a factor f in T must move it by sqrt(f) as well.
 //
-// Build:  g++ -std=c++20 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
+// Build:  g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
 // Run:    ./band_crosscheck ../gri30_h2_mechanism.json
 //
 // No external dependencies: the JSON reader below handles exactly the shape of
 // benchmarks/chemistry/gri30_h2_mechanism.json and nothing more.
+//
+// C++23 USAGE, AND WHAT IS DELIBERATELY NOT USED
+//
+//   std::expected           -- the mechanism loader is fail-closed: a malformed
+//                              or unexpected mechanism yields an error value
+//                              rather than a default-constructed one. A silently
+//                              defaulted rate constant is the failure mode that
+//                              makes a cross-check agree for the wrong reason.
+//   operator[](i, j)        -- the C++23 multidimensional subscript. The
+//                              stoichiometric tables are (reaction x species)
+//                              matrices and now read as `reac[r, s]`.
+//
+//   std::mdspan is NOT used. It is a C++23 library feature, but libstdc++ 13
+//   (the compiler in this environment, g++ 13.3.0) does not ship <mdspan>; it
+//   arrives in libstdc++ 14. `Mat2` below is a nine-line stand-in providing the
+//   same element access through the C++23 multidimensional subscript, which is
+//   the language half of what makes mdspan ergonomic. Swap it for std::mdspan
+//   once the toolchain floor moves; the call sites do not change.
+//   std::print is likewise absent from libstdc++ 13, so output stays on
+//   std::printf rather than being split across two styles.
+//
+// NUMERICAL ACCEPTANCE CRITERION. This migration must not move a single digit:
+// the language standard is not a numerical variable. The C++20 predecessor and
+// this file agree bit-for-bit on every value printed, and both reproduce the
+// Python replica's deterministic checkpoint to all 17 printed digits.
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <expected>
 #include <fstream>
 #include <map>
+#include <span>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
+
+// ------------------------------------------------------- C++23 support types
+
+/// Why a mechanism could not be loaded. Fail-closed: every one of these would
+/// otherwise surface as a silently defaulted rate constant.
+enum class LoadError { cannot_open, bad_json, missing_species, missing_reactions };
+
+constexpr std::string_view describe(LoadError e) noexcept {
+    switch (e) {
+        case LoadError::cannot_open:      return "cannot open mechanism file";
+        case LoadError::bad_json:         return "malformed JSON";
+        case LoadError::missing_species:  return "a required species is absent";
+        case LoadError::missing_reactions:return "no reactions array";
+    }
+    return "unknown";
+}
+
+/// Row-major (rows x cols) view with the C++23 multidimensional subscript.
+/// Stand-in for std::mdspan, which libstdc++ 13 does not ship -- see the header
+/// note. Same access syntax, so the swap is mechanical when the floor moves.
+template <typename T>
+class Mat2 {
+    std::vector<T> buf_;
+    std::size_t cols_ = 0;
+public:
+    Mat2() = default;
+    Mat2(std::size_t rows, std::size_t cols, T init = T{})
+        : buf_(rows * cols, init), cols_(cols) {}
+    constexpr T&       operator[](std::size_t r, std::size_t c)       { return buf_[r * cols_ + c]; }
+    constexpr const T& operator[](std::size_t r, std::size_t c) const { return buf_[r * cols_ + c]; }
+    std::span<const T> row(std::size_t r) const { return {buf_.data() + r * cols_, cols_}; }
+};
 
 // ---------------------------------------------------------------- tiny JSON
 struct JV {
@@ -78,12 +138,13 @@ constexpr double R_SI = 8.314462618;
 constexpr double R_CAL = 1.9872041;      // cal/mol/K, CHEMKIN activation-energy R
 constexpr double P0 = 101325.0;          // GRI-Mech NASA-7 reference pressure, 1 atm
 
+/// Per-reaction scalar parameters. The stoichiometric and third-body tables
+/// are (reaction x species) matrices on `Mech`, reached as `m.reac[r, s]`.
 struct Rxn {
     std::string eq; int type = 0;        // 0 arrhenius, 1 three-body, 2 falloff
     double A = 0, b = 0, Ea = 0;
     bool has_low = false; double lA = 0, lb = 0, lEa = 0;
     bool has_troe = false; double t_a = 0, t3 = 0, t1 = 0, t2 = 0;
-    std::array<double, NSP> eff{}, reac{}, prod{}, nu{};
     double dn = 0; double u = 0.30;
 };
 
@@ -94,19 +155,31 @@ static int sp_index(const std::string& n) {
 
 struct Mech {
     std::vector<Rxn> rx;
+    Mat2<double> reac, prod, nu, eff;    // (NR x NSP), C++23 subscript
     std::array<std::array<std::array<double,7>,2>, NSP> nasa{};
 };
 
-static Mech load_mech(const std::string& path) {
+static std::expected<Mech, LoadError> load_mech(const std::string& path) {
     std::ifstream f(path);
-    if (!f) { std::fprintf(stderr, "cannot open %s\n", path.c_str()); std::exit(2); }
+    if (!f) return std::unexpected(LoadError::cannot_open);
     std::stringstream ss; ss << f.rdbuf(); std::string src = ss.str();
     JParser p(src); JV root = p.parse();
+    if (root.k != JV::OBJ) return std::unexpected(LoadError::bad_json);
     Mech m;
     const JV* spec = root.find("species");
+    if (!spec) return std::unexpected(LoadError::missing_species);
+    const JV* rxs = root.find("reactions");
+    if (!rxs || rxs->k != JV::ARR) return std::unexpected(LoadError::missing_reactions);
+    const std::size_t nr = rxs->arr.size();
+    m.reac = Mat2<double>(nr, NSP, 0.0);
+    m.prod = Mat2<double>(nr, NSP, 0.0);
+    m.nu   = Mat2<double>(nr, NSP, 0.0);
+    m.eff  = Mat2<double>(nr, NSP, 1.0);
     for (int i = 0; i < NSP; ++i) {
         const JV* s = spec->find(SPN[i]);
+        if (!s) return std::unexpected(LoadError::missing_species);
         const JV* co = s->find("coeffs");
+        if (!co || co->arr.size() < 2) return std::unexpected(LoadError::bad_json);
         for (int r = 0; r < 2; ++r)
             for (int c = 0; c < 7; ++c) m.nasa[i][r][c] = co->arr[r].arr[c].num;
     }
@@ -117,7 +190,8 @@ static Mech load_mech(const std::string& path) {
         {"O + H2 <=> H + OH", 0.15}, {"2 OH <=> O + H2O", 0.20},
         {"H + O2 + M <=> HO2 + M", 0.25}, {"H + OH + M <=> H2O + M", 0.30},
         {"2 O + M <=> O2 + M", 0.25}, {"O + H + M <=> OH + M", 0.25}};
-    for (auto& rv : root.find("reactions")->arr) {
+    std::size_t ri = 0;
+    for (auto& rv : rxs->arr) {
         Rxn r;
         r.eq = rv.find("eq")->str;
         const std::string ty = rv.find("type")->str;
@@ -131,16 +205,18 @@ static Mech load_mech(const std::string& path) {
         if (tr && tr->k == JV::ARR) { r.has_troe = true;
             r.t_a = tr->arr[0].num; r.t3 = tr->arr[1].num;
             r.t1 = tr->arr[2].num; r.t2 = tr->arr[3].num; }
-        r.eff.fill(1.0);
         for (auto& kv : rv.find("eff")->obj) { int j = sp_index(kv.first);
-            if (j >= 0) r.eff[j] = kv.second.num; }
+            if (j >= 0) m.eff[ri, static_cast<std::size_t>(j)] = kv.second.num; }
         for (auto& kv : rv.find("react")->obj) { int j = sp_index(kv.first);
-            if (j >= 0) { r.reac[j] = kv.second.num; r.nu[j] -= kv.second.num; } }
+            if (j >= 0) { const auto sj = static_cast<std::size_t>(j);
+                m.reac[ri, sj] = kv.second.num; m.nu[ri, sj] -= kv.second.num; } }
         for (auto& kv : rv.find("prod")->obj) { int j = sp_index(kv.first);
-            if (j >= 0) { r.prod[j] = kv.second.num; r.nu[j] += kv.second.num; } }
-        for (int j = 0; j < NSP; ++j) r.dn += r.nu[j];
+            if (j >= 0) { const auto sj = static_cast<std::size_t>(j);
+                m.prod[ri, sj] = kv.second.num; m.nu[ri, sj] += kv.second.num; } }
+        for (std::size_t j = 0; j < NSP; ++j) r.dn += m.nu[ri, j];
         auto it = named.find(r.eq); if (it != named.end()) r.u = it->second;
         m.rx.push_back(r);
+        ++ri;
     }
     return m;
 }
@@ -158,7 +234,8 @@ static std::vector<double> kc_all(const Mech& m, double T) {
     std::vector<double> kc(m.rx.size());
     const double c0 = P0 / (R_SI * T) * 1e-6;   // mol/cm^3
     for (size_t r = 0; r < m.rx.size(); ++r) {
-        double e = 0; for (int s = 0; s < NSP; ++s) e -= m.rx[r].nu[s] * g_rt(m, s, T);
+        double e = 0; for (int s = 0; s < NSP; ++s)
+            e -= m.nu[r, static_cast<std::size_t>(s)] * g_rt(m, s, T);
         kc[r] = std::exp(e) * std::pow(c0, m.rx[r].dn);
     }
     return kc;
@@ -188,13 +265,14 @@ static std::vector<double> rates_net(const Mech& m, double T, const Vec& c,
                                      const std::vector<double>& kc) {
     std::vector<double> out(m.rx.size());
     for (size_t r = 0; r < m.rx.size(); ++r) {
-        const Rxn& x = m.rx[r];
-        double meff = 0; for (int s = 0; s < NSP; ++s) meff += x.eff[s] * c[s];
+        double meff = 0;
+        for (std::size_t s = 0; s < NSP; ++s) meff += m.eff[r, s] * c[s];
         const double kf = kfwd(m, r, T, meff);
         double f = kf, b = kf / kc[r];
-        for (int s = 0; s < NSP; ++s) {
-            if (x.reac[s] > 0) f *= std::pow(c[s], x.reac[s]);
-            if (x.prod[s] > 0) b *= std::pow(c[s], x.prod[s]);
+        for (std::size_t s = 0; s < NSP; ++s) {
+            const double nr_ = m.reac[r, s], np_ = m.prod[r, s];
+            if (nr_ > 0) f *= std::pow(c[s], nr_);
+            if (np_ > 0) b *= std::pow(c[s], np_);
         }
         out[r] = f - b;
     }
@@ -204,8 +282,8 @@ static std::vector<double> rates_net(const Mech& m, double T, const Vec& c,
 static Vec dcdt(const Mech& m, double T, const Vec& c, const std::vector<double>& kc) {
     const auto rn = rates_net(m, T, c, kc);
     Vec d{};
-    for (int s = 0; s < NSP; ++s) { double a = 0;
-        for (size_t r = 0; r < m.rx.size(); ++r) a += m.rx[r].nu[s] * rn[r];
+    for (std::size_t s = 0; s < NSP; ++s) { double a = 0;
+        for (size_t r = 0; r < m.rx.size(); ++r) a += m.nu[r, s] * rn[r];
         d[s] = a; }
     return d;
 }
@@ -243,7 +321,9 @@ static Vec prop_unc(const Mech& m, double T, const Vec& c,
         for (int k = 0; k < NSP; ++k) { if (k == i) continue;
             const double t = J[k][i] * dt; acc += t * t * v[k]; }
         for (size_t r = 0; r < m.rx.size(); ++r) {
-            const double t = m.rx[r].nu[i] * rn[r] * dt * m.rx[r].u; acc += t * t; }
+            const double t = m.nu[r, static_cast<std::size_t>(i)]
+                           * rn[r] * dt * m.rx[r].u;
+            acc += t * t; }
         out[i] = std::max(acc, 0.0);
     }
     return out;
@@ -267,7 +347,13 @@ static Run band(const Mech& m, double T, double t_end, double dt, bool with_unc)
 
 int main(int argc, char** argv) {
     const std::string path = (argc > 1) ? argv[1] : "../gri30_h2_mechanism.json";
-    const Mech m = load_mech(path);
+    const auto loaded = load_mech(path);
+    if (!loaded) {
+        std::fprintf(stderr, "cannot load %s: %s\n",
+                     path.c_str(), describe(loaded.error()).data());
+        return 2;
+    }
+    const Mech& m = *loaded;
     std::printf("mechanism: %s  (%zu reactions, %d species)\n",
                 path.c_str(), m.rx.size(), NSP);
     const double T = 1500.0;
