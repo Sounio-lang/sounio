@@ -22,7 +22,7 @@ No. Historical canaries exist. The product composition gap remains.
 | 2 LaneCell canary | `MATERIAL_CANARY_FROZEN`, `fleet_lane_cell_attached=false` | recorded; freeze not live |
 | 3 test-only ExecCell | `exec_cell_attached=true` with `test_only=true` | recorded; freeze not live |
 | 4 Replace same-UID `fork/exec` | `broker_command_kernel` + `supervise_child` still re-enter and fork | **open** |
-| 5 Descriptor absence fail-closed | `required_mode_default=false` | **open** |
+| 5 Descriptor absence fail-closed | runtime field and OCaml `required_mode` unset/0 both `false` | **open** |
 | 6 Crash recovery | `recycle_open=false` | **open** |
 | 7 Immutable runtime receipt | no product receipt; canary `test_only=true` | **open** |
 | 8 Fleet canary then fleet | `fleet_lane_cell_attached=false` | **open** |
@@ -32,8 +32,9 @@ A historical canary with `exec_cell_attached=true` is not product attachment.
 
 ## Falsifier
 
-The census fails if it cannot run the named-let counterexample, if
-`required_mode_default` becomes true while gate 4 is still open, or if
+The census fails if it cannot run the named-let counterexample, the
+payload-identity gate, or the OCaml `required_mode` default ratchet; if
+`required_mode_default` becomes true while gate 4 is still open; or if
 `parity_open` or `claim_ready` is raised. A red counterexample is not
 licence to mark gate 4 closed.
 

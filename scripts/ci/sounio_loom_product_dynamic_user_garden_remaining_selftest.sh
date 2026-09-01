@@ -8,6 +8,7 @@ GARDEN="$ROOT_DIR/tools/loom/GARDEN_PRODUCT_DYNAMIC_USER_EXEC_ATTACHMENT_V1.md"
 CONTRACT="$ROOT_DIR/tools/loom/PRODUCT_DYNAMIC_USER_GARDEN_REMAINING_V1.md"
 COUNTEREXAMPLE="$ROOT_DIR/scripts/ci/sounio_loom_product_dynamic_user_exec_counterexample_selftest.sh"
 COHERENCE="$ROOT_DIR/scripts/ci/sounio_loom_handshake_exec_cell_payload_coherence_selftest.sh"
+REQUIRED_MODE="$ROOT_DIR/scripts/ci/sounio_loom_product_exec_ingress_required_mode_default_selftest.sh"
 LANE="$ROOT_DIR/tools/loom/product_dynamic_user_lane_cell_host_canary.runtime.v1"
 EXEC_CELL="$ROOT_DIR/tools/loom/product_exec_cell_host_canary.runtime.v1"
 INGRESS="$ROOT_DIR/tools/loom/product_exec_ingress_dark.runtime.v1"
@@ -48,8 +49,8 @@ pins_live() {
   [[ "$actual" == "$expected" ]]
 }
 
-for path in "$GARDEN" "$CONTRACT" "$COUNTEREXAMPLE" "$COHERENCE" "$LANE" \
-  "$EXEC_CELL" "$INGRESS"; do
+for path in "$GARDEN" "$CONTRACT" "$COUNTEREXAMPLE" "$COHERENCE" \
+  "$REQUIRED_MODE" "$LANE" "$EXEC_CELL" "$INGRESS"; do
   [[ -f "$path" && ! -L "$path" ]] || fail "required parent is absent: ${path#$ROOT_DIR/}"
 done
 
@@ -109,8 +110,15 @@ COHERENCE_RESULT="$(bash "$COHERENCE")"
 [[ "$COHERENCE_RESULT" == *' required_mode_default=false '* ]] ||
   fail 'coherence gate no longer pins required_mode_default=false'
 
+MODE_RESULT="$(bash "$REQUIRED_MODE")"
+[[ "$MODE_RESULT" == sounio-loom-product-exec-ingress-required-mode-default-selftest:\ PASS* ]] ||
+  fail 'OCaml required_mode default ratchet failed'
+[[ "$MODE_RESULT" == *' unset_or_zero=false '* && \
+   "$MODE_RESULT" == *' gate5_closed=false '* ]] ||
+  fail 'OCaml required_mode default is no longer false'
+
 [[ "$(field "$INGRESS" required_mode_default)" == false ]] ||
   fail 'required_mode_default flipped while Garden gate 4 is still open'
 
-printf 'sounio-loom-product-dynamic-user-garden-remaining-selftest: PASS semantic_authority=Sounio producer=Bash role=CENSUS_ONLY garden=GARDEN_PRODUCT_DYNAMIC_USER_EXEC_ATTACHMENT_V1 gate1_counterexample_live=true gate2_lane_canary_recorded=true gate2_lane_freeze_live=%s gate3_exec_cell_canary_recorded=true gate3_exec_cell_test_only=true gate3_exec_cell_freeze_live=%s gate4_fork_exec_replaced=false gate5_descriptor_fail_closed=false gate6_crash_recovery=false gate7_immutable_receipt=false gate8_fleet_rollout=false remaining=4+5+6+7+8 required_mode_default=false fleet_lane_cell_attached=false canary_exec_cell_attached=true canary_test_only=true product_exec_attached=false material_execution=false production_activation=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false python_executed=false rust_executed=false next=replace-same-uid-fork-exec-then-fail-closed-descriptor\n' \
+printf 'sounio-loom-product-dynamic-user-garden-remaining-selftest: PASS semantic_authority=Sounio producer=Bash role=CENSUS_ONLY garden=GARDEN_PRODUCT_DYNAMIC_USER_EXEC_ATTACHMENT_V1 gate1_counterexample_live=true gate2_lane_canary_recorded=true gate2_lane_freeze_live=%s gate3_exec_cell_canary_recorded=true gate3_exec_cell_test_only=true gate3_exec_cell_freeze_live=%s gate4_fork_exec_replaced=false gate5_descriptor_fail_closed=false gate5_ocaml_default=false gate6_crash_recovery=false gate7_immutable_receipt=false gate8_fleet_rollout=false remaining=4+5+6+7+8 required_mode_default=false fleet_lane_cell_attached=false canary_exec_cell_attached=true canary_test_only=true product_exec_attached=false material_execution=false production_activation=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false python_executed=false rust_executed=false next=replace-same-uid-fork-exec-then-fail-closed-descriptor\n' \
   "$LANE_FREEZE_LIVE" "$EXEC_CELL_FREEZE_LIVE"
