@@ -306,6 +306,55 @@ explicitly typed output-path local and non-concatenating success output in
 `file_path` local in `self-hosted/compiler/module_frontend.sio`. PR #2307
 remains intact.
 
+## Live origin/main replay
+
+The pinned `a1590c1e98` evidence above remains the attribution record. After
+`origin/main` advanced by 30 commits to `bc6da34c11`, the four lane commits were
+replayed in a separate clean worktree rather than rewriting that record. The
+replay applied without conflicts, including across the intervening additions
+to `self-hosted/compiler/main.sio` and `.github/workflows/ci.yml`.
+
+Foundry job `11473` measured the intermediate replay commit `839ef8b023`, after
+the two baseline transplants but before the `file_path` repair. With fixed
+Madaros SHA-256
+`2080defa2f1042ef0b0c3d6796e77de0226e2b840856af5da7d2e36ee911e253`, it
+retained the same boundary:
+
+```text
+REMOTE: fpcheck rc=0 errors=0
+REMOTE: hello compile_rc=0 run_rc=0 output=Hello, Sounio
+into_acc_done=40 minimum=40
+first_failure=IR lowering failed during merge: ir_into_acc_failed
+cause: cannot safely lower print/println argument with unresolved scalar kind
+```
+
+Foundry job `11474` measured the complete replay at `ec98d9886c`. With the same
+fixed Madaros and gate order, it passed the raised acceptance floor:
+
+```text
+REMOTE: fpcheck rc=0 errors=0
+REMOTE: hello compile_rc=0 run_rc=0 output=Hello, Sounio
+ir_max_functions 16384
+merged_ir_functions=13140
+into_acc_done=123 minimum=122
+first_failure=Error: Failed to write native binary to /tmp/sounio-remote-927140/fixed-point/madaros.gen2 rc=19
+```
+
+Slurm recorded `11473` as `COMPLETED/0:0` in `00:12:17` and `11474` as
+`COMPLETED/0:0` in `00:33:46`, both on `gpuorangefs-r770-proxmox`. The merged
+function count rose from the anchored run's 13,107 to 13,140, but remained below
+the 16,384 source cap. A fresh strict closure census also passed with 124 nodes,
+11,285 function declarations, and 5,099 slots of headroom. The blocker criterion
+did not drift: the default floor remains 40, the CI floor remains 122, and the
+localized repair still advances the fixed compiler from 40 to 123 completed
+imports.
+
+The complete transcripts and hash-bound replay receipt are retained at:
+
+- `artifacts/audit/madaros_gen2_40_to_123_live_main_baseline_foundry_20260901.txt`
+- `artifacts/audit/madaros_gen2_40_to_123_live_main_postfix_foundry_20260901.txt`
+- `artifacts/audit/madaros_gen2_40_to_123_live_main_replay_receipt_20260901.json`
+
 ## Closed blocker
 
 `BLK-20260901-gen2-current-zero` is closed. Its acceptance gate passed with
