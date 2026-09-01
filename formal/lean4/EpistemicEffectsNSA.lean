@@ -1941,6 +1941,47 @@ theorem norm_mult_of_monomial {n : Nat} {i : Nat} (hi : i < 2^n) {LB : List Nat}
     normSq (2^n) (cdMul n a b) = normSq (2^n) a * normSq (2^n) b :=
   norm_mult_of_xorFree (fun j hj => by simp at hj; subst hj; exact hi) hLB (xorFree_singleton i LB) ha hb
 
+-- ---- §L.3  The RELATIVE noise model — what the checker actually propagates. The
+-- ---- checker carries one scalar ε per Knowledge value and combines products with
+-- ---- `epsilon_combine_relative` (δx = ε·x): the perturbation direction IS the value.
+-- ---- Under that model the affine form of x is a single source with coefficient x, so
+-- ---- the certificate hypothesis collapses to the VALUE supports: xorFree(Q(x), Q(y)).
+
+/-- Relative-model affine form: one source `s`, coefficient the value itself. -/
+def relAff (s : Nat) (x : Vec) : Aff := [(s, x)]
+
+theorem qCoversAff_relAff {n : Nat} {L : List Nat} {x : Vec} (hx : qCoversL n L x) (s : Nat) :
+    qCoversAff n (some L) (relAff s x) := by
+  intro p hp
+  simp only [relAff, List.mem_singleton] at hp
+  subst hp
+  exact hx
+
+/-- THE CHECKER'S OBLIGATION, DISCHARGED BY VALUE SUPPORTS: in the relative model, if the two
+    values' supports are xor-free (in particular if either operand is a monomial), the GUM
+    shortcut is the sensitivity propagator — at every level, sedenions included. This is the
+    rule that can narrow E251 from "kind ≥ 4 refused" to "refused unless xorFree(Q(x), Q(y))". -/
+theorem relative_shortcut_exact_of_xorFree {n : Nat} {LA LB : List Nat}
+    (hLA : boundedL n LA) (hLB : boundedL n LB) (hx : xorFree LA LB)
+    {x y : Vec} (s t : Nat) (ma mb : KMeta)
+    (hxv : qCoversL n LA x) (hyv : qCoversL n LB y)
+    (hma : ma.gumVar = trueVar (2^n) (relAff s x)) (hmb : mb.gumVar = trueVar (2^n) (relAff t y)) :
+    (gMulShortcut n x y ma mb).gumVar = (gMulMeta n x (relAff s x) y (relAff t y) ma mb).gumVar :=
+  shortcut_eq_sensitivity_of_xorFree hLA hLB hx ma mb hxv (qCoversAff_relAff hxv s) hyv (qCoversAff_relAff hyv t) hma hmb
+
+/-- Monomial operand, relative model: exact against ANY partner at ANY level. -/
+theorem relative_shortcut_exact_of_monomial {n : Nat} {k : Nat} (hk : k < 2^n) {LB : List Nat}
+    (hLB : boundedL n LB) {x y : Vec} (s t : Nat) (ma mb : KMeta)
+    (hxv : qCoversL n [k] x) (hyv : qCoversL n LB y)
+    (hma : ma.gumVar = trueVar (2^n) (relAff s x)) (hmb : mb.gumVar = trueVar (2^n) (relAff t y)) :
+    (gMulShortcut n x y ma mb).gumVar = (gMulMeta n x (relAff s x) y (relAff t y) ma mb).gumVar :=
+  relative_shortcut_exact_of_xorFree (fun j hj => by simp at hj; subst hj; exact hk) hLB
+    (xorFree_singleton k LB) s t ma mb hxv hyv hma hmb
+
+/-- And the relative model is exactly where the sedenion witness lives: `sedD = e₁+e₁₀` is a
+    single-source direction with two-line support, i.e. `relAff s sedD`. -/
+theorem sed_witness_is_relative : relAff 0 sedD = [(0, sedD)] := rfl
+
 end Sounio.EpistemicEffectsNSA
 
 -- ================================================================
@@ -1982,3 +2023,5 @@ end Sounio.EpistemicEffectsNSA
 #print axioms Sounio.EpistemicEffectsNSA.shortcut_eq_sensitivity_of_xorFree
 #print axioms Sounio.EpistemicEffectsNSA.norm_mult_of_monomial
 #print axioms Sounio.EpistemicEffectsNSA.not_xorFree_witness
+#print axioms Sounio.EpistemicEffectsNSA.relative_shortcut_exact_of_xorFree
+#print axioms Sounio.EpistemicEffectsNSA.relative_shortcut_exact_of_monomial
