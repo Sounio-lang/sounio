@@ -277,6 +277,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-fo-cross-fn-return-2026-07-28 | repo_only | docs/audit/MADAROS_FO_CROSS_FN_RETURN_2026-07-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-fo-gum-stack-2026-07-27 | repo_only | docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-for-loop-lowering-2026-06-20 | repo_only | docs/audit/MADAROS_FOR_LOOP_LOWERING_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-gen2-pr2307-isolation-2026-08-31 | repo_only | docs/audit/MADAROS_GEN2_PR2307_ISOLATION_2026-08-31.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-gpu-kernel-ir-lower-to-ptx-ptx-module-combination-2026-07-02 | repo_only | docs/audit/MADAROS_GPU_KERNEL_IR_LOWER_TO_PTX_PTX_MODULE_COMBINATION_2026-07-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-gpu-module-compile-oom-2026-07-03 | repo_only | docs/audit/MADAROS_GPU_MODULE_COMPILE_OOM_2026-07-03.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-handle-182-alloc-vs-live-2026-08-17 | repo_only | docs/audit/MADAROS_HANDLE_182_ALLOC_VS_LIVE_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
