@@ -106,8 +106,10 @@ unsafe fn digest_slice(value: DigestSliceV1) -> Result<&'static [u8], Refusal> {
 }
 
 fn digest_array(value: &[u8], out: &mut Vec<u8>) {
-    array((value.len() / 32) as u64, out);
-    for digest in value.chunks_exact(32) {
+    let (digests, remainder) = value.as_chunks::<32>();
+    debug_assert!(remainder.is_empty());
+    array(digests.len() as u64, out);
+    for digest in digests {
         bytes(digest, out);
     }
 }
