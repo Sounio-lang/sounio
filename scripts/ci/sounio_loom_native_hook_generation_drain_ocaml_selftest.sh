@@ -296,7 +296,13 @@ printf '%s\n' \
   'semantic_authority=Sounio' \
   'action=9046' > "$LIVE_MARKERS/final-config.v1"
 
-/bin/sleep 120 &
+LIVE_CALLER_FIXTURE="$TEST_ROOT/large-caller-sleep"
+cp /bin/sleep "$LIVE_CALLER_FIXTURE"
+truncate -s 9437184 "$LIVE_CALLER_FIXTURE"
+chmod 0555 "$LIVE_CALLER_FIXTURE"
+[[ "$(stat -c '%s' "$LIVE_CALLER_FIXTURE")" -gt 8388608 ]] ||
+  fail 'large caller fixture did not cross the bounded metadata-read threshold'
+"$LIVE_CALLER_FIXTURE" 120 &
 LIVE_PID=$!
 LIVE_PID_START="$(sed 's/^[^)]*) //' "/proc/$LIVE_PID/stat" | awk '{print $20}')"
 LIVE_BOOT_ID="$(cat /proc/sys/kernel/random/boot_id)"
@@ -432,4 +438,4 @@ grep -Fq 'refreshDrain' "$ROOT_DIR/tools/loom/src/loom_ui.ml" ||
   fail "forbidden Python or Rust executable ran: $(tr '\n' ' ' < "$FORBIDDEN_LOG")"
 
 printf '%s\n' \
-  'sounio-loom-native-hook-generation-drain-ocaml-selftest: PASS semantic_authority=Sounio operational_realization=OCaml direct_state_inventory=true kernel_process_binding=true canonical_process_generation=true fleet_session_alias_collapse=true duplicate_capability_conflict=DENY675 stable_double_snapshot=true incomplete_inventory=DENY673 false_zero=DENY680 generation_or_capability_unbound=DENY675 canary_or_rollback_incomplete=DENY678 config_unbound=DENY672 arithmetic_invalid=DENY674 runtime_tamper=fail_closed manifest_tamper=fail_closed manifest_missing=fail_closed live_drift=fail_closed forbidden_python_rust_exec=absent ui_route=wired cutover_command=native+hidden_until_ready'
+  'sounio-loom-native-hook-generation-drain-ocaml-selftest: PASS semantic_authority=Sounio operational_realization=OCaml direct_state_inventory=true kernel_process_binding=true canonical_process_generation=true fleet_session_alias_collapse=true duplicate_capability_conflict=DENY675 large_caller_hashing=streamed stable_double_snapshot=true incomplete_inventory=DENY673 false_zero=DENY680 generation_or_capability_unbound=DENY675 canary_or_rollback_incomplete=DENY678 config_unbound=DENY672 arithmetic_invalid=DENY674 runtime_tamper=fail_closed manifest_tamper=fail_closed manifest_missing=fail_closed live_drift=fail_closed forbidden_python_rust_exec=absent ui_route=wired cutover_command=native+hidden_until_ready'

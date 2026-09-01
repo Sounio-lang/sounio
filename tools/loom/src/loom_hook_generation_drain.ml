@@ -52,7 +52,16 @@ let read_file label path =
     ~finally:(fun () -> close_in_noerr channel)
     (fun () -> really_input_string channel (in_channel_length channel))
 
-let sha256_file label path = sha256 (read_file label path)
+let sha256_file label path =
+  let stat =
+    try Unix.lstat path
+    with Unix_error (ENOENT, _, _) -> failf "%s-missing:%s" label path
+  in
+  if stat.st_kind <> S_REG then failf "%s-not-regular:%s" label path;
+  let channel = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+      Cryptokit.hash_channel (Cryptokit.Hash.sha256 ()) channel
+      |> Cryptokit.transform_string (Cryptokit.Hexa.encode ()))
 
 let parse_fields ?(allow_duplicate = false) label text =
   let table = Hashtbl.create 32 in
