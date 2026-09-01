@@ -293,6 +293,45 @@ if SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
   --agent codex --lane "$SESSION_LANE" >/dev/null 2>&1; then
   fail 'duplicate SessionEnd recreated a native hook capability'
 fi
+late_stop="{\"hook_event_name\":\"Stop\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$ROOT_DIR\"}"
+run_hook "$late_stop"
+[[ "$HOOK_RC" -eq 0 ]] ||
+  fail "late Stop was not absorbed after SessionEnd: rc=$HOOK_RC output=$HOOK_OUTPUT"
+if SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" hook-capability-status \
+  --agent codex --lane "$SESSION_LANE" >/dev/null 2>&1; then
+  fail 'late Stop recreated a native hook capability'
+fi
+late_pretool="{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$ROOT_DIR\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"printf should-not-run\"}}"
+run_hook "$late_pretool"
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'hook-session-closed:event=PreToolUse'* ]] ||
+  fail "closed session admitted a late execution tool: rc=$HOOK_RC output=$HOOK_OUTPUT"
+[[ -f "$COORD_DIR/hook-session-lifecycle/events.tsv" ]] ||
+  fail 'native hook omitted its session lifecycle audit log'
+grep -Fq $'action=LATE_NOOP\tagent=codex\tlane='"$SESSION_LANE"$'\tsession_id_sha256=' \
+  "$COORD_DIR/hook-session-lifecycle/events.tsv" ||
+  fail 'session lifecycle log omitted the late-event no-op'
+lifecycle_tombstone="$(find "$COORD_DIR/hook-session-lifecycle" -maxdepth 1 \
+  -type f -name '*.closed' -print -quit)"
+[[ -n "$lifecycle_tombstone" ]] || fail 'SessionEnd omitted its durable tombstone'
+cp "$lifecycle_tombstone" "$TEST_ROOT/hook-session-tombstone.backup"
+sed -i 's/^state=CLOSED$/state=OPEN/' "$lifecycle_tombstone"
+run_hook "$late_stop"
+[[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'hook-session-tombstone-invalid'* ]] ||
+  fail "tampered session tombstone did not fail closed: rc=$HOOK_RC output=$HOOK_OUTPUT"
+cp "$TEST_ROOT/hook-session-tombstone.backup" "$lifecycle_tombstone"
+run_hook "$session_start"
+[[ "$HOOK_RC" -eq 0 && "$HOOK_OUTPUT" == *'Sounio coordination joined:'* ]] ||
+  fail "explicit SessionStart did not reopen the closed session: rc=$HOOK_RC output=$HOOK_OUTPUT"
+[[ -f "$capability_file" ]] || fail 'reopened session omitted its native attestation'
+grep -Fq $'action=REOPENED\tagent=codex\tlane='"$SESSION_LANE"$'\tsession_id_sha256=' \
+  "$COORD_DIR/hook-session-lifecycle/events.tsv" ||
+  fail 'session lifecycle log omitted the explicit reopen'
+run_hook "$session_end"
+[[ "$HOOK_RC" -eq 0 ]] ||
+  fail "reopened session did not close cleanly: rc=$HOOK_RC output=$HOOK_OUTPUT"
+[[ ! -f "$capability_file" ]] ||
+  fail 'reopened SessionEnd left a native hook capability behind'
 
 [[ -f "$DECISION_LOG" ]] || fail "native hook omitted its decision log"
 grep -Fq $'decision=ALLOW\treason=SOUNIO_NATIVE_HOOK_CUTOVER HOOK_EVENT_ADMIT semantic_authority=Sounio action=9045' \
@@ -514,4 +553,4 @@ SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
   --reason 'native tmux fixture complete' >/dev/null
 
 printf '%s\n' \
-  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio action=9045 session=roundtrip duplicate_session_end=idempotent hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused cutover_policy_missing=refused cutover_policy_tamper=refused cutover_runtime_tamper=refused log_redirect=refused providers=codex,claude,cursor,grok dialect_mismatch=refused config_missing=refused config_non_native=refused decision_receipt=complete python=not-executed rust=not-executed'
+  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio action=9045 session=roundtrip duplicate_session_end=idempotent late_stop=noop late_execution=refused tombstone_tamper=refused session_reopen=explicit hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused cutover_policy_missing=refused cutover_policy_tamper=refused cutover_runtime_tamper=refused log_redirect=refused providers=codex,claude,cursor,grok dialect_mismatch=refused config_missing=refused config_non_native=refused decision_receipt=complete python=not-executed rust=not-executed'

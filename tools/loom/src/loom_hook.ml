@@ -1318,6 +1318,130 @@ let process_identity () =
   (pid, pid_start, trim (read_file "/proc/sys/kernel/random/boot_id"),
    Unix.readlink "/proc/self/ns/pid", Unix.gethostname ())
 
+let coordination_state_root root =
+  match Sys.getenv_opt "SOUNIO_COORD_DIR" with
+  | Some path when path <> "" ->
+      if Filename.is_relative path then Filename.concat root path else path
+  | _ -> Filename.concat (git_common_dir root) "sounio-coord-state"
+
+let fsync_directory path =
+  let descriptor = Unix.openfile path [ O_RDONLY ] 0 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () -> Unix.fsync descriptor)
+
+let write_atomic path value =
+  let directory = Filename.dirname path in
+  mkdir_p directory;
+  let temporary =
+    Filename.concat directory
+      (Printf.sprintf ".%s.tmp-%d" (Filename.basename path) (Unix.getpid ()))
+  in
+  let descriptor =
+    Unix.openfile temporary [ O_WRONLY; O_CREAT; O_EXCL ] 0o600
+  in
+  try
+    write_all descriptor value;
+    Unix.fsync descriptor;
+    Unix.close descriptor;
+    Unix.rename temporary path;
+    fsync_directory directory
+  with error ->
+    (try Unix.close descriptor with _ -> ());
+    (try Unix.unlink temporary with _ -> ());
+    raise error
+
+let hook_session_paths root agent lane raw_session_id =
+  let directory =
+    Filename.concat (coordination_state_root root) "hook-session-lifecycle"
+  in
+  let key = sha256 (agent ^ "\000" ^ lane ^ "\000" ^ raw_session_id) in
+  (directory, Filename.concat directory (key ^ ".lock"),
+   Filename.concat directory (key ^ ".closed"))
+
+let validate_hook_session_tombstone path agent lane raw_session_id =
+  let stat = Unix.lstat path in
+  if stat.st_kind <> S_REG then failf "hook-session-tombstone-not-regular";
+  let fields = parse_manifest path in
+  if required fields "schema" <> "loom-hook-session-lifecycle-v1"
+     || required fields "state" <> "CLOSED"
+     || required fields "agent" <> agent
+     || required fields "lane" <> lane
+     || required fields "session_id_sha256" <> sha256 raw_session_id
+  then failf "hook-session-tombstone-invalid"
+
+let write_hook_session_tombstone path agent lane raw_session_id =
+  let pid, pid_start, boot_id, pid_namespace, _ = process_identity () in
+  write_atomic path
+    (String.concat "\n"
+       [ "schema=loom-hook-session-lifecycle-v1"; "state=CLOSED";
+         "agent=" ^ agent; "lane=" ^ lane;
+         "session_id_sha256=" ^ sha256 raw_session_id;
+         "caller_pid=" ^ string_of_int pid; "caller_pid_start=" ^ pid_start;
+         "caller_boot_id=" ^ boot_id; "caller_pid_namespace=" ^ pid_namespace;
+         "closed_utc=" ^ utc_now (); "" ])
+
+let append_hook_session_lifecycle root action agent lane raw_session_id event =
+  let directory, _, _ = hook_session_paths root agent lane raw_session_id in
+  mkdir_p directory;
+  let path = Filename.concat directory "events.tsv" in
+  let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      write_all descriptor
+        (String.concat "\t"
+           [ "schema=loom-hook-session-lifecycle-v1"; "utc=" ^ utc_now ();
+             "action=" ^ action; "agent=" ^ agent; "lane=" ^ lane;
+             "session_id_sha256=" ^ sha256 raw_session_id; "event=" ^ event ]
+         ^ "\n");
+      Unix.fsync descriptor;
+      Unix.lockf descriptor F_ULOCK 0)
+
+let with_hook_session_lifecycle root agent lane raw_session_id event action =
+  let directory, lock_path, tombstone_path =
+    hook_session_paths root agent lane raw_session_id
+  in
+  mkdir_p directory;
+  let descriptor = Unix.openfile lock_path [ O_WRONLY; O_CREAT ] 0o600 in
+  Fun.protect
+    ~finally:(fun () ->
+      (try Unix.lockf descriptor F_ULOCK 0 with _ -> ());
+      Unix.close descriptor)
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      let closed = Sys.file_exists tombstone_path in
+      if closed then
+        validate_hook_session_tombstone tombstone_path agent lane raw_session_id;
+      match event with
+      | "SessionStart" ->
+          let result = action () in
+          if closed then (
+            Unix.unlink tombstone_path;
+            fsync_directory directory;
+            append_hook_session_lifecycle root "REOPENED" agent lane raw_session_id
+              event);
+          result
+      | "SessionEnd" when closed ->
+          append_hook_session_lifecycle root "LATE_NOOP" agent lane raw_session_id
+            event;
+          None
+      | "SessionEnd" ->
+          write_hook_session_tombstone tombstone_path agent lane raw_session_id;
+          append_hook_session_lifecycle root "CLOSED" agent lane raw_session_id event;
+          (try action ()
+           with error ->
+             append_hook_session_lifecycle root "CLOSE_FAILED" agent lane
+               raw_session_id event;
+             raise error)
+      | "Stop" when closed ->
+          append_hook_session_lifecycle root "LATE_NOOP" agent lane raw_session_id
+            event;
+          None
+      | _ when closed -> failf "hook-session-closed:event=%s" event
+      | _ -> action ())
+
 let parent_process () =
   try
     let pid = Unix.getppid () in
@@ -1807,8 +1931,10 @@ let run arguments =
     in
     receipt := Some authorized_receipt;
     let hook_output =
-      execute_event tool_root current_root event !agent !lane raw_session_id
-        file_capability_fixture (sha256 raw_event)
+      with_hook_session_lifecycle current_root !agent !lane raw_session_id
+        !event_name (fun () ->
+          execute_event tool_root current_root event !agent !lane raw_session_id
+            file_capability_fixture (sha256 raw_event))
       |> Option.map (provider_hook_output profile)
     in
     append_decision_log current_root "ALLOW" authorized_receipt.result !agent !lane
