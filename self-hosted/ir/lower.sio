@@ -13710,6 +13710,61 @@ impl Lowerer {
             _ => false,
         }
     }
+    // The fn_id a block's TAIL expression calls, when that tail is a method
+    // call. -1 otherwise. Mirrors block_tail_is_string_ref: walk to the last
+    // statement, and only an expression statement can carry the value.
+    fn block_tail_method_fn_id(self, blk: &Block) -> i64 with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result = 0 - 1
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_method_fn_id(&stmt_ref.expr)
+                    } else {
+                        result = 0 - 1
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    fn opt_block_tail_method_fn_id(self, blk_opt: &Option<Box<Block>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_method_fn_id(&(*blk)),
+            _ => 0 - 1,
+        }
+    }
+
+    fn opt_expr_method_fn_id(self, e_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *e_opt {
+            Some(e) => self.expr_method_fn_id(&(*e)),
+            _ => 0 - 1,
+        }
+    }
+
+    // An `else { ... }` arrives as an ExprBlock, so the tail has to be reached
+    // through it; anything that is not ultimately a method call answers -1.
+    fn expr_method_fn_id(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_method_fn_id(&(*e).block)
+        }
+        if (*e).kind != ExprKind::ExprMethodCall {
+            return 0 - 1
+        }
+        let recv_type = self.lower_method_recv_type(&(*e).left)
+        let call_name = if recv_type.len > 0 {
+            ir_mangle_method_name(recv_type, (*e).name)
+        } else {
+            (*e).name
+        }
+        lowerer_lookup_fn_id_by_name_ref(&self, call_name)
+    }
+
 
     fn expr_result_scalar_kind_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprIntLit {
@@ -16298,6 +16353,46 @@ impl Lowerer {
                             &(*lo.struct_layouts),
                             lo.return_tuple_struct_name_for_fn_id(fn_id))
                         lo = lo.bind_local_tuple_struct(s.name, m_layout, m_slot)
+                    }
+                } else if (*expr_box).kind == ExprKind::ExprIf {
+                    // `let pair = if cond { a.wide() } else { a.narrow() }`.
+                    // The shape enum types a local from a call, a method call, a
+                    // struct literal, an ident or a field access; an if-EXPRESSION
+                    // had no arm at all. So the local got neither a struct type
+                    // nor a tuple-slot layout, and every method call on it lowered
+                    // against the BARE name, inventing a body-less function the
+                    // backend then refuses (empty_stub_ud2).
+                    //
+                    // Measured with three witnesses that differ only here: the
+                    // pair bound from a plain method call refuses nothing, and the
+                    // same pair bound from an if-expression refuses.
+                    //
+                    // The two branches need NOT call the same function -- the real
+                    // shape is `fresh_wide_reg` against `fresh_reg` -- so what has
+                    // to agree is the RETURN TYPE. When they disagree, bind
+                    // nothing: an untyped local is a refusal, but a wrongly typed
+                    // one is a silently wrong call target.
+                    let then_fn = lo.opt_block_tail_method_fn_id(&(*expr_box).block)
+                    let else_fn = lo.opt_expr_method_fn_id(&(*expr_box).else_expr)
+                    if then_fn >= 0 && else_fn >= 0 {
+                        let t_ret = lo.return_struct_name_for_fn_id(then_fn)
+                        let e_ret = lo.return_struct_name_for_fn_id(else_fn)
+                        let t_slot = lo.return_tuple_struct_slot_for_fn_id(then_fn)
+                        let e_slot = lo.return_tuple_struct_slot_for_fn_id(else_fn)
+                        if t_slot == e_slot && ir_name_eq(t_ret, e_ret) {
+                            if t_ret.len > 0 {
+                                lo = lo.bind_local_struct_type(s.name, t_ret)
+                            }
+                            if t_slot >= 0 {
+                                let t_name = lo.return_tuple_struct_name_for_fn_id(then_fn)
+                                if ir_name_eq(t_name, lo.return_tuple_struct_name_for_fn_id(else_fn)) {
+                                    lo = lo.bind_local_tuple_struct(
+                                        s.name,
+                                        lower_struct_layout_index_of(&(*lo.struct_layouts), t_name),
+                                        t_slot)
+                                }
+                            }
+                        }
                     }
                 } else if (*expr_box).kind == ExprKind::ExprIdent {
                     // `let b = nx`: propagate the source variable's struct type (e.g. a Box
