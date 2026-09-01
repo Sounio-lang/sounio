@@ -197,3 +197,28 @@ multiplication operators (Zorn-vector / Moufang identities), i.e. pure 𝕆 alge
 
 Status: equations (A),(B) and the Φ_u reduction are exact and verified; the degree
 computation from Φ_u is the remaining analytic step (Step 1 of §7).
+
+## 9. Two attacks on deg D = 7 (2026-09-01) — verdict
+
+**Attack 1 (Thom–Porteous / Chern).** D is the corank-1 locus of O^5 → E⊗O(1)
+(E = effective rank-7 target), so deg D = c_3(E⊗O(1)) with
+c_3(E⊗O(1)) = 35h³ + 15 c₁(E)h² + 5 c₂(E)h + c₃(E); matching 7 needs
+15c₁+5c₂+c₃ = −28. **But E is exactly the bundle E₇ that fails to exist over Z
+(§6); computing its Chern classes reintroduces the dead object.** This route is
+structurally the wrong tool — the same error as chasing w₇. Abandoned.
+
+**Attack 2 (Φ_u / octonion operators — the live route).** Verified: writing
+Im C(x′) as the graph {(w₁, Ψ(w₁))}, equation (B) becomes (Ψ − Φ_u)(w₁) = 0 with
+Φ_u = R_{u₁}⁻¹L_{u₂}. Both blocks (A) and (B) have rank 5 generically (neither
+alone forces a witness); D is where the **combined** 16×5 system drops to rank 4.
+After clearing n(u₁), the entries are degree 2 in u. The degree of the combined
+degeneracy form is deg D = 7, but extracting "= dim Im 𝕆" from here requires the
+algebra of the operators R_{u₁}⁻¹L_{u₂} (Moufang identities, the Zorn-vector
+matrix representation of octonion left/right multiplication). This is a genuine
+analytic project, not an in-session computation.
+
+**Honest verdict.** deg D = 7 is exact and measured on ~20 configs; the two
+avenues to *prove* it are (1) dead (reintroduces E₇) and (2) live but a real
+research computation in octonion operator algebra. The problem is reduced to its
+sharpest form — the parity/degree lives in the operators R_{u₁}, L_{u₂} on 𝕆 —
+but is not closed here. No proof is fabricated.
