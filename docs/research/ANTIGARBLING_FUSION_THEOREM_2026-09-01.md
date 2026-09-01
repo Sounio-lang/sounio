@@ -339,6 +339,30 @@ which would mean the epistemic pass's uncertainty annotations were never reachin
 on source builds. Three blocking tests passing proved nothing — blocking is the default; the
 positive control T143g′ was added for exactly that reason.
 
+**Root cause (found the same afternoon; two compiler bugs, neither in the e-graph).** The
+step-by-step probe (srun 11449) showed the node vanishing at the *first* `add_var`, before
+any store: `after add_var(9): a0=0 node_count=0, uf_size=1`. The only path that allocates a
+class and then does not store the node is `if id == EG_INVALID { return EG_INVALID }` — and
+the first id is 0. A three-line program printing module-level constants, compiled by the
+freshly derived seed (srun 11448), gave `A(0-1)=0  C(1+1)=1  E(1<<3)=1`: **`lean_single.sio`'s
+`scan_all_consts` read `[-]LITERAL` and silently dropped the rest of the initializer.** The
+seed is what compiles `main.sio` in every source build, so in every source-built Madaros the
+61 module-level constants written as `0 - N` (`EG_INVALID`, `REG_NONE`, `RA_SPILLED`,
+`BSS_INIT_STRING_MAGIC`, `ASYNC_AWAIT_SENTINEL`, …) were 0, and the small e-graph discarded
+its first node — always. T143c had passed only because that particular merge does not need
+node `a`. The committed Madaros has a *different* defect in the same place: its parser folder
+(`items_eval_global_init_word`) lacked `<<`/`>>`, so `let E: i64 = 1 << 3` read as BSS zero.
+Fixes: a precedence-climbing constant folder in `scan_all_consts` (lean_single) and the two
+shift arms in the parser folder (Madaros); `tests/run-pass/module_let_const_expr.sio` pins
+13 forms. The certificate code was never wrong — the instrument that measured it was.
+
+*Measured with the fixed seed (srun 11452, dl380; seed derived from the patched
+`lean_single.sio`, Madaros built with it):* constants `A(0-1)=-1 C(1+1)=2 E(1<<3)=8`; the
+e-graph repro keeps `node_count 1,2,3`; **T143b–h all OK, including T143e and T143g′**;
+`epistemic_egraph_rewrite_gate.sh` PASS=34 FAIL=0; the self-test prints **106** ` OK` lines
+against 99 (child, buggy seed) and 96 (parent) — the dropped first node had been failing other
+e-graph self-tests silently as well.
+
 **Measured (Slurm job 11425, source build of `b1775894cc`, ELF `fca28454`):**
 `antigarbling_third_axis_gate.sh` 8/8 PASS — E251 refused with NS on and surviving
 `SOUNIO_NS_DISABLE=1`; octonion product + sedenion sum accepted; `free` on alternative and
