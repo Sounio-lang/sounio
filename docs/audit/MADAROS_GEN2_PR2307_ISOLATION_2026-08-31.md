@@ -32,8 +32,14 @@ The actual current-source defect was a scalar-kind inference failure at direct
 `CompilerOptions.output_file` field uses in
 `compiler_try_default_native_v2_single`. Anchoring that field in an explicitly
 typed `string` local restored the fixed-seed floor from 0 to 40. The canonical
-fixed-point gate now passes its default progress floor; the remaining 40-to-122
-work is a separate failure in `module_frontend_compile_imported_to_file`.
+fixed-point gate now passes its default progress floor. A second explicitly
+typed path local in `module_frontend_compile_imported_to_file` advances the same
+fixed-seed measurement from 40 to 123, closing the separate 40-to-122 blocker.
+The later terminal is outside this lane's blocker scope; its contract class is
+`bootstrap-runtime` and its observed cause is native code-buffer overflow. A
+stale gate diagnostic had instead called the 13,107-function merge a capacity
+hit, but the source cap is 16,384 and the strict closure census retains 5,132
+slots of headroom.
 
 ## Fixed experiment contract
 
@@ -153,12 +159,104 @@ MADAROS_FIXED_POINT_OK: reached rung 'check' as recorded; the next wall is 'gen2
 REMOTE: gen2_progress rc=0 minimum=40
 ```
 
+## Origin-main anchor 40-to-123 repair
+
+The two isolation commits were transplanted without conflicts onto a fresh
+worktree based at the user-pinned `origin/main` anchor
+`a1590c1e98d18a43d8a46954fc981954fddefffb`:
+
+```text
+1df2215324 ci(madaros): isolate gen2 fixed-seed attribution
+b06379d4cd fix(madaros): restore gen2 progress floor
+```
+
+Before the new change, the transplanted source independently reproduced the
+40 boundary with self-check and hello green. The only hard lowering record was
+the unresolved `print(file_path)` argument in
+`module_frontend_compile_imported_to_file`. `file_path` came from the indexed
+string-array field `work_imports.paths[dep_i]` without an explicit local type.
+
+The repair is one line:
+
+```sio
+let file_path: string = work_imports.paths[dep_i]
+```
+
+It preserves the diagnostic and supplies positive scalar-kind evidence without
+weakening fail-closed `print` lowering. The direct fixed-seed measurement passed
+the elevated floor:
+
+```text
+REMOTE: gen2_measure rc=1 into_acc_done=123 minimum=122
+REMOTE: gen2_measure tail=  error: multimodule native thin-link compilation failed
+```
+
+The canonical fixed-point wrapper reproduced that boundary and retained its
+typecheck rung:
+
+```text
+ir_max_functions 16384
+[rung check] rc=0 errors=0
+[rung gen2] rc=1 merged_ir_functions=13107
+            into_acc_done=123 minimum=122
+            first_failure=Error: Failed to write native binary to /tmp/sounio-remote-899242/fixed-point/madaros.gen2 rc=19
+MADAROS_FIXED_POINT_OK: reached rung 'check' as recorded; the next wall is 'gen2'
+REMOTE: gen2_progress rc=0 minimum=122
+```
+
+The independent post-change executable control also remained green:
+
+```text
+REMOTE: hello compile_rc=0 run_rc=0 output=Hello, Sounio
+```
+
+The gate's reusable default floor remains 40. The existing CI invocation now
+sets `SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE=122`, so the independently reproduced
+progress is retained without changing the local/default experiment contract.
+
+The gate output above originally printed a stale warning based on a hardcoded
+2048 comparison. That warning is invalidated. `IR_MAX_FUNCS` is 16,384, and
+`scripts/ci/madaros_ir_capacity_probe.sh` passed with 124 closure nodes, 11,252
+function declarations, and 5,132 slots of headroom. The gate now reads the cap
+from `self-hosted/ir/ir.sio`, fails closed if the observed merged count reaches
+that cap, and the CI capacity probe is strict rather than report-only.
+
+Foundry job `11464` reran the canonical gate with the fixed attribution
+compiler. Foundry job `11471` rebuilt Madaros from this exact source snapshot,
+then ran self-check, hello, and the canonical 122-floor gate in one job. Its
+Madaros SHA-256 was
+`20ad5d9a5bd99ee05541a55b70c80dd4d0da152b7654313108a239a40179d8e2`;
+all three gates passed and it retained the terminal as:
+
+```text
+Error: Failed to write native binary to /tmp/sounio-remote-926813/fixed-point/madaros.gen2 rc=19
+```
+
+The complete job `11471` output is retained at
+`artifacts/audit/madaros_gen2_40_to_123_current_source_retry_foundry_20260901.txt`.
+The companion JSON receipt records the exact command, source and harness
+content hashes, log digest, and separate evidence limits for older runs whose
+raw logs were not retained.
+
+In both native writers, rc=19 is the fail-closed `code_overflow` return in
+`self-hosted/native/codegen_x86_linux.sio`. The later boundary's contract class
+is `bootstrap-runtime`; its cause is native code-buffer overflow, not IR
+capacity. The lane does not open a second blocker for that later boundary.
+
 ## Invalidated controls
 
 The earlier matrix fixed the lean bootstrap seed but rebuilt Madaros from every
 source snapshot. That varied both the compiler ELF and the source under test.
 Its reported inverse progress (`22`, historically `40`) is not a fixed-Madaros
 comparison and cannot establish PR #2307 as the cause of the current zero.
+
+Foundry job `11470` is also invalidated as an ordered-gate control, not hidden.
+Its standalone self-check and hello both passed, then `gen2-progress` check
+segfaulted at rc=139 because the hello case had lowered the shared remote
+shell's stack to 8 MiB. Removing that parent-shell mutation was the only harness
+change before identical job `11471` passed all three gates. The full negative
+control is retained at
+`artifacts/audit/madaros_gen2_40_to_123_current_source_foundry_20260901.txt`.
 
 Two candidate fixed Madaros seeds were rejected:
 
@@ -202,9 +300,11 @@ control for this lane.
 - adds `gen2-measure`, a direct single-process progress receipt;
 - reports the raw Madaros ELF SHA-256 and independent hello/self-check results.
 
-One compiler source change is retained in the product worktree: the explicitly
-typed output-path local and non-concatenating success output in
-`self-hosted/compiler/main.sio`. PR #2307 remains intact.
+Two compiler source changes are retained in the product worktree: the
+explicitly typed output-path local and non-concatenating success output in
+`self-hosted/compiler/main.sio`, plus the explicitly typed imported-module
+`file_path` local in `self-hosted/compiler/module_frontend.sio`. PR #2307
+remains intact.
 
 ## Closed blocker
 
@@ -212,37 +312,23 @@ typed output-path local and non-concatenating success output in
 `into_acc_done=40`, independent hello and self-check controls green, and the
 fixed Madaros SHA-256 recorded above.
 
-## Remaining blocker
+`BLK-20260901-gen2-40-to-122` is closed. Its acceptance gate passed with
+`into_acc_done=123`, self-check `rc=0` with zero errors, independent hello
+compile/run green, and the same fixed Madaros SHA-256.
 
-```text
-Blocker-ID: BLK-20260901-gen2-40-to-122
-Status: reproduced
-Severity: B1
-Class: gate-regression
-Owner: codex-2
-Lane: gen2-pr2307-isolation-20260831
-Worktree: /tmp/sounio-gen2-pr2307-20260831
-Branch: codex/gen2-pr2307-isolation-20260831
-Files-Owned: self-hosted/compiler/main.sio, scripts/ci/madaros_fixed_point_gate.sh, scripts/dev/souc-build-remote.sh, docs/audit/MADAROS_GEN2_PR2307_ISOLATION_2026-08-31.md
-Files-Read-Only: canonical Madaros ELF outputs, origin/main
-Do-Not-Touch: canonical Madaros ELF outputs
-Repro: run the clean-environment gen2-progress or gen2-measure job with fixed Madaros SHA-256 2080defa2f1042ef0b0c3d6796e77de0226e2b840856af5da7d2e36ee911e253
-Observed: hello passes; self-check exits 0 with zero errors; Gen2 reaches into_acc_done=40, then rejects an unresolved-scalar print argument in module_frontend_compile_imported_to_file at lower.sio site 9712
-Expected: Gen2 reaches the independently established next floor of into_acc_done>=122 while hello and self-check remain green
-Acceptance-Gate: SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE=122 with scripts/ci/madaros_fixed_point_gate.sh, plus independent --gate hello and --gate check jobs under the fixed clean environment
-Evidence-Level: E4
-Evidence: this audit, the fixed-seed direct receipt, and the canonical fixed-point Foundry receipt from 2026-09-01
-Fallback-Path: none
-Legacy-Kept: yes; PR #2307 remains intact because its causal attribution was falsified
-LLM-Offload: not-required
-Next-Action: isolate the unresolved scalar kind in module_frontend_compile_imported_to_file without weakening the restored default floor of 40
-```
+## Remaining boundary
+
+No same-lane B1 blocker is opened after closing
+`BLK-20260901-gen2-40-to-122`. The 123-floor evidence answers this lane's
+acceptance question. The later code-buffer boundary belongs in a separate lane
+with its own owner and acceptance gate if pursued.
 
 ## Review disposition
 
 The earlier Grok 4.6 review correctly warned that a crashing inverse was not an
 acceptance oracle. The fixed-seed rerun sharpened that warning: rebuilding the
 compiler for each row was the primary attribution confound. The repaired source
-then passed both the direct floor and canonical fixed-point wrapper. No math
-claim, clinical pathway, or external-facing artifact changed, so repository
-policy did not require an additional LLM offload.
+then passed the direct and canonical 40 floors, and the pinned-anchor follow-up
+passed both 122-floor forms at `into_acc_done=123`. No math claim, clinical
+pathway, or external-facing artifact changed, so repository policy did not
+require an additional LLM offload.

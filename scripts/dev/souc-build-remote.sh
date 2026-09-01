@@ -213,7 +213,8 @@ for g in $GATES; do
       ;;
     hello)
       echo "REMOTE: --- gen1 compile/run examples/hello.sio ---"
-      ulimit -s 8192 2>/dev/null || true
+      # Gate cases share this shell; lowering its stack here poisoned a later
+      # gen2-progress check even though hello itself passed.
       "\$W/madaros.elf" compile examples/hello.sio -o "\$W/hello.elf" \
         > "\$W/hello.compile.log" 2>&1
       hello_compile_rc=\$?
@@ -247,7 +248,7 @@ for g in $GATES; do
       gen2_measure_rc=\$?
       gen2_measure_into=\$(grep -oE 'into_acc_done[[:space:]]+[0-9]+' "\$W/gen2-measure.log" | grep -oE '[0-9]+' | tail -1)
       gen2_measure_into=\${gen2_measure_into:-0}
-      gen2_measure_first=\$(grep -m1 -E 'println-poison|IR lowering failed|ir_[a-z_]+_failed|error\\[E[0-9]+\\]' "\$W/gen2-measure.log" || true)
+      gen2_measure_first=\$(grep -m1 -E 'println-poison|IR lowering failed|ir_[a-z_]+_failed|error\\[E[0-9]+\\]|Error: native code buffer overflow|Failed to write native binary|multimodule native thin-link compilation failed' "\$W/gen2-measure.log" || true)
       echo "REMOTE: gen2_measure rc=\$gen2_measure_rc into_acc_done=\$gen2_measure_into minimum=$GEN2_MIN"
       if [ -n "\$gen2_measure_first" ]; then
         echo "REMOTE: gen2_measure first_failure=\$gen2_measure_first"

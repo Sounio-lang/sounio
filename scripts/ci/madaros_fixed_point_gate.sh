@@ -39,19 +39,16 @@
 # self-hosted/compiler/main.sio` exits 0 with zero diagnostics — the first time
 # Madaros has typechecked its own entry point.
 #
-# The next wall is named and loud, which is the point of the whole line:
+# The historical wall was named and loud, which is the point of the whole line:
 #
 #     imported_compile: typecheck ok
 #     imported_compile: lower_done
 #     IR lowering failed during merge: too many functions:
 #         shared IR module capacity exceeded (max 8191 slots)
 #
-# 120 modules load, typecheck passes, lowering completes, and the MERGE
-# overflows. main.sio's closure declares 10705 functions; a reachability census
-# from `main` leaves 5997, which would fit. The gap is that cross-module DCE
-# (spec_dce_unreachable_item_fns) only runs on the specialized-collapse path, so
-# nothing prunes here. Raising IR_MAX_FUNCS again would also work and is the
-# worse answer: the pruning already exists and is not being asked to run.
+# The cap has since moved. This gate reads IR_MAX_FUNCS from the source instead
+# of carrying another numeric copy: a stale 2048 comparison falsely classified
+# a 13107-function merge as truncated when the tree's cap was 16384.
 
 set -uo pipefail
 
@@ -66,6 +63,7 @@ SRC="${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
 EXPECT="${SOUNIO_MADAROS_FP_EXPECT:-check}"
 MIN_INTO_ACC_DONE="${SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE:-40}"
 MADAROS="${MADAROS_BIN:-}"
+IR_MAX_FUNCS="$(sed -nE 's/^pub let IR_MAX_FUNCS: i64 = ([0-9]+).*$/\1/p' self-hosted/ir/ir.sio | head -1)"
 
 RUNGS=(none check gen2 run gen3 fixpoint)
 
@@ -82,6 +80,8 @@ rung_index() {
   || gate_fail "SOUNIO_MADAROS_FP_EXPECT=$EXPECT is not a rung; expected one of: ${RUNGS[*]}"
 [[ "$MIN_INTO_ACC_DONE" =~ ^[0-9]+$ ]] \
   || gate_fail "SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE=$MIN_INTO_ACC_DONE is not a non-negative integer"
+[[ "$IR_MAX_FUNCS" =~ ^[0-9]+$ ]] \
+  || gate_fail "could not read IR_MAX_FUNCS from self-hosted/ir/ir.sio"
 
 if [[ -z "$MADAROS" ]]; then
   echo "MADAROS_FIXED_POINT_SKIP: set MADAROS_BIN to a raw Madaros ELF (gen1)" >&2
@@ -125,6 +125,7 @@ echo "src    $SRC"
 echo "work   $WORK"
 echo "expect $EXPECT"
 echo "min_into_acc_done $MIN_INTO_ACC_DONE"
+echo "ir_max_functions $IR_MAX_FUNCS"
 echo
 
 # ── rung: check ───────────────────────────────────────────────────────────────
@@ -152,7 +153,7 @@ else
   MERGED="$(grep -oE 'Merged IR: *[0-9]+' "$WORK/gen2.log" | grep -oE '[0-9]+' | tail -1)"
   INTO_ACC_DONE="$(grep -oE 'into_acc_done[[:space:]]+[0-9]+' "$WORK/gen2.log" | grep -oE '[0-9]+' | tail -1)"
   INTO_ACC_DONE="${INTO_ACC_DONE:-0}"
-  FIRST_GEN2_FAILURE="$(grep -m1 -E 'println-poison|IR lowering failed|ir_[a-z_]+_failed|error\[E[0-9]+\]' "$WORK/gen2.log" || true)"
+  FIRST_GEN2_FAILURE="$(grep -m1 -E 'println-poison|IR lowering failed|ir_[a-z_]+_failed|error\[E[0-9]+\]|Error: native code buffer overflow|Failed to write native binary|multimodule native thin-link compilation failed' "$WORK/gen2.log" || true)"
   GEN2_FAILURE_CONTEXT="$(grep -E 'first flagged in preseed stage|unresolved identifiers|lowering-error record|lowering errors:|raised at lower\.sio lines:|cause:' "$WORK/gen2.log" | head -8 || true)"
   echo "           rc=$GEN2_RC merged_ir_functions=${MERGED:-<none>}"
   echo "           into_acc_done=$INTO_ACC_DONE minimum=$MIN_INTO_ACC_DONE"
@@ -163,8 +164,8 @@ else
     echo "           failure_context:"
     printf '%s\n' "$GEN2_FAILURE_CONTEXT" | sed 's/^/             /'
   fi
-  if [[ -n "$MERGED" ]] && [[ "$MERGED" -ge 2048 ]]; then
-    echo "           WARNING: merged IR hit IR_MAX_FUNCS — ir_merge_modules_into stops copying at the cap without a diagnostic, so this ELF may be silently truncated. See scripts/ci/madaros_ir_capacity_probe.sh"
+  if [[ -n "$MERGED" ]] && [[ "$MERGED" -ge "$IR_MAX_FUNCS" ]]; then
+    gate_fail "merged IR reached IR_MAX_FUNCS ($MERGED >= $IR_MAX_FUNCS). ir_merge_modules_into may have stopped copying at the cap, so a progress/rung verdict would be attributable to a potentially truncated module. See scripts/ci/madaros_ir_capacity_probe.sh"
   fi
   if [[ "$GEN2_RC" -ne 0 || ! -s "$GEN2" ]]; then
     FAIL_DETAIL="gen1 typechecked $SRC but produced no ELF (rc=$GEN2_RC). See $WORK/gen2.log"
