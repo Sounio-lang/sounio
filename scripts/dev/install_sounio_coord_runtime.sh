@@ -1710,7 +1710,7 @@ else
     fi
   done
   sovereign_change_capsule_sources=(
-    "$installer_source"
+    "$installer_source" "$runtime_source"
     "$loom_build_source"
     "$loom_change_build_source" "$loom_material_change_build_source"
     "$loom_change_source" "$loom_change_entrypoint" "$loom_change_freeze"

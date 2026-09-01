@@ -525,16 +525,16 @@ set -e
   fail 'failed execution-outcome activation changed the current runtime link'
 
 git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
-  grep -qx 'stdlib/coordination/loom_witness_epoch_handoff.sio' || \
+  grep -x 'stdlib/coordination/loom_witness_epoch_handoff.sio' >/dev/null || \
   fail 'runtime source SHA omits the frame-9015 source'
 git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
-  grep -qx 'stdlib/coordination/loom_witness_epoch_transparency.sio' || \
+  grep -x 'stdlib/coordination/loom_witness_epoch_transparency.sio' >/dev/null || \
   fail 'runtime source SHA omits the frame-9016 source'
 git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
-  grep -qx 'stdlib/coordination/loom_custody_transfer.sio' || \
+  grep -x 'stdlib/coordination/loom_custody_transfer.sio' >/dev/null || \
   fail 'runtime source SHA omits the frame-9040 source'
 git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
-  grep -qx 'stdlib/coordination/loom_execution_outcome_authority.sio' || \
+  grep -x 'stdlib/coordination/loom_execution_outcome_authority.sio' >/dev/null || \
   fail 'runtime source SHA omits the frame-9022 source'
 
 printf '\n# dirty runtime source control\n' >> \
@@ -1168,9 +1168,19 @@ git -C "$ALT" fetch -q "$ROOT_DIR" "$native_hook_cutover_toolchain_commit"
 printf '\n# runtime upgrade selftest marker\n' >> \
   "$ALT/scripts/dev/sounio_coord_runtime.sh"
 chmod +x "$ALT/scripts/dev/"*
+upgrade_coord_sha="$(sha256sum "$ALT/scripts/dev/sounio_coord_runtime.sh" | awk '{print $1}')"
+sed -i "s/^coord_runtime_sha256=.*/coord_runtime_sha256=$upgrade_coord_sha/" \
+  "$ALT/tools/loom/sovereign_material_change_product.runtime.v2"
+upgrade_change_product_sha="$(
+  sha256sum "$ALT/tools/loom/sovereign_material_change_product.runtime.v2" | awk '{print $1}'
+)"
+sed -i "s/^product_manifest_sha256=.*/product_manifest_sha256=$upgrade_change_product_sha/" \
+  "$ALT/tools/loom/evidence/loom-sovereign-material-change-product-v2-20260831.txt"
 git -C "$ALT" config user.name 'Sounio Runtime Upgrade Selftest'
 git -C "$ALT" config user.email 'coord-runtime-upgrade@sounio.local'
-git -C "$ALT" add scripts/dev/sounio_coord_runtime.sh
+git -C "$ALT" add scripts/dev/sounio_coord_runtime.sh \
+  tools/loom/sovereign_material_change_product.runtime.v2 \
+  tools/loom/evidence/loom-sovereign-material-change-product-v2-20260831.txt
 git -C "$ALT" commit -qm 'test runtime upgrade source'
 output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord install-runtime --source-root "$ALT")"
