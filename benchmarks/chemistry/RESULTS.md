@@ -21,9 +21,17 @@ commit `98aa8e4d5151bbc61815bf910b6c31c3d0789f5f` (branch `claude/gri-mech-cante
 or a draft. Where a run was not performed, the row says so.
 
 Environment: Linux x86-64, Python 3.11, `cantera 3.2.0`, `numpy 2.4.6`,
-`g++ (Ubuntu 13.3.0) -std=c++20 -O2`. Sounio compiler: the committed ELF
+`g++ (Ubuntu 13.3.0) -std=c++23 -O2`. Sounio compiler: the committed ELF
 `bin/madaros-linux-x86_64` (md5 `ff69dae4`, tree `98aa8e4d`), run under
 `SOUNIO_SOUC_ENGINE=lean_single`.
+
+> **Corrected 2026-09-01.** This line previously read `-std=c++20`, which does
+> not build the cross-check as shipped. Measured rather than assumed:
+> `g++ -std=c++20 -O2 -fsyntax-only cpp/gri30_h2_band_crosscheck.cpp` fails with
+> three errors — `std::expected` is C++23-only, and the multidimensional
+> `operator[](std::size_t, std::size_t)` "must have exactly one argument" before
+> C++23. `-std=c++23` compiles clean. The numbers in sections 5 and 6 were
+> produced by the C++23 build, matching the command blocks printed there.
 
 > **Frozen relative to PR #1758.** PR
 > [Sounio-lang/sounio#1758](https://github.com/Sounio-lang/sounio/pull/1758)
