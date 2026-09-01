@@ -271,12 +271,15 @@ fi
 INDEX_LOCK_OWNED=1
 TRANSACTION_OPEN=0
 CANARY_PID=''
+CANARY_CONTINUE=''
 
 cleanup() {
   local status=$?
   set +e
   if [[ -n "${CANARY_PID:-}" ]] && kill -0 "$CANARY_PID" 2>/dev/null; then
-    : > "${CANARY_ROOT:-$TXN_DIR/canary}/continue"
+    if [[ -n "${CANARY_CONTINUE:-}" ]]; then
+      : > "$CANARY_CONTINUE"
+    fi
     wait "$CANARY_PID" 2>/dev/null || true
   fi
   if [[ "${TRANSACTION_OPEN:-0}" -eq 1 ]]; then
@@ -351,23 +354,29 @@ grep -Fq '"state":"PREPARED"' "$GUARDIAN_RECEIPT" ||
   die 'Sounio 9046 guardian did not prepare the staged generation boundary'
 
 CANARY_ROOT="$TXN_DIR/canary"
-CANARY_REPO="$CANARY_ROOT/policyless"
-CANARY_RECEIPT="$CANARY_REPO/.git/sounio-loom-language-authority/agent-hook.tsv"
-mkdir -p "$CANARY_REPO/bin"
-git init -q "$CANARY_REPO"
-cp "$TARGET_ROOT/bin/sounio-coord" "$CANARY_REPO/bin/"
-ln -s "$RUNTIME_ROOT" "$CANARY_REPO/.git/sounio-coord-runtime"
+CANARY_RECEIPT="$CANARY_ROOT/agent-hook.tsv"
+mkdir -p "$CANARY_ROOT"
+: > "$CANARY_RECEIPT"
 
 run_provider_canary() {
   local provider="$1" harness_name="$2" dialect="$3"
   local provider_root="$CANARY_ROOT/$provider"
+  local canary_repo="$provider_root/policyless"
+  local provider_state="$provider_root/state"
+  local provider_receipt="$canary_repo/.git/sounio-loom-language-authority/agent-hook.tsv"
   local harness="$provider_root/$harness_name"
   local session="promotion-$provider-$RANDOM-$RANDOM-$$"
   local lane="session-${session:0:24}"
   local hook_command start_event prompt_event end_event cleanup_event=''
-  local capability expected_receipts=3 ready=0
+  local capability cleanup_rc=0 expected_receipts=3 ready=0 capability_closed=0
 
-  mkdir -p "$provider_root"
+  mkdir -p "$canary_repo/bin" "$provider_state"
+  git init -q "$canary_repo"
+  cp "$TARGET_ROOT/bin/sounio-coord" "$canary_repo/bin/"
+  ln -s "$RUNTIME_ROOT" "$canary_repo/.git/sounio-coord-runtime"
+  ln -s "$provider_state" "$canary_repo/.git/sounio-coord-state"
+  SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$provider_state" \
+    "$RUNTIME_BUNDLE/bin/sounio-coord-runtime" brief >/dev/null
   cp "$(command -v bash)" "$harness"
   chmod 0755 "$harness"
   printf '%s\n' "$lane" > "$provider_root/lane"
@@ -375,43 +384,43 @@ run_provider_canary() {
   case "$provider" in
     codex)
       printf -v start_event '{"hook_event_name":"SessionStart","session_id":"%s","cwd":"%s"}' \
-        "$session" "$CANARY_REPO"
+        "$session" "$canary_repo"
       printf -v prompt_event '{"hook_event_name":"UserPromptSubmit","session_id":"%s","cwd":"%s","prompt":"native hook promotion canary"}' \
-        "$session" "$CANARY_REPO"
+        "$session" "$canary_repo"
       printf -v end_event '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s"}' \
-        "$session" "$CANARY_REPO"
+        "$session" "$canary_repo"
       printf -v cleanup_event '{"hook_event_name":"SessionEnd","session_id":"%s","cwd":"%s"}' \
-        "$session" "$CANARY_REPO"
+        "$session" "$canary_repo"
       expected_receipts=4
       ;;
     claude)
       printf -v start_event '{"hook_event_name":"SessionStart","session_id":"%s","cwd":"%s"}' \
-        "$session" "$CANARY_REPO"
+        "$session" "$canary_repo"
       printf -v prompt_event '{"hook_event_name":"UserPromptSubmit","session_id":"%s","cwd":"%s","prompt":"native hook promotion canary"}' \
-        "$session" "$CANARY_REPO"
+        "$session" "$canary_repo"
       printf -v end_event '{"hook_event_name":"SessionEnd","session_id":"%s","cwd":"%s"}' \
-        "$session" "$CANARY_REPO"
+        "$session" "$canary_repo"
       ;;
     cursor)
       printf -v start_event '{"hook_event_name":"sessionStart","session_id":"%s","cwd":"%s"}' \
-        "$session" "$CANARY_REPO"
+        "$session" "$canary_repo"
       printf -v prompt_event '{"hook_event_name":"beforeSubmitPrompt","session_id":"%s","cwd":"%s","prompt":"native hook promotion canary"}' \
-        "$session" "$CANARY_REPO"
+        "$session" "$canary_repo"
       printf -v end_event '{"hook_event_name":"sessionEnd","session_id":"%s","cwd":"%s"}' \
-        "$session" "$CANARY_REPO"
+        "$session" "$canary_repo"
       ;;
     grok)
       printf -v start_event '{"hookEventName":"session_start","sessionId":"%s","cwd":"%s","workspaceRoot":"%s"}' \
-        "$session" "$CANARY_REPO" "$CANARY_REPO"
+        "$session" "$canary_repo" "$canary_repo"
       printf -v prompt_event '{"hookEventName":"user_prompt_submit","sessionId":"%s","cwd":"%s","workspaceRoot":"%s","prompt":"native hook promotion canary"}' \
-        "$session" "$CANARY_REPO" "$CANARY_REPO"
+        "$session" "$canary_repo" "$canary_repo"
       printf -v end_event '{"hookEventName":"session_end","sessionId":"%s","cwd":"%s","workspaceRoot":"%s"}' \
-        "$session" "$CANARY_REPO" "$CANARY_REPO"
+        "$session" "$canary_repo" "$canary_repo"
       ;;
     *) die "unsupported promotion canary provider: $provider" ;;
   esac
 
-  SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
+  SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$provider_state" \
   TMUX='' TMUX_PANE='' SOUNIO_AGENTD_SOCKET='' SOUNIO_AGENTD_TOKEN_FILE='' \
   "$harness" -c '
     root="$1"; hook="$2"; start="$3"; prompt="$4"; finish="$5"; cleanup="$6"
@@ -427,9 +436,9 @@ run_provider_canary() {
       printf "%s\n" "$cleanup" | /bin/bash -c "$hook" >"$root/cleanup.out" 2>"$root/cleanup.err"
       printf "%s\n" "$?" >"$root/cleanup.rc"
     fi
-  ' _ "$provider_root" "$hook_command" "$start_event" "$prompt_event" "$end_event" \
-    "$cleanup_event" &
+  ' _ "$provider_root" "$hook_command" "$start_event" "$prompt_event" "$end_event" '' &
   CANARY_PID=$!
+  CANARY_CONTINUE="$provider_root/continue"
   for _ in $(seq 1 400); do
     if [[ -e "$provider_root/ready" ]]; then ready=1; break; fi
     if ! kill -0 "$CANARY_PID" 2>/dev/null; then break; fi
@@ -441,11 +450,12 @@ run_provider_canary() {
     : > "$provider_root/continue"
     wait "$CANARY_PID" || true
     CANARY_PID=''
+    CANARY_CONTINUE=''
     die "policyless $provider promotion canary failed at SessionStart"
   fi
   capability="$(
-    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
-    "$CANARY_REPO/bin/sounio-coord" hook-capability-status \
+    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$provider_state" \
+    "$RUNTIME_BUNDLE/bin/sounio-coord-runtime" hook-capability-status \
       --agent "$provider" --lane "$lane"
   )"
   grep -Fq 'state=NATIVE_HOOK_ATTESTED' <<< "$capability" ||
@@ -455,29 +465,51 @@ run_provider_canary() {
   : > "$provider_root/continue"
   wait "$CANARY_PID"
   CANARY_PID=''
+  CANARY_CONTINUE=''
   [[ "$(cat "$provider_root/prompt.rc")" == 0 && \
     "$(cat "$provider_root/end.rc")" == 0 ]] ||
     die "policyless $provider promotion canary failed after SessionStart"
   [[ ! -s "$provider_root/prompt.err" && ! -s "$provider_root/end.err" ]] ||
     die "policyless $provider promotion canary emitted a refusal"
+  for _ in $(seq 1 400); do
+    if ! SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$provider_state" \
+      "$RUNTIME_BUNDLE/bin/sounio-coord-runtime" hook-capability-status \
+        --agent "$provider" --lane "$lane" >/dev/null 2>&1; then
+      capability_closed=1
+      break
+    fi
+    sleep 0.05
+  done
+  [[ "$capability_closed" -eq 1 ]] ||
+    die "policyless $provider promotion canary left its capability active"
   if [[ -n "$cleanup_event" ]]; then
+    set +e
+    printf '%s\n' "$cleanup_event" | env \
+      SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$provider_state" \
+      TMUX='' TMUX_PANE='' SOUNIO_AGENTD_SOCKET='' SOUNIO_AGENTD_TOKEN_FILE='' \
+      /bin/bash -c "$hook_command" \
+        >"$provider_root/cleanup.out" 2>"$provider_root/cleanup.err"
+    cleanup_rc=$?
+    set -e
+    printf '%s\n' "$cleanup_rc" >"$provider_root/cleanup.rc"
     [[ "$(cat "$provider_root/cleanup.rc")" == 0 && \
       ! -s "$provider_root/cleanup.err" ]] ||
       die "policyless $provider promotion canary failed its native cleanup event"
   fi
-  if SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
-    "$CANARY_REPO/bin/sounio-coord" hook-capability-status \
+  if SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$provider_state" \
+    "$RUNTIME_BUNDLE/bin/sounio-coord-runtime" hook-capability-status \
       --agent "$provider" --lane "$lane" >/dev/null 2>&1; then
     die "policyless $provider promotion canary left its capability active"
   fi
-  [[ "$(grep -Fc $'provider='"$provider"$'\tdialect='"$dialect" "$CANARY_RECEIPT")" -eq "$expected_receipts" ]] ||
+  [[ "$(grep -Fc $'provider='"$provider"$'\tdialect='"$dialect" "$provider_receipt")" -eq "$expected_receipts" ]] ||
     die "policyless $provider promotion canary emitted the wrong provider-bound receipt count"
   "$RUNTIME_BUNDLE/bin/sounio-loom-runtime" hook-generation-canary \
-    --cwd "$TARGET_ROOT" --provider "$provider" --canary-root "$CANARY_REPO" \
+    --cwd "$TARGET_ROOT" --provider "$provider" --canary-root "$canary_repo" \
     --output "$provider_root/start.out" --expect 'Sounio coordination joined:' \
     --apply > "$provider_root/action-9046-canary.json"
   grep -Fq '"state":"RECORDED"' "$provider_root/action-9046-canary.json" ||
     die "Sounio 9046 did not record the $provider canary"
+  cat "$provider_receipt" >> "$CANARY_RECEIPT"
 }
 
 run_provider_canary codex codex snake

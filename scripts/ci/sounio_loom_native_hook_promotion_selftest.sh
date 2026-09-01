@@ -6,11 +6,16 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-native-hook-promotion.XXXXXX")"
 RUNTIME_ROOT="${SOUNIO_COORD_RUNTIME_DIR:-$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)/sounio-coord-runtime}"
-STATE_ROOT="${SOUNIO_COORD_DIR:-$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)/sounio-coord-state}"
+STATE_ROOT="${SOUNIO_COORD_DIR:-$TEST_ROOT/state}"
 DRAIN_STATE_ROOT="$TEST_ROOT/drain-state"
 INSTALLER="$ROOT_DIR/scripts/dev/install_sounio_loom_native_hooks.sh"
 
 cleanup() {
+  if [[ -x "$RUNTIME_ROOT/native-next/bin/sounio-coord-runtime" ]]; then
+    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
+      "$RUNTIME_ROOT/native-next/bin/sounio-coord-runtime" \
+        obligation-supervisor-stop --timeout-seconds 5 >/dev/null 2>&1 || true
+  fi
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
@@ -49,6 +54,9 @@ config_sha() {
 [[ -x "$INSTALLER" ]] || fail 'promotion installer is not executable'
 [[ -L "$RUNTIME_ROOT/current" ]] || fail 'shared runtime is not active'
 [[ -L "$RUNTIME_ROOT/native-next" ]] || fail 'staged native runtime is not selected'
+mkdir -p "$STATE_ROOT"
+SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
+  "$RUNTIME_ROOT/native-next/bin/sounio-coord-runtime" brief >/dev/null
 legacy_before="$(readlink -f "$RUNTIME_ROOT/current")"
 
 positive="$TEST_ROOT/positive"
