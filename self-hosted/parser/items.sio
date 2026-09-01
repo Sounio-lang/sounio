@@ -762,6 +762,20 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                         if (*e).bin_op == BinaryOp::OpBitXor {
                             return (true, a ^ b)
                         }
+                        // Shifts were missing: `let E: i64 = 1 << 3` folded to (false, 0) and the
+                        // global read as BSS zero. Out-of-range counts stay unfoldable (fail-closed).
+                        if (*e).bin_op == BinaryOp::OpShl {
+                            if b < 0 || b > 63 {
+                                return (false, 0)
+                            }
+                            return (true, a << b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpShr {
+                            if b < 0 || b > 63 {
+                                return (false, 0)
+                            }
+                            return (true, a >> b)
+                        }
                         return (false, 0)
                     }
                     None => { return (false, 0) }
@@ -5176,7 +5190,10 @@ fn parse_algebra_item(p: Parser, visibility: Visibility) -> (Parser, Item) with 
 
     // Parse body: op declarations and reassociate strategy
     var rev_ops: Option<Box<AlgebraOpDeclList>> = None
-    var reassoc: i64 = 0  // default: free
+    // -1 = `reassociate:` OMITTED. The checker derives a fail-closed strategy from the
+    // declared multiplication laws (collect_algebra_def); an omitted clause is NOT a claim of
+    // free reassociation. Explicit `free` is 0, `blocked` 1, `fano_selective` 2.
+    var reassoc: i64 = 0 - 1
 
     while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
         // Skip whitespace/newlines/semicolons
@@ -5199,8 +5216,9 @@ fn parse_algebra_item(p: Parser, visibility: Visibility) -> (Parser, Item) with 
                 reassoc = 1  // blocked
             } else if strat_name.len == 14 {
                 reassoc = 2  // fano_selective
+            } else {
+                reassoc = 0  // free -- an EXPLICIT claim, distinct from the omitted -1
             }
-            // else: free (0)
             pa = pa.advance()  // consume strategy name
         } else {
             // Parse op declaration (add: ..., mul: ...)

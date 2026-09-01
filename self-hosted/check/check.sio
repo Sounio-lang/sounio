@@ -4762,9 +4762,95 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         checker_collect_models_def_inplace(c, item.name, item.models_def)
     } else if item.kind == ItemKind::ItemPolicy {
         checker_collect_policy_def_inplace(c, item.name, item.policy_def)
+    } else if item.kind == ItemKind::ItemAlgebra {
+        // Until 2026-09-01 this arm did not exist: every `algebra ... { }` declaration was
+        // INERT in the Madaros checker (registry never populated; check_hyper_binary fell
+        // back to the hard-coded predicates; the IR algebra table saw only name-derived
+        // defaults). Measured with SOUNIO_E252_TRACE=1 on a source build: the by-value
+        // collect_algebra_def never ran. Wired here, with the Axis-1 certificate (E252).
+        checker_collect_algebra_def_inplace(c, item.algebra_def)
     } else {
         // ItemSession / typealias / policy / … — not yet collected by the
         // *mut spine (no-op, same as before). *mut collectors pending.
+    }
+}
+
+// Declared laws of an algebra as a bitmask, first line per op wins:
+//   bit0 add_commutative, bit1 add_associative, bit2 mul_commutative,
+//   bit3 mul_associative, bit4 mul_alternative. Defaults = `empty_algebra_info` (15).
+fn checker_algebra_def_law_mask(ops: Option<Box<AlgebraOpDeclList> >) -> i64 with Mut, Panic, Div {
+    match ops {
+        None => 15
+        Some(list) => {
+            var mask = checker_algebra_def_law_mask((*list).tail)
+            let op = (*list).head
+            if op.op_name.len == 3 && op.op_name.buf[0] == 97 as i8 {
+                mask = mask & (0 - 4)  // clear bits 0,1
+                if op.is_commutative { mask = mask | 1 }
+                if op.is_associative { mask = mask | 2 }
+            } else if op.op_name.len == 3 && op.op_name.buf[0] == 109 as i8 {
+                mask = mask & (0 - 29)  // clear bits 2,3,4  (~28)
+                if op.is_commutative { mask = mask | 4 }
+                if op.is_associative { mask = mask | 8 }
+                if op.is_alternative { mask = mask | 16 }
+            }
+            mask
+        }
+    }
+}
+
+// *mut collector for `algebra Name over T { add: ...; mul: ...; reassociate: ... }`.
+// Registers the algebra (name-derived Cayley-Dickson tag, declared laws) and checks the
+// Axis-1 order certificate at the declaration -- mirrors formal/lean4/EpistemicEffectsNSA.lean
+// `assocCert`: `free` needs an associative product, `fano_selective` needs the octonion
+// level; an OMITTED clause (parser -1) derives the most permissive certified strategy.
+fn checker_collect_algebra_def_inplace(c: *mut Checker, opt: Option<Box<AlgebraDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        None => {}
+        Some(adef) => {
+            let idx = (*c).algebras.count
+            if idx >= 16 { return }
+            var info = empty_algebra_info()
+            info.name = (*adef).name
+            info.is_valid = true
+            if info.name.len == 8 && info.name.buf[0] == 79 as i8 {
+                info.algebra_tag = 3  // Octonion
+            } else if info.name.len == 8 && info.name.buf[0] == 83 as i8 {
+                info.algebra_tag = 4  // Sedenion
+            } else if info.name.len == 10 && info.name.buf[0] == 81 as i8 {
+                info.algebra_tag = 2  // Quaternion
+            }
+            let mask = checker_algebra_def_law_mask((*adef).ops)
+            info.add_commutative = (mask & 1) != 0
+            info.add_associative = (mask & 2) != 0
+            info.mul_commutative = (mask & 4) != 0
+            info.mul_associative = (mask & 8) != 0
+            info.mul_alternative = (mask & 16) != 0
+            let mul_assoc = info.mul_associative
+            let mul_alt = info.mul_alternative
+            let declared = (*adef).reassoc_strategy
+            if str_eq(read_env("SOUNIO_E252_TRACE"), "1") {
+                print("e252-trace: tag=") print_int(info.algebra_tag)
+                print(" declared=") print_int(declared)
+                print(" mask=") print_int(mask)
+                print("\n")
+            }
+            var strategy = declared
+            if declared < 0 {
+                if mul_assoc { strategy = 0 }
+                else if mul_alt && info.algebra_tag == 3 { strategy = 2 }
+                else { strategy = 1 }
+            } else if declared == 0 && !mul_assoc {
+                checker_report_error_at_inplace(c, (*adef).span, 252, 0, 0, 0)
+                strategy = 1
+            } else if declared == 2 && info.algebra_tag >= 4 {
+                checker_report_error_at_inplace(c, (*adef).span, 252, 0, 0, 0)
+                strategy = 1
+            }
+            info.reassoc_strategy = strategy
+            (*c).algebras.entries[idx] = info
+            (*c).algebras.count = idx + 1
+        }
     }
 }
 
@@ -6280,6 +6366,19 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
         if kk_both && kk_arith && !kk_hyper {
             checker_report_error_at_inplace(c, e.span, 245, 0, 0, 0)
+        }
+        // Third axis of anti-garbling (formal/lean4/EpistemicEffectsNSA.lean §J-§K). The
+        // product's variance is propagated by the GUM shortcut Var(x*y) = |y|^2 Var x +
+        // |x|^2 Var y (knowledge_binary_result -> epsilon_combine_relative). That formula
+        // silently imposes |xy| = |x||y| -- norm multiplicativity -- which holds exactly on
+        // the composition algebras R, C, H, O (`norm_mult_of_polarBasis`, levels <= 3) and is
+        // FALSE from the sedenions up (`not_polarBasis4`; `sed_shortcut_understates`: reported
+        // 4, true first-order variance 8, with disjoint sources and no re-association). So a
+        // Knowledge<Hyper<Sedenion|Clifford, _>> product would fabricate precision that NS
+        // (E230) cannot see. Refuse it: E251. Addition is unaffected (no norm identity).
+        if kk_both && kk_hyper && e.bin_op == BinaryOp::OpMul
+            && (left_inner.algebra_kind >= 4 || right_inner.algebra_kind >= 4) {
+            checker_report_error_at_inplace(c, e.span, 251, 0, 0, 0)
         }
         let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, (*c).ns_table)
         if knowledge_result.kind == TypeKind::TyError {
@@ -15008,6 +15107,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 232 { print("the same array local initialises two fields; the value copy is shallow, so they would be one array -- give each field its own literal") }
     else if code == 243 { print("the correlation coefficient must be a compile-time literal; a runtime value silently becomes 0.0, which asserts independence") }
     else if code == 230 { print("independence-assuming operation over correlated uncertainty") }
+    else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
+    else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else { print("unknown error") }
 }
 
@@ -20814,7 +20915,6 @@ impl Checker {
 
                 var info = empty_algebra_info()
                 info.name = (*adef).name
-                info.reassoc_strategy = (*adef).reassoc_strategy
                 info.is_valid = true
 
                 // Derive algebra_tag from name for backward compat
@@ -20829,16 +20929,54 @@ impl Checker {
                     info.algebra_tag = 2  // Quaternion
                 }
 
-                // Walk op declarations
-                c = c.collect_algebra_ops((*adef).ops, idx)
+                // Reassociation strategy: the Axis-1 (order) certificate at the declaration.
+                //
+                // A `reassociate:` clause is a CLAIM about which product re-orderings the compiler
+                // may perform. The claim is licensed only when the declared multiplication law
+                // backs it (formal/lean4/EpistemicEffectsNSA.lean, `assocCert`): `free` needs an
+                // associative product; `fano_selective` needs the octonion level (a non-Fano
+                // triple there already changes the value by the associator, W1); from the
+                // sedenions up nothing is certified, so the product must be `blocked`. A
+                // declaration that claims more is an order-fabrication licence -- E252.
+                //
+                // An OMITTED clause (parser value -1) is not a claim: derive the most permissive
+                // strategy the laws certify (associative -> free; alternative at the octonion
+                // level -> fano_selective; otherwise blocked). Before this, an omitted clause
+                // silently meant `free` -- an alternative algebra got free reassociation.
+                let mul_assoc = checker_algebra_def_mul_assoc((*adef).ops)
+                let mul_alt = checker_algebra_def_mul_alt((*adef).ops)
+                let declared = (*adef).reassoc_strategy
+                var strategy = declared
+                if declared < 0 {
+                    if mul_assoc { strategy = 0 }
+                    else if mul_alt && info.algebra_tag == 3 { strategy = 2 }
+                    else { strategy = 1 }
+                } else if declared == 0 && !mul_assoc {
+                    c = c.report_error_at((*adef).span, 252, 0, 0, 0)
+                    strategy = 1
+                } else if declared == 2 && info.algebra_tag >= 4 {
+                    c = c.report_error_at((*adef).span, 252, 0, 0, 0)
+                    strategy = 1
+                }
+                info.reassoc_strategy = strategy
 
-                // Copy info into table
+                // Store the entry FIRST, then walk the op declarations INTO the stored entry.
+                // (Until 2026-09-01 the order was reversed: collect_algebra_ops wrote the
+                // declared laws into entries[idx] and the very next line overwrote them with
+                // `info`'s defaults -- mul_associative = true -- so the registry never saw
+                // `alternative`, and check_hyper_binary's NonAssoc requirement for a declared
+                // alternative algebra could never fire. Measured by reading, fixed by ordering.)
                 c.algebras.entries[idx] = info
                 c.algebras.count = idx + 1
+                c = c.collect_algebra_ops((*adef).ops, idx)
                 c
             }
         }
     }
+
+    // Read the multiplication laws straight from the declaration's op list:
+    // (is_associative, is_alternative). Defaults when no `mul:` line is declared mirror
+    // `empty_algebra_info` (associative, not alternative).
 
     fn collect_algebra_ops(self, ops: Option<Box<AlgebraOpDeclList> >, idx: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
         match ops {
@@ -27023,6 +27161,31 @@ fn if_cond_extract_pred(opt: Option<Box<Expr> >) -> (i64, RefinementPred) with M
                 return no_pred
             }
             (1, pred_make_int(op, lhs_name, rhs_val))
+        }
+    }
+}
+
+// Multiplication laws of an algebra declaration, read straight from the AST op list
+// (first `mul:` line wins; no `mul:` line = associative, not alternative, matching
+// `empty_algebra_info`). Recursive like collect_algebra_ops. Used by collect_algebra_def for
+// the E252 order-fabrication check and the fail-closed reassociation default.
+fn checker_algebra_def_mul_assoc(ops: Option<Box<AlgebraOpDeclList> >) -> bool with Mut, Panic, Div {
+    match ops {
+        None => true
+        Some(list) => {
+            let op = (*list).head
+            if op.op_name.len == 3 && op.op_name.buf[0] == 109 as i8 { return op.is_associative }
+            checker_algebra_def_mul_assoc((*list).tail)
+        }
+    }
+}
+fn checker_algebra_def_mul_alt(ops: Option<Box<AlgebraOpDeclList> >) -> bool with Mut, Panic, Div {
+    match ops {
+        None => false
+        Some(list) => {
+            let op = (*list).head
+            if op.op_name.len == 3 && op.op_name.buf[0] == 109 as i8 { return op.is_alternative }
+            checker_algebra_def_mul_alt((*list).tail)
         }
     }
 }
