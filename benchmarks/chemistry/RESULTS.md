@@ -1345,11 +1345,12 @@ that requires the owner's login, while every public signal read as success.**
 v1.0.0 of the frozen snapshot received its Zenodo DOI 45 seconds after the
 GitHub release. v1.0.1 — the version carrying every remediation in this
 document — received none in ten minutes, and would never have. Its
-`.zenodo.json` had gained a `related_identifiers` entry with the relation
-`isVersionOf`. That relation does not exist: Zenodo's legacy deposit schema
-enumerates 33 (`isNewVersionOf` among them), and this one was invented by
-the author while adding the ORCID and DOIs the archive was asked to carry.
-Zenodo's GitHub integration rejected the deposit. The GitHub release
+`.zenodo.json` had gained two fields the schema forbids, both added by the
+author while inserting the ORCID and DOIs the archive was asked to carry: a
+`related_identifiers` relation, `isVersionOf`, that does not exist (Zenodo's
+legacy deposit schema enumerates 33, `isNewVersionOf` among them), and a
+top-level `version` key, which the schema's `additionalProperties: false`
+rejects outright. Zenodo's GitHub integration rejected the deposit. The GitHub release
 published normally, with its tarball and checksum; the public Zenodo API
 listed one version of the concept and said nothing about a second; the only
 notice was on the owner's authenticated Zenodo GitHub page.
@@ -1365,15 +1366,24 @@ success**, and it had every appearance of success for as long as nobody
 polled for the DOI.
 
 Detected the same way as (5)–(8) — behaviourally, by measuring what should
-have changed and did not — and remedied the same way. Zenodo's schema is
-vendored into the snapshot as `zenodo-legacyrecord.schema.json`, fetched
-from the `zenodo/zenodo` source because `zenodo.org` no longer serves it at
-its documented path, and `verify_snapshot.py` validates `.zenodo.json`
-against it **offline, before a release** — with `jsonschema` when present,
-by enumeration otherwise — so the rejection happens on the author's machine
-with a message, not on an archive server without one. Proved to
-discriminate by negative control: re-inserting `isVersionOf` fails the
-verifier. That check is the reference implementation for this instance, as
+have changed and did not — and remedied the same way, **in two rounds,
+because the first remedy had a blind spot of exactly the kind it was built
+to remove.** Zenodo's schema is vendored into the snapshot as
+`zenodo-legacyrecord.schema.json`, fetched from the `zenodo/zenodo` source
+because `zenodo.org` no longer serves it at its documented path, and
+`verify_snapshot.py` validates `.zenodo.json` against it **offline, before a
+release**. The first version of that check used full `jsonschema`
+validation when the library was present and an enumeration of the
+`relation` vocabulary otherwise. The author's machine lacked the library;
+the enumeration caught `isVersionOf` and passed the file. The release
+workflow's own guard — run the verifier at the tagged commit before
+publishing — executes on a runner that *has* the library, ran full
+validation, and **refused the v1.0.2 tag** on the `version` key the
+enumeration could not see. The guard worked; the offline check did not,
+until the library was installed where the snapshot is built and the fallback
+was made to reject unknown top-level keys as well. Both paths are proved to
+discriminate by negative control. That two-path check, run before the
+irreversible step, is the reference implementation for this instance, as
 the fail-closed probes are for (5)–(7).
 
 v1.0.1 stays published without a DOI, and its README says why. v1.0.2 is
