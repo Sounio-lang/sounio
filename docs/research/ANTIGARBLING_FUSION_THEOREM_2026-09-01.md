@@ -251,7 +251,7 @@ silently. The first two are certified by `N` and `Q`; the third is certified by 
 - `omega` atomises non-linear products: distribute with `Int.mul_add`/`Int.add_mul` first,
   then `omega` closes the linear residue (same pattern as the 08-23 toy model).
 
-## 8. What this unlocks (not done here)
+## 8. What this unlocks (items 1–2 done the same day — §10; 3 open)
 
 1. **Wire `Q` into the checker** next to `noise_set_id`: the machinery already exists in
    `ir_can_reassociate_triple` / `cd_sigma_ct`; the type-level `Q` tag makes the e-graph
@@ -262,6 +262,45 @@ silently. The first two are certified by `N` and `Q`; the third is certified by 
    scalar formula is unsound there even with perfect NS hygiene.
 3. **Paper A**: §4 gains the fusion theorem and the corrected (C′); the sedenion witness is a
    one-paragraph result no competing system can state.
+
+## 10. The compiler wire (same day) — what the theorem changed in `self-hosted/check`
+
+Measured first, on the committed Madaros (`bin/madaros-linux-x86_64`, md5 `ff69dae4`): both
+fail-opens below returned `check: OK`.
+
+**E251 — axis 3 at the product.** `Knowledge<Hyper<A,_>> * Knowledge<Hyper<A,_>>` with
+`A` of algebra kind ≥ 4 (Sedenion, Clifford) is refused. The site is the E245 exemption for
+`TyHyper` inners (`check.sio`, Knowledge×Knowledge binary), whose variance propagation is
+`epsilon_combine_relative` — the shortcut. Octonion products and sedenion *sums* stay
+admitted (`octonion_shortcut_exact`; no norm identity in `+`).
+
+**E252 — axis 1 at the declaration.** An `algebra … { reassociate: … }` clause is a claim
+of order freedom; it is licensed only when the declared law backs it, mirroring `assocCert`:
+`free` needs an associative product (else E252 — the W1 licence); `fano_selective` needs the
+octonion level (on Sedenion, E252). **Omitted clause:** the parser now yields −1 and the
+checker derives the most permissive certified strategy (associative → free; alternative at
+level 3 → fano_selective; otherwise blocked). Before, an omitted clause was silently `free` —
+an alternative algebra received free reassociation.
+
+**A third finding, fixed by ordering.** `collect_algebra_def` walked the op declarations
+into `entries[idx]` and then overwrote the entry with `info` (defaults: associative), so the
+checker's algebra registry never recorded `alternative`; `check_hyper_binary`'s NonAssoc
+requirement for a *declared* alternative algebra could never fire. The store now precedes the
+walk. No test in the tree depended on the clobber (no declared-algebra fixture multiplies
+`Hyper<…>`).
+
+**What was NOT changed, and why.** The small e-graph's `fano_selective` gate reads
+`EgNode.value` as a basis index, but `opt_cleanup.sio` creates VAR nodes with IR *register*
+ids. The gate therefore compares register numbers against Fano lines. It is inert in
+practice — octonion/sedenion products are single IR instructions (`IrHyperMulO/S`) that never
+enter the FADD/FMUL e-graph, whose FMULs are scalar f64 (associative in ℝ) — so nothing is
+unsound today, but the "Q certificate" it pretends to be does not exist there. Making it real
+needs a basis-support mask on e-graph nodes fed from the IR; that is the `Q` propagation of
+§2 (`qUnion`/`qProd`) as engineering, left explicitly open.
+
+Gate: `scripts/ci/antigarbling_third_axis_gate.sh` (refusals paired with accepted controls
+on the same compiler), named in `ci.yml`. Fixtures: `tests/compile-fail/e251_*.sio`,
+`e252_*.sio`; controls in `tests/run-pass/`. Catalogue rows E251/E252 with explanations.
 
 ## 9. Theorem map
 
