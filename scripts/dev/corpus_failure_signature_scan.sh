@@ -26,6 +26,7 @@ cd "$ROOT"
 OUT_DIR="${CORPUS_2306_OUT:-$ROOT/artifacts/audit/corpus_2306}"
 BASELINE="tests/madaros_corpus_baseline.txt"
 JOBS="${SOUNIO_TEST_JOBS:-6}"
+FROM_SOURCE="${CORPUS_2306_FROM_SOURCE:-0}"
 mkdir -p "$OUT_DIR"
 
 # ---------------- cluster mode (offline, no compiler) ----------------
@@ -82,9 +83,11 @@ fi
 
 # ---------------- scan mode ----------------
 run_slurm() {
-  tar -czf - -C "$ROOT" \
-      bin/souc bin/madaros bin/madaros-linux-x86_64 stdlib \
-      tests/run-pass "$BASELINE" \
+  local PAYLOAD="bin/souc bin/madaros bin/madaros-linux-x86_64 stdlib tests/run-pass $BASELINE"
+  if [ "$FROM_SOURCE" = "1" ]; then
+    PAYLOAD="$PAYLOAD bin/souc-linux-x86_64 self-hosted scripts"
+  fi
+  tar -czf - -C "$ROOT" $PAYLOAD \
     | srun -p "${CORPUS_2306_PARTITION:-bench}" -N1 -n1 -c"${SLURM_CPUS:-8}" \
         --mem=24G --time=00:45:00 --chdir=/tmp \
         --job-name=corpus2306-scan \
@@ -98,6 +101,16 @@ run_slurm() {
           ulimit -s 524288 2>/dev/null || true
           ulimit -v unlimited 2>/dev/null || true
           MAD="$W/bin/madaros-linux-x86_64"
+          if [ '"$FROM_SOURCE"' = "1" ]; then
+            echo "REMOTE: building from source (collateral mode)" >&2
+            export SOUNIO_BUILD_LOCK=/tmp/corpus2306-build-$$.lock
+            t0=$SECONDS
+            bash scripts/ci/build_modular_madaros.sh "$W/madaros.elf" > "$W/build.log" 2>&1
+            brc=$?
+            echo "REMOTE: build rc=$brc elapsed=$((SECONDS-t0))s" >&2
+            if [ $brc -ne 0 ]; then tail -15 "$W/build.log" >&2; exit $brc; fi
+            MAD="$W/madaros.elf"
+          fi
           chmod +x "$MAD" 2>/dev/null || true
           "$MAD" --version 2>&1 | head -1 | sed "s/^/REMOTE: /" >&2
 

@@ -1,0 +1,76 @@
+//@ run-pass
+//@ expect-stdout: BIGFRAME_CUM_BY_GENERAL_KEYS_OK
+// Regression guard for stdlib/data/bigframe_ops.sio: bf_cummax_by / bf_cummin_by /
+// bf_cumprod_by must group on the FULL f64 key domain, not on dense integer keys
+// 0..1023.
+//
+// Each of these three verbs once had a second, later top-level definition in the same
+// file that delegated to a dense direct-index table over integer keys 0..1023: a row
+// whose key fell outside [0,1024) got its own value (no grouping at all) and fractional
+// keys were collapsed by an `as i64` truncation. First definition wins in this language,
+// so those bodies never ran, and they were removed. This test pins the surviving
+// contract so a future dense rewrite cannot land silently.
+//
+// Rows (key, val):
+//   0  (5.0,    3.0)
+//   1  (2000.0, 7.0)   key >= 1024 -- a dense table cannot group it
+//   2  (5.0,    1.0)
+//   3  (2000.0, 9.0)
+//   4  (1.5,    4.0)   1.5 and 1.9 both truncate to 1 under `as i64`
+//   5  (1.9,    8.0)
+//   6  (1.5,    2.0)
+//
+// Correct (general-key) answers:
+//   cummax   3  7  3  9  4  8  4
+//   cummin   3  7  1  7  4  8  2
+//   cumprod  3  7  3 63  4  8  8
+// NATIVE + lean_single only (heap).
+use data::bigframe::*
+use data::bigframe_ops::*
+
+fn build() -> BigFrame with Alloc, Mut, Panic {
+    var f = bf_new(2, 7)
+    f.n_rows = 7
+    bf_set(&!f, 0, 0, 5.0);    bf_set(&!f, 0, 1, 3.0)
+    bf_set(&!f, 1, 0, 2000.0); bf_set(&!f, 1, 1, 7.0)
+    bf_set(&!f, 2, 0, 5.0);    bf_set(&!f, 2, 1, 1.0)
+    bf_set(&!f, 3, 0, 2000.0); bf_set(&!f, 3, 1, 9.0)
+    bf_set(&!f, 4, 0, 1.5);    bf_set(&!f, 4, 1, 4.0)
+    bf_set(&!f, 5, 0, 1.9);    bf_set(&!f, 5, 1, 8.0)
+    bf_set(&!f, 6, 0, 1.5);    bf_set(&!f, 6, 1, 2.0)
+    f
+}
+
+fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
+    let f = build()
+    let mx = bf_cummax_by(&f, 0, 1)
+    let mn = bf_cummin_by(&f, 0, 1)
+    let pr = bf_cumprod_by(&f, 0, 1)
+
+    if bf_nrows(&mx) != 7 { print("FAIL cummax_nrows\n"); return 10 }
+    if bf_nrows(&mn) != 7 { print("FAIL cummin_nrows\n"); return 11 }
+    if bf_nrows(&pr) != 7 { print("FAIL cumprod_nrows\n"); return 12 }
+
+    // Out-of-dense-range key 2000.0 must still group rows 1 and 3.
+    if bf_get(&mx, 3, 0) != 9.0 { print("FAIL cummax_bigkey\n"); return 20 }
+    if bf_get(&mn, 3, 0) != 7.0 { print("FAIL cummin_bigkey\n"); return 21 }
+    if bf_get(&pr, 3, 0) != 63.0 { print("FAIL cumprod_bigkey\n"); return 22 }
+
+    // Fractional keys 1.5 and 1.9 must stay distinct groups.
+    if bf_get(&mx, 5, 0) != 8.0 { print("FAIL cummax_frackey\n"); return 30 }
+    if bf_get(&mn, 6, 0) != 2.0 { print("FAIL cummin_frackey\n"); return 31 }
+    if bf_get(&pr, 6, 0) != 8.0 { print("FAIL cumprod_frackey\n"); return 32 }
+
+    // Ordinary in-range group (key 5.0, rows 0 and 2).
+    if bf_get(&mx, 2, 0) != 3.0 { print("FAIL cummax_plain\n"); return 40 }
+    if bf_get(&mn, 2, 0) != 1.0 { print("FAIL cummin_plain\n"); return 41 }
+    if bf_get(&pr, 2, 0) != 3.0 { print("FAIL cumprod_plain\n"); return 42 }
+
+    // Every group's first row echoes its own value.
+    if bf_get(&mx, 0, 0) != 3.0 { print("FAIL cummax_first\n"); return 50 }
+    if bf_get(&mn, 1, 0) != 7.0 { print("FAIL cummin_first\n"); return 51 }
+    if bf_get(&pr, 4, 0) != 4.0 { print("FAIL cumprod_first\n"); return 52 }
+
+    print("BIGFRAME_CUM_BY_GENERAL_KEYS_OK\n")
+    return 0
+}
