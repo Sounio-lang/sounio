@@ -1594,6 +1594,33 @@ native_hook_runtime_parent_identity() {
   fi
 }
 
+NATIVE_HOOK_PROCESS_EXECUTABLE=''
+NATIVE_HOOK_PROCESS_COMMAND=''
+NATIVE_HOOK_PROCESS_SHA256=''
+
+native_hook_process_executable_identity() {
+  local pid="$1" proc_executable raw_executable canonical_executable
+  NATIVE_HOOK_PROCESS_EXECUTABLE=''
+  NATIVE_HOOK_PROCESS_COMMAND=''
+  NATIVE_HOOK_PROCESS_SHA256=''
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  proc_executable="/proc/$pid/exe"
+  raw_executable="$(readlink "$proc_executable" 2>/dev/null || true)"
+  [[ -n "$raw_executable" && -x "$proc_executable" ]] || return 1
+  if [[ "$raw_executable" == *' (deleted)' ]]; then
+    NATIVE_HOOK_PROCESS_EXECUTABLE="$proc_executable"
+    raw_executable="${raw_executable% \(deleted\)}"
+  else
+    canonical_executable="$(readlink -f "$proc_executable" 2>/dev/null || true)"
+    [[ -n "$canonical_executable" ]] || return 1
+    NATIVE_HOOK_PROCESS_EXECUTABLE="$canonical_executable"
+  fi
+  NATIVE_HOOK_PROCESS_COMMAND="$(basename "$raw_executable")"
+  NATIVE_HOOK_PROCESS_SHA256="$(sha256sum "$proc_executable" 2>/dev/null | awk '{print $1}')"
+  [[ -n "$NATIVE_HOOK_PROCESS_COMMAND" && \
+    "$NATIVE_HOOK_PROCESS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+}
+
 native_hook_provider_caller_identity() {
   local parent_pid="$PPID" parent_tail caller_tail
   parent_tail="$(sed 's/^[^)]*) //' "/proc/$parent_pid/stat" 2>/dev/null || true)"
@@ -1601,9 +1628,10 @@ native_hook_provider_caller_identity() {
   [[ "$NATIVE_HOOK_CALLER_PID" =~ ^[1-9][0-9]*$ ]] || return 1
   caller_tail="$(sed 's/^[^)]*) //' "/proc/$NATIVE_HOOK_CALLER_PID/stat" 2>/dev/null || true)"
   NATIVE_HOOK_CALLER_PID_START="$(awk '{print $20}' <<< "$caller_tail")"
-  NATIVE_HOOK_CALLER_EXECUTABLE="$(readlink -f "/proc/$NATIVE_HOOK_CALLER_PID/exe" 2>/dev/null || true)"
-  NATIVE_HOOK_CALLER_COMMAND="$(basename "$NATIVE_HOOK_CALLER_EXECUTABLE")"
-  NATIVE_HOOK_CALLER_SHA256="$(sha256sum "$NATIVE_HOOK_CALLER_EXECUTABLE" 2>/dev/null | awk '{print $1}')"
+  native_hook_process_executable_identity "$NATIVE_HOOK_CALLER_PID" || return 1
+  NATIVE_HOOK_CALLER_EXECUTABLE="$NATIVE_HOOK_PROCESS_EXECUTABLE"
+  NATIVE_HOOK_CALLER_COMMAND="$NATIVE_HOOK_PROCESS_COMMAND"
+  NATIVE_HOOK_CALLER_SHA256="$NATIVE_HOOK_PROCESS_SHA256"
   NATIVE_HOOK_CALLER_CMDLINE="$(tr '\0' ' ' < "/proc/$NATIVE_HOOK_CALLER_PID/cmdline" 2>/dev/null || true)"
   NATIVE_HOOK_CALLER_BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
   NATIVE_HOOK_CALLER_PID_NAMESPACE="$(readlink "/proc/$NATIVE_HOOK_CALLER_PID/ns/pid" 2>/dev/null || true)"
@@ -1750,14 +1778,15 @@ hook_capability_binding_is_current() {
     { HOOK_CAPABILITY_REASON='coord-runtime-absent'; return 1; }
   current_sha256="$(sha256sum "$HC_PRODUCER_EXECUTABLE" | awk '{print $1}')"
   current_coord_sha256="$(sha256sum "$HC_COORD_EXECUTABLE" | awk '{print $1}')"
-  current_caller_sha256="$(sha256sum "$HC_CALLER_EXECUTABLE" | awk '{print $1}')"
+  native_hook_process_executable_identity "$HC_CALLER_PID" || \
+    { HOOK_CAPABILITY_REASON='caller-executable-absent'; return 1; }
+  current_caller_sha256="$NATIVE_HOOK_PROCESS_SHA256"
   [[ "$current_sha256" == "$HC_PRODUCER_SHA256" ]] || \
     { HOOK_CAPABILITY_REASON='producer-drift'; return 1; }
   [[ "$current_coord_sha256" == "$HC_COORD_SHA256" ]] || \
     { HOOK_CAPABILITY_REASON='coord-runtime-drift'; return 1; }
   [[ "$current_caller_sha256" == "$HC_CALLER_SHA256" && \
-    "$(readlink -f "/proc/$HC_CALLER_PID/exe" 2>/dev/null || true)" == \
-      "$HC_CALLER_EXECUTABLE" ]] || \
+    "$NATIVE_HOOK_PROCESS_EXECUTABLE" == "$HC_CALLER_EXECUTABLE" ]] || \
     { HOOK_CAPABILITY_REASON='caller-executable-drift'; return 1; }
   if ((HC_WAKE_ELIGIBLE)); then
     runtime_root="$(active_coord_runtime_root)" || \

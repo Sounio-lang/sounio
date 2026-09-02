@@ -284,6 +284,7 @@ TRANSACTION_OPEN=0
 CANARY_PID=''
 CANARY_CONTINUE=''
 CANARY_STATE=''
+CLAUDE_DELETED_EXECUTABLE_CANARY=0
 
 stop_canary_supervisor() {
   local state_root="$1"
@@ -487,13 +488,21 @@ run_provider_canary() {
     die "policyless $provider promotion canary omitted native attestation"
   grep -Fq 'wake_eligible=1' <<< "$capability" ||
     die "policyless $provider promotion canary is not wake eligible"
+  if [[ "$provider" == claude ]]; then
+    rm -f "$harness"
+    [[ ! -e "$harness" && \
+      "$(readlink "/proc/$CANARY_PID/exe" 2>/dev/null || true)" == \
+        "$harness (deleted)" ]] ||
+      die 'policyless Claude promotion canary did not retain its deleted executable identity'
+    CLAUDE_DELETED_EXECUTABLE_CANARY=1
+  fi
   : > "$provider_root/continue"
   wait "$CANARY_PID"
   CANARY_PID=''
   CANARY_CONTINUE=''
   [[ "$(cat "$provider_root/prompt.rc")" == 0 && \
     "$(cat "$provider_root/end.rc")" == 0 ]] ||
-    die "policyless $provider promotion canary failed after SessionStart"
+    die "policyless $provider promotion canary failed after SessionStart: prompt_rc=$(cat "$provider_root/prompt.rc" 2>/dev/null || printf missing) end_rc=$(cat "$provider_root/end.rc" 2>/dev/null || printf missing) prompt_err=$(tr '\n' ' ' < "$provider_root/prompt.err" 2>/dev/null || true) end_err=$(tr '\n' ' ' < "$provider_root/end.err" 2>/dev/null || true)"
   [[ ! -s "$provider_root/prompt.err" && ! -s "$provider_root/end.err" ]] ||
     die "policyless $provider promotion canary emitted a refusal"
   for _ in $(seq 1 400); do
@@ -544,6 +553,8 @@ run_provider_canary codex codex snake
 run_provider_canary claude claude snake
 run_provider_canary cursor cursor-agent cursor-camel
 run_provider_canary grok grok grok-camel
+[[ "$CLAUDE_DELETED_EXECUTABLE_CANARY" -eq 1 ]] ||
+  die 'four-provider canary omitted the live deleted Claude executable case'
 
 CANARY_SET_RECEIPT="$TXN_DIR/canary-set.json"
 "$RUNTIME_BUNDLE/bin/sounio-loom-runtime" hook-generation-canary --verify \
@@ -602,6 +613,7 @@ grep -Fq '"four_provider_complete":true' "$CANARY_SET_RECEIPT" ||
   printf 'canary_allow_receipts=13\n'
   printf 'canary_runtime_capsule_receipts=13\n'
   printf 'canary_action_9045_receipts=13\n'
+  printf 'canary_claude_deleted_executable=true\n'
   printf 'canary_action_9046_mask=15\n'
   printf 'guardian_action_9046_prepared=true\n'
   printf 'native_entry_open=true\n'

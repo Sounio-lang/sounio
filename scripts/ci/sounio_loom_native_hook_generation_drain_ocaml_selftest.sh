@@ -440,6 +440,15 @@ grep -Fq 'sha256_executable_file "capability-caller" caller' \
 ! grep -Fq 'sha256_file "capability-caller" caller' \
   "$ROOT_DIR/tools/loom/src/loom_hook_generation_drain.ml" ||
   fail 'OCaml observer regressed to bounded record reads for provider executables'
+grep -Fq 'let live_executable_identity pid =' \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_drain.ml" ||
+  fail 'OCaml observer does not preserve a live deleted executable kernel identity'
+grep -Fq 'native_hook_process_executable_identity "$NATIVE_HOOK_CALLER_PID"' \
+  "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" ||
+  fail 'coordination runtime does not derive provider identity from the live kernel executable'
+grep -Fq 'canary_claude_deleted_executable=true' \
+  "$ROOT_DIR/scripts/dev/install_sounio_loom_native_hooks.sh" ||
+  fail 'native hook installer omits the deleted Claude executable canary receipt'
 grep -Fq '/api/hook-generation-drain' "$ROOT_DIR/tools/loom/src/loom.ml" ||
   fail 'HTTP route is not wired'
 grep -Fq 'NATIVE HOOK GENERATION DRAIN' "$ROOT_DIR/tools/loom/src/loom_ui.ml" ||
@@ -450,4 +459,4 @@ grep -Fq 'refreshDrain' "$ROOT_DIR/tools/loom/src/loom_ui.ml" ||
   fail "forbidden Python or Rust executable ran: $(tr '\n' ' ' < "$FORBIDDEN_LOG")"
 
 printf '%s\n' \
-  'sounio-loom-native-hook-generation-drain-ocaml-selftest: PASS semantic_authority=Sounio operational_realization=OCaml direct_state_inventory=true kernel_process_binding=true canonical_process_generation=true composite_process_generation_binding=true fleet_session_alias_collapse=true duplicate_capability_conflict=DENY675 large_caller_hashing=streamed stable_double_snapshot=true incomplete_inventory=DENY673 false_zero=DENY680 generation_or_capability_unbound=DENY675 canary_or_rollback_incomplete=DENY678 config_unbound=DENY672 arithmetic_invalid=DENY674 runtime_tamper=fail_closed manifest_tamper=fail_closed manifest_missing=fail_closed live_drift=fail_closed forbidden_python_rust_exec=absent ui_route=wired cutover_command=native+hidden_until_ready'
+  'sounio-loom-native-hook-generation-drain-ocaml-selftest: PASS semantic_authority=Sounio operational_realization=OCaml direct_state_inventory=true kernel_process_binding=true canonical_process_generation=true composite_process_generation_binding=true fleet_session_alias_collapse=true duplicate_capability_conflict=DENY675 large_caller_hashing=streamed streaming_executable_hash=true deleted_executable_identity=true stable_double_snapshot=true incomplete_inventory=DENY673 false_zero=DENY680 generation_or_capability_unbound=DENY675 canary_or_rollback_incomplete=DENY678 config_unbound=DENY672 arithmetic_invalid=DENY674 runtime_tamper=fail_closed manifest_tamper=fail_closed manifest_missing=fail_closed live_drift=fail_closed forbidden_python_rust_exec=absent ui_route=wired cutover_command=native+hidden_until_ready'

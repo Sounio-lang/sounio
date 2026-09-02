@@ -103,6 +103,8 @@ grep -q '^canary_runtime_capsule_receipts=13$' "$receipt" ||
   fail 'positive promotion did not retain its runtime-capsule proof'
 grep -q '^canary_action_9045_receipts=13$' "$receipt" ||
   fail 'positive promotion did not retain its Sounio action 9045 proof'
+grep -q '^canary_claude_deleted_executable=true$' "$receipt" ||
+  fail 'positive promotion did not prove the live deleted Claude executable boundary'
 grep -q '^canary_action_9046_mask=15$' "$receipt" ||
   fail 'positive promotion did not retain its Sounio action 9046 canary mask'
 grep -q '^guardian_action_9046_prepared=true$' "$receipt" ||

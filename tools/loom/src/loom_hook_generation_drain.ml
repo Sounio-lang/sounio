@@ -54,7 +54,7 @@ let read_file label path =
 
 let sha256_file label path =
   let stat =
-    try Unix.lstat path
+    try Unix.stat path
     with Unix_error (ENOENT, _, _) -> failf "%s-missing:%s" label path
   in
   if stat.st_kind <> S_REG then failf "%s-not-regular:%s" label path;
@@ -434,6 +434,16 @@ let process_delivery_generation member =
   Printf.sprintf "process-%s-g%s-%s-%s" member.session_id member.generation
     member.pid member.pid_start
 
+let live_executable_identity pid =
+  let proc_executable = Printf.sprintf "/proc/%s/exe" pid in
+  let raw_executable = Unix.readlink proc_executable in
+  if has_suffix raw_executable " (deleted)" then proc_executable
+  else Unix.realpath proc_executable
+
+let recorded_executable_identity pid path =
+  let proc_executable = Printf.sprintf "/proc/%s/exe" pid in
+  if path = proc_executable then path else Unix.realpath path
+
 let sorted_directories path =
   if not (Sys.file_exists path) then []
   else
@@ -544,10 +554,13 @@ let capability_for common member current candidate =
             in
             let producer = Unix.realpath (required "hook-capability" values "producer_executable") in
             let coord = Unix.realpath (required "hook-capability" values "coord_executable") in
-            let caller = Unix.realpath (required "hook-capability" values "caller_executable") in
+            let caller =
+              recorded_executable_identity member.pid
+                (required "hook-capability" values "caller_executable")
+            in
             let expected_producer = Unix.realpath (Filename.concat runtime "bin/sounio-loom-runtime") in
             let expected_coord = Unix.realpath (Filename.concat runtime "bin/sounio-coord-runtime") in
-            let live_caller = Unix.readlink (Printf.sprintf "/proc/%s/exe" member.pid) |> Unix.realpath in
+            let live_caller = live_executable_identity member.pid in
             let bound =
               producer = expected_producer && coord = expected_coord && caller = live_caller
               && executable producer && executable coord && executable caller
