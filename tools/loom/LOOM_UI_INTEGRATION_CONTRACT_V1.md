@@ -144,3 +144,30 @@ The heavy-use client is SwiftUI for macOS and iOS. The macOS client is the
 primary operational surface; iOS is for monitoring, notifications, and bounded
 approvals. The web cockpit is a remote and infrequent-operation client. All
 three consume the same backend-owned route and receipt model.
+
+## Experience acceptance bar
+
+Loom is an operational instrument, not an admin form. Visual quality and
+ergonomics are acceptance criteria alongside correct state rendering.
+
+- **macOS:** give heavy users a calm, dense, spatial workspace: a route graph,
+  a receipt/detail inspector, and a compact action surface must remain
+  simultaneously legible without forcing serial modal navigation.
+- **iOS:** preserve the decision, its reason, authority, and safe action in one
+  focused flow. It is a companion for monitoring and bounded approval, not a
+  shrunken desktop cockpit.
+- **Visual semantics:** pool health, adapter health, quota confidence,
+  cooldown, and ownership are separate visual channels. Color supports the
+  label; it must never be the only distinction.
+- **Explanatory graphics:** route graph and fallback-chain visualizations must
+  show why a route was selected or refused, not merely decorate a dashboard.
+- **Operational calm:** maintain stable layout while data refreshes; avoid
+  alert noise, decorative status motion, ambiguous disabled controls, and
+  interactions that hide the authoritative reason.
+- **Accessibility:** support dynamic type, keyboard operation on macOS, Voice
+  Over labels, sufficient contrast, and reduced-motion behavior.
+
+Before implementation, the Figma source must provide desktop and iPhone flows
+for every mock-state scenario. Before release, compare implemented SwiftUI
+screens against those flows at desktop and mobile viewport/device sizes; visual
+review supplements, but never replaces, the route and receipt acceptance gate.
