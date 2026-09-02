@@ -17,6 +17,33 @@ oracles.
 - `gri30_h2_python_replica.py` and `gri30_full_python_replica.py` — pure-Python
   diagnostic replicas of the generated Sounio math. They are useful for tracing
   individual operations but must not supply regression reference values.
+- `gri30_full_cantera_parity.py` — Cantera 3.2 reference for the FULL
+  mechanism (53 species, 325 reactions), added 2026-09-01. Same isothermal
+  protocol, checkpoints at t = 4e-6 s and t = 2e-5 s. Before this, only the
+  H/O sub-mechanism had a Cantera oracle and the full-mechanism results had
+  no reproduction path. Parity table in `RESULTS.md` section 6.
+  Run: `python3 gri30_full_cantera_parity.py`
+- `cpp/gri30_h2_band_crosscheck.cpp` — independent C++23 third
+  implementation (no dependencies) of the H/O kinetics and the GUM band,
+  written from the protocol rather than translated. Reproduces the Python
+  replica's deterministic checkpoint to all 17 digits; used to settle the
+  band-scaling law in `RESULTS.md` section 5. Uses `std::expected` for a
+  fail-closed loader (a silently defaulted rate constant is the failure mode
+  that makes a cross-check agree for the wrong reason) and the C++23
+  multidimensional subscript `reac[r, s]` for the stoichiometric tables.
+  `std::mdspan` is deliberately NOT used: libstdc++ 13 does not ship it, so a
+  nine-line `Mat2` stand-in provides the same access syntax. Migrated from
+  C++20 on 2026-09-01; the output is **bit-for-bit identical** across the two
+  standards, which is the acceptance criterion — the language standard is not
+  a numerical variable.
+  Run: `g++ -std=c++23 -O2 -o band_crosscheck cpp/gri30_h2_band_crosscheck.cpp && ./band_crosscheck gri30_h2_mechanism.json`
+- `formal/lean4/SounioIndepComposition.lean` — the machine-checked side of the
+  same result: 15 theorems, zero `sorry`, establishing that quadrature is the
+  ρ = 0 case of the JCGM combination law, that it understates under positive
+  correlation, and that N fully-correlated steps combined in quadrature
+  understate by exactly √N — which is the √(T/dt) law measured in
+  `RESULTS.md` section 5.3, derived rather than fitted.
+  Run: `cd formal/lean4 && lake build SounioIndepComposition`
 - `gri30_h2_cantera_parity.py` — Cantera 3.2 reference: builds the same
   sub-mechanism from Cantera's own `gri30.yaml`, runs the identical isothermal
   protocol, prints the parity table and ignition delays.
@@ -74,6 +101,63 @@ At the H/O pre-front checkpoint, t=1e-4 s and T=1500 K, the deterministic
 Sounio trajectory agrees with Cantera to 2e-7 through 6e-6 relative for the
 major species and radicals; H2O2 agrees to 5.9e-3 relative.
 
+> **Superseded 2026-09-01** (see `RESULTS.md` section 1 for the commands, the
+> commit and the full three-way table). The two sentences above are kept for
+> the record and corrected as follows.
+>
+> 1. The 2e-7 through 6e-6 figure is **confirmed** for the majors and
+>    radicals: re-measured 2.247e-07 to 2.660e-06 across all eight species.
+> 2. The H2O2 figure of **5.9e-3 is wrong by three orders of magnitude**.
+>    H2O2 agrees to **1.891e-06** — within the same range as every other
+>    species, not an outlier. There is no H2O2 discrepancy to explain.
+> 3. These figures hold **only** under the TDY (non-renormalising)
+>    initialisation this README documents below. Until 2026-09-01 the shipped
+>    `gri30_h2_cantera_parity.py` used `gas.TPX`, which renormalises the
+>    H-atom seed away, shifts every initial concentration by -5.692129e-06
+>    and inflates the checkpoint deviation ~15x, to 1.7e-06 .. 3.9e-05. That
+>    script now implements the documented protocol and asserts the realised
+>    initial state matches intent to exactly 0.0e+00.
+> 4. Sounio agrees with the **Python replica** (same RK4, same dt) to
+>    **1.8e-16 .. 4.6e-15 — 1 to 30 ULP, i.e. 15 significant figures.** The
+>    demo's apparent 3.3e-12 .. 2.6e-10 is purely its print resolution;
+>    `examples/chemistry/h2_precision_probe.sio` re-prints the same checkpoint
+>    at 16 digits and settles it. There is no cross-language discrepancy.
+> 5. The 2e-7 .. 6e-6 band is **not** the RK4-vs-CVODE integrator difference,
+>    contrary to what the Notes below have said. Measured by halving the step
+>    (`examples/chemistry/h2_probe2.sio`), RK4 truncation at dt = 1e-8 is at
+>    most **2.3e-14** -- seven orders of magnitude too small to explain the
+>    gap. The gap is the Arrhenius activation-energy gas constant: the
+>    CHEMKIN-conventional `R = 1.9872041` cal/mol/K against Cantera's
+>    `8.31446261815324/4.184 = 1.9872042586408316`, a 7.98e-08 difference
+>    inside `exp(-Ea/(R*T))`. Substituting Cantera's value collapses the gap
+>    to **8.9e-13 .. 1.2e-11** (a 155,000x-296,000x improvement), at the floor
+>    of CVODE's own `rtol = 1e-12`. The shipped constant is deliberately left
+>    at the CHEMKIN-conventional value; whether GRI-Mech was itself regressed
+>    under that rounding is not established here -- see `RESULTS.md` 1.5.
+>
+> **SUPERSEDED 2026-09-01, later the same day.** The paragraph that stood here
+> said the claim "majors 0.2-2%, radicals ~3%, H2O2 ~16%" had "no provenance".
+> That was wrong, and the correction inverts it. **The provenance is closed:
+> those are the per-species errors of the historical `reac - nu` reverse-rate
+> defect** at the isothermal checkpoint, mislabelled as a Sounio-vs-Cantera
+> comparison. Measured by `rep_traj_bug.py`, which reintroduces the defect:
+>
+> | claim | measured under `reac - nu` |
+> |---|---|
+> | "majors within 0.2-2%" | H2 **0.21%**, O2 **0.18%**, HO2 0.14%, O 1.49%, H2O 1.69%, H 1.76% |
+> | "radicals ~3%" | OH **3.44%** |
+> | "H2O2 ~16%" | H2O2 **16.17%** |
+>
+> Three figures, three matches, the last to three significant figures. What was
+> wrong was the *label*, not the number: the attribution to "fixed-step RK4 vs
+> CVODE" has no basis -- halving dt leaves the residual at ratio 1.000, so it is
+> not truncation -- but the numbers themselves are a real measurement of a real
+> defect. The half of the original paragraph that stands is that no pairing of
+> Sounio, replica and Cantera produces percent-level deviations; that is a
+> different statement, and `RESULTS.md` 1.2 measures it.
+>
+> Run: `python3 rep_traj_bug.py`.  See `RESULTS.md` 1.1a and 2.3.
+
 For the full mechanism at t=4e-7 s, Sounio's coherent forward-sensitivity
 band agrees with the independent Cantera central-difference referee in all
 eight H/O species. The largest relative sigma deviation is 8.724e-7 (H); the
@@ -102,12 +186,24 @@ export SOUNIO_STDLIB_PATH=$(pwd)/stdlib SOUNIO_SOUC_ENGINE=lean_single
 - The UQ implementation propagates persistent rate-parameter sensitivities
   coherently. A quadrature source added independently at every time step would
   incorrectly make radical uncertainties scale with the square root of `dt`.
+  **Measured 2026-09-01** (`RESULTS.md` section 5, two independent
+  implementations agreeing to six digits): the Python replica does add such a
+  source, and its radical band scales as sqrt(dt) exactly as predicted --
+  a factor 2 in dt gives 1.41418-1.41817 and a factor 4 gives 1.99994-2.00841.
+  The law applies only to species whose band is *generated* by accumulation:
+  H2 and O2, whose variance is dominated by the 1% initial-condition
+  uncertainty, give a ratio of exactly 1.000000 under every dt change. The
+  same sqrt(T*dt) reasoning does **not** survive the induction period: past
+  t ~ 1e-5 s the Jacobian terms dominate and the measured band ratio exceeds
+  the sqrt(T/dt) prediction by 59x-242x per decade.
 - First-order symmetric bands describe the covariance, not the full sampling
   distribution. Near ignition, skewed species distributions can require
   quantiles to describe asymmetric tails.
 - Sounio wall time is dominated by the fixed-step RK4 (10k steps at dt = 1e-8);
   Cantera's CVODE takes adaptive steps. This is a correctness/UQ benchmark,
-  not a speed benchmark.
+  not a speed benchmark. **Note (2026-09-01):** the step-size difference costs
+  wall time but *not* accuracy -- RK4 truncation at dt = 1e-8 is 2.3e-14, and
+  the observed parity gap has a different cause entirely (`RESULTS.md` 1.5).
 
 ## Adiabatic (constant-U,V) ignition-delay curve (2026-07-31)
 

@@ -71,7 +71,14 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
         None => {}
     }
 
-    let ty = ty_knowledge(inner_ty, eps_val)
+    // Persist the annotation's provenance category as TypeEntry payload
+    // (parsed by the parser, converted by provenance_from_ast via `meta`,
+    // and DROPPED here until 2026-09-01). Identity is untouched —
+    // types_equal never reads this field; the call-boundary check is the
+    // only consumer. Lane: SOUNIO-KNOWLEDGE-BOUNDARY-PROVENANCE.
+    var ty = ty_knowledge(inner_ty, eps_val)
+    let prov = meta.provenance
+    ty.knowledge_provenance_kind = prov.kind
     (c, ty)
 }
 
@@ -335,14 +342,15 @@ pub fn check_knowledge_epsilon_of(ty: TypeEntry) -> TypeEntry {
 
 // Check if provenance is from a trusted source
 pub fn provenance_is_trusted(prov: Provenance) -> bool {
-    match prov.kind {
-        PROVENANCE_KIND_SOURCE => true,
-        PROVENANCE_KIND_LITERATURE => true,
-        PROVENANCE_KIND_MEASURED => true,
-        PROVENANCE_KIND_DERIVED => false,
-        PROVENANCE_KIND_COMPUTED => false,
-        PROVENANCE_KIND_INPUT => false
-    }
+    // if-chain, NOT match-on-const: in Madaros a const pattern binds instead
+    // of matching (measured 2026-09-01: match x { A => ..., B => ... } with
+    // x=2 returns the A arm), which made this function return true for every
+    // kind and killed provenance_subsumes silently. The arm order and the
+    // trusted set are unchanged: Source, Literature, Measured are trusted.
+    if prov.kind == PROVENANCE_KIND_SOURCE { return true }
+    if prov.kind == PROVENANCE_KIND_LITERATURE { return true }
+    if prov.kind == PROVENANCE_KIND_MEASURED { return true }
+    false
 }
 
 // Get string representation of provenance kind
@@ -498,10 +506,14 @@ pub fn knowledge_meta_from_ty(ty: TypeEntry) -> KnowledgeMeta with Mut, Panic, D
     match ty.kind {
         TypeKind::TyKnowledge => {
             let eps = ty.knowledge_epsilon
+            // Read the persisted provenance payload instead of flattening to
+            // DERIVED. -1 (absent: intrinsics, binary results) maps to
+            // DERIVED — which is what a computed value honestly is.
+            let prov_kind = if ty.knowledge_provenance_kind >= 0 { ty.knowledge_provenance_kind } else { PROVENANCE_KIND_DERIVED }
             KnowledgeMeta {
                 epsilon: eps,
                 validity: validity_always(),
-                provenance: provenance_new(PROVENANCE_KIND_DERIVED)
+                provenance: provenance_new(prov_kind)
             }
         }
         TypeKind::TyIntervention => {

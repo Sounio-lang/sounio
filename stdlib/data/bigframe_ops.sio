@@ -3766,53 +3766,11 @@ pub fn bf_transform_std_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFra
     bf_transform_by(src, key_col, val_col, 5)
 }
 
-/// Per-group cumulative min/max engine shared by bf_cummin_by / bf_cummax_by: a
-/// row-aligned running extreme WITHIN each key_col group (like pandas
-/// df.groupby(key)[val].cummin() / .cummax()): out[i] = min/max of val over the rows of
-/// row i's group up to and including i. ismax=1 -> cummax, 0 -> cummin. DENSE integer keys
-/// 0..1023 only (direct-index running array, no hashing -- the same fast dense-key
-/// contract as bf_groupby_sum; a row whose key is outside [0,1024) gets its own value).
-/// O(n), a single pass. Returns a 1-column BigFrame of length n. NATIVE + lean_single only.
-fn bf_cumextrema_by(src: &BigFrame, key_col: i64, val_col: i64, ismax: i64) -> BigFrame with Alloc, Mut, Div, Panic {
-    var run: [f64; 1024] = [0.0; 1024]
-    var seen: [i64; 1024] = [0; 1024]
-    let n = bf_nrows(src)
-    let nc = bf_ncols(src)
-    var out = bf_new(1, n)
-    out.n_rows = n
-    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
-    let kp = bf_col_ptr(src, key_col) as *mut f64
-    let vp = bf_col_ptr(src, val_col) as *mut f64
-    let op = bf_col_ptr(&out, 0) as *mut f64
-    var i: i64 = 0
-    while i < n {
-        let k = read_f64(kp, i) as i64
-        let v = read_f64(vp, i)
-        if k >= 0 && k < 1024 {
-            if seen[k] == 0 { seen[k] = 1; run[k] = v }
-            else { if ismax == 1 { if v > run[k] { run[k] = v } } else { if v < run[k] { run[k] = v } } }
-            write_f64(op, i, run[k])
-        } else {
-            write_f64(op, i, v)
-        }
-        i = i + 1
-    }
-    out
-}
-
-/// Per-group cumulative MAXIMUM (pandas df.groupby(key)[val].cummax()): out[i] = the max
-/// of val over row i's group up to and including i, row-aligned. Dense integer keys
-/// 0..1023 (see bf_cumextrema_by). NATIVE + lean_single only.
-pub fn bf_cummax_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
-    bf_cumextrema_by(src, key_col, val_col, 1)
-}
-
-/// Per-group cumulative MINIMUM (pandas df.groupby(key)[val].cummin()): out[i] = the min
-/// of val over row i's group up to and including i, row-aligned. Dense integer keys
-/// 0..1023 (see bf_cumextrema_by). NATIVE + lean_single only.
-pub fn bf_cummin_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
-    bf_cumextrema_by(src, key_col, val_col, 0)
-}
+// (A second `bf_cummax_by` / `bf_cummin_by` pair used to sit here, delegating to a
+// private DENSE-key helper `bf_cumextrema_by` over integer keys 0..1023 -- a row with
+// a key outside [0,1024) got its own value and fractional keys collapsed via `as i64`.
+// First definition wins, so neither ever ran; the live hash-table bodies above handle
+// any f64 key. Both wrappers and the now-callerless helper have been removed.)
 
 /// Per-group RANK of `val_col`, ascending, 1-based within each `key_col` group (like
 /// pandas df.groupby(key)[val].rank(method=...)): out[i] = the rank of row i's value
@@ -4634,31 +4592,10 @@ pub fn bf_expanding_min_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFra
     bf_cummin_by(src, key_col, val_col)
 }
 
-/// Per-group cumulative PRODUCT (pandas df.groupby(key)[val].cumprod()): out[i] = the
-/// product of val over row i's group from its start to i (overflows to inf, as in pandas).
-/// DENSE direct-index running product over keys 0..1023 (no hashing -- the same fast
-/// dense-key contract as bf_groupby_sum; a row whose key is outside [0,1024) gets its own
-/// value). O(n), one pass. NATIVE + lean_single only (heap).
-pub fn bf_cumprod_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
-    var acc: [f64; 1024] = [1.0; 1024]
-    let n = bf_nrows(src)
-    let nc = bf_ncols(src)
-    var out = bf_new(1, n)
-    out.n_rows = n
-    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
-    let kp = bf_col_ptr(src, key_col) as *mut f64
-    let vp = bf_col_ptr(src, val_col) as *mut f64
-    let op = bf_col_ptr(&out, 0) as *mut f64
-    var i: i64 = 0
-    while i < n {
-        let k = read_f64(kp, i) as i64
-        let v = read_f64(vp, i)
-        if k >= 0 && k < 1024 { acc[k] = acc[k] * v; write_f64(op, i, acc[k]) }   // acc starts 1 -> first row = v
-        else { write_f64(op, i, v) }
-        i = i + 1
-    }
-    out
-}
+// (A second, DENSE-key `bf_cumprod_by` used to sit here: a direct-index running
+// product over integer keys 0..1023 that gave any row with a key outside [0,1024)
+// its own value and truncated fractional keys via `as i64`. First definition wins,
+// so it never ran; the live hash-table body above handles any f64 key. Removed.)
 
 /// Per-group STATISTIC BROADCAST engine shared by bf_zscore_by / bf_demean_by /
 /// bf_minmax_scale_by / bf_sem_by / bf_range_by: computes a per-group statistic (a

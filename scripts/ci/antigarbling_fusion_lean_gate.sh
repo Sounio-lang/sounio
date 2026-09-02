@@ -105,7 +105,8 @@ for thm in cdMul_add_left cdMul_add_right cdMul_smul_left cdMul_smul_right normS
            polarOn4_1_10_x_2_5 sedenion_shortcut_exact_on_1_10_x_2_5 sedenion_norm_mult_on_1_10_x_2_5 \
            cdSigma_pm cdSigma_sq cdMul_e_e polar_e_e polarOn_of_xorFree norm_mult_of_xorFree \
            shortcut_eq_sensitivity_of_xorFree not_xorFree_witness xorFree_1_10_x_2_5 \
-           xorFree_singleton norm_mult_of_monomial; do
+           xorFree_singleton norm_mult_of_monomial \
+           qCoversAff_relAff relative_shortcut_exact_of_xorFree relative_shortcut_exact_of_monomial; do
     grep -qE "^theorem ${thm}( |$|\()" "${LEAN_FILE}" || fail "theorem ${thm} not found"
 done
 echo "C4 PASS: all load-bearing theorems present"

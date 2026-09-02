@@ -3,6 +3,10 @@
 # important — that it does NOT fire on the two shapes that fooled the scanner
 # four times before it settled: methods of the same name in different impl
 # blocks, and one body formatted two ways.
+#
+# Since #2368 it also covers the cross-MODULE half: one exported name defined in
+# two files. Those controls, and the proof that they discriminate against the
+# scanner they replaced, are at the bottom.
 set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR" || exit 9
@@ -151,6 +155,111 @@ F
 check "divergent duplicate is named DIVERGENT" fail "DIVERGENT" || exit 1
 rm "$W/src/dup_diff.sio"
 
+# ---------------------------------------------------------------------------
+# CROSS-MODULE controls (#2368).
+#
+# A control that behaves the same before and after the change it is supposed to
+# guard is worth nothing, so this was checked rather than assumed. Verified
+# 2026-09-01 by dropping `git show origin/main:...duplicate_definition_gate.sh`
+# in as the gate (it must sit under scripts/ci/ — the gate derives ROOT_DIR from
+# its own path, and running it from /tmp silently scans `/`). All TEN controls
+# above passed unchanged; all SIX below failed, verbatim:
+#
+#   SELFTEST FAIL: divergent pub fn in two modules is XMOD-DIVERGENT expected fail, got pass
+#   SELFTEST FAIL: identical pub fn in two modules is xmod-identical expected fail, got pass
+#   SELFTEST FAIL: non-pub fn in two modules is not a cross-module duplicate behaved correctly but never said 'cross_module_divergent=0'
+#   SELFTEST FAIL: cfg-guarded arms in two modules are not a cross-module duplicate behaved correctly but never said 'cross_module_divergent=0'
+#   SELFTEST FAIL: pub methods of two types in two modules are not a cross-module duplicate behaved correctly but never said 'cross_module_divergent=0'
+#   SELFTEST FAIL: a pub duplicate inside ONE file is not counted cross-module behaved correctly but never said 'cross_module_divergent=0'
+#
+# The RED ones discriminate on the VERDICT: the old scanner looked inside one
+# file at a time and had nothing to say about two. The GREEN ones cannot
+# discriminate that way -- an old scanner that reports nothing cross-module is
+# trivially right about a shape that should report nothing -- so each pins the
+# printed count instead, which the old scanner does not emit. They are stated
+# as false-positive guards on the NEW code path, not as evidence of a fix.
+
+# RED — the #2368 shape itself: one exported name, two modules, DIFFERENT
+# bodies, and the importer picks by module so the other is unreachable.
+cat > "$W/src/xmod_a.sio" <<'F'
+pub fn compile_pipeline(p: i64) -> i64 {
+    inline_pass(p)
+    tco_pass(p)
+}
+F
+cat > "$W/src/xmod_b.sio" <<'F'
+pub fn compile_pipeline(p: i64) -> i64 {
+    p
+}
+F
+check "divergent pub fn in two modules is XMOD-DIVERGENT" fail "XMOD-DIVERGENT" || exit 1
+rm "$W/src/xmod_a.sio" "$W/src/xmod_b.sio"
+
+# RED — identical bodies in two modules are still one dead copy, and are
+# reported separately so the two can be ratcheted apart.
+cat > "$W/src/xmod_same_a.sio" <<'F'
+pub fn shared_helper(x: i64) -> i64 { x * 2 }
+F
+cat > "$W/src/xmod_same_b.sio" <<'F'
+pub fn shared_helper(x: i64) -> i64 {
+    x * 2
+}
+F
+check "identical pub fn in two modules is xmod-identical" fail "xmod-identical" || exit 1
+rm "$W/src/xmod_same_a.sio" "$W/src/xmod_same_b.sio"
+
+# GREEN — a NON-pub fn is not exported, and 959 of these exist in self-hosted/
+# (bootstrap_v0.sio alone redefines most of parser/ by design). Gating them is
+# not possible; see the gate header for the measured cuts.
+cat > "$W/src/priv_a.sio" <<'F'
+fn local_helper(x: i64) -> i64 { x + 1 }
+F
+cat > "$W/src/priv_b.sio" <<'F'
+fn local_helper(x: i64) -> i64 { x + 999 }
+F
+check "non-pub fn in two modules is not a cross-module duplicate" pass "cross_module_divergent=0" || exit 1
+rm "$W/src/priv_a.sio" "$W/src/priv_b.sio"
+
+# GREEN — #[cfg]-guarded alternatives split ACROSS two files. Within one file
+# this is already handled; the cross-module aggregation must inherit it and not
+# reintroduce the false positive.
+cat > "$W/src/cfg_x86.sio" <<'F'
+#[cfg(target_arch = "x86_64")]
+pub fn fast_hash(x: i64) -> i64 { x * 31 }
+F
+cat > "$W/src/cfg_arm.sio" <<'F'
+#[cfg(target_arch = "aarch64")]
+pub fn fast_hash(x: i64) -> i64 { x * 33 }
+F
+check "cfg-guarded arms in two modules are not a cross-module duplicate" pass "cross_module_divergent=0" || exit 1
+rm "$W/src/cfg_x86.sio" "$W/src/cfg_arm.sio"
+
+# GREEN — a method is not a module export. Two types in two files may each have
+# `get`; keying those by name is the shape that produced a false 104.
+cat > "$W/src/meth_a.sio" <<'F'
+impl Alpha {
+    pub fn get(self, i: i64) -> i64 { self.xs[i] }
+}
+F
+cat > "$W/src/meth_b.sio" <<'F'
+impl Beta {
+    pub fn get(self, i: i64) -> i64 { self.ys[i] * 7 }
+}
+F
+check "pub methods of two types in two modules are not a cross-module duplicate" pass "cross_module_divergent=0" || exit 1
+rm "$W/src/meth_a.sio" "$W/src/meth_b.sio"
+
+# GREEN — the same exported name defined TWICE IN ONE FILE is the within-file
+# finding, not a cross-module one. Without the distinct-file requirement the
+# two halves double-count and one ratchet moves the other.
+cat > "$W/src/one_file_pub.sio" <<'F'
+pub fn only_here(x: i64) -> i64 { x * 2 }
+
+pub fn only_here(x: i64) -> i64 { x * 2 }
+F
+check "a pub duplicate inside ONE file is not counted cross-module" fail "cross_module_divergent=0" || exit 1
+rm "$W/src/one_file_pub.sio"
+
 # RED — an empty scan is a broken instrument, not a clean tree.
 check_empty() {
   local out rc
@@ -161,4 +270,4 @@ check_empty() {
 }
 mkdir -p "$W/nothing"; check_empty || exit 1
 
-echo "DUPLICATE_DEFINITION_SELFTEST_OK: 10 controls, 4 of them RED, each behaved as stated"
+echo "DUPLICATE_DEFINITION_SELFTEST_OK: 16 controls, 7 of them RED, each behaved as stated"
