@@ -104,7 +104,7 @@ def main():
     print("oracle: %s %s at %s bits; corpus = %d cases"
           % (meta["oracle"], meta["oracle_version"],
              meta["oracle_precision_bits"], len(cases)))
-    print("relative error in quad-double ulps (1 ulp = 2^-212 = 1.530e-64)")
+    print("relative error in quad-double ulps (1 ulp = 2^-212 = 1.5193e-64)")
     print()
 
     core = [r for r in rows if r["rec"]["regime"] == "core"]

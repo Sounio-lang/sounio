@@ -236,7 +236,7 @@ meta = {
     "python": sys.version.split()[0],
     "oracle_precision_bits": MPMATH_PREC,
     "target_precision_bits": 212,
-    "qd_ulp": "2^-212 = 1.5301...e-64",
+    "qd_ulp": "2^-212 = 1.5192908...e-64",
     "independence": (
         "No Sounio code participates in producing these values. Inputs are "
         "carried as exact (mantissa, exponent) integer pairs so that souc's "
