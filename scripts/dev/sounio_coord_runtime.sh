@@ -3583,12 +3583,16 @@ coord_obligation_reconcile_command() {
 
 coord_wake_reconcile_command() {
   (($# == 0)) || die "wake-reconcile does not accept arguments"
-  local submission_file message_file runtime_self now_epoch retry_interval
-  local attempted=0 started=0 pending=0 skipped=0 sender_agent sender_lane output
+  local submission_file message_file runtime_self now_epoch retry_interval attempt_budget
+  local attempted=0 started=0 pending=0 skipped=0 eligible=0 budget_skipped=0
+  local sender_agent sender_lane output
   local -a submission_paths=()
-  retry_interval="${SOUNIO_COORD_WAKE_RETRY_INTERVAL_SECONDS:-1}"
+  retry_interval="${SOUNIO_COORD_WAKE_RETRY_INTERVAL_SECONDS:-300}"
   [[ "$retry_interval" =~ ^[1-9][0-9]*$ ]] || \
     die "SOUNIO_COORD_WAKE_RETRY_INTERVAL_SECONDS must be a positive integer"
+  attempt_budget="${SOUNIO_COORD_WAKE_RECONCILE_BUDGET:-4}"
+  [[ "$attempt_budget" =~ ^[1-9][0-9]*$ ]] || \
+    die "SOUNIO_COORD_WAKE_RECONCILE_BUDGET must be a positive integer"
   now_epoch="$(date +%s)"
   runtime_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
   submission_paths=("$WAKE_SUBMISSIONS_DIR"/*.submitted)
@@ -3605,6 +3609,11 @@ coord_wake_reconcile_command() {
     ((now_epoch >= S_LAST_ATTEMPT_EPOCH + retry_interval)) || { skipped=$((skipped + 1)); continue; }
     message_file="$MESSAGES_DIR/$(slug "$S_MESSAGE_ID").message"
     [[ -f "$message_file" ]] || { skipped=$((skipped + 1)); continue; }
+    eligible=$((eligible + 1))
+    if ((attempted >= attempt_budget)); then
+      budget_skipped=$((budget_skipped + 1))
+      continue
+    fi
     load_message "$message_file"
     sender_agent="$M_FROM_AGENT"
     sender_lane="$M_FROM_LANE"
@@ -3619,8 +3628,9 @@ coord_wake_reconcile_command() {
     fi
     printf '%s\n' "$output"
   done
-  printf 'WAKE_RECONCILE attempted=%s started=%s pending=%s skipped=%s\n' \
-    "$attempted" "$started" "$pending" "$skipped"
+  printf 'WAKE_RECONCILE attempted=%s started=%s pending=%s skipped=%s eligible=%s budget_skipped=%s budget=%s retry_interval_seconds=%s\n' \
+    "$attempted" "$started" "$pending" "$skipped" "$eligible" "$budget_skipped" \
+    "$attempt_budget" "$retry_interval"
 }
 
 coord_obligation_supervisor_stop_children() {
