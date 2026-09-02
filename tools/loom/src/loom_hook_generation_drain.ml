@@ -63,6 +63,8 @@ let sha256_file label path =
       Cryptokit.hash_channel (Cryptokit.Hash.sha256 ()) channel
       |> Cryptokit.transform_string (Cryptokit.Hexa.encode ()))
 
+let sha256_executable_file = sha256_file
+
 let parse_fields ?(allow_duplicate = false) label text =
   let table = Hashtbl.create 32 in
   String.split_on_char '\n' text
@@ -428,6 +430,10 @@ let runtime_identity path =
       (field fields "runtime_id", sha256_file "runtime-manifest" manifest_path)
     with _ -> ("", "")
 
+let process_delivery_generation member =
+  Printf.sprintf "process-%s-g%s-%s-%s" member.session_id member.generation
+    member.pid member.pid_start
+
 let sorted_directories path =
   if not (Sys.file_exists path) then []
   else
@@ -501,7 +507,7 @@ let capability_for common member current candidate =
         && field values "state" = "NATIVE_HOOK_ATTESTED"
         && field values "agent" = member.agent && field values "lane" = member.lane
         && field values "session_id" = member.session_id
-        && field values "generation" = canonical_process_generation member
+        && field values "generation" = process_delivery_generation member
         && field values "worktree" = member.worktree
         && field values "harness" = member.harness
         && field values "presence_pid" = member.pid
@@ -545,11 +551,11 @@ let capability_for common member current candidate =
             let bound =
               producer = expected_producer && coord = expected_coord && caller = live_caller
               && executable producer && executable coord && executable caller
-              && sha256_file "capability-producer" producer
+              && sha256_executable_file "capability-producer" producer
                  = required "hook-capability" values "producer_sha256"
-              && sha256_file "capability-coord" coord
+              && sha256_executable_file "capability-coord" coord
                  = required "hook-capability" values "coord_sha256"
-              && sha256_file "capability-caller" caller
+              && sha256_executable_file "capability-caller" caller
                  = required "hook-capability" values "caller_sha256"
               && field manifest "runtime_id" = runtime_id
               && field manifest "source_sha" = field values "source_sha"
@@ -558,7 +564,13 @@ let capability_for common member current candidate =
             in
             if bound then (classification, reason)
             else (Unknown, "capability-binary-or-manifest-drift")
-    with _ -> (Unknown, "capability-invalid")
+    with
+    | Error reason -> (Unknown, "capability-invalid:" ^ reason)
+    | Unix_error (error, operation, argument) ->
+        (Unknown,
+         Printf.sprintf "capability-invalid:%s:%s:%s" operation argument
+           (Unix.error_message error))
+    | error -> (Unknown, "capability-invalid:" ^ Printexc.to_string error)
 
 let count classification members =
   List.fold_left
