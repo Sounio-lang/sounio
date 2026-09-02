@@ -29,6 +29,7 @@ import cantera as ct
 SUB_SPECIES = ["H2", "H", "O", "O2", "OH", "H2O", "HO2", "H2O2", "N2", "AR"]
 SUB_SET = set(SUB_SPECIES)
 P0 = 101325.0
+R_SI = 8.31446261815324  # J/(mol*K), CODATA 2018 -- aligned with stdlib/chemistry (PR #2382)
 DT = 1e-8
 T_END = 1e-4
 T_CHECK = 1500.0
@@ -57,7 +58,7 @@ def build_submechanism():
 
 def initial_concentrations(T):
     """Intended absolute initial concentrations, mol/cm^3 (Sounio protocol)."""
-    mtot = 1.0 / (82.057 * T)
+    mtot = P0 / (R_SI * T) * 1e-6  # mol/cm^3 at exactly 1 atm; the 1/(82.057*T) shorthand truncated R
     c = {s: 0.0 for s in SUB_SPECIES}
     c["H2"], c["O2"], c["N2"] = mtot * 0.02, mtot * 0.01, mtot * 0.97
     c["H"] = SEED_C  # additive H-atom seed, NOT taken out of the bath
