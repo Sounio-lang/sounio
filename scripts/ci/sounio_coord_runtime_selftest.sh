@@ -218,6 +218,7 @@ cp "$ROOT_DIR/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v5" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v6" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v7" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v8" \
   "$REPO/tools/loom/"
 mkdir -p "$REPO/tools/loom/evidence"
 cp "$ROOT_DIR/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt" \
@@ -228,6 +229,7 @@ cp "$ROOT_DIR/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v5-20260901.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v6-20260902.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v7-20260902.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v8-20260902.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-drain-first-v1-20260831.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-drain-frozen-v1-20260831.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-reconcile-first-v1-20260901.txt" \
@@ -1034,8 +1036,8 @@ grep -Fq 'state=live' <<< "$capsule_supervisor_status" || \
   fail 'policyless SessionStart did not leave the native obligation supervisor live'
 capsule_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$capsule_supervisor_status")"
 capsule_supervisor_wrapper="$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$capsule_supervisor_pid/status")"
-tr '\0' '\n' < "/proc/$capsule_supervisor_wrapper/environ" | \
-  grep -Fx "SOUNIO_COORD_DIR=$CAPSULE_STATE" >/dev/null || \
+grep -Fxq "SOUNIO_COORD_DIR=$CAPSULE_STATE" \
+  < <(tr '\0' '\n' < "/proc/$capsule_supervisor_wrapper/environ") || \
   fail 'detached supervisor wrapper omitted its explicit state-root identity'
 SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$CAPSULE_STATE" \
   "$POLICYLESS/bin/sounio-coord" obligation-supervisor-stop \

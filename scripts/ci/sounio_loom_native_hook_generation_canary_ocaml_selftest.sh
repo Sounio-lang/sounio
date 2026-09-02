@@ -127,7 +127,7 @@ write_canary_fixture() {
     write_decision "$provider" UserPromptSubmit "$config_sha256" "$decisions"
     write_decision "$provider" Stop "$config_sha256" "$decisions"
     printf '%b\n' \
-      "schema=loom-hook-session-lifecycle-v1\tagent=$provider\taction=PROCESS_EXIT_CLOSED" \
+      "schema=loom-hook-session-lifecycle-v1\tagent=$provider\taction=PROCESS_EXIT_RECONCILE_PENDING" \
       > "$lifecycle"
   else
     write_decision "$provider" SessionEnd "$config_sha256" "$decisions"

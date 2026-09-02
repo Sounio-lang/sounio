@@ -121,7 +121,7 @@ write_rotation_canary_fixture() {
       >> "$decisions"
   done
   printf '%b\n' \
-    'schema=loom-hook-session-lifecycle-v1\tagent=codex\taction=PROCESS_EXIT_CLOSED' \
+    'schema=loom-hook-session-lifecycle-v1\tagent=codex\taction=PROCESS_EXIT_RECONCILE_PENDING' \
     > "$lifecycle"
   printf '%s\n' 'LOOM ROTATION CANARY CODEX' > "$ROTATION_CANARY_ROOT/provider.out"
 }

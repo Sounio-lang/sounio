@@ -205,7 +205,7 @@ let decision_counts provider candidate text =
   (List.length rows, !starts, !prompts, !stops, !ends)
 
 let lifecycle_counts provider text =
-  let closed = ref 0 and process_exit = ref 0 and failed = ref 0 in
+  let closed = ref 0 and process_exit_reconcile_pending = ref 0 and failed = ref 0 in
   nonempty_lines text
   |> List.iteri (fun index line ->
          let label = Printf.sprintf "canary-lifecycle-%d" index in
@@ -214,14 +214,15 @@ let lifecycle_counts provider text =
          exact label fields "agent" provider;
          (match required label fields "action" with
          | "CLOSED" -> incr closed
-         | "PROCESS_EXIT_CLOSED" -> incr process_exit
+         | "PROCESS_EXIT_RECONCILE_PENDING" -> incr process_exit_reconcile_pending
          | "CLOSE_FAILED" | "PROCESS_EXIT_CLOSE_FAILED" -> incr failed
          | _ -> ()));
   if !failed <> 0 then failf "canary-lifecycle-close-failed";
   if provider = "codex" then (
-    if !process_exit = 0 then failf "canary-process-exit-close-absent")
+    if !process_exit_reconcile_pending = 0 then
+      failf "canary-process-exit-reconcile-pending-absent")
   else if !closed = 0 then failf "canary-session-close-absent";
-  (!closed, !process_exit)
+  (!closed, !process_exit_reconcile_pending)
 
 let signing_paths state_directory =
   ( Filename.concat state_directory "guardian-ed25519-private.pem",
@@ -378,7 +379,9 @@ let issue ~root ~state_directory ~provider ~canary_root ~output_path ~expected_o
   let allow_count, start_count, prompt_count, stop_count, end_count =
     decision_counts provider candidate decisions
   in
-  let closed_count, process_exit_count = lifecycle_counts provider lifecycle in
+  let closed_count, process_exit_reconcile_pending_count =
+    lifecycle_counts provider lifecycle
+  in
   let residual_active_count = active_state_count canary_common in
   let residual_watcher_count = watcher_count canary_common in
   if residual_active_count <> 0 then failf "canary-active-state-residual:%d" residual_active_count;
@@ -388,7 +391,7 @@ let issue ~root ~state_directory ~provider ~canary_root ~output_path ~expected_o
     verified_key state_directory ~need_private:true
   in
   let closure_result =
-    if (provider = "codex" && process_exit_count > 0)
+    if (provider = "codex" && process_exit_reconcile_pending_count > 0)
        || (provider <> "codex" && closed_count > 0)
     then "PASS"
     else "FAIL"
@@ -413,7 +416,8 @@ let issue ~root ~state_directory ~provider ~canary_root ~output_path ~expected_o
         "prompt_count=" ^ string_of_int prompt_count;
         "stop_count=" ^ string_of_int stop_count;
         "session_end_count=" ^ string_of_int end_count;
-        "process_exit_closed_count=" ^ string_of_int process_exit_count;
+        "process_exit_reconcile_pending_count="
+        ^ string_of_int process_exit_reconcile_pending_count;
         "residual_active_count=" ^ string_of_int residual_active_count;
         "residual_watcher_count=" ^ string_of_int residual_watcher_count;
         "closure_result=" ^ closure_result;
