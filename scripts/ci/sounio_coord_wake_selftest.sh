@@ -378,6 +378,20 @@ grep -q 'injected=1 .*wakes=1 wake_pending=0$' <<< "$output" || \
 coord "$SECOND" release --agent codex --lane retry-auto --reason 'automatic retry complete' >/dev/null
 tmux -S "$SOCKET" kill-window -t recipient:retry-auto
 
+# Historical discovery is optional outside tmux. An unset TMUX must degrade to
+# durable delivery instead of aborting under set -u before the message persists.
+coord "$SECOND" send --agent codex --lane no-tmux-recipient \
+  --to-agent sender --to-lane origin --kind info \
+  --message 'establish history for the no-tmux negative control' >/dev/null
+output="$(
+  unset TMUX SOUNIO_COORD_DISCOVERY_SOCKET
+  coord "$REPO" send --agent sender --lane origin --to-agent codex \
+    --to-lane no-tmux-recipient --kind info \
+    --message 'persist without an ambient tmux socket'
+)"
+grep -q '^WAKE_UNAVAILABLE .*status=unavailable$' <<< "$output" || \
+  fail 'no-tmux discovery did not fall back to durable delivery'
+
 SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$SECOND" send --agent codex \
   --lane legacy-recipient --to-agent sender --to-lane origin --kind info \
   --message 'establish a historical endpoint without registration' >/dev/null

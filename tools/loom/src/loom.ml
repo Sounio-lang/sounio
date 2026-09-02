@@ -8999,128 +8999,6 @@ let fleet_disable_command cli =
   atomic_write path (descriptor_text (fleet_spec_fields disabled));
   Printf.printf "LOOM_FLEET_DISABLED slot=%s\n%!" slot
 
-let agentd_compat_wake_request ~agent ~lane ~session_id ~message_id ~token
-    ~prompt =
-  Printf.sprintf
-    "{\"agent\":%s,\"lane\":%s,\"message_id\":%s,\"op\":\"wake\",\"prompt\":%s,\"protocol\":1,\"session_id\":%s,\"token\":%s}\n"
-    (json_quote agent) (json_quote lane) (json_quote message_id)
-    (json_quote prompt) (json_quote session_id) (json_quote token)
-
-let agentd_compat_wake_exchange ~socket_path ~agent ~lane ~session_id
-    ~message_id ~token ~prompt =
-  let descriptor = connect_unix socket_path in
-  Fun.protect
-    ~finally:(fun () -> Unix.close descriptor)
-    (fun () ->
-      write_all descriptor
-        (agentd_compat_wake_request ~agent ~lane ~session_id ~message_id ~token
-           ~prompt);
-      let response_line = read_protocol_line descriptor in
-      let response = parse_json response_line in
-      match json_object_field response "ok" with
-      | Some (Json_bool true) ->
-          let state = json_string_field ~default:"" response [ "state" ] in
-          let instance_id =
-            json_string_field ~default:"" response [ "instance_id" ]
-          in
-          let harness_pid =
-            json_int_field ~default:0 response [ "harness_pid" ]
-          in
-          if state <> "delivered" || instance_id = "" || harness_pid <= 0 then
-            failf "agentd-compat-wake-invalid-success-response";
-          (instance_id, harness_pid, sha256 response_line)
-      | Some (Json_bool false) ->
-          failf "agentd-compat-wake-refused:%s"
-            (json_string_field ~default:"request-refused" response [ "error" ])
-      | _ -> failf "agentd-compat-wake-invalid-response")
-
-let agentd_compat_wake_command cli =
-  let socket_path = required cli "--socket" |> Unix.realpath in
-  let token_path = required cli "--token-file" |> Unix.realpath in
-  let agent = required cli "--agent" and lane = required cli "--lane" in
-  let session_id = required cli "--session-id" in
-  let message_id = required cli "--message-id" in
-  let prompt = required cli "--prompt" in
-  List.iter (fun (name, value) -> validate_fleet_atom name value)
-    [ ("agent", agent); ("lane", lane); ("session-id", session_id);
-      ("message-id", message_id) ];
-  if String.length prompt > 16384 || String.contains prompt '\000' then
-    failf "agentd-compat-wake-invalid-prompt";
-  let socket_stat = Unix.stat socket_path in
-  if socket_stat.st_kind <> S_SOCK then
-    failf "agentd-compat-wake-socket-is-not-unix-socket";
-  let token_stat = Unix.stat token_path in
-  if token_stat.st_kind <> S_REG || token_stat.st_perm land 0o077 <> 0 then
-    failf "agentd-compat-wake-token-is-not-private-regular-file";
-  let token = read_file_bounded "agentd compatibility token" 4096 token_path |> trim in
-  if String.length token < 32 || String.contains token '\000' then
-    failf "agentd-compat-wake-invalid-token";
-  let instance_id, harness_pid, response_sha256 =
-    agentd_compat_wake_exchange ~socket_path ~agent ~lane ~session_id ~message_id
-      ~token ~prompt
-  in
-  Printf.printf
-    "LOOM_AGENTD_COMPAT_WAKE_DELIVERED agent=%s lane=%s session_id=%s message_id=%s instance_id=%s harness_pid=%d response_sha256=%s operational_realization=OCaml semantic_authority=false transitional_legacy_bridge=true python_executed=false rust_executed=false disposable_oracle_executed=false same_uid_peer_isolation=false\n%!"
-    agent lane session_id message_id instance_id harness_pid response_sha256
-
-let agentd_compat_wake_selftest_command () =
-  if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
-    failf "agentd-compat-wake-selftest requires SOUNIO_LOOM_HOOK_TEST_MODE=1";
-  let temporary = Filename.temp_file "sounio-agentd-compat-" "" in
-  Unix.unlink temporary;
-  Unix.mkdir temporary 0o700;
-  let socket_path = Filename.concat temporary "agentd.sock" in
-  let token = String.make 64 'a' in
-  let server = Unix.socket PF_UNIX SOCK_STREAM 0 in
-  Unix.bind server (ADDR_UNIX socket_path);
-  Unix.listen server 1;
-  let child = Unix.fork () in
-  if child = 0 then (
-    let exit_code =
-      try
-        let client, _ = Unix.accept server in
-        Fun.protect ~finally:(fun () -> Unix.close client) (fun () ->
-              let line = read_protocol_line client in
-              let value = parse_json line in
-              let exact_string key expected =
-                if json_string_field ~default:"" value [ key ] <> expected then
-                  failf "agentd-compat-selftest-request-drift:%s" key
-              in
-              exact_string "op" "wake";
-              exact_string "token" token;
-              exact_string "agent" "cursor";
-              exact_string "lane" "fleet-cursor-test";
-              exact_string "session_id" "11111111-1111-1111-1111-111111111111";
-              exact_string "message_id" "compat-selftest";
-              exact_string "prompt" "cooperative probe";
-              if json_int_field ~default:0 value [ "protocol" ] <> 1 then
-                failf "agentd-compat-selftest-protocol-drift";
-              write_all client
-                "{\"harness_pid\":4242,\"instance_id\":\"fixture-instance\",\"ok\":true,\"state\":\"delivered\"}\n");
-        0
-      with _ -> 2
-    in
-    Unix.close server;
-    Unix._exit exit_code);
-  Unix.close server;
-  let cleanup () =
-    (try Unix.unlink socket_path with _ -> ());
-    (try Unix.rmdir temporary with _ -> ())
-  in
-  Fun.protect ~finally:cleanup (fun () ->
-      let instance_id, harness_pid, _ =
-        agentd_compat_wake_exchange ~socket_path ~agent:"cursor"
-          ~lane:"fleet-cursor-test"
-          ~session_id:"11111111-1111-1111-1111-111111111111"
-          ~message_id:"compat-selftest" ~token ~prompt:"cooperative probe"
-      in
-      let _, status = Unix.waitpid [] child in
-      if status <> WEXITED 0 || instance_id <> "fixture-instance"
-         || harness_pid <> 4242
-      then failf "agentd-compat-wake-selftest-failed";
-      Printf.printf
-        "PASS agentd_compat_wake=ocaml-only stop_operation=absent signal_operation=absent python_executed=false rust_executed=false disposable_oracle_executed=false semantic_authority=false\n%!")
-
 type captured_process = { captured_code : int; captured_output : string }
 
 let run_captured ?environment executable arguments =
@@ -13806,7 +13684,7 @@ let change_claim_ready_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude|cursor|grok\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  host-enroll --agent A --lane L [--replace] [--state-dir DIR]\n  host-reconcile [--agent A --lane L] [--apply] [--service-enabled] [--state-dir DIR]\n  host-supervise [--once] [--interval-seconds N] [--apply] [--service-enabled] [--state-dir DIR]\n  host-verify --agent A --lane L [--state-dir DIR]\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  agentd-compat-wake --socket PATH --token-file PATH --agent A --lane L --session-id S --message-id ID --prompt TEXT\n  agentd-compat-wake-selftest (test mode only)\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
+    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude|cursor|grok\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  host-enroll --agent A --lane L [--replace] [--state-dir DIR]\n  host-reconcile [--agent A --lane L] [--apply] [--service-enabled] [--state-dir DIR]\n  host-supervise [--once] [--interval-seconds N] [--apply] [--service-enabled] [--state-dir DIR]\n  host-verify --agent A --lane L [--state-dir DIR]\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
   Printf.eprintf
     "  serve write mode: --bind 127.0.0.1 --write-agent A --write-lane L\n";
@@ -14021,8 +13899,6 @@ let main () =
     | "beagle-serve" -> serve_beagle_bridge cli; 0
     | "fleet-enroll" -> fleet_enroll_command cli; 0
     | "fleet-disable" -> fleet_disable_command cli; 0
-    | "agentd-compat-wake" -> agentd_compat_wake_command cli; 0
-    | "agentd-compat-wake-selftest" -> agentd_compat_wake_selftest_command (); 0
     | "fleet-reconcile" -> fleet_reconcile_command cli; 0
     | "fleet-transfer" -> fleet_transfer_command cli; 0
     | "fleet-transfer-recover" -> fleet_transfer_recover_command cli; 0

@@ -1150,7 +1150,12 @@ discover_history_endpoint() {
     history_branch_matches=1
   fi
 
-  socket="${SOUNIO_COORD_DISCOVERY_SOCKET:-${TMUX%%,*}}"
+  if [[ -n "${SOUNIO_COORD_DISCOVERY_SOCKET:-}" ]]; then
+    socket="$SOUNIO_COORD_DISCOVERY_SOCKET"
+  else
+    socket="${TMUX:-}"
+    socket="${socket%%,*}"
+  fi
   [[ -n "$socket" && -S "$socket" ]] || return 1
   pane_lines="$(tmux -S "$socket" list-panes -a -F \
     '#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)"
@@ -3754,6 +3759,7 @@ coord_obligation_supervisor_service_command() {
   local leader_lock="$STATE_DIR/.obligation-supervisor-leader.lock"
   local runtime_self log_file attempt previous_pid='' previous_start=''
   local expected_loom='' actual_loom='' ensured_state=started state_live=0 pid
+  local proc_tail proc_state
   local supervisor_wrapper_pid=''
   local -a owned_pids=() remaining_pids=()
   while (($#)); do
@@ -3820,7 +3826,11 @@ coord_obligation_supervisor_service_command() {
     for ((attempt = 0; attempt < timeout * 10; attempt++)); do
       remaining_pids=()
       for pid in "${owned_pids[@]}"; do
-        kill -0 "$pid" 2>/dev/null && remaining_pids+=("$pid")
+        if kill -0 "$pid" 2>/dev/null; then
+          proc_tail="$(sed 's/^[^)]*) //' "/proc/$pid/stat" 2>/dev/null || true)"
+          proc_state="${proc_tail%% *}"
+          [[ -z "$proc_tail" || "$proc_state" == Z ]] || remaining_pids+=("$pid")
+        fi
       done
       ((${#remaining_pids[@]} == 0)) && break
       sleep 0.1
