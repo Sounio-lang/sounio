@@ -678,6 +678,16 @@ lean_lib «EpistemicEffectsV2» where
 @[default_target]
 lean_lib «EpistemicEffectsNS» where
 
+-- Anti-Garbling FUSION theorem (2026-09-01): the NS calculus lifted to the Cayley–Dickson
+-- algebra CD(n) with a SECOND support certificate Q (basis elements). Axis 2 (nsDisjoint at
+-- kadd/kmul) and Axis 1 (assocCert at re-association) in one calculus: certified
+-- re-association preserves value, true form and reported variance (`reassoc_sound`); the
+-- uncertified gap is exactly the associator / three associators; orthogonality witnesses;
+-- and the THIRD axis (variance shortcut ⇒ norm-multiplicativity, fails in 𝕊). No sorry,
+-- no native_decide; axioms ⊆ {propext, Quot.sound, Classical.choice}.
+@[default_target]
+lean_lib «EpistemicEffectsNSA» where
+
 -- First Lean importer of V2: the V1 `preservation_is_false` witness,
 -- inverted. `measure (lit_nat 0)` stays `Knowledge<Nat>` after reduction.
 @[default_target]

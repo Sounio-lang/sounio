@@ -1489,6 +1489,64 @@ fn ocp_is_nop(op: IrOpcode) -> bool {
 }
 
 // Returns true if this opcode produces a destination register value
+// A wide integer is software-emulated over CONSECUTIVE registers: limb k of the
+// value based at r lives at r+k (ir.sio, "limb k lives at vreg base+k"). An
+// IrWide* instruction names only the BASE in dst/src1/src2 and carries the limb
+// count in imm_i64.
+//
+// Every peel in this file tracks state per register and saw only that base, so
+// limbs 1..n-1 were invisible: never used to a liveness scan, never written to
+// an invalidation. Measured 2026-09-01 -- the same program diverges under -O at
+// i256 (4 limbs) and i128 (2 limbs) and agrees at i64 (1 limb, nothing to be
+// blind to). See docs/audit/OPTIMIZER_WIDE_LIMB_BLINDNESS_2026-09-01.md.
+//
+// IrWideReject is deliberately NOT in this list: it stores `base` in imm_i64,
+// not a limb count, and reading it the same way would fabricate a span.
+fn ocp_is_wide_limb_op(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrWideAdd => true,
+        IrOpcode::IrWideSub => true,
+        IrOpcode::IrWideMul => true,
+        IrOpcode::IrWideDiv => true,
+        IrOpcode::IrWideMod => true,
+        IrOpcode::IrWideDivFull => true,
+        IrOpcode::IrWideModFull => true,
+        IrOpcode::IrWideCmp => true,
+        IrOpcode::IrWideShr => true,
+        IrOpcode::IrWideShrLimb => true,
+        _ => false,
+    }
+}
+
+// How many consecutive registers this instruction's wide operands occupy.
+// 1 for everything that is not a wide op, so a caller can multiply blindly.
+fn ocp_limb_count(at: i64) -> i64 with Div {
+    if !ocp_is_wide_limb_op((IR_A_OP[at as usize] as IrOpcode)) { return 1 }
+    let n = IR_A_IMM_I64[at as usize]
+    if n < 1 { return 1 }
+    if n > OCP_REBRACKET_TRACKED_REG_LIMIT { return OCP_REBRACKET_TRACKED_REG_LIMIT }
+    return n
+}
+
+// The DESTINATION span. IrWideCmp is the exception: it reads two wide values
+// and writes ONE boolean, so widening its dst would clobber whatever follows it.
+fn ocp_dst_limb_count(at: i64) -> i64 with Div {
+    if (IR_A_OP[at as usize] as IrOpcode) == IrOpcode::IrWideCmp { return 1 }
+    return ocp_limb_count(at)
+}
+
+// Whether src2 names a REGISTER. On IrWideShr and IrWideShrLimb it does not --
+// it carries the shift amount (bits, or limbs) as a plain number. A peel that
+// rewrites src2 unconditionally would substitute a shift count for a register
+// number, and small shift counts collide with low register numbers.
+fn ocp_src2_is_register(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrWideShr => false,
+        IrOpcode::IrWideShrLimb => false,
+        _ => true,
+    }
+}
+
 fn ocp_has_dst(op: IrOpcode) -> bool {
     match op {
         IrOpcode::IrLoadImm => true,
@@ -9078,6 +9136,25 @@ fn ocp_mfi_dedup_imm(module: &! IrModule, fi: i64) with Mut, Div, Panic {
             var bb: i64 = 0
             while bb < 256 { seen_const[bb as usize] = false  bb = bb + 1 }
         }
+        // #1667 killed the table at block boundaries but never invalidated a
+        // single register. Any instruction that WRITES a tracked register makes
+        // its recorded immediate stale, and the next matching IrLoadImm was
+        // rewritten as a copy of it:
+        //     var a = 5      // seen[ra] = 5
+        //     a = a + 1      // ra is now 6, seen[ra] still says 5
+        //     var b = 5      // became copy(rb, ra) -> b == 6
+        // Five lines of ordinary code returning the wrong number. ocp_mfi_cse
+        // invalidates on every write for this reason; this peel did not.
+        // The written range, not just its base: a wide write changes every limb
+        // it covers, and a record on limb k survived it.
+        if ocp_has_dst(op) && dst >= 0 && dst < 256 {
+            let dspan = ocp_dst_limb_count(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i)))
+            var dk: i64 = 0
+            while dk < dspan {
+                if dst + dk < 256 { seen_const[(dst + dk) as usize] = false }
+                dk = dk + 1
+            }
+        }
         if op == IrOpcode::IrLoadImm && dst >= 0 && dst < 256 {
             var found: i64 = 0 - 1
             var j: i64 = 0
@@ -9107,14 +9184,28 @@ fn ocp_mfi_dedup_imm(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 // Copy-prop: rewrite src1/src2 through IrCopy chains; scalar field stores only.
 fn ocp_mfi_copy_prop(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var copy_target: [i64; 256] = [-1; 256]
+    // Guard for the invalidation below: true when some entry's VALUE is this
+    // register. Without it the scan runs on every instruction with a dst, the
+    // common case; with it, only where a mapping could actually be stale.
+    var copy_is_source: [bool; 256] = [false; 256]
     var i: i64 = 0
     while i < ir_fn_get(&(*module), fi as usize).instr_count {
-        let s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
-        if s1 >= 0 && s1 < 256 && copy_target[s1 as usize] >= 0 {
+        let here = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))
+        let here_op = (IR_A_OP[here as usize] as IrOpcode)
+        // A wide operand is a RANGE of consecutive registers and this table maps
+        // single registers. Substituting the base of a wide read would point it
+        // at a register whose FOLLOWING limbs are unrelated, so wide reads are
+        // left alone -- the copy is still correct, it is only not propagated.
+        let wide_here = ocp_is_wide_limb_op(here_op)
+        let s1 = IR_A_SRC1[here as usize]
+        if !wide_here && s1 >= 0 && s1 < 256 && copy_target[s1 as usize] >= 0 {
             IR_A_SRC1[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] = copy_target[s1 as usize]
         }
-        let s2 = IR_A_SRC2[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
-        if s2 >= 0 && s2 < 256 && copy_target[s2 as usize] >= 0 {
+        let s2 = IR_A_SRC2[here as usize]
+        // src2 is not always a register: on IrWideShr and IrWideShrLimb it is a
+        // shift amount. Rewriting it substitutes a register number for a shift
+        // count, and small shift counts collide with low register numbers.
+        if !wide_here && ocp_src2_is_register(here_op) && s2 >= 0 && s2 < 256 && copy_target[s2 as usize] >= 0 {
             IR_A_SRC2[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] = copy_target[s2 as usize]
         }
         let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
@@ -9130,12 +9221,58 @@ fn ocp_mfi_copy_prop(module: &! IrModule, fi: i64) with Mut, Div, Panic {
         }
         let dst = IR_A_DST[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         let cur_s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        // A write to `dst` invalidates the entry whose KEY is `dst` (below) and
+        // also every entry whose VALUE is `dst` -- those record "read this
+        // register instead", which stops being true the moment it is written.
+        // Only the key was cleared, so a swap through a temporary miscompiled:
+        //     tv = v0        copy_target[tv] = v0
+        //     v0 = v1        clears copy_target[v0] -- not the entry tv -> v0
+        //     v1 = tv        the read of tv is rewritten to v0, already changed
+        // leaving v0 and v1 both holding the new value. This runs BEFORE the
+        // record below, because that record's own dst is a write as well.
+        // `dst >= 256` also scans: the else branch below stores an unchecked
+        // cur_s1, so an entry's VALUE can name a register outside the tracked
+        // window, and a write to that register must still invalidate it. The
+        // guard array cannot be indexed there, so those writes always scan --
+        // rare, and over-invalidating is sound where under-invalidating is not.
+        // A wide definition writes its whole range, so every limb of it
+        // invalidates records -- both those KEYED on the limb and those whose
+        // VALUE is the limb. Handling only the base left records alive across a
+        // write that had in fact changed the register they name.
+        let write_span = ocp_dst_limb_count(here)
+        var wk: i64 = 0
+        while wk < write_span {
+            let wreg = dst + wk
+            if ocp_has_dst(op) && dst >= 0 && (wreg >= 256 || copy_is_source[wreg as usize]) {
+                var q: i64 = 0
+                while q < 256 {
+                    if copy_target[q as usize] == wreg { copy_target[q as usize] = 0 - 1 }
+                    q = q + 1
+                }
+                if wreg < 256 { copy_is_source[wreg as usize] = false }
+            }
+            if ocp_has_dst(op) && dst >= 0 && wk > 0 && wreg < 256 {
+                copy_target[wreg as usize] = 0 - 1
+            }
+            wk = wk + 1
+        }
         if op == IrOpcode::IrCopy && dst >= 0 && dst < 256 {
             if cur_s1 >= 0 && cur_s1 < 256 && copy_target[cur_s1 as usize] >= 0 {
                 copy_target[dst as usize] = copy_target[cur_s1 as usize]
+                // Both guard writes are range-checked: copy_target holds a
+                // register number that was never bounded above (the else branch
+                // stores an unchecked cur_s1), so indexing the guard with it
+                // unchecked walks off the array -- it segfaulted the compiler
+                // on the first build. A register outside the tracked window is
+                // simply not guarded; the invalidation scan below is likewise
+                // limited to dst < 256, so nothing new is missed.
+                if copy_target[cur_s1 as usize] < 256 {
+                    copy_is_source[copy_target[cur_s1 as usize] as usize] = true
+                }
                 IR_A_SRC1[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] = copy_target[cur_s1 as usize]
             } else {
                 copy_target[dst as usize] = cur_s1
+                if cur_s1 >= 0 && cur_s1 < 256 { copy_is_source[cur_s1 as usize] = true }
             }
         } else if dst >= 0 && dst < 256 {
             copy_target[dst as usize] = 0 - 1
@@ -9158,19 +9295,48 @@ fn ocp_mfi_dse(module: &! IrModule, fi: i64) with Mut, Div, Panic {
         let s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         let s2 = IR_A_SRC2[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         let dst = IR_A_DST[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
-        if s1 >= 0 && s1 < 256 {
-            last_write[s1 as usize] = 0 - 1
+        // A wide READ consumes every limb, so every pending write under that
+        // range is live. Clearing only the base left a write to limb k killable
+        // by a later store, after this instruction had already read it.
+        let at_i = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))
+        let rspan = ocp_limb_count(at_i)
+        let s2_span = if ocp_src2_is_register(op) { rspan } else { 1 }
+        var rk: i64 = 0
+        while rk < rspan {
+            if s1 >= 0 && s1 + rk < 256 { last_write[(s1 + rk) as usize] = 0 - 1 }
+            rk = rk + 1
         }
-        if s2 >= 0 && s2 < 256 {
-            last_write[s2 as usize] = 0 - 1
+        rk = 0
+        while rk < s2_span {
+            if s2 >= 0 && s2 + rk < 256 { last_write[(s2 + rk) as usize] = 0 - 1 }
+            rk = rk + 1
         }
         if ocp_has_dst(op) && !ocp_has_side_effect(op) {
             if dst >= 0 && dst < 256 {
+                let wspan = ocp_dst_limb_count(at_i)
                 let prev = last_write[dst as usize]
-                if prev >= 0 {
-                    ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (prev)), ir_nop())
+                // Neither side may be wide. NOPing a wide instruction because
+                // its BASE was overwritten would delete the definitions of its
+                // other limbs with it, and a wide write is not a full overwrite
+                // of anything a scalar write recorded.
+                if prev >= 0 && wspan == 1 {
+                    let at_prev = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (prev))
+                    if ocp_dst_limb_count(at_prev) == 1 {
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (prev)), ir_nop())
+                    }
                 }
-                last_write[dst as usize] = i
+                // Limbs above the base are written here too, but recording them
+                // as removable would let a later write to one of them NOP an
+                // instruction that also defines the others.
+                if wspan == 1 {
+                    last_write[dst as usize] = i
+                } else {
+                    var wk: i64 = 0
+                    while wk < wspan {
+                        if dst + wk < 256 { last_write[(dst + wk) as usize] = 0 - 1 }
+                        wk = wk + 1
+                    }
+                }
             }
         }
         // A call READS its arguments from instr.call_args, a Box list this pass
@@ -9310,13 +9476,22 @@ fn ocp_mfi_cse(module: &! IrModule, fi: i64) with Mut, Div, Panic {
         let bin = (IR_A_BIN_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as BinaryOp)
         let s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         let s2 = IR_A_SRC2[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        // Every limb of a wide write invalidates: an expression recorded over
+        // limb k stops holding when the wide instruction overwrites it. Wide
+        // ops are not IrBinOp so they are never RECORDED here, but they do
+        // write registers that recorded expressions name.
         if ocp_has_dst(op) && dst >= 0 {
-            let invalidated = ocp_cse_invalidate_reg(cse_op, cse_src1, cse_src2, cse_dst, cse_len, dst)
-            cse_op = invalidated.op
-            cse_src1 = invalidated.src1
-            cse_src2 = invalidated.src2
-            cse_dst = invalidated.dst
-            cse_len = invalidated.len
+            let ispan = ocp_dst_limb_count(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i)))
+            var ik: i64 = 0
+            while ik < ispan {
+                let invalidated = ocp_cse_invalidate_reg(cse_op, cse_src1, cse_src2, cse_dst, cse_len, dst + ik)
+                cse_op = invalidated.op
+                cse_src1 = invalidated.src1
+                cse_src2 = invalidated.src2
+                cse_dst = invalidated.dst
+                cse_len = invalidated.len
+                ik = ik + 1
+            }
         }
         if ocp_is_binop(op) {
             let op_key = ocp_binop_to_cse_key(bin)
@@ -9380,11 +9555,23 @@ fn ocp_mfi_dce_once(module: &! IrModule, fi: i64) -> i64 with Mut, Div, Panic {
         let at = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))
         let s1 = IR_A_SRC1[at as usize]
         let s2 = IR_A_SRC2[at as usize]
-        if s1 >= 0 && s1 < 256 {
-            used[s1 as usize] = true
+        // A wide operand is a RANGE of consecutive registers, not one. Marking
+        // only the base left limbs 1..n-1 looking unused, and their defining
+        // instructions were NOPed -- the wrong answer under -O with no runtime
+        // signal. src2 is spanned only where it is a register: on the shift ops
+        // it is a shift amount, and marking a span there would be marking
+        // arithmetic on a number that is not a register at all.
+        let span = ocp_limb_count(at)
+        let s2_span = if ocp_src2_is_register((IR_A_OP[at as usize] as IrOpcode)) { span } else { 1 }
+        var lk: i64 = 0
+        while lk < span {
+            if s1 >= 0 && s1 + lk < 256 { used[(s1 + lk) as usize] = true }
+            lk = lk + 1
         }
-        if s2 >= 0 && s2 < 256 {
-            used[s2 as usize] = true
+        lk = 0
+        while lk < s2_span {
+            if s2 >= 0 && s2 + lk < 256 { used[(s2 + lk) as usize] = true }
+            lk = lk + 1
         }
         // #1682: NOT EVERY REGISTER USE LIVES IN src1/src2, and this scan used to
         // assume it did. Two operand classes were invisible to it:
@@ -9425,7 +9612,17 @@ fn ocp_mfi_dce_once(module: &! IrModule, fi: i64) -> i64 with Mut, Div, Panic {
         let dst = IR_A_DST[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         if ocp_has_dst(op) && !ocp_has_side_effect(op) {
             if dst >= 0 && dst < 256 {
-                if !used[dst as usize] {
+                // A wide definition writes its whole range, so it is dead only
+                // when EVERY limb is unused. Testing the base alone removed
+                // instructions whose upper limbs were still read.
+                let dspan = ocp_dst_limb_count(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i)))
+                var any_used: bool = false
+                var dk: i64 = 0
+                while dk < dspan {
+                    if dst + dk < 256 && used[(dst + dk) as usize] { any_used = true }
+                    dk = dk + 1
+                }
+                if !any_used {
                     ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_nop())
                     removed = removed + 1
                 }
@@ -9457,8 +9654,15 @@ fn ocp_mfi_const_fold(module: &! IrModule, fi: i64) with Mut, Div, Panic {
             var bb: i64 = 0
             while bb < 256 { is_const[bb as usize] = false  bb = bb + 1 }
         }
+        // The written RANGE: a wide write covers limb_count consecutive
+        // registers, and a constant recorded on limb k outlived it.
         if dst >= 0 && dst < 256 {
-            is_const[dst as usize] = false
+            let cspan = ocp_dst_limb_count(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i)))
+            var ck: i64 = 0
+            while ck < cspan {
+                if dst + ck < 256 { is_const[(dst + ck) as usize] = false }
+                ck = ck + 1
+            }
         }
         if ocp_is_load_imm(op) || op == IrOpcode::IrLoadBool {
             if dst >= 0 && dst < 256 {
@@ -9680,8 +9884,15 @@ fn ocp_mfi_sccp(module: &! IrModule, fi: i64) with Mut, Div, Panic {
             var bb: i64 = 0
             while bb < 256 { is_const[bb as usize] = false  bb = bb + 1 }
         }
+        // The written RANGE: a wide write covers limb_count consecutive
+        // registers, and a constant recorded on limb k outlived it.
         if dst >= 0 && dst < 256 {
-            is_const[dst as usize] = false
+            let cspan = ocp_dst_limb_count(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i)))
+            var ck: i64 = 0
+            while ck < cspan {
+                if dst + ck < 256 { is_const[(dst + ck) as usize] = false }
+                ck = ck + 1
+            }
         }
         if ocp_is_load_imm(op) || op == IrOpcode::IrLoadBool {
             if dst >= 0 && dst < 256 {

@@ -361,6 +361,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.ontology-bundle-versioning-2026-08-19 | repo_only | docs/audit/ONTOLOGY_BUNDLE_VERSIONING_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ontology-ci-disconnect-2026-08-19 | repo_only | docs/audit/ONTOLOGY_CI_DISCONNECT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.optimizer-divergence-2026-08-31 | repo_only | docs/audit/OPTIMIZER_DIVERGENCE_2026-08-31.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.optimizer-wide-limb-blindness-2026-09-01 | repo_only | docs/audit/OPTIMIZER_WIDE_LIMB_BLINDNESS_2026-09-01.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ousadia-epistemic-method-rx-madaros-2026-07-19 | repo_only | docs/audit/OUSADIA_EPISTEMIC_METHOD_RX_MADAROS_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pbpk-dissertation-session-notes-2026-06-28 | repo_only | docs/audit/PBPK_DISSERTATION_SESSION_NOTES_2026-06-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pbpk-rapamycin-triage-2026-06-02 | repo_only | docs/audit/PBPK_RAPAMYCIN_TRIAGE_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -726,6 +727,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.gating-engine | repo_only | docs/internal/concepts/gating-engine.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.hypercomplex-zero-divisor-evidence | repo_only | docs/internal/concepts/hypercomplex-zero-divisor-evidence.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.justification | repo_only | docs/internal/concepts/justification.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.knowledge-boundary-provenance-lane-20260901 | repo_only | docs/internal/concepts/knowledge-boundary-provenance-lane-20260901.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.maturity-ladder | repo_only | docs/internal/concepts/MATURITY_LADDER.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.no-implicit-degradation | repo_only | docs/internal/concepts/no-implicit-degradation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.no-versus-unknown | repo_only | docs/internal/concepts/no-versus-unknown.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -860,6 +862,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.llm-guide.explanations.e248 | repo_only | docs/llm-guide/explanations/E248.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.llm-guide.explanations.e249 | repo_only | docs/llm-guide/explanations/E249.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.llm-guide.explanations.e250 | repo_only | docs/llm-guide/explanations/E250.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.llm-guide.explanations.e251 | repo_only | docs/llm-guide/explanations/E251.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.llm-guide.explanations.e252 | repo_only | docs/llm-guide/explanations/E252.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.llm-guide.readme | repo_only | docs/llm-guide/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.llm-guide.stdlib-index | repo_only | docs/llm-guide/stdlib-index.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.madaros-status | repo_only | docs/MADAROS_STATUS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -962,6 +966,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.align-curve-and-target | historical | docs/research/align-curve-and-target.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.antigarbling-completeness-2026-08-23 | historical | docs/research/ANTIGARBLING_COMPLETENESS_2026-08-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.antigarbling-completeness-proof-2026-08-23 | historical | docs/research/ANTIGARBLING_COMPLETENESS_PROOF_2026-08-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.antigarbling-fusion-theorem-2026-09-01 | historical | docs/research/ANTIGARBLING_FUSION_THEOREM_2026-09-01.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.associator-spectral-bound-status | historical | docs/research/associator_spectral_bound_status.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ast-native-claims-falsifiers-2026-07-25 | historical | docs/research/ast_native_claims_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ast-native-claims-spec-2026-07-25 | historical | docs/research/ast_native_claims_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

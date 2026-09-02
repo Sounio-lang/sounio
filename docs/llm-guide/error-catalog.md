@@ -501,9 +501,12 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E229 | lexer | error | source exceeds lexer byte buffer, or token table full (fail-closed) | [E229.md](explanations/E229.md) |
 | E230 | type-checker/epistemic | error | independence-assuming operation over correlated uncertainty | — |
 | E232 | type-checker/struct | error | the same array local initialises two fields | — |
+| E244 | type-checker/epistemic | error | Knowledge provenance boundary mismatch: the argument's provenance cannot satisfy the parameter's requirement (trusted classes: Source, Literature, Measured) | — |
 | E245 | type-checker/epistemic | error | arithmetic between two Knowledge<T> values is not supported | — |
 | E246 | type-checker/effects | error | unknown effect, or effect dropped as a ninth slot | — |
 | E247 | type-checker/zero-divisor | error | ZD locus is not a well-formed sedenion pair | [E247.md](explanations/E247.md) |
 | E248 | type-checker/numeric | error | f128/f256 value conversion is not implemented | [E248.md](explanations/E248.md) |
 | E249 | parser/type-checker | error | f128/f256 is reserved for compiler-owned format identity | [E249.md](explanations/E249.md) |
 | E250 | type-checker/extern | error | call to an extern C function the native backend does not implement | [E250.md](explanations/E250.md) |
+| E251 | type-checker/epistemic | error | product variance shortcut is unsound beyond the octonions (norm not multiplicative on Sedenion/Clifford) | [E251.md](explanations/E251.md) |
+| E252 | type-checker/algebra | error | algebra declares a reassociation strategy its multiplication law cannot certify | [E252.md](explanations/E252.md) |

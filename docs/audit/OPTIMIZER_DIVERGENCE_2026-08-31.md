@@ -301,7 +301,57 @@ Guarded by a second fixture in `madaros_opt_chained_call_gate.sh`,
 `opt_cse_branch_dominance_main.sio`, verified to fail on a compiler that carries
 the DSE fix but not this one.
 
-### How the 51 were narrowed — kept for the 40 that remain
+### THIRD DEFECT FIXED — `ocp_mfi_dedup_imm` never invalidated a register
+
+The peel mask named it in one pass: three of the four remaining output-changers
+are fixed by disabling `dedup_imm`, the fourth by `copy_prop`.
+
+`ocp_mfi_dedup_imm` records "register R holds immediate K" and rewrites a later
+load of K as a copy of R. It never invalidated that record when another
+instruction WROTE R. Five lines:
+
+    var a = 5      // seen[ra] = 5
+    a = a + 1      // ra is now 6, seen[ra] still says 5
+    var b = 5      // became copy(rb, ra)  ->  b == 6
+
+    without -O   b == 5      with -O   b == 6
+
+And `var c = 7; c = c * 2; var d = 7; var e = 7` gives `d + e == 28` instead of
+14 — both loads collapsed onto the mutated register.
+
+This is the most ordinary code of the three defects. The first needed a chained
+accumulator, the second needed two branches with a constant bound to a local
+after a specific preceding call. This one needs a variable reassigned and the
+same literal used again.
+
+**`#1667` is worth reading as a warning.** That issue fixed this same peel for
+block boundaries, and its comment is still in the source: it promises to kill the
+table at a label and after a terminator, and both halves are present and correct.
+It was not a sloppy fix. It was a fix that was complete for the problem it
+examined, and the real defect had a third dimension nobody had named.
+
+    after the CSE fix    40 diverged   (36 exit-code, 4 output)
+    after this fix       29            (28 exit-code, 1 output)
+    fixed                11            zero regressions
+
+All three together: **632 -> 29** over `tests/run-pass`, 603 programs recovered,
+and the silent class — wrong output, exit 0, no signal — went **51 -> 1**. The
+survivor is `gum_reporting.sio`, which the mask attributes to `copy_prop`.
+
+### The shape all three share
+
+    ocp_mfi_dse        table of last write per register    missed: CALLS
+    ocp_mfi_cse        table of computed expressions       missed: BLOCK BOUNDARY
+    ocp_mfi_dedup_imm  table of immediates per register    missed: WRITES
+
+Each peel keeps state across an event that invalidates it, and in every case a
+neighbouring peel in the same file already handles that event correctly. DSE
+resets at blocks and CSE did not; CSE invalidates on writes and dedup_imm did
+not. Finding these needed no understanding of the compiler as a whole — only
+comparing two adjacent peels and asking why one does something the other
+does not.
+
+### How the 51 were narrowed — kept for the 29 that remain
 
 The DSE fix removed 587. The remainder splits:
 
@@ -366,3 +416,80 @@ measures blast radius, not defect count.
 **That the unoptimised path is correct.** These comparisons are `-O` against no
 `-O` on the same engine. Where the two disagree, the flag changed something; that
 the default build is right is assumed here, not shown.
+
+## Fourth defect: copy_prop kept a record past a write to its SOURCE
+
+`ocp_mfi_copy_prop` records "read `src` instead of `dst`" for an `IrCopy` and
+invalidates that record when `dst` is written. It never invalidated it when
+`src` was written. A swap through a temporary writes exactly that register
+between the copy and its use:
+
+    tv = v0     recorded: read v0 instead of tv
+    v0 = v1     v0 changes; the record above is now false
+    v1 = tv     rewritten to `v1 = v0`, so both hold the new value
+
+Four peels in this file have now been found keeping state across an event that
+invalidates it, and each one's neighbour already handled that same event:
+
+    ocp_mfi_dse        last write per register     missed: calls
+    ocp_mfi_cse        computed expressions        missed: block boundaries
+    ocp_mfi_dedup_imm  immediates per register     missed: writes (the key)
+    ocp_mfi_copy_prop  copies per register         missed: writes (the VALUE)
+
+### How it was found, and what nearly stopped it
+
+Two source-level reproducers were written and both were wrong, because the
+instrument used to attribute the divergence to a peel was itself lying. The
+`SOUNIO_OCP_SKIP_*` switches were served by TWO definitions of
+`module_frontend_load_ocp_skip_mask` in one file, with different bit numbering;
+the first wins, and it was the one that disagreed with `ocp_skip()`. Ten of the
+twelve names disabled a different peel than they name. Fixed separately, and
+measured rather than read: `SOUNIO_OCP_SKIP_DCE_LOOP=1` (present only in the
+dead table) left the binary byte-identical while `SOUNIO_OCP_SKIP_DCE=1`
+changed it, and afterwards the exact inverse.
+
+A scalar swap of literals does NOT reproduce this. `dedup_imm` and `const_fold`
+run first and fold it away; the values have to be opaque. Reduction from
+`gum_reporting.sio` -- whose selection sort ranked its second contributor wrong
+with the top two entries holding the same value -- gave the shape directly.
+
+The first version of the fix indexed its guard array without a bounds check and
+SIGSEGV'd the compiler on `gum_reporting`, AFTER building itself cleanly. A
+green self-build only exercises the paths the compiler itself takes.
+
+### Measured after the fix
+
+Full sweep over `tests/run-pass`, same compiler built twice, differing only in
+`-O`, with `SOUNIO_STDLIB_PATH` pinned to the worktree:
+
+    compared                  1725
+    divergent                   26   (29 before this fix)
+    of which output-changing     0   (1 before this fix)
+    new divergences              0
+
+The silent class is now empty. The three that closed are `gum_reporting.sio`,
+`test_ot_hand_problems.sio` and `test_rational_exact.sio`.
+
+**A first pass at this said 29 -> 18 and it was wrong.** Eight of the eleven
+files that vanished from the divergence list had not been fixed; their base
+build failed, so the sweep skipped them silently. The cause was environmental --
+module resolution reaching `/workspace/sounio/stdlib`, a shared checkout that
+was broken at the time -- and with the path pinned they still diverge. A file
+that leaves a divergence list has either been fixed or stopped being measured,
+and only checking it one by one distinguishes those.
+
+### The 26 that remain are one family
+
+All 26 are wide-integer arithmetic: 25 `lorenz_i256_*` plus
+`wide_i128_fn_abi_known_failure`. None changes output; all change exit status.
+
+They are NOT `opt_cleanup` peels. On a clean case
+(`lorenz_i256_step1_taylor2_radius_artifact_tiny`, which passes without `-O` and
+fails with it) disabling each of the thirteen peels one at a time fixes none of
+them, so the cause is a different `-O` stage and outside what this mask can
+reach.
+
+`lorenz_i256_fixed_step` is a trap for anyone continuing here: it is annotated
+`known-failure`, returns 4 without `-O` and 0 with it. The optimiser is right
+there and the default path is wrong, which inverts this document's standing
+assumption that the unoptimised build is the reference.
