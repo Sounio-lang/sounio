@@ -25,17 +25,38 @@ fn fabs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 
 // ulp(x) for positive normal x: 2^(e-52) where 2^e <= x < 2^(e+1).
 // Found by scaling x into [1,2) with exact multiplications by 2 or 1/2.
+// Unit in the last place of x, for FINITE x.  Zero and subnormals return the
+// subnormal spacing 2^-1074 (the grid they lie on).  inf and NaN return NaN.
+// Precondition fix (2026-09-02): the first version scaled |x| into [1,2) with
+// two unbounded loops, so x == 0 and x == inf never returned and a subnormal
+// underflowed to 0.  The loops are now bounded (2200 > 1074 + 1023 doublings
+// and halvings) so every bit pattern terminates.  NaN cannot be detected by
+// comparison on either engine (measured 2026-09-02: `nan != nan` is false and
+// `nan < 1.0` is true), so it is caught by the range check after the loops.
 fn ulp(x: f64) -> f64 with Mut, Div, Panic {
     var m: f64 = fabs(x)
+    if m > 1.7976931348623157e308 { return m - m }
+    var dmin: f64 = 1.0
+    var dsub: f64 = 1.0
+    var j: i64 = 0
+    while j < (1022 as i64) { dmin = dmin * 0.5; j = j + 1 }
+    j = 0
+    while j < (1074 as i64) { dsub = dsub * 0.5; j = j + 1 }
+    if m < dmin { return dsub }
     var u: f64 = 1.0
-    // u tracks 2^e as m is scaled to [1,2)
-    while m >= 2.0 { m = m * 0.5; u = u * 2.0 }
-    while m < 1.0 { m = m * 2.0; u = u * 0.5 }
-    // 2^-52 by 52 exact halvings
-    var eps: f64 = 1.0
-    var k: i64 = 0
-    while k < (52 as i64) { eps = eps * 0.5; k = k + 1 }
-    u * eps
+    var n: i64 = 0
+    while m >= 2.0 && n < (2200 as i64) { m = m * 0.5; u = u * 2.0; n = n + 1 }
+    while m < 1.0 && n < (2200 as i64) { m = m * 2.0; u = u * 0.5; n = n + 1 }
+    if m >= 1.0 && m < 2.0 {
+        // 2^-52 by 52 exact halvings
+        var eps: f64 = 1.0
+        var k: i64 = 0
+        while k < (52 as i64) { eps = eps * 0.5; k = k + 1 }
+        let r: f64 = u * eps
+        if r < dsub { dsub } else { r }
+    } else {
+        m
+    }
 }
 
 fn init_state(t: f64, c: &![f64; 10]) with Mut, Div, Panic {
