@@ -1,0 +1,86 @@
+// examples/chemistry/rep_stagnation.sio
+//
+// Step-stagnation test, in Sounio.  Replaces benchmarks/chemistry/
+// rep_stagnation.py, which had no business being Python (CLAUDE.md 6.4).
+//
+// Hypothesis under test (RESULTS.md 7.7): halving dt made the replica's
+// self-difference WORSE by 12-140x.  If the per-step increment dt*|dc/dt|
+// falls below half an ULP of c, the RK4 update rounds back to c and the step
+// is lost; between 0.5 and ~10 ULP it is heavily quantised.  For each species
+// and each dt this prints  ratio = dt*|dc/dt| / (ulp(c)/2)  at that dt's own
+// checkpoint state.  ratio < 1 is a frozen species; ratio >> 10 is not.
+//
+// The checkpoint state comes from the module's own integrator
+// (simulate_gri30_h2, shipped exponent) and dc/dt from g30_dc, so nothing
+// numerical is re-implemented here except ulp().
+//
+// Run:  SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run examples/chemistry/rep_stagnation.sio
+
+use chemistry::gri30_h2::*
+
+fn pi64(x: i64) with IO, Mut, Div, Panic {
+    if x < 0 { print("-"); pi64(0 - x) } else if x >= 10 { pi64(x / 10); print((x % 10) as i32) } else { print(x as i32) }
+}
+fn fabs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// ulp(x) for positive normal x: 2^(e-52) where 2^e <= x < 2^(e+1).
+// Found by scaling x into [1,2) with exact multiplications by 2 or 1/2.
+fn ulp(x: f64) -> f64 with Mut, Div, Panic {
+    var m: f64 = fabs(x)
+    var u: f64 = 1.0
+    // u tracks 2^e as m is scaled to [1,2)
+    while m >= 2.0 { m = m * 0.5; u = u * 2.0 }
+    while m < 1.0 { m = m * 2.0; u = u * 0.5 }
+    // 2^-52 by 52 exact halvings
+    var eps: f64 = 1.0
+    var k: i64 = 0
+    while k < (52 as i64) { eps = eps * 0.5; k = k + 1 }
+    u * eps
+}
+
+fn init_state(t: f64, c: &![f64; 10]) with Mut, Div, Panic {
+    let mtot: f64 = 101325.0 / (8.31446261815324 * t) * 1.0e-6
+    var i: i64 = 0
+    while i < (10 as i64) { (*c)[i] = 0.0; i = i + 1 }
+    (*c)[0] = mtot * 0.02
+    (*c)[3] = mtot * 0.01
+    (*c)[8] = mtot * 0.97
+    (*c)[1] = 1.0e-11
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let t_k: K = 1500.0
+    let t: f64 = t_k as f64
+    let t_end: f64 = 1.0e-4
+    let names: [string; 8] = ["H2", "H", "O", "O2", "OH", "H2O", "HO2", "H2O2"]
+    let dts: [f64; 3] = [1.0e-8, 5.0e-9, 2.5e-9]
+    let stepss: [i64; 3] = [10000, 20000, 40000]
+
+    println("REP_STAGNATION (Sounio) -- ratio = dt*|dc/dt| / (ulp(c)/2) at the checkpoint, T=1500K, t=1e-4 s")
+    println("columns: species, ratio at dt=1e-8, 5e-9, 2.5e-9  (integer part; <1 = frozen, <10 = quantised)")
+    var frozen: i64 = 0
+    var quantised: i64 = 0
+    var worst_ratio: f64 = 1.0e300
+    var k: i64 = 0
+    while k < (3 as i64) {
+        var c0: [f64; 10] = [0.0; 10]
+        init_state(t, &!c0)
+        let c: [f64; 10] = simulate_gri30_h2(&c0, t, dts[k], stepss[k])
+        let dc: [f64; 10] = g30_dc(t, &c)
+        print("dt="); pi64((dts[k] * 1.0e10) as i64); println("e-10 s:")
+        var i: i64 = 0
+        while i < (8 as i64) {
+            let ratio = dts[k] * fabs(dc[i]) / (ulp(c[i]) * 0.5)
+            if ratio < worst_ratio { worst_ratio = ratio }
+            if ratio < 1.0 { frozen = frozen + 1 } else if ratio < 10.0 { quantised = quantised + 1 }
+            print("  "); print(names[i]); print("  ratio = "); pi64(ratio as i64); println("")
+            i = i + 1
+        }
+        k = k + 1
+    }
+    println("")
+    print("frozen species-steps: "); pi64(frozen); print("   quantised: "); pi64(quantised); println("")
+    print("smallest ratio seen: "); pi64(worst_ratio as i64); println("")
+    if frozen > 0 { println("STAGNATION CONFIRMED") } else { println("STAGNATION NOT CONFIRMED: every increment exceeds half an ULP; the 12-140x growth stays UNEXPLAINED") }
+    0
+}
