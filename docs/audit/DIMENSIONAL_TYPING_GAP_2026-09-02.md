@@ -33,8 +33,15 @@ let ea: cal/mol = 16812.0     # lean_single: unknown identifier `mol`
 Every spelling tried fails: `mg/mL`, `cal/mol`, `mol/cm3`, `mol/cm^3`,
 `cal/mol/K`, `cal/(mol*K)`, `mol/L`. `examples/macro_system_demo.sio`
 contains `let concentration: mg/mL = dose / volume;` and reports `check: OK`
-on Madaros — but the same function extracted verbatim into a fresh file fails
-to parse. The demo is not being parsed; its green is not evidence.
+on Madaros — but that line sits inside the `/* ... */` block that wraps the
+file's "aspirational example preserved below" (lines 1–263); the checked body
+is the 20-line stub after it. **Correction (2026-09-02):** an earlier revision
+of this dispatch read that green as "the demo is not being parsed". It is
+parsed; the derived-unit annotation is simply commented out. There is no
+"check OK on an unparsed body" defect here, and no gate is filed for one.
+The three reproductions that stand are pinned by
+`scripts/ci/language_gap_ratchet_gate.sh`, which asserts the measured
+behaviour and fails on purpose when a fix lands.
 
 ## Repro 2 — lean_single drops the dimension of an inferred quotient
 

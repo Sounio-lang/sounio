@@ -756,3 +756,18 @@ reproductions in `tests/known-gaps/units/`. Direct `mol + K` is rejected on
 both engines; `mol/cm3` does not parse on either; a quotient of unit-typed
 values loses its dimension on lean_single; a `K` value passes into an `f64`
 parameter unchecked.
+
+## IEEE 754 special values: NaN compares as ordered; `inf`/`nan` do not print (measured 2026-09-02, issue #2389)
+
+- **Both engines:** `nan == nan` is `1`, `nan != nan` is `0`, `nan < 1.0` is
+  `1` (IEEE: `0 / 1 / 0`). `x != x` cannot detect NaN, and a loop whose exit
+  condition is a float comparison never exits on NaN.
+- **lean_single:** `println(inf)` never returns; `println(nan)` prints
+  non-numeric bytes. **Madaros:** `println(inf)` prints
+  `9223372036854775808.000000` and `println(nan)` prints
+  `-9223372036854775808.000000` (the ±2^63 integer-indefinite pattern).
+- Repros: `tests/known-gaps/numerics/`. Ratchet:
+  `scripts/ci/language_gap_ratchet_gate.sh` (also carries #2387 and #2388).
+- Working rule until fixed: bound every loop that exits on a float comparison
+  and range-check `x >= lo && x < hi` after it; see `ulp()` in
+  `examples/chemistry/rep_stagnation.sio`.
