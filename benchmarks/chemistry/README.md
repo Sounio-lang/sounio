@@ -73,7 +73,9 @@ PYTHONPATH=/tmp/sounio-cantera-py python3 gri30_full_cantera_uq_reference.py \
 ## Shared reactor protocol
 
 2% H2 / 1% O2 / 97% N2 nominally at 1 atm and 1500 K, using exactly
-`1/(82.057*T)` mol/cm3 plus an additive H-atom seed of 1e-11 mol/cm3. The seed
+`101325/(8.31446261815324*T)*1e-6` mol/cm3 plus an additive H-atom seed of
+1e-11 mol/cm3. (Until 2026-09-01 this was the shorthand `1/(82.057*T)`, whose
+truncated molar gas volume ran 4.461e-06 high.) The seed
 makes the actual initial pressure 101325.576758 Pa. Cantera is initialized
 through `TDY` so those concentrations are not renormalized. Epistemic runs add
 1% standard uncertainty on initial H2/O2 and one persistent multiplier per

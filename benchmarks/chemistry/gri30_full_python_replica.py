@@ -42,7 +42,13 @@ SP = list(D["species"].keys())  # json order: H2 H O O2 OH H2O HO2 H2O2 C ... N2
 NSP = len(SP)
 RX = D["reactions"]
 NR = len(RX)
-R_SI = 8.314462618
+R_SI = 8.31446261815324
+# Arrhenius activation-energy gas constant, cal/(mol*K).
+# Cantera converts the cal/mol Ea values of gri30.yaml with 4.184 J/cal exactly
+# and its own R, giving 8.31446261815324/4.184 = 1.9872042586408316.  The older
+# 1.9872041 is 7.98e-08 away, which sits inside exp(-Ea/(R*T)) and therefore made
+# this replica run DIFFERENT rate constants from the mechanism Cantera reads.
+R_CAL = 1.9872042586408316
 P0 = 101325.0  # CHEMKIN/GRI standard state: 1 atm
 
 nasa = {s: D["species"][s]["coeffs"] for s in SP}
@@ -116,12 +122,12 @@ def m_eff(r, c):
 
 
 def kfwd_eff(r, t, me):
-    kf = A[r] * t**B[r] * math.exp(-EA[r] / (1.9872041 * t))
+    kf = A[r] * t**B[r] * math.exp(-EA[r] / (R_CAL * t))
     if TYPE[r] == 1:
         return kf * me
     if TYPE[r] == 2:
         low = LOW[r]
-        k0 = low[0] * t**low[1] * math.exp(-low[2] / (1.9872041 * t))
+        k0 = low[0] * t**low[1] * math.exp(-low[2] / (R_CAL * t))
         pr = k0 * me / kf
         if pr <= 0.0:
             return 0.0
@@ -215,7 +221,7 @@ def propagate_unc(t, c, kc, varc, dt):
 
 def demo_init(t):
     """2% H2 / 1% O2 / 97% N2 at 1 atm, H-atom seed 1e-11 (chain initiation)."""
-    m = 1.0 / (82.057 * t)
+    m = P0 / (R_SI * t) * 1e-6
     c = [0.0] * NSP
     c[SP.index("H2")] = m * 0.02
     c[SP.index("O2")] = m * 0.01
@@ -231,7 +237,7 @@ def main():
 
     # --- forward effective rates + Kc at 1200 K, air-like bath ---
     t = 1200.0
-    mtot = 1.0 / (82.057 * t)
+    mtot = P0 / (R_SI * t) * 1e-6
     kc = [kc_cm(r, t) for r in range(NR)]
     c_air = [0.0] * NSP
     c_air[SP.index("N2")] = mtot * 0.79
