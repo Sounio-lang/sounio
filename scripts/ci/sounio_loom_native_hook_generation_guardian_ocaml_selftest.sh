@@ -109,11 +109,19 @@ write_rotation_canary_fixture() {
   local common="$ROTATION_CANARY_ROOT/.git"
   local decisions="$common/sounio-loom-language-authority/agent-hook.tsv"
   local lifecycle="$common/sounio-coord-state/hook-session-lifecycle/events.tsv"
+  local presence="$common/sounio-coord-state/process-presences/codex.presence"
+  local capability="$common/sounio-coord-state/hook-capabilities/codex.capability"
   local loom_sha256 codex_sha256
   loom_sha256="$(sha256_file "$candidate/bin/sounio-loom-runtime")"
   codex_sha256="$(sha256_file "$ROOT_DIR/.codex/hooks.json")"
   git init -q "$ROTATION_CANARY_ROOT"
-  mkdir -p "$(dirname "$decisions")" "$(dirname "$lifecycle")"
+  mkdir -p "$(dirname "$decisions")" "$(dirname "$lifecycle")" \
+    "$(dirname "$presence")" "$(dirname "$capability")"
+  printf '%s\n' 'agent=codex' > "$presence"
+  printf '%s\n' \
+    'schema=loom-native-hook-capability-v1' \
+    'state=NATIVE_HOOK_ATTESTED' \
+    'agent=codex' > "$capability"
   : > "$decisions"
   for event in SessionStart UserPromptSubmit Stop; do
     printf '%b\n' \

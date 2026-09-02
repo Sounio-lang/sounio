@@ -54,7 +54,7 @@ config_sha() {
 [[ -x "$INSTALLER" ]] || fail 'promotion installer is not executable'
 [[ -L "$RUNTIME_ROOT/current" ]] || fail 'shared runtime is not active'
 [[ -L "$RUNTIME_ROOT/native-next" ]] || fail 'staged native runtime is not selected'
-mkdir -p "$STATE_ROOT"
+mkdir -p "$STATE_ROOT/process-presences"
 SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
   "$RUNTIME_ROOT/native-next/bin/sounio-coord-runtime" brief >/dev/null
 legacy_before="$(readlink -f "$RUNTIME_ROOT/current")"

@@ -138,11 +138,50 @@ let count_regular directory =
         try if (Unix.lstat path).st_kind = S_REG then total + 1 else total
         with _ -> total) 0
 
-let active_state_count common =
+let single_regular label directory =
+  let paths =
+    if not (Sys.file_exists directory) then []
+    else
+      Sys.readdir directory |> Array.to_list
+      |> List.filter_map (fun name ->
+             let path = Filename.concat directory name in
+             try if (Unix.lstat path).st_kind = S_REG then Some path else None
+             with _ -> None)
+  in
+  match paths with
+  | [ path ] -> path
+  | _ -> failf "%s-count:%d" label (List.length paths)
+
+let residual_state provider common =
   let state = Filename.concat common "sounio-coord-state" in
-  [ "claims"; "process-presences"; "hook-capabilities"; "endpoints" ]
-  |> List.fold_left
-       (fun total name -> total + count_regular (Filename.concat state name)) 0
+  let claims = count_regular (Filename.concat state "claims") in
+  let presences = count_regular (Filename.concat state "process-presences") in
+  let capabilities = count_regular (Filename.concat state "hook-capabilities") in
+  let endpoints = count_regular (Filename.concat state "endpoints") in
+  if claims <> 0 then failf "canary-residual-claim-count:%d" claims;
+  if endpoints <> 0 then failf "canary-residual-endpoint-count:%d" endpoints;
+  if presences <> 1 then failf "canary-retained-presence-count:%d" presences;
+  if capabilities <> 1 then
+    failf "canary-retained-capability-count:%d" capabilities;
+  let presence =
+    single_regular "canary-retained-presence"
+      (Filename.concat state "process-presences")
+    |> read_file "canary-retained-presence"
+    |> parse_fields "canary-retained-presence"
+  in
+  exact "canary-retained-presence" presence "agent" provider;
+  let capability =
+    single_regular "canary-retained-capability"
+      (Filename.concat state "hook-capabilities")
+    |> read_file "canary-retained-capability"
+    |> parse_fields "canary-retained-capability"
+  in
+  exact "canary-retained-capability" capability "schema"
+    "loom-native-hook-capability-v1";
+  exact "canary-retained-capability" capability "state"
+    "NATIVE_HOOK_ATTESTED";
+  exact "canary-retained-capability" capability "agent" provider;
+  (claims, presences, capabilities, endpoints)
 
 let watcher_count common =
   let directory =
@@ -328,7 +367,11 @@ let validate_receipt ~state_directory ~candidate_id ~candidate_manifest_sha256
     candidate_loom_runtime_sha256;
   exact "canary-receipt" fields "config_bundle_sha256" config_bundle_sha256;
   exact "canary-receipt" fields "deny_count" "0";
-  exact "canary-receipt" fields "residual_active_count" "0";
+  exact "canary-receipt" fields "residual_active_count" "2";
+  exact "canary-receipt" fields "residual_claim_count" "0";
+  exact "canary-receipt" fields "retained_presence_count" "1";
+  exact "canary-receipt" fields "retained_capability_count" "1";
+  exact "canary-receipt" fields "residual_endpoint_count" "0";
   exact "canary-receipt" fields "residual_watcher_count" "0";
   exact "canary-receipt" fields "closure_result" "PASS";
   exact "canary-receipt" fields "guardian_key_id" key_id;
@@ -382,9 +425,15 @@ let issue ~root ~state_directory ~provider ~canary_root ~output_path ~expected_o
   let closed_count, process_exit_reconcile_pending_count =
     lifecycle_counts provider lifecycle
   in
-  let residual_active_count = active_state_count canary_common in
+  let residual_claim_count, retained_presence_count,
+      retained_capability_count, residual_endpoint_count =
+    residual_state provider canary_common
+  in
+  let residual_active_count =
+    residual_claim_count + retained_presence_count + retained_capability_count
+    + residual_endpoint_count
+  in
   let residual_watcher_count = watcher_count canary_common in
-  if residual_active_count <> 0 then failf "canary-active-state-residual:%d" residual_active_count;
   if residual_watcher_count <> 0 then
     failf "canary-watcher-residual:%d" residual_watcher_count;
   let private_key, public_text, public_sha256, key_id =
@@ -419,6 +468,10 @@ let issue ~root ~state_directory ~provider ~canary_root ~output_path ~expected_o
         "process_exit_reconcile_pending_count="
         ^ string_of_int process_exit_reconcile_pending_count;
         "residual_active_count=" ^ string_of_int residual_active_count;
+        "residual_claim_count=" ^ string_of_int residual_claim_count;
+        "retained_presence_count=" ^ string_of_int retained_presence_count;
+        "retained_capability_count=" ^ string_of_int retained_capability_count;
+        "residual_endpoint_count=" ^ string_of_int residual_endpoint_count;
         "residual_watcher_count=" ^ string_of_int residual_watcher_count;
         "closure_result=" ^ closure_result;
         "canary_root_sha256=" ^ Loom_hook.sha256 canary_root;

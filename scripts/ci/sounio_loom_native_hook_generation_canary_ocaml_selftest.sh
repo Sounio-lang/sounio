@@ -117,10 +117,18 @@ write_canary_fixture() {
   local common="$root/.git"
   local decisions="$common/sounio-loom-language-authority/agent-hook.tsv"
   local lifecycle="$common/sounio-coord-state/hook-session-lifecycle/events.tsv"
+  local presence="$common/sounio-coord-state/process-presences/$provider.presence"
+  local capability="$common/sounio-coord-state/hook-capabilities/$provider.capability"
   local config_sha256
   config_sha256="$(provider_config_sha256 "$provider")"
   git init -q "$root"
-  mkdir -p "$(dirname "$decisions")" "$(dirname "$lifecycle")"
+  mkdir -p "$(dirname "$decisions")" "$(dirname "$lifecycle")" \
+    "$(dirname "$presence")" "$(dirname "$capability")"
+  printf '%s\n' "agent=$provider" > "$presence"
+  printf '%s\n' \
+    'schema=loom-native-hook-capability-v1' \
+    'state=NATIVE_HOOK_ATTESTED' \
+    "agent=$provider" > "$capability"
   : > "$decisions"
   write_decision "$provider" SessionStart "$config_sha256" "$decisions"
   if [[ "$provider" == codex ]]; then
