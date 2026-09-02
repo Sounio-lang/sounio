@@ -18,6 +18,7 @@ use check::hyper::{check_hyper_binary}
 use check::compat::*
 use check::invariance::*
 use check::epistemic::*
+use check::causal::*
 use check::noise_sets::*
 use check::effects::*
 use check::ontology_side_table_cache::{
@@ -1846,6 +1847,97 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
     // and demand the enclosing `with` clause.
     if name_matches_str11(name, 70, 111, 114, 103, 101, 116, 116, 97, 98, 108, 101) {
         return checker_lower_zd_named_mut(c, type_args, span, 200)
+    }
+
+    // IndepKnowledge<T, A, B | Z> -- conditional independence as a type.
+    //
+    // This is the PRODUCTION spine. The by-value lower_named_type_with_args
+    // carries the same rule, but nothing outside tests/ calls it, so a guard
+    // that lives only there passes every claim while appearing to check them.
+    if name_matches_str14(name, 73, 110, 100, 101, 112, 75, 110, 111, 119, 108, 101, 100, 103, 101) {
+        match type_args {
+            None => {
+                checker_report_error_at_inplace(c, span, 72, 0, 0, 0)
+                return ty_error()
+            }
+            Some(args) => {
+                let t_expr = (*args).head
+                let rest1 = match (*args).tail {
+                    None => {
+                        checker_report_error_at_inplace(c, span, 72, 0, 0, 0)
+                        return ty_error()
+                    }
+                    Some(r) => *r
+                }
+                let a_expr = rest1.head
+                let rest2 = match rest1.tail {
+                    None => {
+                        checker_report_error_at_inplace(c, span, 72, 0, 0, 0)
+                        return ty_error()
+                    }
+                    Some(r) => *r
+                }
+                let b_expr = rest2.head
+
+                // A and B name variables, not types.
+                if a_expr.kind != TypeExprKind::TypeNamed {
+                    checker_report_error_at_inplace(c, a_expr.span, 72, 0, 0, 0)
+                    return ty_error()
+                }
+                if b_expr.kind != TypeExprKind::TypeNamed {
+                    checker_report_error_at_inplace(c, b_expr.span, 72, 0, 0, 0)
+                    return ty_error()
+                }
+
+                let cond_id = match rest2.tail {
+                    None => 0 - 1
+                    Some(r) => indep_cond_set_id((*r).head)
+                }
+                let base_ty = checker_lower_type_expr_mut(c, t_expr)
+                let a_id = indep_var_id(checker_copy_string_list_to_name(a_expr.path.segments))
+                let b_id = indep_var_id(checker_copy_string_list_to_name(b_expr.path.segments))
+
+                // A variable is not independent of itself; the claim asserts
+                // nothing, and asserting nothing is how an unfounded quadrature
+                // gets licensed.
+                if a_id == b_id {
+                    checker_report_error_at_inplace(c, b_expr.span, 72, 0, 0, 0)
+                    return ty_error()
+                }
+
+                // With a graph declared in source the claim becomes an
+                // obligation discharged by d-separation. Without one, only the
+                // degeneracy rule above can be known.
+                if CG_DECLARED == 1 {
+                    let a_node = ast_cg_find_node(a_id)
+                    if a_node < 0 {
+                        checker_report_error_at_inplace(c, a_expr.span, 254, 0, 0, 0)
+                        return ty_error()
+                    }
+                    let b_node = ast_cg_find_node(b_id)
+                    if b_node < 0 {
+                        checker_report_error_at_inplace(c, b_expr.span, 254, 0, 0, 0)
+                        return ty_error()
+                    }
+                    let cond_args = match rest2.tail {
+                        None => None
+                        Some(zr) => (*zr).head.type_args
+                    }
+                    let zpair = checker_cg_zset(cond_args)
+                    if !zpair.0 {
+                        checker_report_error_at_inplace(c, b_expr.span, 254, 0, 0, 0)
+                        return ty_error()
+                    }
+                    let g = checker_cg_build()
+                    if !causal_d_separated(g, a_node, b_node, zpair.1) {
+                        checker_report_error_at_inplace(c, b_expr.span, 255, 0, 0, 0)
+                        return ty_error()
+                    }
+                }
+
+                return ty_cond_indep(base_ty, a_id, b_id, cond_id, 0.0 - 1.0)
+            }
+        }
     }
     if name_matches_str14(name, 69, 120, 97, 99, 116, 108, 121, 80, 114, 105, 118, 97, 116, 101) {
         return checker_lower_exactly_private_named_mut(c, type_args, span)
@@ -6334,7 +6426,14 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     // Skip the generic types_compatible mismatch, which would otherwise reject two hyper values
     // with a spurious E004 "cannot be combined" before hyper dispatch runs.
     let both_hyper = left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper
-    if !both_hyper && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !types_compatible(left_ty, right_ty) {
+    // Same exemption, same reason, for IndepKnowledge. Two claims over the same
+    // base type are deliberately INCOMPATIBLE as types -- `a ⊥ b | Z` is not
+    // `c ⊥ d` and neither may be assigned to the other -- but both erase to T
+    // under an operator, and binary_result_type unwraps them. Without this the
+    // generic identity check rejects `a + b` between two different claims over
+    // the same f64 before the unwrap ever runs.
+    let either_cond_indep = left_ty.kind == TypeKind::TyCondIndep || right_ty.kind == TypeKind::TyCondIndep
+    if !both_hyper && !either_cond_indep && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !types_compatible(left_ty, right_ty) {
         let is_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
             || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem
         let is_cmp = e.bin_op == BinaryOp::OpEq || e.bin_op == BinaryOp::OpNe
@@ -15127,6 +15226,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 243 { print("the correlation coefficient must be a compile-time literal; a runtime value silently becomes 0.0, which asserts independence") }
     else if code == 230 { print("independence-assuming operation over correlated uncertainty") }
     else if code == 72 { print("malformed conditional-independence claim: IndepKnowledge<T, A, B | Z> needs two distinct variables") }
+    else if code == 254 { print("this variable is not a node of the declared causal graph") }
+    else if code == 255 { print("the claimed independence does not hold: an active path remains open in the declared causal graph") }
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else { print("unknown error") }
@@ -17192,6 +17293,60 @@ fn indep_cond_set_id(cond: TypeExpr) -> i64 with Mut, Panic, Div {
     }
 }
 
+// Rebuild the declared graph from the CG_* registry the parser filled. Node
+// names are not carried: causal_d_separated works on indices, and the indices
+// here are the registry's own, so a name would be a second source of truth.
+fn checker_cg_build() -> CausalGraph with Mut, Panic, Div {
+    var g = causal_graph_new()
+    var i: i64 = 0
+    while i < CG_NODE_COUNT && i < 16 {
+        let pair = causal_graph_add_node(g, Name { buf: [0; 128], len: 0 }, true)
+        g = pair.0
+        i = i + 1
+    }
+    var e: i64 = 0
+    while e < CG_EDGE_COUNT && e < 32 {
+        if CG_EDGE_DIRECTED[e as usize] == 1 {
+            g = causal_graph_add_edge(g, CG_EDGE_FROM[e as usize], CG_EDGE_TO[e as usize])
+        } else {
+            g = causal_graph_add_confound(g, CG_EDGE_FROM[e as usize], CG_EDGE_TO[e as usize])
+        }
+        e = e + 1
+    }
+    g
+}
+
+// The conditioning set as node indices. `ok` is false when Z names a variable
+// the graph does not declare -- which must be rejected, not treated as an empty
+// conditioning set: silently dropping an unknown Z would turn a conditioned
+// claim into a marginal one and d-separate pairs the author never claimed.
+fn checker_cg_zset(cond_args: Option<Box<TypeExprList>>) -> (bool, [bool; 16]) with Mut, Panic, Div {
+    var z_set: [bool; 16] = [false; 16]
+    match cond_args {
+        None => (true, z_set)
+        Some(zl) => {
+            var cur = *zl
+            var more = true
+            var ok = true
+            while more {
+                let zh = indep_var_id(checker_copy_string_list_to_name(cur.head.path.segments))
+                let zn = ast_cg_find_node(zh)
+                if zn < 0 {
+                    ok = false
+                    more = false
+                } else {
+                    z_set[zn as usize] = true
+                    match cur.tail {
+                        Some(rest) => { cur = *rest }
+                        None => { more = false }
+                    }
+                }
+            }
+            (ok, z_set)
+        }
+    }
+}
+
 fn checker_copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Div {
     var n = Name { buf: [0; 128], len: seg.head_len }
     var i: i64 = 0
@@ -18384,6 +18539,38 @@ impl Checker {
                         return (c2, ty_error())
                     }
 
+                    // With a graph declared in source, the claim stops being an
+                    // assertion and becomes an obligation: A and B must name
+                    // nodes of that graph, and the graph must d-separate them
+                    // given Z. Without a declared graph nothing can discharge
+                    // it, and only the degeneracy rule above applies.
+                    if CG_DECLARED == 1 {
+                        let a_node = ast_cg_find_node(a_id)
+                        if a_node < 0 {
+                            let c3 = c.report_error_at(a_expr.span, 254, 0, 0, 0)
+                            return (c3, ty_error())
+                        }
+                        let b_node = ast_cg_find_node(b_id)
+                        if b_node < 0 {
+                            let c4 = c.report_error_at(b_expr.span, 254, 0, 0, 0)
+                            return (c4, ty_error())
+                        }
+                        let cond_args = match rest2.tail {
+                            None => None
+                            Some(zr) => (*zr).head.type_args
+                        }
+                        let zpair = checker_cg_zset(cond_args)
+                        if !zpair.0 {
+                            let c5 = c.report_error_at(b_expr.span, 254, 0, 0, 0)
+                            return (c5, ty_error())
+                        }
+                        let g = checker_cg_build()
+                        if !causal_d_separated(g, a_node, b_node, zpair.1) {
+                            let c6 = c.report_error_at(b_expr.span, 255, 0, 0, 0)
+                            return (c6, ty_error())
+                        }
+                    }
+
                     // confidence unset (-1.0): the claim carries no probability
                     // level of its own, only the structural assertion.
                     let ci = ty_cond_indep(base_ty, a_id, b_id, cond_id, 0.0 - 1.0)
@@ -19411,6 +19598,9 @@ impl Checker {
             // Claim metadata is removed from the item stream by the parse
             // driver, so collection has no work to perform for this variant.
             ItemKind::ItemClaim => self
+            // Same for a causal graph: the parse driver drops it, and the graph
+            // itself is already in the CG_* registry by the time we get here.
+            ItemKind::ItemCausalGraph => self
         }
     }
 
@@ -21930,6 +22120,9 @@ impl Checker {
             // The arm exists so the match is exhaustive — without it the build
             // prints `error: match must be exhaustive` and still exits 0.
             ItemKind::ItemClaim => self
+            // Same for a causal graph: the parse driver drops it, and the graph
+            // itself is already in the CG_* registry by the time we get here.
+            ItemKind::ItemCausalGraph => self
         }
     }
 
