@@ -97,14 +97,14 @@ wait_for_endpoint_absence() {
   return 1
 }
 
-wait_for_hook_state_absence() {
+wait_for_hook_retirement_boundary() {
   local agent="$1" lane="$2" attempt key
   key="${agent}--${lane}"
   for attempt in $(seq 1 300); do
     if [[ ! -f "$COORD_DIR/claims/$key.claim" && \
-      ! -f "$COORD_DIR/process-presences/$key.presence" && \
-      ! -f "$COORD_DIR/hook-capabilities/$key.capability" && \
-      ! -f "$COORD_DIR/endpoints/$key.endpoint" ]]; then
+      ! -f "$COORD_DIR/delivery-endpoints/$key.endpoint" && \
+      -f "$COORD_DIR/process-presences/$key.presence" && \
+      -f "$COORD_DIR/hook-capabilities/$key.capability" ]]; then
       return 0
     fi
     sleep 0.05
@@ -351,28 +351,22 @@ run_hook "$session_end"
 mv "$presence_backup" "$presence_file"
 run_hook "$session_end"
 [[ "$HOOK_RC" -eq 0 ]] || fail "native SessionEnd failed: rc=$HOOK_RC output=$HOOK_OUTPUT"
-if SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
-  "$ROOT_DIR/bin/sounio-coord" hook-capability-status \
-  --agent codex --lane "$SESSION_LANE" >/dev/null 2>&1; then
-  fail 'SessionEnd left a native hook capability behind'
-fi
+wait_for_hook_retirement_boundary codex "$SESSION_LANE" ||
+  fail 'SessionEnd did not release the claim while retaining action 9047 evidence'
+first_retained_presence_sha="$(sha256sum "$presence_file" | cut -d ' ' -f1)"
+first_retained_capability_sha="$(sha256sum "$capability_file" | cut -d ' ' -f1)"
 run_hook "$session_end"
 [[ "$HOOK_RC" -eq 0 ]] ||
   fail "duplicate native SessionEnd was not idempotent: rc=$HOOK_RC output=$HOOK_OUTPUT"
-if SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
-  "$ROOT_DIR/bin/sounio-coord" hook-capability-status \
-  --agent codex --lane "$SESSION_LANE" >/dev/null 2>&1; then
-  fail 'duplicate SessionEnd recreated a native hook capability'
-fi
+[[ "$(sha256sum "$presence_file" | cut -d ' ' -f1)" == "$first_retained_presence_sha" && \
+  "$(sha256sum "$capability_file" | cut -d ' ' -f1)" == "$first_retained_capability_sha" ]] ||
+  fail 'duplicate SessionEnd mutated retained action 9047 evidence'
 late_stop="{\"hook_event_name\":\"Stop\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$ROOT_DIR\"}"
 run_hook "$late_stop"
 [[ "$HOOK_RC" -eq 0 ]] ||
   fail "late Stop was not absorbed after SessionEnd: rc=$HOOK_RC output=$HOOK_OUTPUT"
-if SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
-  "$ROOT_DIR/bin/sounio-coord" hook-capability-status \
-  --agent codex --lane "$SESSION_LANE" >/dev/null 2>&1; then
-  fail 'late Stop recreated a native hook capability'
-fi
+[[ -f "$presence_file" && -f "$capability_file" ]] ||
+  fail 'late Stop removed retained action 9047 evidence'
 late_pretool="{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$ROOT_DIR\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"printf should-not-run\"}}"
 run_hook "$late_pretool"
 [[ "$HOOK_RC" -eq 2 && "$HOOK_OUTPUT" == *'hook-session-closed:event=PreToolUse'* ]] ||
@@ -401,8 +395,8 @@ grep -Fq $'action=REOPENED\tagent=codex\tlane='"$SESSION_LANE"$'\tsession_id_sha
 run_hook "$session_end"
 [[ "$HOOK_RC" -eq 0 ]] ||
   fail "reopened session did not close cleanly: rc=$HOOK_RC output=$HOOK_OUTPUT"
-[[ ! -f "$capability_file" ]] ||
-  fail 'reopened SessionEnd left a native hook capability behind'
+wait_for_hook_retirement_boundary codex "$SESSION_LANE" ||
+  fail 'reopened SessionEnd did not preserve the action 9047 retirement boundary'
 
 [[ -f "$DECISION_LOG" ]] || fail "native hook omitted its decision log"
 grep -Fq $'decision=ALLOW\treason=SOUNIO_NATIVE_HOOK_CUTOVER HOOK_EVENT_ADMIT semantic_authority=Sounio action=9045' \
@@ -541,8 +535,8 @@ wait_for_file "$SESSION_CLOSE_READY" ||
 kill -TERM "$session_close_provider_pid"
 : >"$SESSION_CLOSE_CONTINUE"
 wait "$session_close_provider_pid" 2>/dev/null || true
-wait_for_hook_state_absence codex "$SESSION_CLOSE_LANE" ||
-  fail "atomic SessionEnd left state after provider exit: $(cat "$SESSION_CLOSE_LOG" 2>/dev/null || true)"
+wait_for_hook_retirement_boundary codex "$SESSION_CLOSE_LANE" ||
+  fail "atomic SessionEnd violated the action 9047 retirement boundary: $(cat "$SESSION_CLOSE_LOG" 2>/dev/null || true)"
 wait_for_log_pattern "$COORD_DIR/hook-session-lifecycle/events.tsv" \
   $'action=CLOSED\tagent=codex\tlane='"$SESSION_CLOSE_LANE"$'\tsession_id_sha256=' ||
   fail 'atomic SessionEnd omitted its provider-exit closure receipt'
@@ -700,21 +694,22 @@ chmod 0755 "$PROCESS_EXIT_SCRIPT"
 SOUNIO_LOOM_PROCESS_EXIT_WATCHER=1 \
   "$TMUX_HARNESS" "$PROCESS_EXIT_SCRIPT" "$LOOM" "$ROOT_DIR" "$PROCESS_EXIT_ID" \
   >"$PROCESS_EXIT_LOG" 2>&1
-process_exit_closed=0
+process_exit_retirement_pending=0
 for _ in $(seq 1 200); do
   if [[ ! -f "$COORD_DIR/claims/codex--$PROCESS_EXIT_LANE.claim" && \
-    ! -f "$COORD_DIR/process-presences/codex--$PROCESS_EXIT_LANE.presence" && \
-    ! -f "$COORD_DIR/hook-capabilities/codex--$PROCESS_EXIT_LANE.capability" ]]; then
-    process_exit_closed=1
+    ! -f "$COORD_DIR/delivery-endpoints/codex--$PROCESS_EXIT_LANE.endpoint" && \
+    -f "$COORD_DIR/process-presences/codex--$PROCESS_EXIT_LANE.presence" && \
+    -f "$COORD_DIR/hook-capabilities/codex--$PROCESS_EXIT_LANE.capability" ]]; then
+    process_exit_retirement_pending=1
     break
   fi
   sleep 0.05
 done
-[[ "$process_exit_closed" -eq 1 ]] ||
-  fail "native process-exit supervisor left active state: $(cat "$PROCESS_EXIT_LOG")"
-grep -Fq $'action=PROCESS_EXIT_CLOSED\tagent=codex\tlane='"$PROCESS_EXIT_LANE"$'\tsession_id_sha256=' \
+[[ "$process_exit_retirement_pending" -eq 1 ]] ||
+  fail "native process-exit supervisor violated the action 9047 retirement boundary: $(cat "$PROCESS_EXIT_LOG")"
+grep -Fq $'action=PROCESS_EXIT_RECONCILE_PENDING\tagent=codex\tlane='"$PROCESS_EXIT_LANE"$'\tsession_id_sha256=' \
   "$COORD_DIR/hook-session-lifecycle/events.tsv" ||
-  fail 'native process-exit supervisor omitted its closure receipt'
+  fail 'native process-exit supervisor omitted its reconciliation-pending receipt'
 watcher_closed=0
 for _ in $(seq 1 200); do
   if [[ "$(find "$COORD_DIR/hook-session-lifecycle" -maxdepth 1 -type f -name '*.watcher' | wc -l)" -eq 0 ]]; then
@@ -727,4 +722,4 @@ done
   fail 'native process-exit supervisor left a watcher record behind'
 
 printf '%s\n' \
-  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio action=9045 session=roundtrip duplicate_session_end=idempotent late_stop=noop late_execution=refused tombstone_tamper=refused session_reopen=explicit provider_exit_during_close=closed atomic_close_sabotage=causal generation_mismatch=refused presence_mismatch=refused process_exit=closed hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused direct_shell_close=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused cutover_policy_missing=refused cutover_policy_tamper=refused cutover_runtime_tamper=refused log_redirect=refused providers=codex,claude,cursor,grok dialect_mismatch=refused config_missing=refused config_non_native=refused decision_receipt=complete python=not-executed rust=not-executed'
+  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio action=9045 session=roundtrip duplicate_session_end=idempotent late_stop=noop late_execution=refused tombstone_tamper=refused session_reopen=explicit provider_exit_during_close=reconcile-pending atomic_close_sabotage=causal generation_mismatch=refused presence_mismatch=refused process_exit=reconcile-pending retirement_claim=released retirement_endpoint=released retirement_presence=retained retirement_capability=retained hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused direct_shell_close=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused cutover_policy_missing=refused cutover_policy_tamper=refused cutover_runtime_tamper=refused log_redirect=refused providers=codex,claude,cursor,grok dialect_mismatch=refused config_missing=refused config_non_native=refused decision_receipt=complete python=not-executed rust=not-executed'

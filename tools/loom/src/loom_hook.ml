@@ -1548,7 +1548,7 @@ let close_dead_hook_session tool_root root agent lane raw_session_id target_iden
           else false
         in
         if cleaned then (
-          append_hook_session_lifecycle root "PROCESS_EXIT_CLOSED" agent lane
+          append_hook_session_lifecycle root "PROCESS_EXIT_RECONCILE_PENDING" agent lane
             raw_session_id "ProcessExit";
           remove_and_sync watcher_path)
         else

@@ -1299,6 +1299,7 @@ remove_endpoint_for_lane() {
   [[ -f "$endpoint_file" ]] || return 0
   load_endpoint "$endpoint_file"
   [[ "$E_AGENT" == "$agent" && "$E_LANE" == "$lane" ]] || die "endpoint owner mismatch"
+  [[ "$E_WORKTREE" == "$worktree" ]] || die "endpoint belongs to worktree $E_WORKTREE"
   unlink "$endpoint_file"
   printf 'utc=%s event=ENDPOINT_UNREGISTERED endpoint_id=%s agent=%s lane=%s worktree=%s reason=%s\n' \
     "$NOW_UTC" "$E_ID" "$E_AGENT" "$E_LANE" "$E_WORKTREE" "$reason" >> "$EVENT_LOG"
@@ -1422,6 +1423,14 @@ remove_presence_for_lane() {
   [[ -f "$presence_file" ]] || return 0
   load_presence "$presence_file"
   [[ "$P_AGENT" == "$agent" && "$P_LANE" == "$lane" ]] || die "presence owner mismatch"
+  [[ "$P_WORKTREE" == "$worktree" ]] || die "presence belongs to worktree $P_WORKTREE"
+  case "$P_HARNESS" in
+    codex|claude|cursor|grok)
+      append_presence_event PRESENCE_RETIREMENT_REQUESTED \
+        "$reason; retained for Sounio action 9047"
+      return 0
+      ;;
+  esac
   unlink "$presence_file"
   capability_file="$(hook_capability_path "$agent" "$lane")"
   [[ ! -f "$capability_file" ]] || unlink "$capability_file"
@@ -2020,10 +2029,10 @@ hook_session_close_command() {
   C_SHA="$(current_sha)"
   append_event RELEASE "$reason"
   unlink "$claim_file"
-  printf 'utc=%s event=HOOK_SESSION_CLOSED agent=%s lane=%s session_id=%s generation=%s runtime_id=%s revocation_mode=%s\n' \
+  printf 'utc=%s event=HOOK_SESSION_CLOSED agent=%s lane=%s session_id=%s generation=%s runtime_id=%s revocation_mode=%s reconcile_pending=true\n' \
     "$NOW_UTC" "$agent" "$lane" "$session_id" "$expected_generation" \
     "$NATIVE_HOOK_RUNTIME_ID" "$revocation_mode" >> "$EVENT_LOG"
-  printf 'HOOK_SESSION_CLOSED agent=%s lane=%s session_id=%s generation=%s runtime_id=%s revocation_mode=%s\n' \
+  printf 'HOOK_SESSION_CLOSED agent=%s lane=%s session_id=%s generation=%s runtime_id=%s revocation_mode=%s reconcile_pending=true\n' \
     "$agent" "$lane" "$session_id" "$expected_generation" \
     "$NATIVE_HOOK_RUNTIME_ID" "$revocation_mode"
 }
@@ -3124,7 +3133,12 @@ presence_unregister_command() {
     return 0
   fi
   remove_presence_for_lane "$agent" "$lane" "$WORKTREE" clean-exit
-  printf 'PRESENCE_UNREGISTERED presence_id=%s\n' "$(claim_id_for "$agent" "$lane")"
+  if [[ -f "$presence_file" ]]; then
+    printf 'PRESENCE_RECONCILE_PENDING presence_id=%s action=9047\n' \
+      "$(claim_id_for "$agent" "$lane")"
+  else
+    printf 'PRESENCE_UNREGISTERED presence_id=%s\n' "$(claim_id_for "$agent" "$lane")"
+  fi
 }
 
 pending_directed_count() {
@@ -4756,9 +4770,19 @@ prune_command() {
     presence_state || true
     if [[ "$PRESENCE_STATE" == orphaned ]] && \
       ((NOW_EPOCH > P_LAST_EPOCH + recovery_retention)); then
-      unlink "$presence_file"
-      presences_removed=$((presences_removed + 1))
-      printf 'PRUNED_PRESENCE presence_id=%s agent=%s lane=%s\n' "$P_ID" "$P_AGENT" "$P_LANE"
+      case "$P_HARNESS" in
+        codex|claude|cursor|grok)
+          append_presence_event PRESENCE_RECONCILE_PENDING \
+            "prune refused; Sounio action 9047 required"
+          printf 'RETAINED_PRESENCE presence_id=%s agent=%s lane=%s action=9047\n' \
+            "$P_ID" "$P_AGENT" "$P_LANE"
+          ;;
+        *)
+          unlink "$presence_file"
+          presences_removed=$((presences_removed + 1))
+          printf 'PRUNED_PRESENCE presence_id=%s agent=%s lane=%s\n' "$P_ID" "$P_AGENT" "$P_LANE"
+          ;;
+      esac
     fi
   done
   printf 'pruned=%s pruned_messages=%s\n' "$removed" "$messages_removed"

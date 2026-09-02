@@ -138,6 +138,35 @@ expect_text "$RAW_GENERATION_OUTPUT" 'related-hook-capabilities-generation-drift
   raw-generation-cause
 write_related "$LIVE_STATE" test live "$WORK"
 
+RELEASE_STATE="$(new_state release-live)"
+write_presence "$RELEASE_STATE" test release "$LIVE_PID" "$LIVE_START" "$NOW" 300 "$ROOT_DIR"
+RELATED_PID="$LIVE_PID"
+RELATED_PID_START="$LIVE_START"
+write_related "$RELEASE_STATE" test release "$ROOT_DIR"
+rm "$RELEASE_STATE/claims/test--release.claim"
+SOUNIO_COORD_DIR="$RELEASE_STATE" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" claim --agent test --lane release \
+  --intent 'live provider release retirement boundary fixture' \
+  --files tools/loom/GARDEN_NATIVE_HOOK_GENERATION_RECONCILE_V1.md >/dev/null
+RELEASE_OUTPUT="$(SOUNIO_COORD_DIR="$RELEASE_STATE" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" release --agent test --lane release \
+  --reason 'live provider retirement boundary fixture')"
+expect_text "$RELEASE_OUTPUT" 'RELEASED claim_id=test--release' live-release-result
+[[ ! -e "$RELEASE_STATE/claims/test--release.claim" ]] ||
+  fail 'live provider release retained its claim and would block another lane'
+[[ ! -e "$RELEASE_STATE/delivery-endpoints/test--release.endpoint" ]] ||
+  fail 'live provider release retained its immediate-delivery endpoint'
+[[ -f "$RELEASE_STATE/process-presences/test--release.presence" ]] ||
+  fail 'live provider release fabricated absence by deleting presence'
+[[ -f "$RELEASE_STATE/hook-capabilities/test--release.capability" ]] ||
+  fail 'live provider release fabricated absence by deleting capability'
+grep -q 'event=PRESENCE_RETIREMENT_REQUESTED .*presence_id=test--release .*reason=release; retained for Sounio action 9047' \
+  "$RELEASE_STATE/events.log" ||
+  fail 'live provider release omitted its governed retirement request'
+RELEASE_RECONCILE="$(run_reconcile "$RELEASE_STATE" --agent test --lane release)"
+expect_text "$RELEASE_RECONCILE" '"decision":"KEEP"' live-release-reconcile
+expect_text "$RELEASE_RECONCILE" '"absence_reason":"none"' live-release-cause
+
 HEARTBEAT_STATE="$(new_state heartbeat)"
 write_presence "$HEARTBEAT_STATE" test heartbeat "$LIVE_PID" "$LIVE_START" 1 1 "$WORK"
 RELATED_PID="$LIVE_PID"
@@ -277,4 +306,4 @@ wait "$UI_PID" || true
 CHILDREN=()
 
 printf '%s\n' \
-  'sounio-loom-native-hook-generation-reconcile-ocaml-selftest: PASS semantic_authority=Sounio action=9047 stage=PARITY_OPEN operational_realization=OCaml live=KEEP heartbeat_only=KEEP legacy_endpoint=KEY_BOUND_KEEP pid_absent_plan=QUARANTINE_ELIGIBLE pid_absent_apply=QUARANTINE_READY related_artifacts=4 wal=COMMITTED audit=ALLOW+DENY identity_drift=FAIL_CLOSED shared_lock=flock2 timeout=FAIL_CLOSED python_oracle_attempt=PRE_EXEC_REFUSED causal_control=LIVE_THEN_PID_ABSENT ui_route=READ_ONLY_AUTHORITY python_executed=false rust_executed=false disposable_oracle_executed=false same_uid_peer_isolation=false quarantine_committed=true native_entry_open=false cutover_ready=false bridge_free_current=false'
+  'sounio-loom-native-hook-generation-reconcile-ocaml-selftest: PASS semantic_authority=Sounio action=9047 stage=PARITY_OPEN operational_realization=OCaml live=KEEP live_release_claim=RELEASED live_release_endpoint=RELEASED live_release_presence=RETAINED live_release_capability=RETAINED live_release_reconcile=KEEP heartbeat_only=KEEP legacy_endpoint=KEY_BOUND_KEEP pid_absent_plan=QUARANTINE_ELIGIBLE pid_absent_apply=QUARANTINE_READY related_artifacts=4 wal=COMMITTED audit=ALLOW+DENY identity_drift=FAIL_CLOSED shared_lock=flock2 timeout=FAIL_CLOSED python_oracle_attempt=PRE_EXEC_REFUSED causal_control=LIVE_THEN_PID_ABSENT ui_route=READ_ONLY_AUTHORITY python_executed=false rust_executed=false disposable_oracle_executed=false same_uid_peer_isolation=false quarantine_committed=true native_entry_open=false cutover_ready=false bridge_free_current=false'
