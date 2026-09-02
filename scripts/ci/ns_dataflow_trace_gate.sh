@@ -51,10 +51,10 @@ for w in "${WITNESSES[@]}"; do
   out="$(SOUNIO_NS_DISABLE=1 SOUNIO_NS_TRACE=1 bash -c "ulimit -s unlimited 2>/dev/null; timeout 120 '$SOUC' check '$src' 2>&1")"
   n_trace=$(printf '%s\n' "$out" | grep -c '^NS_TRACE ')
   [[ $n_trace -gt 0 ]] || fail "$w: no NS_TRACE lines under SOUNIO_NS_DISABLE=1 SOUNIO_NS_TRACE=1 (dataflow not observable): $out"
-  printf '%s\n' "$out" | grep -E 'E230' >/dev/null && fail "$w: E230 survived SOUNIO_NS_DISABLE (knob inert): $out"
+  printf '%s\n' "$out" | grep -E 'error\[E230\]' >/dev/null && fail "$w: E230 survived SOUNIO_NS_DISABLE (knob inert): $out"
   # And confirm the refusal is real: WITHOUT the knob the same file is refused (E230).
   ref="$("$SOUC" check "$src" 2>&1)"
-  printf '%s\n' "$ref" | grep -E 'E230' >/dev/null || fail "$w: expected E230 under default checker (witness no longer flips): $ref"
+  printf '%s\n' "$ref" | grep -E 'error\[E230\]' >/dev/null || fail "$w: expected E230 under default checker (witness no longer flips): $ref"
   pass "$w: $n_trace NS_TRACE line(s) and no E230 under SOUNIO_NS_DISABLE; E230 under default"
 done
 

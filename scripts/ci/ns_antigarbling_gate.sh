@@ -16,6 +16,24 @@ unset SOUNIO_SOUC_BIN || true
 fail() { echo "NS_ANTIGARBLING_GATE_FAIL: $*" >&2; exit 1; }
 pass() { echo "NS_ANTIGARBLING_GATE_OK: $*"; }
 
+# WHY EVERY CODE GREP IS ANCHORED TO `error[Exxx]` AND NOT TO A BARE `Exxx`.
+#
+# souc prints a diagnostic as `error[E230] in <mod>::<fn> at a..b: <message>`
+# followed by indented `= help:` / `= note:` PROSE. That prose routinely names
+# OTHER error codes -- E230's own help opens with "E230 anti-garbling", and
+# E178's help names E230 to explain what the capacity cliff does to the
+# anti-garbling rule. A bare `grep -E 'E230'` therefore matches help text as
+# readily as a real refusal.
+#
+# That is not a theoretical hazard: the ABSENCE checks below (`accepts`,
+# `vanishes_under_sabotage`) fail the gate when they see E230, so a mention of
+# "E230" inside an unrelated diagnostic's help makes this gate report a failure
+# the compiler did not commit -- and the tempting "fix" is to reword the
+# diagnostic until the grep is happy, i.e. to damage a user-facing help message
+# in order to satisfy a test. Anchoring to the bracketed diagnostic line removes
+# the incentive: prose may name any code it likes, and the gate still measures
+# only which diagnostics were actually RAISED.
+
 SOUC="${SOUC:-$ROOT/bin/souc}"
 [[ -x "$SOUC" ]] || fail "no souc at $SOUC"
 echo "souc=$SOUC"
@@ -25,7 +43,7 @@ refuses_e230() {
   local label="$1" src="$2" out rc
   set +e; out=$(SOUNIO_NS_DISABLE= "$SOUC" check "$src" 2>&1); rc=$?; set -e
   [[ $rc -ne 0 ]] || fail "$label expected refusal, got rc=0"
-  echo "$out" | grep -E 'E230' >/dev/null || fail "$label refused but not with E230: $out"
+  echo "$out" | grep -E 'error\[E230\]' >/dev/null || fail "$label refused but not with E230: $out"
   pass "$label refused with E230"
 }
 
@@ -33,7 +51,7 @@ refuses_e230() {
 vanishes_under_sabotage() {
   local label="$1" src="$2" out rc
   set +e; out=$(SOUNIO_NS_DISABLE=1 "$SOUC" check "$src" 2>&1); rc=$?; set -e
-  echo "$out" | grep -E 'E230' >/dev/null && fail "$label E230 survived NS-disable (not caused by NS): $out"
+  echo "$out" | grep -E 'error\[E230\]' >/dev/null && fail "$label E230 survived NS-disable (not caused by NS): $out"
   pass "$label E230 vanishes under SOUNIO_NS_DISABLE"
 }
 
@@ -46,7 +64,7 @@ vanishes_under_sabotage() {
 accepts() {
   local label="$1" src="$2" out rc
   set +e; out=$("$SOUC" check "$src" 2>&1); rc=$?; set -e
-  echo "$out" | grep -E 'E230' >/dev/null && fail "$label wrongly refused a disjoint op: $out"
+  echo "$out" | grep -E 'error\[E230\]' >/dev/null && fail "$label wrongly refused a disjoint op: $out"
   pass "$label accepted by the NS rule (no E230; rc=$rc, other diagnostics are not this gate's)"
 }
 
@@ -63,8 +81,8 @@ unrelated_refusal_survives_ns_disable() {
   [[ -f "$src" ]] || { echo "NS_ANTIGARBLING_GATE_SKIP: no unrelated-refusal fixture"; return 0; }
   set +e; out=$(SOUNIO_NS_DISABLE=1 "$SOUC" check "$src" 2>&1); rc=$?; set -e
   [[ $rc -ne 0 ]] || fail "$code vanished under SOUNIO_NS_DISABLE (knob too broad)"
-  echo "$out" | grep -E "$code" >/dev/null || fail "$code fixture refused under SOUNIO_NS_DISABLE but not with $code: $out"
-  echo "$out" | grep -E 'E230' >/dev/null && fail "$code fixture also raised E230 under SOUNIO_NS_DISABLE (knob inert)"
+  echo "$out" | grep -E "error\[$code\]" >/dev/null || fail "$code fixture refused under SOUNIO_NS_DISABLE but not with $code: $out"
+  echo "$out" | grep -E 'error\[E230\]' >/dev/null && fail "$code fixture also raised E230 under SOUNIO_NS_DISABLE (knob inert)"
   pass "$code survives SOUNIO_NS_DISABLE (knob is NS-specific; E230 and $code causally separable)"
 }
 
@@ -81,7 +99,7 @@ overflow_is_loud() {
   rc=$?
   set -e
   [[ $rc -ne 0 ]] || fail "$label expected refusal, got rc=0"
-  echo "$out" | grep -E 'E178' >/dev/null \
+  echo "$out" | grep -E 'error\[E178\]' >/dev/null \
     || fail "$label overflowed the source cap SILENTLY (no E178): $out"
   pass "$label overflow reported loudly with E178 (survives SOUNIO_NS_DISABLE: capacity != refusal)"
 }
