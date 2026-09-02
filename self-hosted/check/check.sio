@@ -10909,6 +10909,7 @@ pub fn checker_check_items_inner_store_return_had_error_mut(c: *mut Checker, ite
     // ever lands on the hot path, so the layout-sensitive stale-stack
     // codegen crash never fires. (Was: `(*c).check_items(items)` by value.)
     checker_check_items_inplace(c, items)
+    checker_verify_dsep_claims_mut(c)
     checker_flush_unemitted_type_errors_mut(c)
     if (*c).had_error {
         1
@@ -15228,6 +15229,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 72 { print("malformed conditional-independence claim: IndepKnowledge<T, A, B | Z> needs two distinct variables") }
     else if code == 254 { print("this variable is not a node of the declared causal graph") }
     else if code == 255 { print("the claimed independence does not hold: an active path remains open in the declared causal graph") }
+    else if code == 256 { print("`d_separated` needs a declared causal graph and exactly two variable names, with an optional `| Z`") }
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else { print("unknown error") }
@@ -17345,6 +17347,94 @@ fn checker_cg_zset(cond_args: Option<Box<TypeExprList>>) -> (bool, [bool; 16]) w
             (ok, z_set)
         }
     }
+}
+
+// Verify every d_separated(A, B | Z) the parser recorded and rewrote to the
+// proof token. Deferred to here, after all items are parsed, so a graph declared
+// below its use still counts -- the parser cannot know the whole graph yet.
+//
+// A claim that fails is an error at the call site; the token it produced stays a
+// 1, but the compilation does not succeed, so no proof escapes a failed check.
+// The *mut spine's copy. Every driver that checks a program routes through
+// checker_check_items_inner_store_return_had_error_mut, so this is where the
+// verification actually runs; the by-value one below serves
+// check_program_with_artifacts.
+pub fn checker_verify_dsep_claims_mut(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    var i: i64 = 0
+    while i < DSEP_COUNT && i < 64 {
+        // A multi-module check runs this once per module. Mark each claim
+        // instead of clearing the registry: clearing on the first module wiped
+        // claims belonging to a module not yet checked, and they vanished.
+        if DSEP_DONE[i as usize] == 1 {
+            i = i + 1
+            continue
+        }
+        DSEP_DONE[i as usize] = 1
+        let sp = Span {
+            file_id: DSEP_SPAN_FILE[i as usize] as i32,
+            start: DSEP_SPAN_START[i as usize],
+            end: DSEP_SPAN_END[i as usize],
+        }
+        if DSEP_FORM_OK[i as usize] == 0 || CG_DECLARED == 0 {
+            checker_report_error_at_inplace(c, sp, 256, 0, 0, 0)
+        } else {
+            let a_node = ast_cg_find_node(DSEP_A[i as usize])
+            let b_node = ast_cg_find_node(DSEP_B[i as usize])
+            var z_node: i64 = 0 - 1
+            var z_known = true
+            if DSEP_Z[i as usize] >= 0 {
+                z_node = ast_cg_find_node(DSEP_Z[i as usize])
+                if z_node < 0 { z_known = false }
+            }
+            if a_node < 0 || b_node < 0 || !z_known {
+                checker_report_error_at_inplace(c, sp, 254, 0, 0, 0)
+            } else {
+                var z_set: [bool; 16] = [false; 16]
+                if z_node >= 0 { z_set[z_node as usize] = true }
+                let g = checker_cg_build()
+                if !causal_d_separated(g, a_node, b_node, z_set) {
+                    checker_report_error_at_inplace(c, sp, 255, 0, 0, 0)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+pub fn checker_verify_dsep_claims(c: Checker) -> Checker with Mut, Panic, Div, Alloc, IO {
+    var out = c
+    var i: i64 = 0
+    while i < DSEP_COUNT && i < 64 {
+        let sp = Span {
+            file_id: DSEP_SPAN_FILE[i as usize] as i32,
+            start: DSEP_SPAN_START[i as usize],
+            end: DSEP_SPAN_END[i as usize],
+        }
+        if DSEP_FORM_OK[i as usize] == 0 || CG_DECLARED == 0 {
+            out = out.report_error_at(sp, 256, 0, 0, 0)
+        } else {
+            let a_node = ast_cg_find_node(DSEP_A[i as usize])
+            let b_node = ast_cg_find_node(DSEP_B[i as usize])
+            var z_node: i64 = 0 - 1
+            var z_known = true
+            if DSEP_Z[i as usize] >= 0 {
+                z_node = ast_cg_find_node(DSEP_Z[i as usize])
+                if z_node < 0 { z_known = false }
+            }
+            if a_node < 0 || b_node < 0 || !z_known {
+                out = out.report_error_at(sp, 254, 0, 0, 0)
+            } else {
+                var z_set: [bool; 16] = [false; 16]
+                if z_node >= 0 { z_set[z_node as usize] = true }
+                let g = checker_cg_build()
+                if !causal_d_separated(g, a_node, b_node, z_set) {
+                    out = out.report_error_at(sp, 255, 0, 0, 0)
+                }
+            }
+        }
+        i = i + 1
+    }
+    out
 }
 
 fn checker_copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Div {
