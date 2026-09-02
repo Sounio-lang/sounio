@@ -386,8 +386,10 @@ pub struct Checker {
     // SEPARATE from ns_table's interned SET count: many distinct sources can
     // union into fewer distinct interned sets, so the two counters diverge on
     // real programs. Reset to 0 in checker_new/checker_init_in_place;
-    // saturates to unknown via ns_singleton's own src>63 guard once 64
-    // sources have been issued (the issuer does not duplicate that cap).
+    // saturates to unknown via ns_singleton's own src >= ns_source_cap() guard
+    // once 256 sources have been issued (the issuer does not duplicate that
+    // cap, but it DOES report E178 at the offending measure() site so the
+    // saturation is never silent -- W4).
     ns_source_issued: i64,
     // Scratch set during checker_check_call_args_inplace to the noise_set_id
     // of the most recently seen Knowledge-typed call argument (parametric
@@ -6392,6 +6394,12 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         if knowledge_result.kind == TypeKind::TyError {
             checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
         }
+        // W4: the union above may have exhausted the interning table. That
+        // saturates to unknown, which is sound but turns every later E230 into
+        // an unexplained refusal -- so say it out loud, once per overflow event.
+        if ns_table_overflow_take(&!(*(*c).ns_table)) {
+            checker_report_error_at_inplace(c, e.span, 179, 0, 0, 0)
+        }
         // N3: anti-garbling gate. An independence-assuming op over operands whose
         // noise-symbol sets are not provably disjoint understates variance -- E230.
         if checker_ns_should_refuse((*c).ns_table, e.bin_op, left_ty, right_ty) {
@@ -8361,7 +8369,18 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     if !checker_ns_sabotage() {
         let src = (*c).ns_source_issued
         (*c).ns_source_issued = src + 1
+        // W4: overflow must be LOUD. ns_singleton still saturates the handle to
+        // unknown (sound), but a silent saturation makes every downstream E230
+        // fire for a reason the user cannot see -- or, worse, makes an
+        // uncertainty band wrong without saying so. Report it here, at the
+        // measure() site that actually exceeded the cap.
+        if src >= ns_source_cap() {
+            checker_report_error_at_inplace(c, e.span, 178, 0, 0, 0)
+        }
         result.noise_set_id = ns_singleton(&!(*(*c).ns_table), src)
+        if ns_table_overflow_take(&!(*(*c).ns_table)) {
+            checker_report_error_at_inplace(c, e.span, 179, 0, 0, 0)
+        }
     }
     checker_ns_trace_emit("measure", result.noise_set_id)
     result
@@ -9623,24 +9642,46 @@ pub fn checker_ns_disable() -> bool with IO, Mut, Panic, Div {
 // binary-op checking paths (the *mut Checker in-place path and the value path)
 // so the rule cannot go inert on one of them.
 //
-// An independence-assuming operator (OpAdd, OpMul) over two Knowledge operands
-// whose sources are not provably disjoint CAN understate the propagated variance
-// (it drops the covariance term). For Add the assumed a^2+b^2 vs true (a+b)^2 on a
-// shared symbol understates iff the coefficient product ab>0 and OVERstates iff
-// ab<0; refusing every non-disjoint pair is therefore CONSERVATIVE (it never
-// admits an understatement, though it also refuses the ab<0 pairs that were safe).
-// ns_disjoint fails closed: unknown (-1) and any unrepresentable set are NEVER
-// disjoint. A non-Knowledge operand carries no source of its own and never
-// triggers the rule (both operands must be Knowledge to reach the disjointness
-// test). Sub/Div are NOT gated here -- a SCOPE decision, not a safety one: the
-// SAME-sign correlated case of subtraction overstates (safe), but an OPPOSITE-sign
-// shared source makes Sub (and Div, sign-dependent) a genuine ungated anti-garbling
-// (math-review, zai, 2026-08-25). A full sign-of-covariance treatment of Sub/Div is
-// future work; today they pass unrefused.
+// An independence-assuming operator over two Knowledge operands whose sources are
+// not provably disjoint CAN understate the propagated variance, because it drops
+// the covariance term. Which SIGN of covariance is dangerous depends on the op:
+//
+//   Var(x + y) = Var x + Var y + 2 Cov      naive drops +2Cov -> unsafe iff Cov > 0
+//   Var(x - y) = Var x + Var y - 2 Cov      naive drops -2Cov -> unsafe iff Cov < 0
+//   Mul/Div use the GUM relative shortcut, whose dropped term is
+//   +/- 2 Cov / (xy) -- its sign depends on Cov AND on the sign of the product
+//   of the two VALUES, which this domain does not track.
+//
+// W4 closes the Sub/Div scope hole the N3 comment recorded (math-review, zai,
+// 2026-08-25) with the narrowest sound rule the domain can actually certify:
+//
+//   Add, Mul  refuse every non-disjoint pair. UNCHANGED from N3. Conservative:
+//             it never admits an understatement, though it still refuses the
+//             Cov < 0 pairs that were safe. Deliberately NOT relaxed by the new
+//             sign information -- this change only ever adds refusals.
+//   Sub       refuse a non-disjoint pair UNLESS Cov >= 0 is PROVEN
+//             (ns_cov_nonneg: every shared source carries a non-negative
+//             coefficient product). Then the naive variance OVERSTATES, which is
+//             safe. This is what keeps `x - x` compiling while catching
+//             `(p - a) - a`, where `a` enters with opposite signs.
+//   Div       refuse every non-disjoint pair. The sign of the dropped term needs
+//             sign(xy) as well as sign(Cov), and the NS domain carries no value
+//             signs, so the sign CANNOT be established: fail closed, exactly as
+//             ns_disjoint already does for the unknown handle (-1).
+//   Rem       still ungated. Its uncertainty propagation is not modelled at all
+//             (epsilon_combine_independent is a placeholder), so a refusal here
+//             would not be backed by a variance argument. Remaining hole, named.
+//
+// ns_disjoint and ns_cov_nonneg both fail closed: unknown (-1), any
+// unrepresentable set, and any source of unknown SIGN are never certified. A
+// non-Knowledge operand carries no source of its own and never triggers the rule
+// (both operands must be Knowledge to reach the query).
 fn checker_ns_should_refuse(table: *mut NoiseSetTable, bin_op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) -> bool with IO, Mut, Panic, Div {
     if checker_ns_disable() { return false }
-    let is_indep_op = bin_op == BinaryOp::OpAdd || bin_op == BinaryOp::OpMul
-    if !is_indep_op { return false }
+    let is_add_lane = bin_op == BinaryOp::OpAdd || bin_op == BinaryOp::OpMul
+    let is_sub_lane = bin_op == BinaryOp::OpSub
+    let is_div_lane = bin_op == BinaryOp::OpDiv
+    if !is_add_lane && !is_sub_lane && !is_div_lane { return false }
     if !is_knowledge_type(left_ty) { return false }
     if !is_knowledge_type(right_ty) { return false }
     let a = left_ty.noise_set_id
@@ -9653,7 +9694,10 @@ fn checker_ns_should_refuse(table: *mut NoiseSetTable, bin_op: BinaryOp, left_ty
     // `deterministic + anything` (e.g. the N2 `x + w` witnesses where x is top).
     if a == ns_empty() { return false }
     if b == ns_empty() { return false }
-    !ns_disjoint(&(*table), a, b)
+    if ns_disjoint(&(*table), a, b) { return false }
+    // Not provably disjoint. Only the subtractive lane has an escape hatch.
+    if is_sub_lane { return !ns_cov_nonneg(&(*table), a, b) }
+    true
 }
 
 fn checker_check_callee_effects_named_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64, source: Name) with Mut, IO, Panic, Div, Alloc {
@@ -15104,6 +15148,10 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 175 { print("function is private in its defining module") }
     else if code == 176 { print("struct constructor is private in its defining module") }
     else if code == 177 { print("enum constructor is private in its defining module") }
+    // NS capacity enforcement (178-179) -- W4. Both are LOUD replacements for a
+    // silent saturation to the unknown noise-set handle.
+    else if code == 178 { print("noise-source capacity exceeded: this checker run has issued more independent measurement sources than the noise-symbol domain can represent, so correlation between them can no longer be tracked") }
+    else if code == 179 { print("noise-set interning table exhausted: too many distinct source-sets in one checker run, so correlation between the values that carry them can no longer be tracked") }
     else if code == 221 { print("this math function is bound for typechecking but the native backend cannot emit it; the call would compile and then die on an illegal instruction at run time") }
     else if code == 244 { print("Knowledge provenance boundary mismatch: the argument's provenance cannot satisfy the parameter's requirement (trusted classes: Source, Literature, Measured)") }
     else if code == 245 { print("arithmetic between two Knowledge<T> values is not supported by this compiler; the operation typechecks but has no lowering, so it would produce a wrong value or crash at runtime") }
@@ -15380,6 +15428,21 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     else if code == 174 {
         print("   |\n   = help: use a comparison or boolean expression in assert(...)\n")
     }
+    else if code == 178 {
+        print("   |\n   = help: the noise-symbol domain represents 256 independent measurement")
+        print("\n   =       sources per checker run. Past that the checker cannot tell whether")
+        print("\n   =       two values share a source, so the anti-garbling rule would refuse")
+        print("\n   =       every downstream combination without being able to say why. Split")
+        print("\n   =       the model across separate compilation units, or raise")
+        print("\n   =       ns_source_cap() and ns_words() together in")
+        print("\n   =       self-hosted/check/noise_sets.sio.\n")
+    }
+    else if code == 179 {
+        print("   |\n   = help: the noise-symbol interning table holds 4096 distinct source-sets")
+        print("\n   =       per checker run. Past that the checker cannot name which sources a")
+        print("\n   =       value carries. Raise ns_cap() in self-hosted/check/noise_sets.sio")
+        print("\n   =       (and ns_table_bytes()/ns_table_alloc() with it).\n")
+    }
     // Sprint 29: Do-calculus type checking (138-141)
     else if code == 138 {
         print("   |\n   = help: ensure a mediating variable exists on all directed paths, with no confounding bypasses\n")
@@ -15431,7 +15494,13 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("\n   =       precision.")
         print("\n   =")
         print("\n   =       Prove the sources disjoint, or use a correlation-aware operator")
-        print("\n   =       that takes the covariance explicitly instead of assuming zero.\n")
+        print("\n   =       that takes the covariance explicitly instead of assuming zero.")
+        print("\n   =")
+        print("\n   =       Per operator: `+` and `*` refuse any shared source; `-` is allowed")
+        print("\n   =       when every shared source is provably same-signed in both operands")
+        print("\n   =       (then the reported variance overstates, which is safe); `/` refuses")
+        print("\n   =       any shared source, because its dropped term also depends on the sign")
+        print("\n   =       of the product of the operand values, which is not tracked.\n")
     }
     else {
         // No help available for unknown errors
@@ -22549,6 +22618,11 @@ impl Checker {
             let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table)
             if knowledge_result.kind == TypeKind::TyError {
                 c = c.report_error_at(e.span, 36, 0, 0, 0)
+            }
+            // W4: mirror of the in-place spine -- interning-table exhaustion is
+            // reported (E179), never silently degraded to "unknown".
+            if ns_table_overflow_take(&!(*c.ns_table)) {
+                c = c.report_error_at(e.span, 179, 0, 0, 0)
             }
             // N3: anti-garbling gate (value path). Mirrors the in-place path so
             // the E230 rule cannot go inert on plain named-call binary checking.

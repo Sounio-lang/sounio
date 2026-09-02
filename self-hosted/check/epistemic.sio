@@ -866,10 +866,34 @@ pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeE
                 // identity handling folds it away rather than corrupting the
                 // union with an unrelated value. Sabotage leaves noise_set_id
                 // at ty_knowledge's -1 default.
+                //
+                // W4: the transfer is OP-SPECIFIC, because the coefficient
+                // SIGNS are. Membership unions the same way in every case (so
+                // ns_disjoint, and therefore the Add/Mul verdict, is unchanged
+                // from N2), but:
+                //   a - b  negates b's coefficients (ns_union_sub). That is what
+                //          lets E230 tell `x - x` (same-sign reuse: the naive
+                //          variance OVERSTATES, safe) apart from `(p - a) - a`
+                //          (opposite-sign reuse: it UNDERSTATES).
+                //   a * b  produce a first-order form in the RELATIVE basis,
+                //   a / b  whose coefficients are not comparable with the
+                //          additive ones, so ns_union_opaque marks every source
+                //          of the result sign-unknown and every later sign query
+                //          over it fails closed. A non-Knowledge operand goes
+                //          through this too: `k * c` scales k's coefficients by
+                //          a constant whose SIGN this domain does not track.
                 if !checker_ns_sabotage() {
                     let left_ns = if left_is_knowledge { left_ty.noise_set_id } else { ns_empty() }
                     let right_ns = if right_is_knowledge { right_ty.noise_set_id } else { ns_empty() }
-                    result.noise_set_id = ns_union(&!(*ns_table), left_ns, right_ns)
+                    let is_sub_lane = op == BinaryOp::OpSub
+                    let is_scale_lane = op == BinaryOp::OpMul || op == BinaryOp::OpDiv
+                    result.noise_set_id = if is_sub_lane {
+                        ns_union_sub(&!(*ns_table), left_ns, right_ns)
+                    } else if is_scale_lane {
+                        ns_union_opaque(&!(*ns_table), left_ns, right_ns)
+                    } else {
+                        ns_union(&!(*ns_table), left_ns, right_ns)
+                    }
                 }
                 checker_ns_trace_emit("union", result.noise_set_id)
                 result

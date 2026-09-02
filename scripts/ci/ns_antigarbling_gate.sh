@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NS anti-garbling (E230) acceptance — N3 gate.
+# NS anti-garbling (E230) acceptance — N3 gate, extended by W4 to Sub/Div.
 #
 # The same-source-built sabotage witness (synthesis §26): a compile-fail witness
 # proves nothing by also failing under sabotage. The control that means something
@@ -68,6 +68,24 @@ unrelated_refusal_survives_ns_disable() {
   pass "$code survives SOUNIO_NS_DISABLE (knob is NS-specific; E230 and $code causally separable)"
 }
 
+# W4: the capacity cliff must be AUDIBLE. Overflowing the noise-source cap used
+# to saturate the handle to unknown in silence, after which E230 refused every
+# downstream combination for a reason the user could not see. E178 says it.
+# Measured as "E178 present", not as rc!=0, and deliberately NOT under the NS
+# knob: SOUNIO_NS_DISABLE turns off the refusal, not the capacity accounting.
+overflow_is_loud() {
+  local label="$1" src="$2" out rc
+  [[ -f "$src" ]] || fail "$label missing fixture $src"
+  set +e
+  out=$(bash -c "ulimit -s unlimited 2>/dev/null; SOUNIO_NS_DISABLE=1 timeout 300 '$SOUC' check '$src' 2>&1")
+  rc=$?
+  set -e
+  [[ $rc -ne 0 ]] || fail "$label expected refusal, got rc=0"
+  echo "$out" | grep -E 'E178' >/dev/null \
+    || fail "$label overflowed the source cap SILENTLY (no E178): $out"
+  pass "$label overflow reported loudly with E178 (survives SOUNIO_NS_DISABLE: capacity != refusal)"
+}
+
 refuses_e230        "x+x shared source"  tests/compile-fail/ns_add_shared_source_rejected.sio
 vanishes_under_sabotage "x+x shared source" tests/compile-fail/ns_add_shared_source_rejected.sio
 refuses_e230        "top operand"        tests/compile-fail/ns_add_unknown_conservative.sio
@@ -76,6 +94,30 @@ accepts             "disjoint x+y"       tests/run-pass/ns_union_add_trace.sio
 accepts             "disjoint x*y"       tests/run-pass/ns_union_mul_trace.sio
 refuses_e230        "ident(x)+x"         tests/compile-fail/ns_add_via_identity_rejected.sio
 vanishes_under_sabotage "ident(x)+x"     tests/compile-fail/ns_add_via_identity_rejected.sio
+
+# ---- W4: Sub/Div -----------------------------------------------------------
+# The N3 scope hole. `-` is refused when the shared source's coefficient sign
+# cannot be shown non-negative (opposite-sign, or sign-unknown after a Mul/Div),
+# and `/` is refused for any shared source because its dropped term also depends
+# on the sign of the product of the operand values, which this domain does not
+# carry. Each refusal carries the same sabotage control as the N3 ones: it must
+# VANISH under SOUNIO_NS_DISABLE while E245 at the same site stays.
+refuses_e230        "(p-a)-a opposite sign"  tests/compile-fail/ns_sub_opposite_sign_rejected.sio
+vanishes_under_sabotage "(p-a)-a opposite sign" tests/compile-fail/ns_sub_opposite_sign_rejected.sio
+refuses_e230        "(a*b)-a sign-unknown"   tests/compile-fail/ns_sub_shared_source_rejected.sio
+vanishes_under_sabotage "(a*b)-a sign-unknown" tests/compile-fail/ns_sub_shared_source_rejected.sio
+refuses_e230        "x/x shared source"      tests/compile-fail/ns_div_shared_source_rejected.sio
+vanishes_under_sabotage "x/x shared source"   tests/compile-fail/ns_div_shared_source_rejected.sio
+
+# OVER-REFUSAL guards. Extending the rule to Sub/Div is only worth anything if
+# it does not become a blanket ban: a same-sign correlated subtraction OVERstates
+# (safe) and a genuinely uncorrelated Sub/Div has no covariance term at all.
+accepts             "same-sign x-x"          tests/run-pass/ns_sub_same_sign_allowed_trace.sio
+accepts             "disjoint a-b and c/d"   tests/run-pass/ns_sub_div_disjoint_ok_trace.sio
+
+# ---- W4: capacity ----------------------------------------------------------
+overflow_is_loud    "source cap 256"         tests/compile-fail/ns_source_cap_overflow_loud.sio
+
 unrelated_refusal_survives_ns_disable
 
 echo "NS_ANTIGARBLING_GATE_OK: all controls passed"

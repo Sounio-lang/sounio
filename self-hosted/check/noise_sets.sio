@@ -1,11 +1,14 @@
 // Noise-symbol sets -- the NS abstract domain.
 //
 // A Knowledge value's uncertainty carries the identity-set of the independent
-// measurement sources it derives from. This module is the interning table for
-// those sets. N1 introduced the representation; the checker now wires source
-// seeding, union, conservative joins, and proven identity-call projection into
-// TypeEntry.noise_set_id. E230 reads that metadata for Add and Mul and refuses
-// Knowledge operands whose source sets are not provably disjoint.
+// measurement sources it derives from, TOGETHER WITH the sign of each source's
+// coefficient in the value's linear (first-order) form. This module is the
+// interning table for those signed sets. N1 introduced the representation; the
+// checker wires source seeding, the op-specific transfer, conservative joins,
+// and proven identity-call projection into TypeEntry.noise_set_id. E230 reads
+// that metadata for Add, Mul, Sub and Div and refuses Knowledge operands whose
+// propagation would drop a covariance term that can only make the reported
+// variance SMALLER than the truth.
 // SOUNIO_NS_TRACE=1 exposes the dataflow, SOUNIO_NS_SABOTAGE=1 disables its
 // writes as a negative control, and SOUNIO_NS_DISABLE=1 disables only E230 so
 // the refusal witness can prove which rule fired. See check.sio for the exact
@@ -14,12 +17,38 @@
 // Handle encoding (3 states — see docs/internal/concepts/ns-antigarbling-lane-20260823.md):
 //   -1  = unknown / top   (ignorance; NEVER treated as disjoint)
 //    0  = empty / deterministic  (no uncertainty sources)
-//   >0  = interned set handle  (index+1 into the table's mask array)
+//   >0  = interned set handle  (index+1 into the table's mask arrays)
 //
-// The HANDLE is opaque; set operations (union, disjoint) dereference to the
-// canonical inline mask and re-intern. Bitwise ops act only on the inline mask,
-// never on the handle (per the codex representation contract). Source cap = 64
-// (one i64 mask); overflow saturates to unknown (conservative).
+// The HANDLE is opaque; set operations (union, disjoint, covariance sign)
+// dereference to the canonical inline masks and re-intern. Bitwise ops act only
+// on the inline masks, never on the handle (per the codex representation
+// contract).
+//
+// SIGNED REPRESENTATION (W4). Each interned set is TWO parallel bit vectors of
+// ns_words() words: `pos` and `neg`.
+//
+//   member(s)     = pos[s] | neg[s]
+//   coefficient +  <=>  pos[s] & !neg[s]
+//   coefficient -  <=>  neg[s] & !pos[s]
+//   sign unknown   <=>  pos[s] & neg[s]      (the top of the per-source sign
+//                                             lattice: BOTH bits set)
+//
+// That encoding makes the join a plain bitwise OR of both vectors -- two
+// disagreeing signs land on "unknown" automatically, which is exactly the
+// lattice's least upper bound -- and it makes every query below fail closed on
+// an unknown sign without a separate ambiguity vector.
+//
+// The signs live in the ADDITIVE (absolute) basis: Var(x +/- y) = Var x + Var y
+// +/- 2 Cov(x,y) with Cov = sum_s c_x[s] c_y[s] Var(s). A value produced by Mul
+// or Div has a linear form in the RELATIVE basis instead, whose coefficients are
+// not comparable with the additive ones, so ns_union_opaque marks every source
+// of such a result sign-unknown. Nothing downstream may then certify a sign.
+//
+// Source cap = ns_source_cap() (ns_words() * 64); overflow saturates the handle
+// to unknown (conservative) AND is reported LOUDLY by the checker (E178) rather
+// than silently degrading the whole downstream program to "refuse everything".
+// Interning-table exhaustion sets the sticky `overflow` flag, which the checker
+// drains into E179 for the same reason.
 
 // ============================================================
 // Constants
@@ -33,6 +62,13 @@ pub fn ns_unknown() -> i64 { 0 - 1 }
 // 0: empty / deterministic.
 pub fn ns_empty() -> i64 { 0 }
 
+// Words per bit vector. 4 * 64 = 256 sources.
+pub fn ns_words() -> i64 { 4 }
+
+// Independent measurement sources representable in one checker run.
+// MUST equal ns_words() * 64 -- asserted by tests/run-pass/ns_capacity_contract.sio.
+pub fn ns_source_cap() -> i64 { 256 }
+
 // Table capacity (distinct interned non-empty sets).
 fn ns_cap() -> i64 { 4096 }
 
@@ -40,26 +76,36 @@ fn ns_cap() -> i64 { 4096 }
 // Interning table
 // ============================================================
 
-// masks[i] holds the canonical inline bitmask of interned set with handle i+1.
-// count is the number of interned non-empty sets.
+// pos[i*W + w] / neg[i*W + w] hold word w of the canonical signed masks of the
+// interned set with handle i+1. count is the number of interned non-empty sets.
+// overflow is sticky: set when interning is refused because the table is full.
+//
+// 4096 sets * 4 words * 8 bytes * 2 vectors = 262144 bytes of masks.
 pub struct NoiseSetTable {
-    masks: [i64; 4096],
+    pos: [i64; 16384],
+    neg: [i64; 16384],
     count: i64,
+    overflow: i64,
 }
 
-pub fn ns_table_new() -> NoiseSetTable {
-    NoiseSetTable { masks: [0; 4096], count: 0 }
-}
+// Byte size of NoiseSetTable, kept next to the struct so the heap_alloc below
+// and the capacity-contract witness read the SAME number.
+// 16384*8 + 16384*8 + 8 + 8 = 262160.
+pub fn ns_table_bytes() -> i64 { 262160 }
 
 // Heap-allocated table, mirroring struct_table_alloc()/fn_sig_table_alloc()
 // (self-hosted/check/defs.sio) — a *mut field on Checker rather than an
 // inline value, so the noise-symbol table does not grow the by-value Checker
 // struct (already ~164KB and SRET-fragile; see the comment on
 // checker_check_measure_expr_inplace in check.sio). heap_alloc zeroes the
-// block, which is exactly ns_table_new()'s value (masks all 0, count 0) --
+// block, which is exactly the empty table (all masks 0, count 0, overflow 0) --
 // see fn_sig_table_alloc's "calloc zeroes" comment for the same contract.
+//
+// There is deliberately no by-value ns_table_new(): a 256KB struct literal
+// would be returned through the stack and this compiler warns on (and has
+// miscompiled) frames that large. The table is only ever reached by pointer.
 pub fn ns_table_alloc() -> *mut NoiseSetTable with Alloc {
-    heap_alloc(32776) as *mut NoiseSetTable
+    heap_alloc(262160) as *mut NoiseSetTable
 }
 
 // Sentinel for Checker.last_call_arg_ns (check.sio, N2 phase): "no
@@ -70,65 +116,136 @@ pub fn ns_table_alloc() -> *mut NoiseSetTable with Alloc {
 pub fn ns_arg_sentinel() -> i64 { 0 - 2 }
 
 // ============================================================
-// Mask helpers (inline, source cap 64)
+// Scratch masks
 // ============================================================
 
-// Single-source mask: bit `src`. src outside [0,63] saturates to 0 here; the
-// caller maps that to unknown via ns_singleton.
-fn ns_bit(src: i64) -> i64 {
-    if src < 0 { 0 }
-    else if src > 63 { 0 }
-    else {
-        let shift = src as u8
-        ((1 as i64) << shift) as i64
+// The domain ops build their result here and then intern it, rather than
+// threading 2*ns_words() mask words through a call signature: imported calls
+// with more than 8 parameters fail native codegen
+// (docs/compiler/KNOWN_LIMITATIONS.md), and `&![T; N]` parameters are the
+// documented JIT hazard. The checker is single-threaded and every use below is
+// confined to a single non-reentrant call, so the scratch cannot be observed
+// half-written by another operation.
+var NS_SCRATCH_POS: [i64; 4] = [0; 4]
+var NS_SCRATCH_NEG: [i64; 4] = [0; 4]
+
+fn ns_scratch_clear() with Mut {
+    var w: i64 = 0
+    while w < 4 {
+        NS_SCRATCH_POS[w as usize] = 0
+        NS_SCRATCH_NEG[w as usize] = 0
+        w = w + 1
     }
 }
 
 // ============================================================
-// Handle <-> mask
+// Bit helpers
 // ============================================================
 
-// Dereference a handle to its inline mask. unknown/top -> a full mask is not
-// representable; callers must special-case unknown BEFORE calling ns_deref.
-// empty -> 0. interned -> masks[handle-1].
-fn ns_deref(table: &NoiseSetTable, handle: i64) -> i64 {
+// Which word holds source `src`. src >> 6 == src / 64, without the Div effect.
+fn ns_word_index(src: i64) -> i64 {
+    let six = 6 as u8
+    src >> six
+}
+
+// The bit for `src` within its word. src & 63 == src % 64.
+fn ns_bit_in_word(src: i64) -> i64 {
+    let shift = (src & 63) as u8
+    ((1 as i64) << shift) as i64
+}
+
+// ============================================================
+// Handle -> mask words
+// ============================================================
+
+// Word `w` of a handle's positive-coefficient vector. unknown/top is not
+// representable as a mask; callers must special-case unknown BEFORE calling.
+// empty -> 0. interned -> pos[(handle-1)*W + w].
+fn ns_pos_word(table: &NoiseSetTable, handle: i64, w: i64) -> i64 {
     if handle <= 0 { 0 }
     else {
         let idx = handle - 1
-        if idx < table.count { table.masks[idx as usize] } else { 0 }
+        if idx < table.count { table.pos[(idx * 4 + w) as usize] } else { 0 }
     }
 }
 
-// Intern an inline mask, returning its canonical handle.
-// mask 0 -> empty handle 0. Existing mask -> its handle. New -> append.
-// Table full -> unknown (conservative: we lose the identity, so must not claim
-// disjointness later).
-pub fn ns_intern(table: &!NoiseSetTable, mask: i64) -> i64 with Mut, Panic, Div {
-    if mask == 0 { return 0 }
+fn ns_neg_word(table: &NoiseSetTable, handle: i64, w: i64) -> i64 {
+    if handle <= 0 { 0 }
+    else {
+        let idx = handle - 1
+        if idx < table.count { table.neg[(idx * 4 + w) as usize] } else { 0 }
+    }
+}
+
+// ============================================================
+// Interning
+// ============================================================
+
+// Intern the scratch masks, returning the canonical handle.
+// All-zero -> empty handle 0. Existing pair -> its handle. New -> append.
+// Table full -> unknown, and the sticky overflow flag is raised so the checker
+// can say so out loud (conservative: we lose the identity, so we must not claim
+// disjointness later, and the user must be told we stopped being able to).
+fn ns_intern_scratch(table: &!NoiseSetTable) -> i64 with Mut, Panic, Div {
+    var is_empty = true
+    var w: i64 = 0
+    while w < 4 {
+        if NS_SCRATCH_POS[w as usize] != 0 { is_empty = false }
+        if NS_SCRATCH_NEG[w as usize] != 0 { is_empty = false }
+        w = w + 1
+    }
+    if is_empty { return 0 }
     var i: i64 = 0
     while i < table.count {
-        if table.masks[i as usize] == mask { return i + 1 }
+        var same = true
+        var k: i64 = 0
+        while k < 4 {
+            if table.pos[(i * 4 + k) as usize] != NS_SCRATCH_POS[k as usize] { same = false }
+            if table.neg[(i * 4 + k) as usize] != NS_SCRATCH_NEG[k as usize] { same = false }
+            k = k + 1
+        }
+        if same { return i + 1 }
         i = i + 1
     }
-    if table.count >= ns_cap() { return ns_unknown() }
+    if table.count >= ns_cap() {
+        table.overflow = 1
+        return ns_unknown()
+    }
     let idx = table.count
-    table.masks[idx as usize] = mask
+    var j: i64 = 0
+    while j < 4 {
+        table.pos[(idx * 4 + j) as usize] = NS_SCRATCH_POS[j as usize]
+        table.neg[(idx * 4 + j) as usize] = NS_SCRATCH_NEG[j as usize]
+        j = j + 1
+    }
     table.count = idx + 1
     idx + 1
 }
 
-// A freshly measured source becomes a singleton set. Out-of-range source ->
-// unknown (we cannot represent it in the 64-bit mask, so stay conservative).
+// Drain the sticky interning-table overflow flag. Returns true exactly once per
+// overflow event, so the checker reports E179 without repeating it at every
+// subsequent operation.
+pub fn ns_table_overflow_take(table: &!NoiseSetTable) -> bool with Mut {
+    if table.overflow == 0 { return false }
+    table.overflow = 0
+    true
+}
+
+// A freshly measured source becomes a singleton set with coefficient +1.
+// Out-of-range source -> unknown (we cannot represent it, so stay conservative;
+// the checker reports E178 at the same site so the loss is not silent).
 pub fn ns_singleton(table: &!NoiseSetTable, src: i64) -> i64 with Mut, Panic, Div {
     if src < 0 { return ns_unknown() }
-    if src > 63 { return ns_unknown() }
-    let m = ns_bit(src)
+    if src >= ns_source_cap() { return ns_unknown() }
+    let bit = ns_bit_in_word(src)
     // Fail-closed (grok-4.6 N1 review): a real source must NEVER intern to the
-    // empty mask. If the bit for src is 0 (e.g. any shift-UB at the sign bit 63),
-    // saturate to unknown rather than hand back handle 0 (which would certify the
-    // source independent of itself and drop it from unions).
-    if m == 0 { return ns_unknown() }
-    ns_intern(table, m)
+    // empty mask. If the bit for src is 0 (e.g. any shift-UB at a word's sign
+    // bit), saturate to unknown rather than hand back handle 0 (which would
+    // certify the source independent of itself and drop it from unions).
+    if bit == 0 { return ns_unknown() }
+    ns_scratch_clear()
+    NS_SCRATCH_POS[ns_word_index(src) as usize] = bit
+    ns_intern_scratch(table)
 }
 
 // ============================================================
@@ -144,39 +261,130 @@ fn ns_handle_valid(table: &NoiseSetTable, h: i64) -> bool {
 }
 
 // ============================================================
-// Domain operations (transfer + query)
+// Domain operations (transfer)
 // ============================================================
 
-// Union of two source-sets (the add/mul transfer). Unknown absorbs (top).
-// An INVALID positive handle saturates to unknown (we lost the identity, so we
-// must not silently drop it through the empty identity). empty is the identity.
-// Validity is checked BEFORE the empty shortcuts and before any deref.
+// Additive union -- the transfer for Add, for Rem, and for every CFG join
+// (if/else, match, loop-carried reassignment). Unknown absorbs (top). An
+// INVALID positive handle saturates to unknown (we lost the identity, so we
+// must not silently drop it through the empty identity). Empty is the identity
+// because its mask words are all zero. Validity is checked BEFORE any deref.
+//
+// Signs OR together per source, so a source that is + in one operand and - in
+// the other becomes sign-unknown (pos & neg) -- the join of the sign lattice.
 pub fn ns_union(table: &!NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
     if a < 0 { return ns_unknown() }
     if b < 0 { return ns_unknown() }
     if a > table.count { return ns_unknown() }   // invalid positive -> top
     if b > table.count { return ns_unknown() }
-    if a == 0 { return b }
-    if b == 0 { return a }
-    let ma = ns_deref(table, a)
-    let mb = ns_deref(table, b)
-    ns_intern(table, ma | mb)
+    var w: i64 = 0
+    while w < 4 {
+        NS_SCRATCH_POS[w as usize] = ns_pos_word(table, a, w) | ns_pos_word(table, b, w)
+        NS_SCRATCH_NEG[w as usize] = ns_neg_word(table, a, w) | ns_neg_word(table, b, w)
+        w = w + 1
+    }
+    ns_intern_scratch(table)
 }
+
+// Subtractive transfer, `a - b`. Identical to ns_union except that b's
+// coefficients enter NEGATED: b's positives become the result's negatives and
+// vice versa. This is what lets `(p - a) - a` be seen as an OPPOSITE-sign reuse
+// of `a` (Cov < 0, so the independence-assuming variance UNDERSTATES) while
+// `x - x` stays a same-sign reuse (Cov > 0, which OVERSTATES and is safe).
+pub fn ns_union_sub(table: &!NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    if a < 0 { return ns_unknown() }
+    if b < 0 { return ns_unknown() }
+    if a > table.count { return ns_unknown() }
+    if b > table.count { return ns_unknown() }
+    var w: i64 = 0
+    while w < 4 {
+        NS_SCRATCH_POS[w as usize] = ns_pos_word(table, a, w) | ns_neg_word(table, b, w)
+        NS_SCRATCH_NEG[w as usize] = ns_neg_word(table, a, w) | ns_pos_word(table, b, w)
+        w = w + 1
+    }
+    ns_intern_scratch(table)
+}
+
+// Multiplicative transfer, `a * b` and `a / b`. Membership unions as usual, but
+// the result's first-order form lives in the RELATIVE basis (GUM shortcut
+// Var(xy)/(xy)^2 ~= relVar x + relVar y), whose coefficients are not comparable
+// with the additive signs this domain tracks. Every source of the result is
+// therefore marked sign-unknown (pos & neg both set), which makes every later
+// sign query over it fail closed.
+pub fn ns_union_opaque(table: &!NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    if a < 0 { return ns_unknown() }
+    if b < 0 { return ns_unknown() }
+    if a > table.count { return ns_unknown() }
+    if b > table.count { return ns_unknown() }
+    var w: i64 = 0
+    while w < 4 {
+        let m = ns_pos_word(table, a, w) | ns_neg_word(table, a, w)
+            | ns_pos_word(table, b, w) | ns_neg_word(table, b, w)
+        NS_SCRATCH_POS[w as usize] = m
+        NS_SCRATCH_NEG[w as usize] = m
+        w = w + 1
+    }
+    ns_intern_scratch(table)
+}
+
+// ============================================================
+// Domain operations (query)
+// ============================================================
 
 // Disjointness certificate. TRUE only when both sets are KNOWN, VALID, and share
 // no source. Unknown (-1) is NEVER disjoint. An INVALID positive handle is NEVER
 // disjoint (fail closed — an unrepresentable set cannot be certified independent).
 // Empty is disjoint from every other known, valid set because deterministic
 // values carry no shared uncertainty. Unknown and invalid handles fail closed
-// before the empty shortcuts and before deref.
-pub fn ns_disjoint(table: &NoiseSetTable, a: i64, b: i64) -> bool {
+// before the empty shortcuts and before any deref. Signs are irrelevant here:
+// membership alone decides.
+pub fn ns_disjoint(table: &NoiseSetTable, a: i64, b: i64) -> bool with Mut {
     if a < 0 { return false }
     if b < 0 { return false }
     if !ns_handle_valid(table, a) { return false }   // invalid positive -> not disjoint
     if !ns_handle_valid(table, b) { return false }
     if a == 0 { return true }
     if b == 0 { return true }
-    let ma = ns_deref(table, a)
-    let mb = ns_deref(table, b)
-    (ma & mb) == 0
+    var shared = false
+    var w: i64 = 0
+    while w < 4 {
+        let ma = ns_pos_word(table, a, w) | ns_neg_word(table, a, w)
+        let mb = ns_pos_word(table, b, w) | ns_neg_word(table, b, w)
+        if (ma & mb) != 0 { shared = true }
+        w = w + 1
+    }
+    !shared
+}
+
+// Sign-of-covariance certificate, the SUBTRACTIVE lane's escape hatch.
+//
+// Cov(a,b) = sum_s c_a[s] c_b[s] Var(s), and Var(s) >= 0. So Cov(a,b) >= 0
+// whenever every shared source contributes a NON-NEGATIVE coefficient product.
+// In this encoding a negative product needs one operand positive at s and the
+// other negative at s, i.e. a bit in (pos_a & neg_b) | (neg_a & pos_b). A
+// sign-unknown source has BOTH its bits set, so it lands in that expression
+// against any membership in the other operand and is refused -- the fail-closed
+// behaviour the unknown handle already has.
+//
+// TRUE therefore means: both handles known and valid, and Cov(a,b) >= 0 is
+// PROVEN. It is not a claim that the sets are disjoint, and it says nothing
+// about the sign of the operands' VALUES -- which is why it is sound for `-`
+// (where the dropped term is -2Cov) and NOT used for `/` (where the dropped
+// term is -2Cov/(xy) and the sign of xy is not tracked by this domain).
+pub fn ns_cov_nonneg(table: &NoiseSetTable, a: i64, b: i64) -> bool with Mut {
+    if a < 0 { return false }
+    if b < 0 { return false }
+    if !ns_handle_valid(table, a) { return false }
+    if !ns_handle_valid(table, b) { return false }
+    var opposed = false
+    var w: i64 = 0
+    while w < 4 {
+        let pa = ns_pos_word(table, a, w)
+        let na = ns_neg_word(table, a, w)
+        let pb = ns_pos_word(table, b, w)
+        let nb = ns_neg_word(table, b, w)
+        if ((pa & nb) | (na & pb)) != 0 { opposed = true }
+        w = w + 1
+    }
+    !opposed
 }
