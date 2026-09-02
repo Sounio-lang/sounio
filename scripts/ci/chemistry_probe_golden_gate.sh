@@ -15,7 +15,7 @@ SOUC="${SOUC:-$ROOT_DIR/bin/souc}"
 GOLD="$ROOT_DIR/benchmarks/chemistry/golden"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/chem-probe-golden.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
-PROBES=(rep_traj_bug rep_stagnation rep_adiabatic_bug)
+PROBES=(rep_traj_bug rep_stagnation rep_adiabatic_bug gbs_oracle)
 FAILS=0
 echo "[chem-golden] lean_single: $(md5sum "$ROOT_DIR/bin/souc-lean-single-x86_64" 2>/dev/null | cut -c1-8) bin/souc-lean-single-x86_64"
 for p in "${PROBES[@]}"; do

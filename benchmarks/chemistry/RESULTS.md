@@ -1791,6 +1791,72 @@ band these differences sit in. A difference of a few ULP has no stable ratio.
 > replica contributes nothing measurable to the 2.074e-11**, and that line of
 > the table stands.
 
+> **Resolved 2026-09-02 with a second integrator, in Sounio.** The label
+> *unexplained* above was owed to the absence of an independent instrument:
+> a self-difference cannot say which of the two runs is wrong. There is now a
+> second method — Gragg-Bulirsch-Stoer, the modified midpoint rule with
+> Richardson extrapolation in `h²`, sharing this replica's right-hand side
+> verbatim so that only the time stepping differs:
+>
+> ```sh
+> SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run examples/chemistry/gbs_oracle.sio
+> ```
+>
+> **The oracle is characterised before it is used**, because Richardson
+> extrapolation divides by `((n_k/n_j)² − 1)` and so amplifies roundoff as the
+> depth grows. Sweeping depth against subdivision sequence (self-difference
+> between macro-steps `H = 1e-6` and `5e-7`, worst over species):
+>
+> | depth | order | seq 2,4,6,8,10,12,14,16 | seq 2,4,6,8,12,16,24,32 |
+> |---|---|---|---|
+> | 3 | 6 | 5.730e-09 | 5.730e-09 |
+> | 4 | 8 | 8.413e-11 | 8.413e-11 |
+> | 5 | 10 | 8.942e-13 | 6.257e-13 |
+> | 6 | 12 | **5.734e-14** | **1.421e-14** |
+> | 7 | 14 | 3.066e-13 | 2.314e-14 |
+> | 8 | 16 | 2.581e-13 | 1.556e-14 |
+>
+> Both sequences bottom out at depth 6 and rise afterwards: that minimum **is**
+> the truncation-to-roundoff crossover of the extrapolation, measured in place.
+> The wider sequence bottoms out four times lower, so the instrument used below
+> is depth 6 with 2,4,6,8,12,16,24,32, resolution **1.421e-14** worst over
+> species, and per species: H2 6.198e-15, H 1.421e-14, O 3.702e-15,
+> O2 5.007e-15, OH 5.910e-15, H2O 1.334e-14, HO2 2.273e-15, H2O2 3.107e-15.
+>
+> **The halving ladder against that independent method**, relative distance
+> ×1e18, each species readable against its own resolution above:
+>
+> | dt | H2 | H | O | O2 | OH | H2O | HO2 | H2O2 |
+> |---|---|---|---|---|---|---|---|---|
+> | 1e-8 | 10755 | 4904 | 4841 | 357 | 16380 | 5898 | 2652 | 32629 |
+> | 5e-9 | 10573 | 7442 | 1851 | 2861 | 3546 | 5618 | 757 | 1709 |
+> | 2.5e-9 | 8385 | 40254 | 30185 | 2146 | 29552 | 45365 | 1705 | 24083 |
+> | 1.25e-9 | 729 | 63257 | 78596 | 13056 | 77005 | 60955 | 14212 | 73805 |
+>
+> At `dt = 5e-9` seven of eight distances sit **below** the oracle's own
+> per-species resolution: there the replica agrees with an independent method
+> to within the oracle's noise. At `dt = 1.25e-9`, four steps of refinement
+> later, seven of eight are **above** it, by 2.6× to 24×. **The replica's
+> distance to an external reference has a minimum and then grows as the step
+> shrinks.** Growth measured against a different method cannot be truncation
+> being resolved, and cannot be an artefact of comparing a run with itself.
+>
+> So the 12–140× of the table above is no longer unexplained: it is the
+> **right-hand branch of the total-error curve of a fixed-step method**, where
+> accumulation over 10⁴ to 8×10⁴ steps overtakes a truncation term that is
+> already spent. **What is still owed is the exponent, not the mechanism.**
+> Per halving the observed factors are 2.1× to 6.6× (from the 4.6×–43× above
+> over two halvings), and a systematic accumulation predicts 2×; the fastest
+> species exceed that and no model here derives 6.6×. The location of the
+> minimum is bracketed between `1e-8` and `2.5e-9` and is **not** pinned,
+> because the `5e-9` row is at the instrument's floor.
+>
+> The bound that the residual line depends on is unchanged and now has
+> independent support: at `dt = 1e-8` the replica is 3.263e-14 from the second
+> method, three orders below the 2.074e-11 residual, so **the replica still
+> contributes nothing measurable to it**. It also follows that `dt = 1e-8` was
+> a fortunate choice: refining it does not improve this replica, it degrades it.
+
 ### The honest statement of the central result
 
 - **The published gap of 2.660e-06 is real, is one rounded constant, and is
