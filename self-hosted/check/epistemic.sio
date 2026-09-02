@@ -873,8 +873,14 @@ pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeE
                 // from N2), but:
                 //   a - b  negates b's coefficients (ns_union_sub). That is what
                 //          lets E230 tell `x - x` (same-sign reuse: the naive
-                //          variance OVERSTATES, safe) apart from `(p - a) - a`
-                //          (opposite-sign reuse: it UNDERSTATES).
+                //          variance does not UNDERstate -- naive - true = 2Cov
+                //          with Cov >= 0, so it is >= the truth, exactly equal
+                //          when Cov = 0 -- safe) apart from `(p - a) - a`
+                //          (opposite-sign reuse: it UNDERSTATES). The `x - x`
+                //          acceptance holds only while every source of x has a
+                //          KNOWN sign; once x has been through Mul/Div, or
+                //          through a join that met + with -, its sources are
+                //          top and the same shape is refused.
                 //   a * b  produce a first-order form in the RELATIVE basis,
                 //   a / b  whose coefficients are not comparable with the
                 //          additive ones, so ns_union_opaque marks every source
@@ -885,14 +891,28 @@ pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeE
                 if !checker_ns_sabotage() {
                     let left_ns = if left_is_knowledge { left_ty.noise_set_id } else { ns_empty() }
                     let right_ns = if right_is_knowledge { right_ty.noise_set_id } else { ns_empty() }
+                    //
+                    // THE DEFAULT IS OPAQUE, NOT UNION. Only OpAdd may keep the
+                    // additive signs; every other operator either negates them
+                    // (OpSub), leaves the additive basis entirely (OpMul/OpDiv),
+                    // or is not modelled at all. `ns_union` as the fallback was a
+                    // FAIL-OPEN (caught by math-review, grok-4.6, 2026-09-02):
+                    // OpRem reached it, so `r = a % b` published a's and b's
+                    // additive signs as if they were r's, and a later `r - a`
+                    // could then collect a Cov >= 0 certificate from
+                    // ns_cov_nonneg that the real Jacobian does not support --
+                    // understating the variance, which is exactly what E230
+                    // exists to prevent. An unmodelled operator must reach
+                    // ns_union_opaque so every source of its result is
+                    // sign-unknown and every later sign query fails closed.
+                    let is_add_lane = op == BinaryOp::OpAdd
                     let is_sub_lane = op == BinaryOp::OpSub
-                    let is_scale_lane = op == BinaryOp::OpMul || op == BinaryOp::OpDiv
-                    result.noise_set_id = if is_sub_lane {
-                        ns_union_sub(&!(*ns_table), left_ns, right_ns)
-                    } else if is_scale_lane {
-                        ns_union_opaque(&!(*ns_table), left_ns, right_ns)
-                    } else {
+                    result.noise_set_id = if is_add_lane {
                         ns_union(&!(*ns_table), left_ns, right_ns)
+                    } else if is_sub_lane {
+                        ns_union_sub(&!(*ns_table), left_ns, right_ns)
+                    } else {
+                        ns_union_opaque(&!(*ns_table), left_ns, right_ns)
                     }
                 }
                 checker_ns_trace_emit("union", result.noise_set_id)

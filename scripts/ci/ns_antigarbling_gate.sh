@@ -127,6 +127,13 @@ vanishes_under_sabotage "(a*b)-a sign-unknown" tests/compile-fail/ns_sub_shared_
 refuses_e230        "x/x shared source"      tests/compile-fail/ns_div_shared_source_rejected.sio
 vanishes_under_sabotage "x/x shared source"   tests/compile-fail/ns_div_shared_source_rejected.sio
 
+# The escape hatch's own guard. Sub is allowed when ns_cov_nonneg certifies
+# Cov >= 0, so the certificate is only as good as the signs feeding it: an
+# operator whose result carries signs nobody derived can launder a false
+# certificate through it. OpRem did exactly that until math-review caught it.
+refuses_e230        "(a%b)-a via opaque Rem" tests/compile-fail/ns_rem_result_is_opaque.sio
+vanishes_under_sabotage "(a%b)-a via opaque Rem" tests/compile-fail/ns_rem_result_is_opaque.sio
+
 # OVER-REFUSAL guards. Extending the rule to Sub/Div is only worth anything if
 # it does not become a blanket ban: a same-sign correlated subtraction OVERstates
 # (safe) and a genuinely uncorrelated Sub/Div has no covariance term at all.
