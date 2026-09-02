@@ -733,3 +733,26 @@ modular checker (`self-hosted/check/`) and is not affected by this specific
 mechanism. Changing `lean_single.sio` risks perturbing that fixed point and
 was judged out of scope for this measurability pass; #1494 stays open for
 whoever picks option 1, 2, or the remainder of option 3.
+
+## `f128` is not a working numeric type on either engine (measured 2026-09-02, issue #2387)
+
+- **Madaros** refuses `f128` at parse (`module failed to parse`).
+- **lean_single** accepts the type name and computes in **f64**: with
+  `one: f128 = 1.0` and `tiny` built by twenty exact divisions by ten,
+  `(one + tiny) - one == 0`; the number of halvings of `e` until
+  `(one + e) - one == 0` is **53** — the f64 significand — where binary128
+  gives 113. Repro: `examples/numerics/f128_is_f64_probe.sio`.
+- Consequence for `benchmarks/chemistry/RESULTS.md` §7.7: the 12–140× growth
+  of the replica's self-difference under step halving, left *unexplained*
+  there, is exactly the question a genuine `f128` reference integration would
+  settle; it is blocked by the compiler, not by choice.
+- `CLAUDE.md` §13 records the engine split the other way round (E218 under
+  lean_single); that entry is stale as of this measurement.
+
+## Derived unit types are not expressible; units are lost at call boundaries (measured 2026-09-02, issue #2388)
+
+See `docs/audit/DIMENSIONAL_TYPING_GAP_2026-09-02.md` and the three
+reproductions in `tests/known-gaps/units/`. Direct `mol + K` is rejected on
+both engines; `mol/cm3` does not parse on either; a quotient of unit-typed
+values loses its dimension on lean_single; a `K` value passes into an `f64`
+parameter unchecked.
