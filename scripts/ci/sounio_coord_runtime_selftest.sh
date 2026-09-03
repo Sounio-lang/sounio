@@ -220,6 +220,7 @@ cp "$ROOT_DIR/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v7" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v8" \
   "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v9" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v10" \
   "$REPO/tools/loom/"
 mkdir -p "$REPO/tools/loom/evidence"
 cp "$ROOT_DIR/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt" \
@@ -233,6 +234,7 @@ cp "$ROOT_DIR/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v8-20260902.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v9-20260903.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v9-20260902.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v10-20260903.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-drain-first-v1-20260831.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-drain-frozen-v1-20260831.txt" \
   "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-reconcile-first-v1-20260901.txt" \
