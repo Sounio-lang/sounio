@@ -487,11 +487,37 @@ and no definition of the quantity it measures.
 Verified against the oracle rather than by inspection — all 29 net rates of
 progress against `Cantera.net_rates_of_progress`, radical-loaded state:
 
-| | worst relative deviation |
-|---|---|
-| shipped reverse path | **7.877e-07** (the R_cal residual of §1.5, since closed) |
-| `reac - nu` | **1.838e+00** (184%) |
-| R16 specifically | shipped 2.860e-08, bug 5.046e-01 |
+```sh
+python3 benchmarks/chemistry/rep_prodfix.py
+```
+
+| | worst relative deviation, published regime | after #2382 |
+|---|---|---|
+| shipped reverse path | **7.877e-07** (the R_cal residual of §1.5) | **8.442e-15** |
+| `reac - nu` | **1.838e+00** (184%) | **1.838e+00**, unchanged |
+| R16 specifically | shipped **2.860e-08**, bug 5.046e-01 | shipped **4.134e-15**, bug 5.046e-01 |
+
+> **Re-measured 2026-09-03, and the second column is new.** The first column
+> was measured before the gas constant was aligned; #2382 has since merged, so
+> the producer no longer runs in that regime and the numbers cannot be left
+> standing unqualified. Re-running it now gives the second column: the shipped
+> path collapses to the double-precision floor, and the defect's magnitude does
+> not move at all — 1.838e+00 and 5.046e-01 to four figures in both regimes.
+> That contrast is the section's point. **The defect is a property of the
+> stoichiometry; the floor beneath it was a property of the constant.**
+>
+> The published-regime figures are reproducible on demand rather than trusted:
+> setting `R_CAL = 1.9872041` in `gri30_h2_python_replica.py` and re-running
+> returns R16's shipped deviation to exactly **2.860e-08**, which is how the
+> first column was attributed rather than assumed.
+>
+> One further correction, found by the snapshot verifier and not by any gate
+> here: this producer built its radical-loaded state from `1/(82.057·T)` while
+> every sibling had moved to `P0/(R·T)·1e-6`. It is aligned in the same commit.
+> The change is 5.7e-06 in the state and moves the shipped floor from 9.204e-15
+> to 8.442e-15; the buggy column does not move by a single bit, because R16's
+> forward term depends only on the fixed radical seeds, which the molar volume
+> does not touch.
 
 ## 3. Standard-state reference pressure — no defect present
 

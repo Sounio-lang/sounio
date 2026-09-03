@@ -86,7 +86,7 @@ def main():
     print("'fix' is a no-op relative to the shipped code; only the buggy form differs.")
 
     # (1) radical-loaded state: reverse terms must carry real flux
-    mtot = 1.0 / (82.057 * T)
+    mtot = 101325.0 / (8.31446261815324 * T) * 1e-6
     c = {s: 0.0 for s in rep.SP}
     c["H2"], c["O2"], c["N2"] = mtot * 0.02, mtot * 0.01, mtot * 0.97
     c["H"], c["OH"], c["O"] = 1e-9, 1e-10, 1e-10
