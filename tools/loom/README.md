@@ -40,6 +40,9 @@ bin/sounio-loom fleet-reconcile --apply
 bin/sounio-loom list
 bin/sounio-loom tui
 bin/sounio-loom serve --bind 127.0.0.1 --port 8787
+bin/sounio-loom message-serve --bind 127.0.0.1 --port 8789 \
+  --token-file /private/path/loom-message.cap \
+  --agent founder-ui --lane loom-apple
 bin/sounio-loom export-events-arrow --out loom-events.arrow
 bin/sounio-loom verify-events-arrow --file loom-events.arrow
 bin/sounio-loom beagle-serve --bind 127.0.0.1 --port 4372
@@ -66,6 +69,15 @@ bin/sounio-loom obligation-tui
 bin/sounio-loom obligation-serve --bind 127.0.0.1 --port 8788
 bin/sounio-loom obligation-supervise --state-dir PATH
 ```
+
+`message-serve` is a separate authenticated command plane. Its token file must
+be a regular file owned by the current user with no group/world permissions.
+The server fixes sender agent and lane at startup, accepts only `info` or
+`request`, invokes the durable coordination runtime without a shell, and
+returns `202` only after parsing the runtime's `SENT` receipt. Runtime errors or
+the eight-second runtime deadline return a fail-closed refusal. The endpoint is
+loopback-only unless `--allow-remote` is explicit, and audit lines never contain
+the bearer token or message body.
 
 ## Subprocess Membrane
 

@@ -159,7 +159,8 @@ command -v openssl >/dev/null 2>&1 || {
   exit 1
 }
 
-dune build --root "$ROOT_DIR/tools/loom" src/loom.exe
+dune build --root "$ROOT_DIR/tools/loom" \
+  src/loom.exe message_bridge/loom_message_bridge.exe
 if [[ -z "${SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT:-}" || \
   -z "${SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT:-}" ]]; then
   prepare_frozen_toolchain

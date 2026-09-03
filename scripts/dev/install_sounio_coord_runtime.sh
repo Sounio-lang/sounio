@@ -110,6 +110,12 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-loom-runtime" ]] || \
       die "installed runtime declares Loom but omits its OCaml kernel: $runtime_id"
   fi
+  if grep -q '^capability=loom-authenticated-message-bridge-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-message-runtime" ]] || \
+      die "installed runtime declares the authenticated message bridge but omits its OCaml runtime: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" loom_message_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-message-runtime"
+  fi
   if grep -q '^capability=loom-transactional-custody-transfer-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-custody-transfer-runtime" ]] || \
@@ -592,6 +598,8 @@ loom_witness_mesh_v1_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_wi
 loom_witness_epoch_handoff_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_witness_epoch_handoff_adapter.sh"
 loom_witness_epoch_transparency_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_witness_epoch_transparency_adapter.sh"
 loom_project="$SOURCE_ROOT/tools/loom"
+loom_message_source="$loom_project/message_bridge/loom_message_bridge.ml"
+loom_message_dune="$loom_project/message_bridge/dune"
 loom_language_authority_entrypoint="$SOURCE_ROOT/tools/loom/language_authority_main.sio"
 loom_language_authority_module="$SOURCE_ROOT/stdlib/coordination/loom_language_authority.sio"
 loom_language_authority_freeze="$SOURCE_ROOT/tools/loom/language_authority.freeze.v1"
@@ -775,6 +783,8 @@ for product_exec_ingress_source in \
   [[ -f "$product_exec_ingress_source" ]] ||
     die "Loom product ExecIngress capsule is incomplete: $product_exec_ingress_source"
 done
+[[ -f "$loom_message_source" && -f "$loom_message_dune" ]] || \
+  die "Loom authenticated message bridge source bundle is incomplete"
 [[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_arrow.ml" && \
   -f "$loom_project/src/loom_epistemic.ml" && \
   -f "$loom_project/src/loom_exec.ml" && \
@@ -810,6 +820,7 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 
 "$loom_build_source" >/dev/null
 loom_binary="$loom_project/_build/default/src/loom.exe"
+loom_message_binary="$loom_project/_build/default/message_bridge/loom_message_bridge.exe"
 loom_language_authority_binary="$loom_project/.runtime/sounio-loom-language-authority-runtime"
 loom_custody_transfer_binary="$loom_project/_build/default/src/sounio-loom-custody-transfer-runtime"
 loom_execution_outcome_binary="$loom_project/.runtime/sounio-loom-execution-outcome-runtime"
@@ -828,6 +839,8 @@ loom_witness_epoch_handoff_binary="$loom_project/_build/default/src/sounio-loom-
 loom_witness_epoch_transparency_binary="$loom_project/_build/default/src/sounio-loom-witness-epoch-transparency-runtime"
 loom_product_activation_resident_binary="$loom_project/.runtime/sounio-loom-resident-membrane-runtime-v5"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
+[[ -x "$loom_message_binary" ]] || \
+  die "Loom build omitted its authenticated message bridge runtime"
 [[ -x "$loom_language_authority_binary" ]] || \
   die "Loom build omitted its frozen Sounio language-authority runtime"
 [[ -x "$loom_custody_transfer_binary" ]] || \
@@ -1048,6 +1061,7 @@ bundle_sources=(
   "$fleet_source" "$fleetd_source" "$fleet_model_source"
   "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier"
   "$loom_build_source" "$loom_language_authority_build_source"
+  "$loom_message_source" "$loom_message_dune"
   "$loom_language_authority_entrypoint" "$loom_language_authority_module"
   "$loom_language_authority_freeze"
   "$loom_custody_transfer_build_source" "$loom_custody_transfer_entrypoint"
@@ -1163,6 +1177,7 @@ else
   install -m 0755 "$fleet_model_generator" "$stage/bin/sounio-fleet-tla-sabotage"
   install -m 0755 "$fleet_trace_verifier" "$stage/bin/sounio-fleet-trace-verify"
   install -m 0755 "$loom_binary" "$stage/bin/sounio-loom-runtime"
+  install -m 0755 "$loom_message_binary" "$stage/bin/sounio-loom-message-runtime"
   install -m 0755 "$loom_language_authority_binary" \
     "$stage/bin/sounio-loom-language-authority-runtime"
   install -m 0644 "$loom_language_authority_freeze" \
@@ -1242,6 +1257,9 @@ else
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
   coord_runtime_sha256="$(sha256sum "$stage/bin/sounio-coord-runtime" | awk '{print $1}')"
   loom_runtime_sha256="$(sha256sum "$stage/bin/sounio-loom-runtime" | awk '{print $1}')"
+  loom_message_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-message-runtime" | awk '{print $1}'
+  )"
   loom_language_authority_policy_manifest_sha256="$(
     sha256sum "$stage/policy/language-authority/tools/loom/language_authority.freeze.v1" | awk '{print $1}'
   )"
@@ -1365,6 +1383,7 @@ else
     printf 'bundle_sha256=%s\n' "$bundle_sha"
     printf 'coord_runtime_sha256=%s\n' "$coord_runtime_sha256"
     printf 'loom_runtime_sha256=%s\n' "$loom_runtime_sha256"
+    printf 'loom_message_runtime_sha256=%s\n' "$loom_message_runtime_sha256"
     printf 'loom_custody_transfer_runtime_sha256=%s\n' \
       "$loom_custody_transfer_runtime_sha256"
     printf 'loom_execution_outcome_runtime_sha256=%s\n' \
@@ -1379,6 +1398,7 @@ else
     printf 'capability=agentd-logical-command-v1\n'
     printf 'capability=agentd-runtime-registration-v1\n'
     printf 'capability=loom-kernel-v1\n'
+    printf 'capability=loom-authenticated-message-bridge-v1\n'
     printf 'capability=loom-transactional-custody-transfer-v1\n'
     printf 'capability=loom-durable-execution-outcome-v1\n'
     printf 'capability=loom-native-agent-hook-v1\n'
