@@ -133,8 +133,11 @@ cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_reconcile_freeze_selftest.sh" \
   "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_reconcile_ocaml_selftest.sh" \
   "$REPO/scripts/ci/"
-mkdir -p "$REPO/tools/loom/src"
+mkdir -p "$REPO/tools/loom/src" "$REPO/tools/loom/message_bridge"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/message_bridge/dune" \
+  "$ROOT_DIR/tools/loom/message_bridge/loom_message_bridge.ml" \
+  "$REPO/tools/loom/message_bridge/"
 cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v1" \
   "$ROOT_DIR/tools/loom/native_hook_cutover_authority_main.sio" \
@@ -822,6 +825,15 @@ done
   fail 'installed runtime omitted the native Sounio witness-epoch-handoff adapter'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-witness-epoch-transparency-runtime" ]] || \
   fail 'installed runtime omitted the native Sounio witness-epoch-transparency adapter'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-message-runtime" ]] || \
+  fail 'installed runtime omitted the authenticated OCaml message bridge'
+message_runtime_sha="$(
+  sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-message-runtime" | \
+    awk '{print $1}'
+)"
+grep -q "^loom_message_runtime_sha256=$message_runtime_sha$" \
+  "$RUNTIME_ROOT/versions/$first_id/manifest" || \
+  fail 'installed message bridge binary is not bound to its manifest hash'
 grep -q '^loom_witness_mesh_language=Sounio$' \
   "$RUNTIME_ROOT/versions/$first_id/manifest" || \
   fail 'installed runtime omitted the witness-mesh language declaration'
@@ -877,6 +889,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   agentd-logical-command-v1 coord-reply-correlation-v1 \
   agentd-runtime-registration-v1 loom-kernel-v1 loom-cursor-replay-v1 \
   loom-native-hook-binary-attestation-v1 loom-runtime-authority-capsule-v1 \
+  loom-authenticated-message-bridge-v1 \
   loom-transactional-custody-transfer-v1 \
   loom-truthful-lane-health-v1 loom-nondestructive-health-reconcile-v1 \
   loom-native-sounio-continuity-v1 \
@@ -948,6 +961,17 @@ first_runtime_version="$(sed -n 's/^runtime_version=//p' "$first_manifest")"
 [[ -n "$first_runtime_version" ]] || fail 'installed runtime manifest omitted its version'
 grep -qx "runtime_version=$first_runtime_version" <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
+set +e
+message_bridge_probe="$(
+  cd "$SECOND" && bin/sounio-loom message-serve \
+    --cwd "$SECOND" --token-file "$TEST_ROOT/missing-message-bridge.cap" 2>&1
+)"
+message_bridge_probe_rc=$?
+set -e
+[[ "$message_bridge_probe_rc" -ne 0 ]] || \
+  fail 'installed Loom message bridge accepted a missing capability'
+grep -q 'message-bridge-token-missing' <<< "$message_bridge_probe" || \
+  fail 'installed Loom runtime omitted the authenticated message bridge command'
 
 mkdir -p "$POLICYLESS/bin"
 git init -q "$POLICYLESS"
@@ -986,7 +1010,7 @@ grep -Fq 'state=live' <<< "$capsule_supervisor_status" || \
 capsule_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$capsule_supervisor_status")"
 capsule_supervisor_wrapper="$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$capsule_supervisor_pid/status")"
 tr '\0' '\n' < "/proc/$capsule_supervisor_wrapper/environ" | \
-  grep -Fxq "SOUNIO_COORD_DIR=$CAPSULE_STATE" || \
+  grep -Fx "SOUNIO_COORD_DIR=$CAPSULE_STATE" >/dev/null || \
   fail 'detached supervisor wrapper omitted its explicit state-root identity'
 SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$CAPSULE_STATE" \
   "$POLICYLESS/bin/sounio-coord" obligation-supervisor-stop \

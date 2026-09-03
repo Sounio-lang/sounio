@@ -186,7 +186,8 @@ command -v openssl >/dev/null 2>&1 || {
   exit 1
 }
 
-dune build --root "$ROOT_DIR/tools/loom" src/loom.exe
+dune build --root "$ROOT_DIR/tools/loom" \
+  src/loom.exe message_bridge/loom_message_bridge.exe
 SOUNIO_SOURCE_ROOT="$ROOT_DIR" \
   SOUNIO_LOOM_NATIVE_HOOK_GENERATION_DRAIN_OUTPUT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-native-hook-generation-drain" \
   "$SCRIPT_DIR/build_sounio_loom_native_hook_generation_drain.sh"

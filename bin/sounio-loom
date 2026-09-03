@@ -24,8 +24,13 @@ GIT_COMMON_DIR="$(git -C "$WORKTREE" rev-parse --path-format=absolute --git-comm
 
 RUNTIME_ROOT="${SOUNIO_COORD_RUNTIME_DIR:-$GIT_COMMON_DIR/sounio-coord-runtime}"
 LOCAL_RUNTIME="$SOURCE_ROOT/tools/loom/_build/default/src/loom.exe"
+LOCAL_MESSAGE_RUNTIME="$SOURCE_ROOT/tools/loom/_build/default/message_bridge/loom_message_bridge.exe"
+message_bridge=0
+if [[ "${1:-}" == message-serve ]]; then
+  message_bridge=1
+fi
 selection=local
-selected="$LOCAL_RUNTIME"
+selected="$([[ "$message_bridge" == 1 ]] && printf '%s' "$LOCAL_MESSAGE_RUNTIME" || printf '%s' "$LOCAL_RUNTIME")"
 manifest=''
 
 if [[ "${SOUNIO_COORD_RUNTIME_MODE:-shared}" != local && \
@@ -33,20 +38,29 @@ if [[ "${SOUNIO_COORD_RUNTIME_MODE:-shared}" != local && \
   current="$(readlink -f "$RUNTIME_ROOT/current" 2>/dev/null || true)"
   [[ -n "$current" ]] || die "shared coordination runtime has a broken current link: $RUNTIME_ROOT/current"
   manifest="$current/manifest"
-  selected="$current/bin/sounio-loom-runtime"
+  if [[ "$message_bridge" == 1 ]]; then
+    selected="$current/bin/sounio-loom-message-runtime"
+  else
+    selected="$current/bin/sounio-loom-runtime"
+  fi
   [[ -f "$manifest" && -x "$selected" ]] || \
-    die "shared coordination runtime has no Loom kernel: $current"
+    die "shared coordination runtime has no requested Loom runtime: $current"
   protocol="$(manifest_value "$manifest" loom_protocol_version)"
   [[ "$protocol" == "$CLIENT_PROTOCOL" ]] || \
     die "incompatible shared Loom runtime: client_protocol=$CLIENT_PROTOCOL runtime_protocol=${protocol:-missing}"
   selection=shared
 else
   needs_build=0
-  [[ -x "$LOCAL_RUNTIME" ]] || needs_build=1
+  [[ -x "$selected" ]] || needs_build=1
+  if [[ "$message_bridge" == 1 ]]; then
+    source_roots=("$SOURCE_ROOT/tools/loom/message_bridge" "$SOURCE_ROOT/tools/loom/dune-project")
+  else
+    source_roots=("$SOURCE_ROOT/tools/loom/src" "$SOURCE_ROOT/tools/loom/dune-project")
+  fi
   if [[ "$needs_build" == 0 ]] && \
-    find "$SOURCE_ROOT/tools/loom" -type f \
+    find "${source_roots[@]}" -type f \
       \( -name '*.ml' -o -name '*.c' -o -name dune -o -name dune-project \) \
-      -newer "$LOCAL_RUNTIME" -print -quit | grep -q .; then
+      -newer "$selected" -print -quit | grep -q .; then
     needs_build=1
   fi
   if [[ "$needs_build" == 1 ]]; then
@@ -66,6 +80,15 @@ if [[ "${1:-}" == runtime-info ]]; then
     printf 'source_sha=%s\n' "$(manifest_value "$manifest" source_sha)"
   fi
   exec "$selected" runtime-version
+fi
+
+if [[ "$message_bridge" == 1 ]]; then
+  shift
+  if [[ "$selection" == shared ]]; then
+    export SOUNIO_COORD_COMMAND="${SOUNIO_COORD_COMMAND:-$current/bin/sounio-coord-runtime}"
+  else
+    export SOUNIO_COORD_COMMAND="${SOUNIO_COORD_COMMAND:-$SOURCE_ROOT/scripts/dev/sounio_coord_runtime.sh}"
+  fi
 fi
 
 exec "$selected" "$@"
