@@ -242,25 +242,26 @@ fn hlir_oct_load(state: HlirLowerState, ptr_val: i64, dim: i64) -> (HlirLowerSta
     hlir_oct_record(s, comps, dim)
 }
 
-// Cayley-Dickson multiply: r[i⊕j] += σ(i,j,bits)·a[i]·b[j] over `dim` components
-// (dim=8/bits=3 octonion, dim=16/bits=4 sedenion). Returns a fresh repr.
-fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64, dim: i64, bits: i64) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+// Twisted XOR convolution for the Cayley-Dickson cocycle:
+// r[d] = sum_i sigma(i, i^d, bits) * a[i] * b[i^d].
+// Fixing d makes every selected pair land in one result lane. The explicit
+// reduction order remains authoritative; target selectors may accelerate only
+// b[i^d] until a reduction proof is available.
+fn hlir_xor_convolution(state: HlirLowerState, a_repr: i64, b_repr: i64, contract: HlirXorConvolution) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
     var s = state
+    let dim = contract.dimension
+    let bits = contract.bits
     let a = hlir_oct_lookup(s, a_repr)
     let b = hlir_oct_lookup(s, b_repr)
     var r: [i64; 16] = [0 - 1; 16]
-    var z: i64 = 0
-    while z < dim {
+    var d: i64 = 0
+    while d < dim {
         let zp = hlir_lower_literal_float(s, 0.0, hlir_type_f64())
         s = zp.0
-        r[z as usize] = zp.1
-        z = z + 1
-    }
-    var i: i64 = 0
-    while i < dim {
-        var j: i64 = 0
-        while j < dim {
-            let m = i ^ j
+        var sum = zp.1
+        var i: i64 = 0
+        while i < dim {
+            let j = i ^ d
             let mulp = hlir_lower_binary(s, HLIR_BIN_FMUL, a[i as usize], b[j as usize], hlir_type_f64())
             s = mulp.0
             var t = mulp.1
@@ -271,12 +272,13 @@ fn hlir_oct_mul(state: HlirLowerState, a_repr: i64, b_repr: i64, dim: i64, bits:
                 s = negp.0
                 t = negp.1
             }
-            let addp = hlir_lower_binary(s, HLIR_BIN_FADD, r[m as usize], t, hlir_type_f64())
+            let addp = hlir_lower_binary(s, HLIR_BIN_FADD, sum, t, hlir_type_f64())
             s = addp.0
-            r[m as usize] = addp.1
-            j = j + 1
+            sum = addp.1
+            i = i + 1
         }
-        i = i + 1
+        r[d as usize] = sum
+        d = d + 1
     }
     hlir_oct_record(s, r, dim)
 }
@@ -2463,7 +2465,8 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
         if expr.bin_op == BinaryOp::OpMul && hlir_oct_is(s, lhs_val) && hlir_oct_is(s, rhs_val) {
             let dim = hlir_oct_dim(s, lhs_val)
             let bits = if dim == 16 { 4 } else { 3 }
-            return hlir_oct_mul(s, lhs_val, rhs_val, dim, bits)
+            let contract = hlir_cayley_dickson_xor_convolution(bits)
+            return hlir_xor_convolution(s, lhs_val, rhs_val, contract)
         }
         let lhs_ty = hlir_lower_value_type(s, lhs_val)
         let rhs_ty = hlir_lower_value_type(s, rhs_val)
