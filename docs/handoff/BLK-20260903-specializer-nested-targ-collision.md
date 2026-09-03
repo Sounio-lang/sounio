@@ -136,6 +136,35 @@ Fail-closed refusal, same file plus the two frontends:
   fold that call into their existing verdict checks, so the message appears only
   where the program would otherwise have been accepted.
 
+## Correction to the evidence in commit 681eebdd74 (2026-09-03)
+
+That commit's message claims the per-file differential over the 20 generics
+fixtures showed "zero regressions, and seq_knowledge_nested_generic.sio moves
+from E137 to OK". **The improvement claim is wrong** and is withdrawn here.
+
+The differential ran the pre-fix binary out of a second worktree
+(`/workspace/sounio`, a stale branch) and the post-fix binary out of this one,
+so it varied the tree as well as the compiler. `seq_knowledge_nested_generic.sio`
+reports E137 under the other worktree's `stdlib/` and checks clean under this
+one, on the *same* binary — the difference was `SOUNIO_STDLIB_PATH`, not the
+fix.
+
+Re-measured in one worktree with only `SOUNIO_MADAROS_BIN` swapped, all 20
+fixtures give **identical verdicts on both binaries**. No improvement and no
+regression is visible at that level, because the run-pass fixture was rewritten
+to use one template per shape and no longer exercises the defect.
+
+What the zero-regression half of the claim rests on, and which stands: three
+runs of `scripts/run_sio_test_suite.sh generic` inside this worktree with only
+the binary changed — committed, mangling-only, and final — each 13 pass / 4
+fail / 1 stale known-failure with the same four failures.
+
+The fix's benefit is demonstrated instead by
+`tests/compile-fail/specializer_multi_instantiation_struct_args.sio`, added in
+d6a0cec5b7 for exactly this reason: same worktree, binary swapped, the
+committed compiler accepts it with rc=0 and prints zeros while this tree's
+build refuses it.
+
 ## Residual — NOT claimed closed
 
 - Multi-instantiation monomorphization. A template used with two distinct
