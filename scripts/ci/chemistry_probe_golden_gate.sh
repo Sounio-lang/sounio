@@ -7,6 +7,16 @@
 # regenerate the golden to make the gate pass (CLAUDE.md §6.6).
 #   regenerate (only after the change is understood):
 #     REGEN=1 bash scripts/ci/chemistry_probe_golden_gate.sh
+#
+# What this gate does NOT prove, stated so its green is not over-read: the
+# probes run under the COMMITTED bin/souc-lean-single-x86_64, which lags the
+# source in self-hosted/ (CLAUDE.md principle 15). A lowering or codegen change
+# on main therefore cannot move these numbers until that ELF is refreshed --
+# measured 2026-09-03, when main's ir/lower.sio and codegen_x86_linux.sio
+# changes merged in and all five probes matched byte for byte, with the ELF's
+# md5 unchanged. The md5 is printed below for exactly that reason: it says
+# which compiler produced the goldens, so a green run cannot be mistaken for
+# evidence about a compiler the run never used.
 set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR" || exit 1
