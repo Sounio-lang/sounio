@@ -154,6 +154,25 @@ final class RoutingContractTests: XCTestCase {
         XCTAssertEqual(snapshot.decision.selectedAdapterId, "adapter-codex")
     }
 
+    func testLatestRouteEnvelopePreservesExplicitAbsenceAndAuthority() throws {
+        let absent = try JSONDecoder().decode(
+            LoomLatestRouteOperation.self,
+            from: Data("""
+            {"schema":"loom-latest-route-operation-v1","operation":null}
+            """.utf8)
+        )
+        XCTAssertNil(absent.operation)
+
+        let present = try JSONDecoder().decode(
+            LoomLatestRouteOperation.self,
+            from: Data("""
+            {"schema":"loom-latest-route-operation-v1","operation":{"schema":"loom-route-operation-v1","decision":{"id":"task-live-decision","taskId":"task-live","policy":"authority-first","candidateAdapterIds":["adapter-codex"],"selectedAdapterId":"adapter-codex"},"receipt":{"taskId":"task-live","policy":"authority-first","poolId":"pool-openai-team","adapterId":"adapter-codex","model":"gpt-5.6-terra","effort":"high","reason":"authorized-adapter-launched","fallbackChain":["adapter-codex"],"status":"running","sourceHash":"source","semanticsHash":"semantics","producingLanguage":"Sounio","languageRole":"SEMANTIC_AUTHORITY","operationalLanguage":"OCaml","providerRole":"REVIEW_ONLY","quotaState":"estimated","poolHealth":"healthy","adapterHealth":"healthy","quotaUsedPercent":12.5,"sessionId":"session-live"}}}
+            """.utf8)
+        )
+        XCTAssertEqual(present.operation?.receipt.taskId, "task-live")
+        XCTAssertEqual(present.operation?.receipt.languageRole, "SEMANTIC_AUTHORITY")
+    }
+
     private func lane(
         _ lane: String,
         presence: String,

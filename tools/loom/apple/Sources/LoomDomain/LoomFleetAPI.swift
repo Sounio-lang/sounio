@@ -322,6 +322,11 @@ public struct LoomRoutingConfigReceipt: Codable, Equatable, Sendable {
     public let config: LoomRoutingConfig
 }
 
+public struct LoomLatestRouteOperation: Codable, Equatable, Sendable {
+    public let schema: String
+    public let operation: LoomRouteOperation?
+}
+
 public enum LoomMessageClientError: LocalizedError, Equatable, Sendable {
     case refused(status: Int, reason: String)
     case invalidReceipt
@@ -463,6 +468,26 @@ public struct LoomMessageClient: Sendable {
             throw LoomMessageClientError.invalidReceipt
         }
         return config
+    }
+
+    public func latestRouteOperation() async throws -> LoomRouteOperation? {
+        let latest = try await checkedResponse(
+            authorizedRequest(path: "v1/routing/receipts/latest"),
+            as: LoomLatestRouteOperation.self
+        )
+        guard latest.schema == "loom-latest-route-operation-v1" else {
+            throw LoomMessageClientError.invalidReceipt
+        }
+        if let operation = latest.operation {
+            guard operation.schema == "loom-route-operation-v1",
+                  operation.decision.taskId == operation.receipt.taskId,
+                  operation.receipt.producingLanguage == "Sounio",
+                  operation.receipt.languageRole == "SEMANTIC_AUTHORITY"
+            else {
+                throw LoomMessageClientError.invalidReceipt
+            }
+        }
+        return latest.operation
     }
 
     public func updateRoutingConfig(

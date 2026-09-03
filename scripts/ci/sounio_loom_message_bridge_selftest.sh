@@ -252,6 +252,13 @@ grep -q '"model":"gpt-5.6-sol"' "$TEST_ROOT/routing-readback.json" ||
 grep -q '"revision":1' "$TEST_ROOT/routing-readback.json" ||
   fail 'stored routing config revision drifted'
 
+status="$(http_status "$TEST_ROOT/routing-latest-empty.json" \
+  --header "authorization: Bearer $SECRET" "$BASE_URL/v1/routing/receipts/latest")"
+[[ "$status" == 200 ]] || fail "empty latest routing receipt returned HTTP $status"
+grep -q '"schema":"loom-latest-route-operation-v1","operation":null' \
+  "$TEST_ROOT/routing-latest-empty.json" ||
+  fail 'latest routing receipt did not represent absence explicitly'
+
 status="$(http_status "$TEST_ROOT/routing-duplicate.json" --request PUT \
   --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
   --data '{"schema":"loom-routing-config-v1","policy":"authority-first","model":"gpt-5.6-sol","effort":"high","poolOrder":["pool-openai-team","pool-openai-team"],"adapterOrder":["adapter-codex"]}' \
@@ -275,6 +282,14 @@ grep -q '"providerRole":"REVIEW_ONLY"' "$TEST_ROOT/route-positive.json" ||
   fail 'positive route promoted the provider role'
 [[ "$(wc -l <"$PROVIDER_FIXTURE_LOG")" == 1 ]] ||
   fail 'positive route did not launch exactly one provider fixture'
+
+status="$(http_status "$TEST_ROOT/routing-latest.json" \
+  --header "authorization: Bearer $SECRET" "$BASE_URL/v1/routing/receipts/latest")"
+[[ "$status" == 200 ]] || fail "latest routing receipt returned HTTP $status"
+cmp -s "$TEST_ROOT/route-positive.json" \
+  <(sed -e 's/^{"schema":"loom-latest-route-operation-v1","operation"://' \
+         -e 's/}$//' "$TEST_ROOT/routing-latest.json") ||
+  fail 'latest routing receipt drifted from the persisted Sounio operation'
 
 rm "$CODEX_SESSIONS/2026/09/03/route.jsonl"
 unknown_task='{"schema":"loom-route-task-v1","taskId":"route-unknown","kind":"review","title":"Unknown quota","prompt":"This route must remain closed."}'

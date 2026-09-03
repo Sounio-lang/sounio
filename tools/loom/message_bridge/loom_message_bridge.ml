@@ -1282,6 +1282,23 @@ let write_private_file path contents =
     (fun () -> write_all descriptor contents; Unix.fsync descriptor);
   Unix.rename temporary path
 
+let latest_route_operation_path cwd configured_state_dir =
+  Filename.concat (routing_state_dir cwd configured_state_dir)
+    "latest-route-operation-v1.json"
+
+let latest_route_operation cwd configured_state_dir =
+  let path = latest_route_operation_path cwd configured_state_dir in
+  if Sys.file_exists path then
+    Printf.sprintf "{\"schema\":\"loom-latest-route-operation-v1\",\"operation\":%s}"
+      (trim (read_file path))
+  else
+    "{\"schema\":\"loom-latest-route-operation-v1\",\"operation\":null}"
+
+let persist_route_operation receipt_path latest_path receipt =
+  let contents = receipt ^ "\n" in
+  write_private_file receipt_path contents;
+  write_private_file latest_path contents
+
 let route_task cwd configured_state_dir body =
   let parsed = parse_json body in
   if json_string_field parsed [ "schema" ] <> "loom-route-task-v1" then
@@ -1360,6 +1377,7 @@ let route_task cwd configured_state_dir body =
         Filename.concat (routing_state_dir cwd configured_state_dir) "receipts"
       in
       ensure_private_directory receipts_dir;
+      let latest_path = latest_route_operation_path cwd configured_state_dir in
       let receipt_path =
         Filename.concat receipts_dir
           (routing_slug task_id ^ "-" ^ String.sub (sha256 task_id) 0 16 ^ ".json")
@@ -1373,7 +1391,7 @@ let route_task cwd configured_state_dir body =
               ~config_sha quota adapter ~provider_plan_sha ~session_id ~command_sha
               ~result:"not-launched"
           in
-          write_private_file receipt_path (receipt ^ "\n");
+          persist_route_operation receipt_path latest_path receipt;
           receipt
       | `Allow ->
           write_private_file receipt_path "{\"schema\":\"loom-route-receipt-pending-v1\"}\n";
@@ -1399,7 +1417,7 @@ let route_task cwd configured_state_dir body =
                   ~authority_output:dispatch_output ~config_sha quota adapter
                   ~provider_plan_sha ~session_id ~command_sha ~result:"not-launched"
               in
-              write_private_file receipt_path (receipt ^ "\n");
+              persist_route_operation receipt_path latest_path receipt;
               receipt
           | `Allow ->
               let review_prompt =
@@ -1427,7 +1445,7 @@ let route_task cwd configured_state_dir body =
                   ~command_sha:(sha256 (String.concat "\000" (Array.to_list argv)))
                   ~result:(if launched then "provider-custody-started" else "provider-start-refused:" ^ sha256 output)
               in
-              write_private_file receipt_path (receipt ^ "\n");
+              persist_route_operation receipt_path latest_path receipt;
               receipt))
 
 let authorized request token =
@@ -1480,6 +1498,12 @@ let handle cwd routing_state_dir token sender_agent sender_lane descriptor =
         "LOOM_MESSAGE_DECISION decision=ALLOW reason=routing-config-read sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
         sender_agent sender_lane (sha256 projection);
       respond "200 OK" projection
+    else if request.http_method = "GET" && path = "/v1/routing/receipts/latest" then
+      let projection = latest_route_operation cwd routing_state_dir in
+      Printf.eprintf
+        "LOOM_MESSAGE_DECISION decision=ALLOW reason=routing-latest-read sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+        sender_agent sender_lane (sha256 projection);
+      respond "200 OK" projection
     else if request.http_method = "PUT" && path = "/v1/routing/config" then
       let receipt = update_routing_config cwd routing_state_dir request.http_body in
       Printf.eprintf
@@ -1489,7 +1513,9 @@ let handle cwd routing_state_dir token sender_agent sender_lane descriptor =
     else if request.http_method = "POST" && path = "/v1/routing/tasks" then
       let receipt = route_task cwd routing_state_dir request.http_body in
       let receipt_status =
-        try json_string_field (parse_json receipt) [ "receipt"; "status" ]
+        try
+          let parsed_receipt = child_object (parse_json receipt) "receipt" |> Option.get in
+          json_string_field parsed_receipt [ "status" ]
         with _ -> "invalid"
       in
       let decision =

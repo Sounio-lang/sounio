@@ -199,8 +199,9 @@ final class LoomStore: ObservableObject {
             if let events = try? await client.events() {
                 eventGroups = events
             }
-            await refreshThreads()
             await refreshRoutingConfig()
+            await refreshLatestRouteOperation()
+            await refreshThreads()
         } catch {
             connection = .unavailable(error.localizedDescription)
         }
@@ -286,6 +287,18 @@ final class LoomStore: ObservableObject {
             }
         } catch {
             routingConfigState = .failed(error.localizedDescription)
+        }
+    }
+
+    func refreshLatestRouteOperation() async {
+        guard let messageClient, routeState != .deciding else { return }
+        do {
+            guard let operation = try await messageClient.latestRouteOperation() else { return }
+            routeOperation = operation
+            dashboard = .live(operation, title: operation.receipt.taskId)
+            routeState = .received(operation)
+        } catch {
+            // Fleet and configuration remain usable when no historical receipt is readable.
         }
     }
 
