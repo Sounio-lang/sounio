@@ -503,6 +503,7 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E229 | lexer | error | source exceeds lexer byte buffer, or token table full (fail-closed) | [E229.md](explanations/E229.md) |
 | E230 | type-checker/epistemic | error | independence-assuming operation over correlated uncertainty | — |
 | E232 | type-checker/struct | error | the same array local initialises two fields | — |
+| E236 | type-checker/epistemic | error | binary operation on Knowledge values reuses a correlated binding; independence is not assumed (add `with Correlated`) | — |
 | E244 | type-checker/epistemic | error | Knowledge provenance boundary mismatch: the argument's provenance cannot satisfy the parameter's requirement (trusted classes: Source, Literature, Measured) | — |
 | E245 | type-checker/epistemic | error | arithmetic between two Knowledge<T> values is not supported | — |
 | E246 | type-checker/effects | error | unknown effect, or effect dropped as a ninth slot | — |

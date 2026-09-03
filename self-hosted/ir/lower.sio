@@ -19493,6 +19493,159 @@ impl Lowerer {
                 return (lo_call, dst)
             }
         }
+        // R6 Correlated (id 29): the only Knowledge (x) Knowledge combinations
+        // check.sio's E245 does not blanket-refuse (see checker_is_knowledge_ident_add
+        // / checker_check_correlated_on_binary_inplace's correlated_same_slot_add --
+        // the checker only reaches this lowering when the same-slot form also had
+        // the effect declared, so no effect check is repeated here). Both are
+        // OpAdd on two ExprIdents bound as Knowledge; they differ only in whether
+        // the two names are the SAME slot (correlation 1, not independent) or
+        // DIFFERENT slots (provably disjoint sources -- checker_ns_should_refuse
+        // already stays silent for these, unchanged).
+        //
+        // Same slot: value' = value+value, variance' = 4*variance. GUM linear
+        // propagation for y=2x has dy/dx=2, so Var(y) = 2^2 Var(x) -- this is
+        // epsilon_combine_correlated's linear sum (2*eps) squared, not
+        // epsilon_combine_independent's quadrature sum (sqrt(2)*eps): the whole
+        // point of R6 is that these are not independent draws, they are the same
+        // draw counted twice.
+        //
+        // Different slots: value' = v1+v2, variance' = var1+var2 -- ordinary
+        // independent-quadrature addition (Var(A+B)=Var(A)+Var(B) with zero
+        // covariance), exactly what knowledge_binary_result already computes via
+        // epsilon_combine_independent for the checker's static result type.
+        if e.bin_op == BinaryOp::OpAdd {
+            var same_slot = false
+            var different_slots = false
+            match e.left {
+                Some(lbox) => {
+                    match e.right {
+                        Some(rbox) => {
+                            if (*lbox).kind == ExprKind::ExprIdent && (*rbox).kind == ExprKind::ExprIdent {
+                                let l_is_knowledge = ir_name_eq(lo3.lookup_local_struct_type((*lbox).name), make_name("Knowledge"))
+                                let r_is_knowledge = ir_name_eq(lo3.lookup_local_struct_type((*rbox).name), make_name("Knowledge"))
+                                if l_is_knowledge && r_is_knowledge {
+                                    if name_eq((*lbox).name, (*rbox).name) {
+                                        same_slot = true
+                                    } else {
+                                        different_slots = true
+                                    }
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                None => {}
+            }
+            if different_slots {
+                let v1pair = lo3.fresh_reg()
+                var lo_d1 = v1pair.0
+                let v1_reg = v1pair.1
+                lo_d1 = lo_d1.emit(ir_field_get(v1_reg, lhs, 0, make_name("value")))
+                lo_d1 = lo_d1.emit(ir_mark_float_reg(v1_reg))
+
+                let v2pair = lo_d1.fresh_reg()
+                var lo_d2 = v2pair.0
+                let v2_reg = v2pair.1
+                lo_d2 = lo_d2.emit(ir_field_get(v2_reg, rhs, 0, make_name("value")))
+                lo_d2 = lo_d2.emit(ir_mark_float_reg(v2_reg))
+
+                let var1pair = lo_d2.fresh_reg()
+                var lo_d3 = var1pair.0
+                let var1_reg = var1pair.1
+                lo_d3 = lo_d3.emit(ir_field_get(var1_reg, lhs, 1, make_name("variance")))
+                lo_d3 = lo_d3.emit(ir_mark_float_reg(var1_reg))
+
+                let var2pair = lo_d3.fresh_reg()
+                var lo_d4 = var2pair.0
+                let var2_reg = var2pair.1
+                lo_d4 = lo_d4.emit(ir_field_get(var2_reg, rhs, 1, make_name("variance")))
+                lo_d4 = lo_d4.emit(ir_mark_float_reg(var2_reg))
+
+                let conf1pair = lo_d4.fresh_reg()
+                var lo_d5 = conf1pair.0
+                let conf1_reg = conf1pair.1
+                lo_d5 = lo_d5.emit(ir_field_get(conf1_reg, lhs, 2, make_name("confidence")))
+                lo_d5 = lo_d5.emit(ir_mark_float_reg(conf1_reg))
+
+                let rvpair = lo_d5.fresh_reg()
+                var lo_d6 = rvpair.0
+                let result_value_reg = rvpair.1
+                lo_d6 = lo_d6.emit(ir_binop_typed(result_value_reg, v1_reg, BinaryOp::OpAdd, v2_reg, true, true))
+                lo_d6 = lo_d6.emit(ir_mark_float_reg(result_value_reg))
+
+                let rvarpair = lo_d6.fresh_reg()
+                var lo_d7 = rvarpair.0
+                let result_variance_reg = rvarpair.1
+                lo_d7 = lo_d7.emit(ir_binop_typed(result_variance_reg, var1_reg, BinaryOp::OpAdd, var2_reg, true, true))
+                lo_d7 = lo_d7.emit(ir_mark_float_reg(result_variance_reg))
+
+                lo_d7 = lo_d7.emit(ir_alloc(dst, 0))
+                lo_d7 = lo_d7.emit(ir_field_set(dst, 0, result_value_reg, make_name("value")))
+                lo_d7 = lo_d7.emit(ir_field_set(dst, 1, result_variance_reg, make_name("variance")))
+                var lo_d8 = lo_d7.emit(ir_field_set(dst, 2, conf1_reg, make_name("confidence")))
+                lo_d8 = lo_d8.bind_variance_for_base_reg(dst, result_variance_reg)
+                lo_d8.pending_variance_reg = result_variance_reg
+                lo_d8 = lo_d8.fo_seed_from_variance(result_variance_reg, 0 - 1)
+                var dk: i64 = 0
+                while dk < 32 {
+                    lo_d8.fo_pending_sens[dk as usize] = lo_d8.fo_expr_sens[dk as usize]
+                    dk = dk + 1
+                }
+                return (lo_d8, dst)
+            }
+            if same_slot {
+                let vpair = lo3.fresh_reg()
+                var lo_k1 = vpair.0
+                let value_reg = vpair.1
+                lo_k1 = lo_k1.emit(ir_field_get(value_reg, lhs, 0, make_name("value")))
+                lo_k1 = lo_k1.emit(ir_mark_float_reg(value_reg))
+
+                let varpair = lo_k1.fresh_reg()
+                var lo_k2 = varpair.0
+                let variance_reg = varpair.1
+                lo_k2 = lo_k2.emit(ir_field_get(variance_reg, lhs, 1, make_name("variance")))
+                lo_k2 = lo_k2.emit(ir_mark_float_reg(variance_reg))
+
+                let confpair = lo_k2.fresh_reg()
+                var lo_k3 = confpair.0
+                let conf_reg = confpair.1
+                lo_k3 = lo_k3.emit(ir_field_get(conf_reg, lhs, 2, make_name("confidence")))
+                lo_k3 = lo_k3.emit(ir_mark_float_reg(conf_reg))
+
+                let rvpair = lo_k3.fresh_reg()
+                var lo_k4 = rvpair.0
+                let result_value_reg = rvpair.1
+                lo_k4 = lo_k4.emit(ir_binop_typed(result_value_reg, value_reg, BinaryOp::OpAdd, value_reg, true, true))
+                lo_k4 = lo_k4.emit(ir_mark_float_reg(result_value_reg))
+
+                let fourpair = lo_k4.fresh_reg()
+                var lo_k5 = fourpair.0
+                let four_reg = fourpair.1
+                lo_k5 = lo_k5.emit(ir_load_float(four_reg, 4.0))
+
+                let rvarpair = lo_k5.fresh_reg()
+                var lo_k6 = rvarpair.0
+                let result_variance_reg = rvarpair.1
+                lo_k6 = lo_k6.emit(ir_binop_typed(result_variance_reg, variance_reg, BinaryOp::OpMul, four_reg, true, true))
+                lo_k6 = lo_k6.emit(ir_mark_float_reg(result_variance_reg))
+
+                lo_k6 = lo_k6.emit(ir_alloc(dst, 0))
+                lo_k6 = lo_k6.emit(ir_field_set(dst, 0, result_value_reg, make_name("value")))
+                lo_k6 = lo_k6.emit(ir_field_set(dst, 1, result_variance_reg, make_name("variance")))
+                var lo_k7 = lo_k6.emit(ir_field_set(dst, 2, conf_reg, make_name("confidence")))
+                lo_k7 = lo_k7.bind_variance_for_base_reg(dst, result_variance_reg)
+                lo_k7.pending_variance_reg = result_variance_reg
+                lo_k7 = lo_k7.fo_seed_from_variance(result_variance_reg, 0 - 1)
+                var mk: i64 = 0
+                while mk < 32 {
+                    lo_k7.fo_pending_sens[mk as usize] = lo_k7.fo_expr_sens[mk as usize]
+                    mk = mk + 1
+                }
+                return (lo_k7, dst)
+            }
+        }
         // String equality: `s == t` / `s != t` route to the str_eq builtin (content
         // compare), instead of an integer compare of the string pointers (which is
         // always false for distinct literals). `!=` negates via `(str_eq == 0)`.
